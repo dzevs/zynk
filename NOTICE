@@ -1,0 +1,24 @@
+zynk
+====
+
+zynk is a fork of herdr (https://github.com/ogulcancelik/herdr),
+created and maintained by Zevs <hi@zevs.gg>.
+
+Licensing
+---------
+zynk is distributed under the GNU Affero General Public License v3.0 or
+later (AGPL-3.0-or-later) — the same license as upstream herdr. See LICENSE
+for the full text. The license is NOT changed by this fork; it is preserved.
+
+Copyright
+---------
+Copyright (C) ogulcancelik and the herdr contributors (upstream herdr).
+Copyright (C) 2026 Zevs <hi@zevs.gg> — the zynk fork and its additions.
+
+This is a derivative work of herdr. Upstream copyright notices and the AGPL
+license are preserved. New zynk-layer code is also AGPL-3.0-or-later as part
+of the combined work. Per AGPL, complete corresponding source is available
+with any conveyed or network-served build.
+
+The built-in notification sounds (assets/sounds/) are inherited from herdr and
+are covered by this combined-work AGPL provenance.
