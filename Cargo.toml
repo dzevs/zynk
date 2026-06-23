@@ -1,0 +1,103 @@
+[package]
+name = "zynk"
+version = "3.0.1"
+edition = "2021"
+build = "build.rs"
+description = "Terminal-native command center for AI agents"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/dzevs/zynk"
+homepage = "https://github.com/dzevs/zynk"
+keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
+categories = ["command-line-utilities"]
+readme = "README.md"
+# crates.io: the `zynk` crate name is owner-controlled (owner `dzevs`, currently 2.x — the retired MIT ACP
+# protocol/helper CLI). The native app continues that lineage at 3.x (AGPL-3.0-or-later); crates.io is
+# monotonic, so a native publish must be >= 3.0.0. Packaging is crates.io-ready (P1, ZYNK_CRATES_IO_P1): the
+# `include` list below is ANCHORED (leading `/`, so bare `SKILL.md`/`README.md` no longer leak `.codex/`,
+# `docs/next/`, `website/`) and complete (build.rs, vendor source + provenance/patches, migrations, SKILL.md,
+# Cargo.lock, NOTICE). build.rs no-ops under `DOCS_RS` (docs.rs) and emits Zig output into `$OUT_DIR` (so
+# `cargo package --verify` does not see a build-modified source tree). `cargo install zynk` builds from source:
+# it needs Zig 0.15.2 AND network during the build — libghostty-vt's Zig deps (gobject/libxev/vaxis/z2d/zf/
+# zigimg/wayland/uucode) are fetched into Zig's global cache; `--offline` is unsupported, so the build is NOT
+# hermetic. `publish = ["crates-io"]` enables `cargo publish` (and `--dry-run`) to crates.io ONLY; the ACTUAL
+# `cargo publish` stays gated behind an explicit operator approval (HARD RULE) + a `v3.0.1` git tag. Binary
+# release / Homebrew / GitHub tag remain at 3.0.0 (this crate is 3.0.1 for provenance). See
+# docs/zynk/release-3.0.0-prep.md.
+publish = ["crates-io"]
+include = [
+    "/src/**/*",
+    "/assets/sounds/*",
+    "/build.rs",
+    "/vendor/libghostty-vt/**/*",
+    "/vendor/libghostty-vt.vendor.json",
+    "/vendor/libghostty-vt.patches.md",
+    "/vendor/patches/libghostty-vt/**/*",
+    "/migrations/**/*",
+    "/SKILL.md",
+    "/Cargo.lock",
+    "/NOTICE",
+    "/README.md",
+    "/LICENSE",
+    "/Cargo.toml",
+]
+
+# zynk fork (ADR 0010 — hard fork, full rebrand): the Cargo package/crate name is `zynk`
+# and the produced binary is `zynk`. ADR 0007 §1's minimal-rebrand carve-out (crate stays
+# (ADR 0007 §1) is superseded — we no longer track upstream.
+# Cargo exposes `CARGO_BIN_EXE_zynk` to integration tests (keyed on the bin name, unchanged).
+[[bin]]
+name = "zynk"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22.1"
+bincode = { version = "2", features = ["serde"] }
+bytes = "1"
+crossterm = "0.29"
+ctrlc = "3"
+interprocess = "2.4.2"
+libc = "0.2"
+# zynk M5b B4a (ADR 0006): direct, bundled, feature-unified onto the SINGLE
+# libsqlite3-sys node sqlx-sqlite links — load-bearing for the static
+# sqlite3_auto_extension registration (single-libsqlite3 invariant, guarded by a test).
+libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
+portable-pty = "0.9"
+png = "0.17"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# zynk M5b B4a (ADR 0006): vendors sqlite-vec.c, compiled -DSQLITE_CORE; exports
+# sqlite3_vec_init for the static auto-extension registration in zynk::embed::vec.
+sqlite-vec = "0.1.9"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+toml = "0.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+unicode-width = "0.2"
+fastembed = { version = "5", optional = true }
+
+[features]
+# zynk M5b B5 (ADR 0006): the real `fastembed` embedder is OPT-IN and absent from the
+# DEFAULT compiled graph — `just test`/`just check` stay 100% network-free and hermetic
+# (no ort/ort-sys/ONNX/HF in the default build). Enabling this feature ALSO requires
+# explicit local provisioning (warm ORT cache + a staged model dir via ZYNK_EMBED_MODEL_DIR);
+# never an implicit network download at build or index/query time. See ADR 0006 §D5/§D6.
+# NOTE: this is empty until the optional `fastembed` dep lands (Phase 2); the seam below
+# (cfg(feature = "fastembed")) is inert in the default build either way.
+default = []
+fastembed = ["dep:fastembed"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Kernel",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

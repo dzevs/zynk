@@ -1,0 +1,198 @@
+name: Release dry-run
+
+# Fork-correct release-binary DRY-RUN. Builds the cross-platform `zynk` binaries, packages them as
+# `zynk-v<version>-<target>.{tar.gz,zip}`, and produces a single `SHA256SUMS` — all as workflow ARTIFACTS.
+# It NEVER creates a GitHub Release, tag, or public asset, and uses only the default GITHUB_TOKEN (no bot
+# secrets, no ogulcancelik/* repos, no push-to-master, no release-docs or website gates). Cutting an actual
+# release is a separate, explicitly operator-gated step.
+#
+# KNOWN GAP (tracked in docs/zynk/release-3.0.0-prep.md): the vendored libghostty-vt Zig build eagerly
+# fetches the `uucode` dep over the network (deps.files.ghostty.org) on a cold cache, which makes builds
+# (esp. macOS) network-dependent and occasionally flaky. Pre-warming/vendoring that Zig cache for
+# determinism is a follow-up.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: version string for artifact names (no leading v), e.g. 3.0.0
+        required: true
+        default: "3.0.0"
+        type: string
+      libghostty_optimize:
+        description: libghostty-vt optimize mode
+        required: true
+        default: ReleaseFast
+        type: choice
+        options:
+          - ReleaseFast
+          - ReleaseSafe
+          - ReleaseSmall
+
+permissions:
+  contents: read
+
+env:
+  VERSION: ${{ inputs.version }}
+  LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
+  LIBGHOSTTY_VT_SIMD: 'false'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            asset: linux-aarch64
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+      # cargo-zigbuild uses `zig cc` as the C compiler + linker, so it cross-compiles (esp. the aarch64
+      # target) cleanly without apt cross toolchains. Zig 0.15.2 is already installed above; the
+      # libghostty-vt `zig build` in build.rs uses the same Zig.
+      # NOTE: these are glibc (gnu) DYNAMIC builds, not static musl. The bundled sqlite-vec 0.1.9 C source
+      # uses BSD `u_int8_t/u_int16_t/u_int64_t` typedefs that musl does not define, so the musl target fails
+      # to compile (with both musl-gcc AND zig cc). Restoring a static musl build is a SEPARATE gated change
+      # (patch sqlite-vec's typedefs, or upgrade to a fixed release after a musl + vector/retrieval test
+      # pass) — not a release-tooling hack. See docs/zynk/release-3.0.0-prep.md.
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
+        with:
+          tool: cargo-zigbuild
+      - name: Remove Zig caches
+        run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+      - name: Build (cargo-zigbuild)
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          base="zynk-v${VERSION}-${{ matrix.asset }}"
+          install -m 0755 "target/${{ matrix.target }}/release/zynk" zynk
+          # C++ runtime guard: the binary must not pull in a C++ runtime (no unresolved C++ symbols).
+          if nm -u zynk 2>/dev/null | grep -E '(__cxa|GLIBCXX|CXXABI|_ZSt)'; then
+            echo "error: Linux artifact has unresolved C++ runtime symbols" >&2
+            exit 1
+          fi
+          tar -czf "$base.tar.gz" zynk
+          rm -f zynk
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zynk-v${{ inputs.version }}-${{ matrix.asset }}
+          path: zynk-v${{ inputs.version }}-${{ matrix.asset }}.tar.gz
+          retention-days: 7
+
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            asset: macos-x86_64
+          - target: aarch64-apple-darwin
+            asset: macos-aarch64
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+      - name: Install macOS build tools
+        run: brew install cmake ninja
+      - name: Remove Zig caches
+        run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          base="zynk-v${VERSION}-${{ matrix.asset }}"
+          install -m 0755 "target/${{ matrix.target }}/release/zynk" zynk
+          tar -czf "$base.tar.gz" zynk
+          rm -f zynk
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zynk-v${{ inputs.version }}-${{ matrix.asset }}
+          path: zynk-v${{ inputs.version }}-${{ matrix.asset }}.tar.gz
+          retention-days: 7
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+      - name: Remove Zig caches
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force .zig-cache -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force vendor/libghostty-vt/.zig-cache -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force vendor/libghostty-vt/zig-out -ErrorAction SilentlyContinue
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Package
+        shell: pwsh
+        run: |
+          $base = "zynk-v$env:VERSION-windows-x86_64"
+          Copy-Item target\x86_64-pc-windows-msvc\release\zynk.exe zynk.exe
+          Compress-Archive -Path zynk.exe -DestinationPath "$base.zip" -Force
+          Remove-Item zynk.exe
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zynk-v${{ inputs.version }}-windows-x86_64
+          path: zynk-v${{ inputs.version }}-windows-x86_64.zip
+          retention-days: 7
+
+  checksums:
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: dist
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          : > SHA256SUMS
+          while IFS= read -r f; do
+            ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) >> "$GITHUB_WORKSPACE/SHA256SUMS"
+          done < <(find dist -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
+          sort -k2 SHA256SUMS -o SHA256SUMS
+          echo "=== SHA256SUMS ===" && cat SHA256SUMS
+      - name: Upload SHA256SUMS
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: SHA256SUMS
+          path: SHA256SUMS
+          retention-days: 7

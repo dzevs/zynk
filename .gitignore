@@ -1,0 +1,10 @@
+/target
+/result
+/result-*
+/vendor/libghostty-vt/zig-pkg/
+__pycache__/
+*.pyc
+*.swp
+*.swo
+*~
+.DS_Store
