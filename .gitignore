@@ -3,6 +3,7 @@
 /result-*
 /vendor/libghostty-vt/zig-pkg/
 __pycache__/
+node_modules/
 *.pyc
 *.swp
 *.swo
@@ -12,8 +13,7 @@ __pycache__/
 # Maintainer-private paths — never committed to the public repo.
 # Enforced by scripts/check_public_tree.py (structural gate) + .gitleaks.toml (content gate).
 /.codex/
-/.pi/
-/.zed/
+/.pi/cache/
 /.local/
 /backlog/
 /website/

@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 FORBIDDEN = [
-    ".codex", ".pi", ".zed", ".local", "backlog",
+    ".codex", ".pi/cache", ".local", "backlog",
     "website", "docs/next", "docs/superpowers", "public",
     "CLAUDE.local.md", ".claude/settings.local.json", "scripts/export-public.sh",
     "docs/zynk/plans", "docs/zynk/release-3.0.0-prep.md",
