@@ -26,6 +26,14 @@ tags = ["zynk", "private"]
 # string is rejected by the structural gate before it can be committed — so this exemption cannot open a leak
 # path. (Bytecode embeds the dev/CI absolute compile path, e.g. `/home/<user>/…`, which is why the content scan
 # needs the exemption in the first place.)
+# Self-exemption for THIS config: it literally contains every forbidden string as its own rule regex +
+# explanatory comments, so a full tracked-tree scan (`just gate` via scripts/gitleaks_tracked.sh) would flag
+# the rule against itself. This is a NARROW single-file path exemption — every other tracked file is still
+# scanned by the allowlist-free rule above. (The incremental `gitleaks protect --staged` pre-commit hook only
+# scans changed hunks, so it never re-scanned this file after it was first committed.)
 [allowlist]
-description = "python build artifacts (gitignored bytecode caches); tracked bytecode is blocked by check_public_tree.py"
-paths = ['''(^|/)__pycache__/''']
+description = "gitignored python bytecode (tracked bytecode blocked by check_public_tree.py) + this gate config itself"
+paths = [
+    '''(^|/)__pycache__/''',
+    '''(^|/)\.gitleaks\.toml$''',
+]
