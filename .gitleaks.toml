@@ -1,0 +1,31 @@
+title = "zynk private-content gate"
+
+# zynk private-strings: genuinely-private references that must NEVER appear in the public repo, ANYWHERE.
+#
+# This config deliberately does NOT `useDefault`. The default gitleaks ruleset ships a broad global allowlist
+# (paths/stopwords/regexes) that MASKS path-like findings — verified: with `useDefault = true`, `/home/zeus`
+# and `/Users/can` were NOT reported, while `ogulcancelik/zynk` was. A dedicated, allowlist-free rule
+# guarantees every private string is caught everywhere (NOTICE/vendor/etc. included).
+#
+# The rule matches the wrong-fork link `ogulcancelik/zynk`, NOT bare `ogulcancelik` — so upstream herdr
+# attribution (bare `ogulcancelik` / `ogulcancelik/herdr`) in NOTICE/LICENSE/vendor is naturally clean.
+#
+# Scope: this gate replaces the export gate's CONTENT check (the same private-string patterns); it is not a
+# generic secret scanner. Accidental real-secret detection (API keys/tokens) is a separate concern — add a
+# second pass (default gitleaks ruleset or trufflehog) later if wanted, but never fold it in here in a way
+# that re-introduces an allowlist masking the rule below.
+[[rules]]
+id = "zynk-private-strings"
+description = "private references that must never appear in the public repo"
+regex = '''(smscode|/home/zeus|/home/can|/Users/can|dewa\.zeuz@gmail|hey@herdr|ogulcancelik/zynk)'''
+tags = ["zynk", "private"]
+
+# Build-artifacts-only exemption, SAFE because it is PAIRED with scripts/check_public_tree.py: that structural
+# gate FORBIDS any TRACKED `__pycache__`/`*.pyc`/`*.pyo`, so this content-scan exemption is only ever applied to
+# UNtracked local bytecode (gitignored). A force-added (`git add -f`) bytecode artifact carrying a private
+# string is rejected by the structural gate before it can be committed — so this exemption cannot open a leak
+# path. (Bytecode embeds the dev/CI absolute compile path, e.g. `/home/<user>/…`, which is why the content scan
+# needs the exemption in the first place.)
+[allowlist]
+description = "python build artifacts (gitignored bytecode caches); tracked bytecode is blocked by check_public_tree.py"
+paths = ['''(^|/)__pycache__/''']

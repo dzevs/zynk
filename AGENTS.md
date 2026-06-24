@@ -50,5 +50,4 @@ a `refs #<issue>` body line. Keep subjects descriptive — they feed release not
 ## Contributions
 
 Contributions are welcome via GitHub issues and pull requests — see `CONTRIBUTING.md`. The maintainer
-(`dzevs`) reviews and merges; this public repo is a curated export, so accepted changes may be re-applied and
-re-exported by a maintainer.
+(`dzevs`) reviews and merges contributions directly.

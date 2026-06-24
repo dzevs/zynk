@@ -18,7 +18,7 @@ Requires Rust (stable), **Zig 0.15.2** (the bundled `libghostty-vt` is built wit
 TypeScript asset test).
 
 ```bash
-just install-hooks   # one-time: installs the fmt pre-commit hook
+just install-hooks   # one-time: installs the pre-commit hook (lint + private-content gates)
 just ci              # fmt --check + clippy -D warnings + tests (run before opening a PR)
 ```
 
@@ -36,9 +36,9 @@ reproduction, the affected zynk version/commit, OS, and terminal.
 
 ## Note on this repo
 
-`dzevs/zynk` is a curated public mirror of a private source-of-truth repository. Accepted contributions are
-reviewed and merged by the maintainer (`dzevs`); larger changes may be re-applied upstream of the export and
-re-exported. A maintainer will guide you if needed.
+`dzevs/zynk` is the canonical repository. The maintainer (`dzevs`) reviews and merges contributions directly.
+A private-content gate runs in CI and locally (`just install-hooks` → `just gate`; `scripts/check_public_tree.py`
++ `.gitleaks.toml`) — keep maintainer-private paths and strings out of commits.
 
 ## Security
 

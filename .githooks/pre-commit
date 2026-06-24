@@ -6,3 +6,13 @@ cd "$repo_root"
 
 echo "pre-commit: running just lint"
 just lint
+
+# --- single-repo private-content gates (FAIL-CLOSED; do not bypass) ---
+# Structural: no forbidden/private path may be staged (catches add/rename into e.g. website/, .codex/).
+python3 scripts/check_public_tree.py --staged || exit 1
+# Content: no private strings in staged changes. gitleaks is REQUIRED — fail closed if missing.
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "ERROR: gitleaks not found — install gitleaks 8.30.0; the private-content gate is fail-closed." >&2
+  exit 1
+fi
+gitleaks protect --staged --config .gitleaks.toml --redact || exit 1

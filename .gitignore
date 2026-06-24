@@ -8,3 +8,20 @@ __pycache__/
 *.swo
 *~
 .DS_Store
+
+# Maintainer-private paths — never committed to the public repo.
+# Enforced by scripts/check_public_tree.py (structural gate) + .gitleaks.toml (content gate).
+/.codex/
+/.pi/
+/.zed/
+/.local/
+/backlog/
+/website/
+/docs/next/
+/docs/superpowers/
+/WORKFLOW.md
+/CLAUDE.local.md
+/docs/zynk/plans/
+/docs/zynk/release-3.0.0-prep.md
+/docs/zynk/cutover-readiness.md
+/docs/zynk/dev-ux.md

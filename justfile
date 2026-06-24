@@ -4,7 +4,7 @@
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
@@ -25,7 +25,7 @@ ci filter='all()': lint test-ts
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config
 
 # Install repo-local git hooks
 install-hooks:
@@ -45,3 +45,8 @@ build-libghostty-vt:
 # Print default config
 default-config:
     cargo run --release --locked -- --default-config
+
+# Private-content gates over the whole repo (structural tracked-path + gitleaks content).
+gate:
+    python3 scripts/check_public_tree.py
+    gitleaks detect --no-git --config .gitleaks.toml --source . --redact
