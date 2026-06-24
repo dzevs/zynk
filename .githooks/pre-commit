@@ -16,3 +16,5 @@ if ! command -v gitleaks >/dev/null 2>&1; then
   exit 1
 fi
 gitleaks protect --staged --config .gitleaks.toml --redact || exit 1
+# Scoped scrub: no product-specific reference terms (mastra/studio/discord/pnpm/...) in copied tooling/docs.
+python3 scripts/scrub_check.py --staged || exit 1
