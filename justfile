@@ -51,3 +51,7 @@ gate:
     python3 scripts/check_public_tree.py
     python3 scripts/scrub_check.py
     gitleaks detect --no-git --config .gitleaks.toml --source . --redact
+
+# Optional docs prose lint (Vale: write-good + the custom zynk style). NOT a hard CI gate; needs `vale` installed.
+docs-lint:
+    vale README.md CLAUDE.md AGENTS.md WORKFLOW.md CONTRIBUTING.md SECURITY.md docs/styleguides/
