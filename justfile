@@ -54,4 +54,4 @@ gate:
 
 # Optional docs prose lint (Vale: write-good + the custom zynk style). NOT a hard CI gate; needs `vale` installed.
 docs-lint:
-    vale README.md CLAUDE.md AGENTS.md WORKFLOW.md CONTRIBUTING.md SECURITY.md docs/styleguides/
+    vale README.md CLAUDE.md AGENTS.md WORKFLOW.md CONTRIBUTING.md CODE_OF_CONDUCT.md DEVELOPMENT.md SECURITY.md docs/styleguides/
