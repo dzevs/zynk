@@ -245,7 +245,7 @@ Every release needs a rollback plan before it happens:
    - crates.io: `cargo yank --version X.Y.Z` (then publish a fixed patch)
    - GitHub release: mark the release as a draft / re-pin "latest" to the prior tag
    - Homebrew tap: revert the formula to the previous bottle/version
-2. Revert the code: `git revert <commit> && git push` (on a branch; never force-push main)
+2. Revert the code: `git revert <commit>` on a branch, then push — **push is an operator gate** (WORKFLOW.md rule 1); never force-push main
 3. Verify rollback: `zynk --version`, error logs clean
 4. Communicate: notify team of rollback
 
@@ -286,7 +286,7 @@ Every release needs a rollback plan before it happens:
 - No one monitoring the release for the first hour
 - Release/version configuration done by memory, not by the lockfile and `Cargo.toml`
 - "It's Friday afternoon, let's tag and publish"
-- Publishing to crates.io, tagging, or yanking without a separate explicit gate
+- Pushing, merging, publishing to crates.io, tagging, or yanking without a separate explicit operator gate
 - Tests that migrate the live on-disk DB instead of an isolated one
 
 ## Verification
