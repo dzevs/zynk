@@ -17,9 +17,9 @@ zynk is a single Rust binary that lives in the terminal you already use. Not a w
 shell, not a screenshot wrapper around someone else's view: you see each agent's own terminal, with a
 coordination layer on top.
 
-## why zynk
+## Why zynk
 
-Running several agents in terminals is powerful and quickly turns chaotic — panes scattered across windows,
+Running many agents in terminals is powerful and turns chaotic fast — panes scattered across windows,
 no clear "who's blocked", handoffs lost in scrollback, no shared memory or protocol between them.
 
 zynk gives the terminal that missing coordination layer:
@@ -29,7 +29,7 @@ zynk gives the terminal that missing coordination layer:
 - a **native message bus** — agents address each other by pane, with honest delivery state and a persisted,
   searchable history
 
-## what you get
+## What you get
 
 - **real terminal workspaces** — workspaces (per repo or folder), tabs, and panes that are actual processes,
   not rewritten agent views
@@ -42,7 +42,7 @@ zynk gives the terminal that missing coordination layer:
 - **integrations** — official agent hooks add native session identity and semantic state reporting
 - mouse-native throughout, 18 built-in themes, keyboard copy mode, and sound/toast notifications
 
-## install
+## Install
 
 Install with Homebrew, download a prebuilt binary, use Nix, or build from source.
 
@@ -78,7 +78,7 @@ nix run github:dzevs/zynk
 
 **Build from source** — requires Rust (stable), **Zig 0.15.2** (the bundled `libghostty-vt` is built with
 Zig), and **network access during the build** (the Zig build fetches libghostty-vt's Zig package
-dependencies into Zig's global cache; offline builds are not supported yet):
+dependencies into Zig's global cache; offline builds aren't supported yet):
 
 ```bash
 git clone https://github.com/dzevs/zynk
@@ -90,10 +90,10 @@ cargo build --release --locked
 `cargo install zynk` installs the native Zynk app **from source** (the `zynk` 3.x crate — the 2.x crate was
 the retired ACP protocol/helper CLI). It needs Rust (stable), **Zig 0.15.2**, and **network access during the
 build**: Cargo fetches the crate, then the build fetches libghostty-vt's Zig package dependencies into Zig's
-global cache (`cargo install --offline` is not supported). For a no-build install, most users should prefer
+global cache (`cargo install --offline` isn't supported). For a no-build install, most users should prefer
 Homebrew, the GitHub Release binaries, or Nix above.
 
-## quick start
+## Quick start
 
 Start zynk in the directory where the work lives:
 
@@ -109,21 +109,21 @@ switch workspaces.
 Press `ctrl+b q` to detach the client. The server and pane processes keep running. Open another terminal and
 run `zynk` again to reattach.
 
-## core concepts
+## Core concepts
 
 **Server and client.** By default, `zynk` attaches to a background server. Detaching closes only the client. `zynk server stop` stops the default server and kills its panes. Named sessions are separate server namespaces: use `zynk session attach work`, `zynk session stop work`, and `zynk session list` when you want fully separate runtime state.
 
 **Workspaces, tabs, panes.** A workspace is the project-level container. Tabs group panes inside a workspace. Panes are real terminal processes, not rewritten agent views.
 
-**Copy.** zynk copies pane text, not the sidebar. Drag-select inside a pane, double-click a word or token, or press `prefix+[` for keyboard copy mode. In copy mode, move with `h/j/k/l`, `w/b/e`, and `{`/`}`, start selection with `v` or Space, copy with `y` or Enter, and leave with `q` or Esc. In PuTTY and some SSH terminals, hold `Shift` while dragging to use the terminal's own selection, and `Shift` + right click to paste.
+**Copy.** zynk copies pane text, not the sidebar. Drag-select inside a pane, select a word or token with a double mouse-press, or press `prefix+[` for keyboard copy mode. In copy mode, move with `h/j/k/l`, `w/b/e`, and `{`/`}`, start selection with `v` or Space, copy with `y` or Enter, and leave with `q` or Esc. In PuTTY and some SSH terminals, hold `Shift` while dragging to use the terminal's own selection, and paste with `Shift` + secondary mouse-press.
 
-**Update and restore.** Auto-update and self-update remain fail-closed until release-manifest hosting exists, so `zynk update` does not fetch yet — update manually with `brew upgrade dzevs/tap/zynk` (if installed via Homebrew), by installing a newer [GitHub Release](https://github.com/dzevs/zynk/releases) binary, via Nix, or by rebuilding from source (`git pull && cargo build --release --locked`). A running server keeps using the old process until it is stopped, so stop the old server to pick up the new binary. Stopping exits pane processes. Run `zynk server stop`, then run `zynk` again for the default session. For a named session, run `zynk session stop <name>`, then run `zynk session attach <name>` again. With current official integrations installed, supported agent panes can restart from their native agent sessions after a server restart.
+**Update and restore.** Auto-update and self-update remain fail-closed until release-manifest hosting exists, so `zynk update` doesn't fetch yet — update manually with `brew upgrade dzevs/tap/zynk` (if installed via Homebrew), by installing a newer [GitHub Release](https://github.com/dzevs/zynk/releases) binary, via Nix, or by rebuilding from source (`git pull && cargo build --release --locked`). A running server keeps using the old process until it's stopped, so stop the old server to pick up the new binary. Stopping exits pane processes. Run `zynk server stop`, then run `zynk` again for the default session. For a named session, run `zynk session stop <name>`, then run `zynk session attach <name>` again. With current official integrations installed, supported agent panes can restart from their native agent sessions after a server restart.
 
-**Keybindings.** zynk uses explicit keybinding strings. `prefix+n` means press the configured prefix, then `n`. `ctrl+alt+n`, `cmd+k`, `alt+1`, and function-key chords are direct terminal-mode shortcuts and do not need the prefix. Plain direct printable keys such as `n` steal normal typing, so use `prefix+n` unless you intentionally want a modifier-gated direct binding.
+**Keybindings.** zynk uses explicit keybinding strings. `prefix+n` means press the configured prefix, then `n`. `ctrl+alt+n`, `cmd+k`, `alt+1`, and function-key chords are direct terminal-mode shortcuts and don't need the prefix. Plain direct printable keys such as `n` steal normal typing, so use `prefix+n` unless you intentionally want a modifier-gated direct binding.
 
 **Agent awareness.** The sidebar shows blocked, working, done, and idle states. Detection works with process names and terminal output by default. Official integrations can add native session identity for restore, semantic state reports, or both.
 
-## agent messaging (the zynk layer)
+## Agent messaging (the zynk layer)
 
 This is zynk's net-new layer on top of the multiplexer. Agents send each other **plain-text messages**; zynk
 auto-attaches structured protocol metadata, prepends a visible awareness header, persists every message to a
@@ -146,10 +146,10 @@ Design guarantees (binding):
   later advance to `received` through the server-authoritative `zynk.message_received` event, or to `failed`
   on delivery failure. zynk never collapses these states. A `received` state comes from the receiving
   integration's event, never from screen scraping, status markers, or a socket ACK. A receiver without the
-  zynk integration honestly stays at `submitted`.
+  zynk integration stays at `submitted`.
 - **Body purity.** The message body is pure text; all provenance (agent identity, workspace/tab, branch,
   `git_sha`, cwd) plus zynk's own protocol IDs (`message_id`/`conversation_id`/`conversation_seq`) are persisted
-  as structured protocol metadata, indexed separately from the body. The protocol IDs + sender identity also
+  as structured protocol metadata, indexed apart from the body. The protocol IDs + sender identity also
   render in a visible awareness header prepended to agent-targeted messages (awareness, not receipt proof).
 - **Structured responses.** No silent success and no bare `ok`. Every command returns a clear structured
   response (stable JSON for automation + concise human text), with `result`, the relevant ids, delivery
@@ -161,7 +161,7 @@ Design guarantees (binding):
 Agents can drive zynk over the same local Unix socket — create workspaces, split or zoom panes, spawn
 helpers, read output, wait for state changes, and message each other. Start with [`SKILL.md`](./SKILL.md).
 
-## update
+## Update
 
 Auto-update, self-update, and update channels remain fail-closed until release-manifest hosting exists, so
 `zynk update` and `zynk channel set <stable|preview>` return a "not available" notice rather than fetching.
@@ -176,7 +176,7 @@ If a session is still running the old server, use the same stop-and-run-again fl
 binary. Self-update, "new version available" notifications, and the stable/preview update channels remain
 deferred until release-manifest hosting exists.
 
-## how it compares
+## How it compares
 
 |                          | tmux | gui managers | zynk |
 |--------------------------|------|--------------|------|
@@ -192,9 +192,9 @@ deferred until release-manifest hosting exists.
 | native agent-to-agent messaging | — | —          | ✓     |
 | persisted + retrievable conversation | — | —      | ✓     |
 
-tmux gives you persistence and panes, but it was built before agents existed. gui managers show agent state, but they make you leave your terminal and use their wrapped view. zynk is persistence, awareness, and a native multi-agent conversation layer in one tool that stays out of your way.
+tmux gives you persistence and panes, but predates agents. gui managers show agent state, but they make you leave your terminal and use their wrapped view. zynk is persistence, awareness, and a native multi-agent conversation layer in one tool that stays out of your way.
 
-## remote and attach
+## Remote and attach
 
 zynk works over normal SSH. Run it on the remote host, detach, and reattach later:
 
@@ -219,7 +219,7 @@ zynk agent attach <target>
 zynk terminal attach <terminal_id>
 ```
 
-## agent awareness
+## Agent awareness
 
 The sidebar shows which agents are blocked, working, or done. Workspaces roll up to their most urgent state so you can scan the full list at a glance.
 
@@ -227,12 +227,12 @@ States:
 
 - 🔴 **blocked** — agent needs input or approval
 - 🟡 **working** — agent is actively running
-- 🔵 **done** — work finished, you have not looked at it yet
+- 🔵 **done** — work finished, you haven't looked at it yet
 - 🟢 **idle** — done and seen
 
-Detection works by reading the foreground process and terminal output — zero config, no hooks required. Official claude code, codex, github copilot cli, droid, kimi code cli, qodercli, and cursor agent cli integrations provide session restore identity; pi, omp, opencode, kilo code cli, hermes, and custom socket integrations can report their own state.
+Detection works by reading the foreground process and terminal output — zero config, no hooks required. Official claude code, codex, github copilot CLI, droid, kimi code CLI, qodercli, and cursor agent CLI integrations provide session restore identity; pi, omp, opencode, kilo code CLI, hermes, and custom socket integrations can report their own state.
 
-## supported agents
+## Supported agents
 
 Automatic detection works out of the box — process-name matching plus terminal-output heuristics.
 
@@ -244,23 +244,23 @@ Automatic detection works out of the box — process-name matching plus terminal
 | [droid](https://factory.ai) | ✓ | ✓ | ✓ |
 | [amp](https://ampcode.com) | ✓ | ✓ | ✓ |
 | [opencode](https://github.com/anomalyco/opencode) | ✓ | ✓ | ✓ |
-| [grok cli](https://x.ai/grok) | ✓ | ✓ | ✓ |
+| [grok CLI](https://x.ai/grok) | ✓ | ✓ | ✓ |
 | [hermes agent](https://github.com/NousResearch/hermes-agent) | ✓ | ✓ | ✓ |
-| [kilo code cli](https://kilo.ai/) | ✓ | ✓ | ✓ |
+| [kilo code CLI](https://kilo.ai/) | ✓ | ✓ | ✓ |
 | cursor agent | ✓ | ✓ | ✓ |
-| antigravity cli | ✓ | ✓ | ✓ |
-| kimi code cli | ✓ | ✓ | ✓ |
-| [github copilot cli](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
+| antigravity CLI | ✓ | ✓ | ✓ |
+| kimi code CLI | ✓ | ✓ | ✓ |
+| [github copilot CLI](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
 | [qodercli](https://qoder.com/cli) | ✓ | ✓ | ✓ |
-| [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
+| [kiro CLI](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
 
-Detected but not fully tested: gemini cli, cline.
+Detected but not fully tested: gemini CLI, cline.
 
 For agents outside the built-in list, zynk still works as a terminal multiplexer with workspaces, panes, and tiling. Custom integrations can report agent labels over the socket API.
 
-## integrations
+## Integrations
 
-Official integrations have two roles. claude code, codex, github copilot cli, droid, kimi code cli, qodercli, and cursor agent cli report session identity for native restore, while their state still comes from screen detection. pi, opencode, kilo code cli, and hermes report both semantic state and session identity. omp reports semantic state without native session restore. Install with:
+Official integrations have two roles. claude code, codex, github copilot CLI, droid, kimi code CLI, qodercli, and cursor agent CLI report session identity for native restore, while their state still comes from screen detection. pi, opencode, kilo code CLI, and hermes report both semantic state and session identity. omp reports semantic state without native session restore. Install with:
 
 ```bash
 zynk integration install pi
@@ -277,7 +277,7 @@ zynk integration install qodercli
 zynk integration install cursor
 ```
 
-## keybindings
+## Keybindings
 
 Press `ctrl+b` to enter prefix mode. Default actions are prefix-first and tmux-like:
 
@@ -303,7 +303,7 @@ Press `ctrl+b` to enter prefix mode. Default actions are prefix-first and tmux-l
 
 Mouse is supported throughout. Resize mode uses `h`/`l` for width, `j`/`k` for height, and `esc` to exit.
 
-## configuration
+## Configuration
 
 zynk separates **config** from **data**:
 
@@ -316,13 +316,13 @@ zynk --default-config   # print full default config
 ```
 
 In-app settings cover theme, sound, and toast preferences. zynk writes runtime logs under its config dir
-(`~/.config/zynk/`); in persistent session mode, `zynk-client.log` and `zynk-server.log` are usually the
+(`~/.config/zynk/`); in persistent session mode, `zynk-client.log` and `zynk-server.log` are the
 useful files.
 
 If a database from an earlier build already occupies `~/.zynk/zynk.db`, zynk **fails closed** rather than
 overwrite it, and points you at the explicit `zynk db` adopt/backup/import action.
 
-## docs
+## Docs
 
 - [`SKILL.md`](./SKILL.md) — reusable agent skill for driving zynk over the socket
 - [`AGENTS.md`](./AGENTS.md) — agent & contributor guide
@@ -331,7 +331,7 @@ overwrite it, and points you at the explicit `zynk db` adopt/backup/import actio
 If you are an AI agent helping with this repository, read [`AGENTS.md`](./AGENTS.md) before making changes and
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) before opening issues or PRs.
 
-## development
+## Development
 
 ```bash
 git clone https://github.com/dzevs/zynk
@@ -346,7 +346,7 @@ just check       # formatting, tests, and maintenance checks
 Tests are hermetic — each spawns its own temporary config and socket — so `just test` / `just check` are safe
 to run directly. See [`CLAUDE.md`](./CLAUDE.md) and [`AGENTS.md`](./AGENTS.md).
 
-## provenance & license
+## Provenance & license
 
 zynk is a fork of **[herdr](https://github.com/ogulcancelik/herdr)**, a terminal workspace manager by
 ogulcancelik and the herdr contributors. zynk keeps herdr's terminal-multiplexer foundation and adds a

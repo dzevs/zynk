@@ -12,14 +12,14 @@ unverified agent output never reaches `main`. Project conventions live in `CLAUD
   merge/push/tag/release operations, and waits for an explicit operator gate per action.
 - **Codex** — collaborative reviewer (Gate-1 spec + Gate-2 implementation). A co-author, not independent.
 - **Swarm** — Gate-3 independent verification: a fan-out of specialist reviewers, decorrelated from the author.
-- **Pi** — coordinator / relay; READ-ONLY verification. Does not implement, commit, or push.
+- **Pi** — coordinator / relay; READ-ONLY verification. Doesn't write code, commit, or push.
 - **zynk** — the audited transport; the conversation is the verdict record.
 
-## Hard rules
+## Binding rules
 
 1. No merge / push / tag / release / publish until the operator explicitly approves — each is a separate gate.
 2. No "ready to merge" claim until Gate-1, Gate-2, and Gate-3 all approve.
-3. Pi must not edit source files or implement; Pi coordinates and verifies read-only.
+3. Pi must not edit source files or write code; Pi coordinates and verifies read-only.
 4. On any gate/check failure: STOP, fix the root cause, re-run until clean. Never bypass (`--no-verify` is forbidden).
 5. Local builds/tests use an isolated `CARGO_TARGET_DIR`, never the live runtime.
 6. Precise `git add <path>` — never `git add -A`. Lowercase conventional commits; never force-push `main`.
@@ -50,25 +50,25 @@ flowchart TD
   H --> I[Claude merges to main / pushes]
 ```
 
-## Gate-1 — Spec soundness
+## `Gate-1` — spec soundness
 
 Claude writes a spec, then asks Codex to review it (`zynk send <codex-pane> --type request-review --trace <id>
 -- "<text>"`). Codex may iterate with Claude until the spec is sound. Gate-1 passes only when Codex explicitly
 approves the final spec.
 
-## Gate-2 — Collaborative implementation review
+## `Gate-2` — collaborative implementation review
 
 Claude implements the approved spec with tests, then asks Codex to review the diff. Codex may request changes;
 Claude and Codex iterate. Gate-2 passes only when Codex explicitly approves the implementation.
 
-## Gate-3 — Swarm independent verification
+## `Gate-3` — swarm independent verification
 
 After Gate-2, Claude requests an independent **swarm** verification, decorrelated from the author. Use the
 global `swarm` skill: an arbiter fans out specialist reviewers (e.g. correctness, security, regression,
 does-it-reproduce), collects and cross-verifies their findings, and reports one verdict through the audited
 zynk conversation (`zynk thread` / `zynk trace <id>`).
 
-Manual fallback (no swarm skill available): Claude `zynk send`s the change to several reviewer panes with
+Manual fallback (no swarm skill available): Claude `zynk send`s the change to three or more reviewer panes with
 distinct lenses, collects their `zynk reply` verdicts, and treats a majority-confirm as the Gate-3 verdict.
 
 Allowed Gate-3 verdicts: `approve`, `request-changes`, `blocked-insufficient-evidence`, `blocked-harness-failure`.
@@ -76,7 +76,7 @@ Allowed Gate-3 verdicts: `approve`, `request-changes`, `blocked-insufficient-evi
 ## Failure handling
 
 - **request-changes** — a real issue was found. Claude/Codex re-enter the implementation loop; a new Gate-2 and a new Gate-3 are required.
-- **blocked-insufficient-evidence** — the change could not be verified (incomplete proof/diff). Claude corrects the evidence; no code change is implied; re-verify.
+- **blocked-insufficient-evidence** — the change couldn't be verified (incomplete proof/diff). Claude corrects the evidence; no code change is implied; re-verify.
 - **blocked-harness-failure** — the verifier environment/tooling failed. Fix the harness; re-verify the same candidate.
 
 ## Merge rule
@@ -86,7 +86,7 @@ approved, Gate-3 (swarm) `approve` recorded in the audited conversation, Claude 
 `file:line`, and the operator explicitly approves. Merge to `main` is a fast-forward; pushes are operator-gated;
 never force-push.
 
-## Private-content gate
+## Private content gate
 
 Two-plus fail-closed layers run in pre-commit (`just install-hooks`) AND CI (`.github/workflows/gates.yml`):
 

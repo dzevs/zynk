@@ -2,8 +2,8 @@
 
 Build needs Rust (stable) + **Zig 0.15.2**; the TS asset test needs Bun. Co-author/reviewer agents (Codex,
 Pi, swarm) read `AGENTS.md`; the gated dev/release flow is `WORKFLOW.md`. Deep design law: `docs/zynk/` (SPEC +
-ADRs `decisions/`); **ADR 0010 (full hard fork) is binding** — disregard older ADR/ledger passages about
-minimal-rebrand or upstream-merge survivability.
+ADRs `decisions/`); **ADR 0010 (full fork, no upstream-merge survivability) is binding** — disregard older
+ADR/ledger passages about minimal-rebrand or upstream-merge survivability.
 
 When another agent sends you a message via zynk, **reply through zynk** (`zynk reply` / `zynk send`) — never
 in the chat; a chat reply never reaches them.
@@ -19,7 +19,7 @@ in the chat; a chat reply never reaches them.
 
 - `build.rs` runs `zig build` against `vendor/libghostty-vt/` (static VT lib, linked `extern "C"`). `ZIG` env overrides the binary; `LIBGHOSTTY_VT_OPTIMIZE` (default `ReleaseFast`) etc. tune it. Zig emits `zig-out`/`.zig-cache` under **`OUT_DIR`** — never into `vendor/`, because `cargo publish` rejects a build that mutates package source. `build.rs` early-returns when `DOCS_RS` is set (no Zig/network).
 - **Vendor patches:** `vendor/libghostty-vt.vendor.json` pins the source commit; `vendor/libghostty-vt.patches.md` is the patch index. `scripts.test_vendor_libghostty_vt` enforces index ↔ files. Drop a patch only when the vendored commit has the upstream fix AND `zig build test-lib-vt` passes.
-- **sqlite-vec (ADR 0006):** `vec0` is statically compiled in + registered via `sqlite3_auto_extension` before any sqlx connection. This works ONLY because Cargo unifies to exactly one `libsqlite3-sys` node — a second one silently breaks it (`no such module: vec0`). vec0 tables are created **lazily at runtime, never in a migration**.
+- **sqlite-vec (ADR 0006):** `vec0` is statically compiled in + registered via `sqlite3_auto_extension` before any sqlx connection. This works ONLY because Cargo unifies to exactly one `libsqlite3-sys` node — a second one breaks it with no error (`no such module: vec0`). vec0 tables are created **on first use at runtime, never in a migration**.
 
 ## Architecture invariants (what · file · why)
 
@@ -30,16 +30,16 @@ in the chat; a chat reply never reaches them.
 - **Platform code is isolated** behind a typed boundary (`src/platform/mod.rs`: `capabilities()`, `ForegroundJob`, `Signal`); impls in `linux.rs`/`macos.rs`/`windows.rs`/`fallback.rs`. Add OS behavior there, not via scattered `#[cfg(target_os)]`.
 - **Conversation layer is fork-owned + additive** (`src/zynk/`: `db`, `db_cutover`, `message`, `header`, `receipt`, `inbox`, `retrieval/`, `embed/`, `runtime`, `skill`). `src/persist/` is session/layout/snapshot state, **NOT messages**. Touch upstream files minimally — only at API/CLI dispatch + integration-hook points — and log every touch in `docs/zynk/fork-patch-ledger.md` (append-only).
 
-## Module map (non-obvious roles)
+## Module map (roles that surprise)
 
-- `src/api/` — the socket **command schema + JSON dispatch** layer. `schema.rs` `enum Method` is the wire contract (`#[serde(tag="method", content="params")]`; each `serde(rename="…")` **is the wire ID**). Defines + transports methods; does **not** implement them.
+- `src/api/` — the socket **command schema + JSON dispatch** layer. `schema.rs` `enum Method` is the wire contract (`#[serde(tag="method", content="params")]`; each `serde(rename="…")` **is the wire ID**). Defines + transports methods; **doesn't** run them.
 - `src/app/api/` — the App-side handlers that mutate `AppState` per `Method` (`panes.rs`, `workspaces.rs`, …, fork-owned `zynk.rs`). Where socket commands become state changes.
 - `src/server/` — headless lifecycle (`headless.rs::run_server` binds `zynk.sock` JSON + `zynk-client.sock` binary, inits state/PTYs, renders to an in-memory buffer, streams frames; installs the App-owned receipt worker). `handoff.rs` = live server replacement (Unix).
 - `src/ipc.rs` — low-level Unix-socket primitives (`interprocess`): connect/bind, `SocketFileIdentity`, perms/cleanup. Transport plumbing, not the command layer.
 - `src/protocol/` — the **binary** client frame protocol (`wire.rs`) + `render_ansi.rs`. Distinct from the `src/api/` JSON method protocol.
 - `src/cli/` — hand-rolled positional dispatcher (NOT clap); `cli/zynk.rs` is the `zynk` subcommand group (transport shim, never the receipt authority). `src/pty/` + `src/terminal/` = PTY actor + emulator/screen state feeding `compute_view`/detection.
 
-## Rules & anti-patterns (NEVER/ALWAYS · why)
+## Rules and antipatterns (NEVER/ALWAYS · why)
 
 - **NEVER** feed detection the parser/viewport/scrollable viewport; **NEVER** match incidental whole-pane text (use the tightest region). **NEVER** use detection-tainted identity (`to.agent`/`effective_agent_label`/`detected_agent`) for receipt/awareness — gate on hook-authoritative `agent_session`/`hook_authority`.
 - **No `unwrap()` in production**; `tracing` for logging. The header renderer must **never panic on a sparse party** — missing cwd/agent/pane render as `-` (`src/zynk/header.rs::or_dash`). Dead code fails `clippy -D warnings` → targeted `#![allow(dead_code)]` **with a justifying comment**.
@@ -59,7 +59,7 @@ in the chat; a chat reply never reaches them.
 ## Gotchas
 
 - **Foreign-DB fail-closed (ADR 0008).** Native DB = `$ZYNK_HOME/zynk.db` (default `~/.zynk/zynk.db`); config separate at `~/.config/zynk/config.toml`. `db::classify_db_at` classifies any existing file; a non-empty unrecognized DB is **`Foreign` → FAIL CLOSED**, never auto-migrate/overwrite. The only cutover is the explicit non-destructive `zynk db status|adopt|backup|import`.
-- **Editing a migration in place re-checksums it and WIPES existing DBs at next init.** ADR 0010 accepted this (DB disposable, only-us). Don't expect data to survive a `migrations/zynk/0001_*` edit.
+- **Editing a migration in place re-checksums it and WIPES existing DBs at next init.** ADR 0010 accepted this (DB disposable, no external consumers). Don't expect data to survive a `migrations/zynk/0001_*` edit.
 - **`trace_id` lives in `messages.meta_json` only** (indexed by `migrations/zynk/0003`), never in body/body_hash/protocol_json/FTS.
 - **Global DB shared across runtimes** — every row carries `runtime_session_id` + `socket_namespace` so dev-test conversations never conflate with live; the runtime-id file sits beside the active API socket.
 - **`Method` is exhaustively matched** in `api_method_name` + dispatch — a new variant is compiler-forced everywhere; changing a `serde(rename)` breaks clients.
@@ -68,4 +68,4 @@ in the chat; a chat reply never reaches them.
 
 ## Skills (`.claude/skills/`)
 
-Claude's implementer skills: `smoke-test`, `zynk-docs`, `pr-explainer`, `pr-splitter`, `debugging-difficult-bugs`. The co-authors' methodology set is `.agents/skills/` (separate; each agent uses its own dir).
+Claude's implementer skills: `smoke-test`, `zynk-docs`, `pr-explainer`, `pr-splitter`, `debugging-difficult-bugs`. The co-authors' workflow set is `.agents/skills/` (separate; each agent uses its own dir).

@@ -1,8 +1,8 @@
-# Security Policy
+# Security policy
 
 ## Reporting a vulnerability
 
-Please report security vulnerabilities **privately** to **hi@zevs.gg**. Do not open a public issue
+Please report security vulnerabilities **privately** to **hi@zevs.gg**. Don't open a public issue
 for security problems.
 
 Include a description, reproduction steps, the affected version/commit, and the impact. You'll get an

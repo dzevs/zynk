@@ -7,7 +7,7 @@ manager for AI coding agents. Contributions are welcome via GitHub issues and pu
 
 ## Before you start
 
-- **Understand your code.** Using AI to help write code is fine; submitting code you can't explain is not.
+- **Understand your code.** Using AI to help write code is fine; submitting code you can't explain isn't.
 - **Keep the scope small** and consistent with zynk's existing design and interaction patterns.
 - For larger changes to UI, behavior, persistence, protocol, or architecture, open an issue to discuss the
   approach before sending a big PR.

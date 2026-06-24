@@ -4,7 +4,7 @@ The default writing guide for zynk docs (the `zynk-docs` skill routes here).
 
 ## Core rules
 
-- Write clearly and directly: short sentences, short paragraphs, simple words, low jargon.
+- Write so the reader understands on the first pass: short sentences, short paragraphs, plain words, low jargon.
 - Break dense text with headings and bullet lists. Refer to the reader as `you` when needed.
 - Write for readers who are tired, rushed, reading in a non-native language, or new to terminals/Rust.
 - Lead with the actionable point; cut filler. Every line should earn its place.
@@ -12,7 +12,7 @@ The default writing guide for zynk docs (the `zynk-docs` skill routes here).
 ## Terse + actionable — no marketing
 
 - Agent-facing docs (`CLAUDE.md`, `AGENTS.md`, `WORKFLOW.md`) load into context every session, so noise wastes
-  tokens and *reduces* adherence. Include only facts an agent needs and cannot quickly derive: build/commands,
+  tokens and *reduces* adherence. Include only facts an agent needs and can't derive from the source: build/commands,
   conventions, architecture invariants + file paths + the WHY, gotchas.
 - Be specific and verifiable: "`no unwrap()` in production", not "write clean code". Structure with headers +
   bullets. Target under 200 lines.
@@ -30,4 +30,4 @@ The default writing guide for zynk docs (the `zynk-docs` skill routes here).
 
 ## Linting
 
-Run `just docs-lint` (Vale: write-good + the `zynk` prose style) before committing docs. Optional, not a hard CI gate.
+Run `just docs-lint` (Vale: write-good + the `zynk` prose style) before committing docs. Optional, not a blocking CI gate.
