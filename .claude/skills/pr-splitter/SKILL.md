@@ -5,71 +5,75 @@ description: Use when breaking a large, complex, messy, or hard-to-review pull r
 
 # PR Splitter
 
-Preserve the original PR as source material, build smaller reviewable PRs intentionally, and track
-drift locally as review feedback changes the stack. In zynk, "review feedback" includes the operator
-gate and the decorrelated Codex/swarm second opinion — treat their approved direction as the new
-source of truth for the stack.
+Treat the original PR as raw material to mine, assemble each smaller reviewable PR on purpose, and keep
+a local record of how the stack diverges as review feedback lands. Inside zynk, "review feedback" spans
+both the operator gate and the decorrelated Codex/swarm second opinion — once they sign off on a
+direction, that direction becomes the stack's new source of truth.
 
 ## Required workflow
 
 1. **Snapshot before touching history**
-   - Check `git status`.
-   - Create an immutable local reference to the original branch: `git branch backup/original-large-pr`.
-   - Do not delete or rewrite the original branch until the split is complete.
+   - Run `git status` to see where you stand.
+   - Pin an immutable local pointer to the starting branch: `git branch backup/original-large-pr`.
+   - Leave the original branch intact — no deletes, no rewrites — until every slice has shipped.
 
 2. **Inventory the original PR**
-   - Inspect `git diff --stat <base>...HEAD`, `git diff --name-only <base>...HEAD`, and
+   - Survey the diff with `git diff --stat <base>...HEAD`, `git diff --name-only <base>...HEAD`, and
      `git log --oneline <base>..HEAD`.
-   - Classify changes by review unit: prep/refactor, API/protocol/type changes, behavior, tests,
-     docs, cleanup, generated/lock files (`Cargo.lock`, generated snapshots).
+   - Sort the changes into reviewable buckets: prep/refactor, API/protocol/type changes, behavior,
+     tests, docs, cleanup, and generated/lock files (`Cargo.lock`, generated snapshots).
 
 3. **Create a local scratchpad**
-   - Write split notes to an uncommitted local file, preferably `.notes/pr-split.md`.
-   - Ensure `.notes/` is ignored or leave it untracked. Do not commit scratchpad notes unless the
-     user explicitly asks. (`.notes/` must never reach a commit — the private-content gate will
-     flag stray local artifacts.)
-   - Track: original branch, base branch, planned PRs, files/hunks extracted, verification per PR,
-     remaining original diff, and intentional drift from review feedback.
+   - Capture your split plan in a throwaway local file — `.notes/pr-split.md` is the preferred home.
+   - Either gitignore `.notes/` or just keep it untracked. Never commit the scratchpad unless the
+     user specifically requests it. (`.notes/` must stay out of every commit — the private-content
+     gate trips on stray local artifacts.)
+   - Record: original branch, base branch, the PRs you plan, which files/hunks each one pulls, how
+     each PR is verified, what original diff is still left over, and where review feedback has pushed
+     the stack off the original intent.
 
 4. **Choose the split shape**
-   - Use stacked PRs when later work depends on earlier work.
-   - Use parallel PRs only when changes are truly independent.
-   - Use foundation + parallel follow-ups when one shared prep change unlocks independent work
-     (e.g. a protocol/IPC type change that several handlers then build on).
+   - Reach for stacked PRs whenever later work sits on top of earlier work.
+   - Reserve parallel PRs for changes that are genuinely independent of one another.
+   - Pick foundation + parallel follow-ups when a single shared prep change opens the door to
+     otherwise-independent work (for instance, a protocol/IPC type change that several handlers then
+     build on).
 
 5. **Extract changes safely**
-   - Prefer fresh branches from the correct base plus selective restore over rewriting messy history.
-   - Use path-level extraction for clean file ownership:
+   - Favor cutting fresh branches from the right base and selectively restoring into them over
+     untangling messy history in place.
+   - For whole files that belong cleanly to one slice, extract by path:
      `git checkout backup/original-large-pr -- src/path/to/file.rs`.
-   - Use hunk-level extraction for mixed files:
+   - For files that mix concerns, extract the relevant hunks:
      `git restore -p --source backup/original-large-pr -- src/path/to/file.rs`.
-   - Keep each PR independently buildable and reviewable. A Rust PR that does not compile on its own
-     is not a valid split unit — the crate must build.
+   - Every PR has to stand on its own — buildable and reviewable in isolation. A Rust slice that
+     won't compile by itself isn't a legitimate split unit; the crate must build.
 
 6. **Verify each PR independently**
-   - Run the narrowest relevant build, format, lint, and tests for that PR's scope:
+   - For each slice run the tightest relevant build, format, lint, and test pass for its scope:
      `cargo build --release --locked`, `cargo nextest run --locked <filter>`, `just lint`, and
-     `just check` before the stack is considered green.
-   - Do not leave tests, docs, or generated files separated from the code they validate unless the
-     split plan explicitly calls for it.
+     `just check` before you call the stack green.
+   - Keep tests, docs, and generated files attached to the code they back unless the plan
+     deliberately decouples them.
 
 7. **Manage drift deliberately**
-   - Treat reviewer-approved changes (operator gate + Codex/swarm verdict) as the new source of
-     truth for the stack.
-   - After changing an earlier PR, rebase dependent PRs onto it and resolve conflicts in favor of
-     the reviewed direction, not blindly in favor of the original branch.
-   - Compare the evolving stack against `backup/original-large-pr` to find remaining intent, not to
-     force byte-for-byte equality.
-   - Record intentional differences in `.notes/pr-split.md`.
+   - Once a change is approved (operator gate + Codex/swarm verdict), treat it as the stack's new
+     source of truth.
+   - When an earlier PR shifts, rebase its dependents onto the new version and settle conflicts
+     toward the reviewed direction rather than reflexively toward the original branch.
+   - Diff the evolving stack against `backup/original-large-pr` to surface intent you still owe —
+     not to chase byte-for-byte equality.
+   - Log every deliberate divergence in `.notes/pr-split.md`.
 
 8. **Use range-diff for rewritten stacks**
-   - Use `git range-diff` after rebases, conflict resolution, or force-pushes to understand what
-     changed. (Force-push remains operator-gated — never force-push without an explicit gate.)
-   - Summarize meaningful range-diff results for reviewers when updating a stacked PR.
+   - After rebases, conflict resolution, or force-pushes, reach for `git range-diff` to see exactly
+     what moved. (Force-push stays operator-gated — never run one without an explicit gate.)
+   - When you refresh a stacked PR, distill the meaningful range-diff output into a note for
+     reviewers.
 
 ## PR description pattern
 
-Keep PR descriptions concise and reviewer-facing:
+Keep each PR description short and aimed at the reviewer:
 
 ```markdown
 ## Summary
@@ -90,8 +94,8 @@ This is PR N of M split from a larger change.
 - cargo nextest run --locked <filter>
 ```
 
-Do not put the full split ledger in PR descriptions. Keep detailed extraction notes and drift
-tracking in `.notes/pr-split.md`.
+Don't dump the whole split ledger into the PR body. The granular extraction notes and drift log
+belong in `.notes/pr-split.md`.
 
 ## Scratchpad template
 
@@ -120,39 +124,39 @@ Base branch: main
 
 ## Per-PR scope, not a combined release note
 
-Each split PR must describe and verify only the changes in that PR — never carry the original
-branch's combined release/changelog wording into a single split PR. The original branch covers the
-full combined change and its release note does not belong in any one slice.
+A split PR should document and validate only its own changes — never inherit the original branch's
+combined release/changelog wording into a single slice. That branch accounts for the whole combined
+change, so its release note has no place in any one piece of it.
 
-After extracting changes into a split branch:
+Once you've pulled changes into a split branch:
 
-1. **Strip any combined-change release note or version bump carried over from the original branch.**
-   These were written for the full diff and produce misleading history on a slice.
-2. **Write a per-PR summary scoped to that PR's changes only.** Describe what this specific PR does,
-   not the full original feature.
-3. **Reference only the modules actually changed in this PR.** If the original change touched the
-   server, protocol, and detection layers but this PR only touches `src/detect/`, scope the summary
-   to detection.
-4. **Match the change's apparent significance to the slice.** A prep/refactor slice is a small,
-   low-risk PR; a slice that introduces new protocol/IPC surface is the one to flag for the
-   Codex/swarm second opinion.
-5. **Version bumps, tags, and releases stay out of split PRs.** Those are separate, explicitly
-   operator-gated actions — never fold one into a routine split slice.
+1. **Drop any combined-change release note or version bump that rode along from the original branch.**
+   Written for the full diff, they leave misleading history on a slice.
+2. **Compose a summary scoped strictly to this PR's changes.** Cover what this particular slice does,
+   not the entire original feature.
+3. **Name only the modules this PR actually touches.** If the original change spanned the server,
+   protocol, and detection layers but this slice only touches `src/detect/`, keep the summary on
+   detection.
+4. **Size the framing to the slice.** A prep/refactor slice is a small, low-risk PR; a slice that
+   adds new protocol/IPC surface is the one worth flagging for the Codex/swarm second opinion.
+5. **Keep version bumps, tags, and releases out of split PRs entirely.** Those are separate,
+   explicitly operator-gated actions — never bundle one into a routine slice.
 
-Add a "summary + verification scoped to this slice" line to the scratchpad template under each
-planned PR so it is not forgotten.
+Append a "summary + verification scoped to this slice" line under each planned PR in the scratchpad
+template so it doesn't slip.
 
 ## Common failure modes
 
-Avoid splitting by file when behavior spans files, extracting tests without the code they validate,
-leaving follow-up PRs that do not compile, force-pushing without a reviewer summary (and without the
-operator gate), deleting the original branch early, reverting reviewed feedback while resolving stack
-conflicts, and carrying the original branch's combined release wording or version bump into every
-split PR instead of scoping each slice to its own changes.
+Watch out for: splitting along file boundaries when the behavior crosses files, pulling tests apart
+from the code they exercise, shipping follow-up PRs that won't compile, force-pushing with no
+range-diff summary for reviewers (and no operator gate), retiring the original branch too soon,
+undoing reviewed feedback while you untangle stack conflicts, and dragging the original branch's
+combined release wording or version bump into every slice instead of scoping each one to its own
+changes.
 
 ## Default output
 
-When asked to split a PR, produce:
+A split request should yield:
 
 1. proposed PR sequence,
 2. branch strategy,

@@ -1,125 +1,107 @@
 ---
-description: Audit next-release docs and changelog before release
+description: Audit release readiness against the root CHANGELOG and README before a zynk release
 ---
-Audit release readiness for this repo.
+Audit release readiness for the zynk public repo (single repo, canonical branch `main`).
 
 Optional starting ref override: `$1`
 Extra user intent/context: `${@:2}`
 
+READ-ONLY by default. Never run a release, tag, `cargo publish`, or push — those are operator-gated (`WORKFLOW.md`).
+
 Process:
 
 1. Determine the base ref.
-   - If `$1` is non-empty and looks like a ref/tag, use it.
-   - Otherwise use the latest release tag, preferring the repo's semver tag style:
+   - If `$1` is a ref/tag, use it. Otherwise the latest release tag (zynk tags are `vX.Y.Z`, e.g. `v3.0.1`):
      ```bash
      git describe --tags --abbrev=0
      ```
 
-2. Inspect the range from base ref to `HEAD`.
-   - Use first-parent history for release context:
-     ```bash
-     git log --first-parent --reverse --format='%H%x09%s' <base>..HEAD
-     ```
-   - Also inspect full commits and commit bodies when needed:
-     ```bash
-     git log --reverse --format='%H%x09%s%n%b' <base>..HEAD
-     ```
+2. Inspect the range `base..HEAD`.
+   ```bash
+   git log --first-parent --reverse --format='%H%x09%s' <base>..HEAD
+   git log --reverse --format='%H%x09%s%n%b' <base>..HEAD   # full commit bodies when needed
+   ```
 
-3. Detect merged PRs if any.
-   - Look for first-parent subjects that indicate PR merges, including squash merges like `title (#123)`.
-   - If GitHub CLI is available and the PR number is known, use it to fetch PR title/body for context.
-   - Treat a merged PR as the primary release unit.
-   - Do **not** also list individual commits that belong to that PR.
+3. Detect merged PRs.
+   - Look for first-parent subjects that indicate merges, including squash subjects like `title (#123)`.
+   - Treat a merged PR as the primary release unit; do **not** also list the individual commits inside it.
+   - If `gh` is available and the PR number is known, fetch the PR title/body for context.
 
-4. Handle direct commits separately.
-   - Any commit in the range not represented by a merged PR should be considered on its own.
+4. Handle direct commits separately — any commit in the range not represented by a merged PR stands on its own.
 
 5. Infer what matters.
-   - For each PR or direct commit, inspect changed files and diff stats.
-   - Read the most relevant files in full when needed to understand user-facing impact.
-   - Ignore pure housekeeping unless it has release value:
-     - version bumps
-     - release/tag commits
-     - changelog-only commits
-     - formatting-only changes
-     - comment-only/doc-only changes unless they materially affect users
+   - For each PR or direct commit, inspect changed files and diff stats; read the key files in full when needed.
+   - Ignore pure housekeeping unless it has release value: version bumps, release/tag commits, changelog-only
+     commits, formatting-only changes, comment/doc-only changes that do not materially affect users.
 
-6. Audit `docs/next/CHANGELOG.md` and issue references.
-   - Treat root `CHANGELOG.md` as the latest released changelog.
-   - Treat `docs/next/CHANGELOG.md` as the next-release changelog.
-   - Compare meaningful user-facing changes in the commit range against `docs/next/CHANGELOG.md`.
-   - Flag missing entries for new features, bug fixes, removals, breaking changes, defaults, compatibility changes, user-visible command/config/API behavior, and security-relevant changes.
-   - Do not require changelog entries solely for internal client/server protocol version bumps. Mention protocol only when the release intentionally changes user-facing compatibility guidance beyond the normal restart requirement.
-   - Inspect commit bodies for issue reference lines in the form `refs #<issue-number>`.
-   - Flag normal commits that use GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>`, because they close issues before release when they land on `master`.
-   - For each shipped issue reference, check whether the changelog has a matching user-facing entry that mentions `#<issue-number>` when appropriate.
-   - For each merged external human PR, check whether the changelog entry mentions the PR number and thanks the contributor in the existing style, e.g. `(#129, thanks @username)`. If the PR primarily ships an issue fix, include both the issue and PR numbers when useful, e.g. `(#128, #129, thanks @username)`. Do not add thanks text for maintainer-owned bots or automation accounts such as `kangal-bot` or `dependabot`.
-   - Do not require or add GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>` to changelog entries or release notes.
-   - List shipped issue references under `Issue references to close after release:` so the release operator can verify what release CI will close after the GitHub Release is published.
-   - Flag stale entries that do not appear to correspond to shipped changes in the range.
-   - Flag entries that are too implementation-focused or unclear for end users.
-   - Preserve the existing changelog style and sections: `Added`, `Changed`, `Fixed`, `Removed`, and `Breaking Changes` when applicable.
+6. Audit the root `CHANGELOG.md` — the project's single, in-repo changelog.
+   - It uses `## [X.Y.Z] — YYYY-MM-DD` sections, newest first. The release being prepared is either a new top
+     section or the accumulated changes since the latest released section.
+   - Compare user-facing shipped changes in the range against the changelog. Flag missing entries for new
+     features, bug fixes, removals, breaking changes, changed defaults, user-visible command/config/API
+     behavior, and security-relevant changes.
+   - Do not require entries solely for internal client/server protocol version bumps; mention protocol only
+     when the release intentionally changes user-facing compatibility beyond the normal restart requirement.
+   - Inspect commit bodies for issue references (`refs #<n>`) and GitHub closing keywords (`fixes`/`closes`/
+     `resolves #<n>`) — these close issues once they land on `main`. List them under the issue-references output.
+   - For each merged external human PR, check the entry credits the PR number and thanks the contributor in the
+     existing style, e.g. `(#129, thanks @user)` (both issue + PR when useful, e.g. `(#128, #129, thanks @user)`).
+     Do not add thanks for maintainer bots/automation accounts.
+   - Flag stale entries (no matching shipped change in the range) and entries too implementation-focused for end
+     users. Preserve the existing sections: `Added`, `Changed`, `Fixed`, `Removed`, and `Breaking Changes`.
 
-7. Audit next-release public docs.
-   - Treat root `README.md` and `website/src/content/docs/` as the latest released public docs.
-   - Treat `docs/next/README.md` as the next-release root README, and `docs/next/website/src/content/docs/` as the full next-release mirror of website docs.
-   - Compare meaningful user-facing changes in the range against next-release docs first.
-   - Flag missing release docs for new or changed features, commands, config keys, protocol behavior, integrations, defaults, and compatibility notes.
-   - Compare `docs/next/README.md` against root `README.md`, and compare the staged website-doc mirror against `website/src/content/docs/`. Flag each difference as intended to ship in this release, stale, or needing user decision.
-   - Also audit example config snippets for release readiness.
+7. Audit the root `README.md` — the project's single, in-repo public doc.
+   - Compare user-facing changes in the range against the README: new/changed commands, config keys, supported
+     agents, integrations, defaults, compatibility notes, and the install snippets / version pins (the `vX.Y.Z`
+     download URLs + the Homebrew / crates.io / Nix lines).
+   - Flag README sections that disagree with the implementation or with the version being released.
 
-8. Verify finalization state.
-   - Before `just release`, approved `docs/next/README.md` must be copied to root `README.md`, approved staged website docs must be copied from `docs/next/website/src/content/docs/` to `website/src/content/docs/`, and the deleted root doc files must stay deleted.
-   - If the release will change `Cargo.lock` or the package version, check `nix/package.nix` after the release version bump and refresh `cargoHash` before tagging. A stale hash fails both the `Nix` workflow and the release workflow's `flake-check` job with a fixed-output derivation mismatch. Use the `got:` hash printed by `nix flake check --print-build-logs` or CI, then rerun the Nix check when available.
-   - Run or recommend:
-     ```bash
-     just release-docs-check
-     ```
-   - This check must include root `README.md`, root `CHANGELOG.md`, the removed root doc files, and exact 1:1 sync between `docs/next/website/src/content/docs/` and `website/src/content/docs/`.
-   - Do not run `just release` unless the working tree is clean and the docs check passes.
+8. Check version + packaging consistency.
+   - `Cargo.toml` `version` must match the intended tag (`vX.Y.Z`), the top `CHANGELOG.md` section, and the
+     README version pins (the prebuilt-binary/Homebrew version can intentionally trail the crates.io source
+     version — confirm the README says so rather than assuming a mismatch is a bug).
+   - If the release changes `Cargo.lock` or the version, refresh the Nix `cargoHash` in `nix/package.nix`; a
+     stale hash fails the `nix` workflow and `nix flake check` with a fixed-output-derivation mismatch. Use the
+     `got:` hash printed by `nix flake check --print-build-logs`.
+   - Confirm `just check` is green and `just gate` is clean; confirm `LICENSE` + `NOTICE` (AGPL-3.0-or-later +
+     the upstream herdr attribution) are intact.
 
-9. Apply changes only when asked.
-   - Do not edit files during the audit unless the user explicitly asks you to apply fixes.
-   - When asked to apply audit fixes, update `docs/next/CHANGELOG.md`, `docs/next/README.md`, and any required staged website docs under `docs/next/website/src/content/docs/`.
-   - When asked to finalize release docs, copy approved next-release README and changelog into root, copy approved staged website docs into `website/src/content/docs/`, then run `just release-docs-check`.
+9. Apply changes only when explicitly asked.
+   - Do not edit files during the audit unless the user asks you to apply fixes.
+   - When applying fixes, keep changes scoped to the root `CHANGELOG.md` / `README.md` / version files named
+     here. Never tag, publish, or push — recommend those as operator-gated next steps.
 
 Output format:
 
 ```md
 Release readiness: READY | NOT READY
 
-Base: <base ref>
-Range: <base ref>..HEAD
-Meaningful shipped changes: yes | no
+Base: <tag>   Range: <tag>..HEAD   Meaningful shipped changes: yes | no
+
+Version consistency: Cargo.toml <x> · CHANGELOG <x> · README pins <x> · intended tag v<x> → CONSISTENT | MISMATCH
 
 Changelog: OK | MISSING ENTRIES | NEEDS ATTENTION
 Missing:
-- <only user-facing shipped changes missing from docs/next/CHANGELOG.md>
-
-Docs: OK | MISSING | INACCURATE | NEEDS DECISION
-Missing:
-- <only required next-release public docs gaps>
-
+- <user-facing shipped changes missing from CHANGELOG.md>
 Wrong or questionable:
-- <docs that disagree with implementation, if any>
+- <stale or unclear entries, if any>
 
-Issue refs: OK | NEEDS ATTENTION
-Will close after release:
-- #<issue>
-
-Accepted/no action:
-- <items the user explicitly accepted, such as known closing-keyword commits>
-
-Root docs finalized: YES | NO
-<result of just release-docs-check or why it was not run>
+README: OK | MISSING | INACCURATE
+- <user-facing gaps or stale sections>
 
 Nix cargoHash: OK | NEEDS UPDATE | NOT CHECKED
-<result of nix flake check or the hash-refresh status>
+Gates: just check <green|red> · just gate <clean|fail> · LICENSE/NOTICE <intact|issue>
 
-Required before release:
+Issue references the release will close:
+- #<n>
+
+Accepted / no action:
+- <items the user explicitly accepted>
+
+Required before release (all operator-gated):
 1. <short action>
 ```
 
-Keep the main output glanceable. Put commit inventories, excluded housekeeping, and commands run in an appendix only when they materially help the operator.
-
-If the range has no meaningful user-facing changes, say that plainly instead of forcing entries.
+Keep the output glanceable. Put commit inventories, excluded housekeeping, and commands run in an appendix only
+when they materially help the operator. If the range has no meaningful user-facing changes, say so plainly
+instead of forcing entries.

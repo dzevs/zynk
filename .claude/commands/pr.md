@@ -1,6 +1,6 @@
 # PR
 
-Prepare a pull request for the current branch (zynk uses no changesets).
+Prepare a pull request for the current branch (zynk has no separate version-bump or release-note step to run).
 
 1. Ensure the branch is committed and `just check` is green.
 2. Self-review the full branch diff (`/selfreview`) and address what you find.

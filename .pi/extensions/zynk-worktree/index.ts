@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SOURCE_CHECKOUT = process.env.ZYNK_WORKTREE_SOURCE ?? process.cwd();
-const DEFAULT_BASE = "master";
+const DEFAULT_BASE = "main";
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const EXTENSION_NAME = "zynk-worktree";
 
@@ -34,12 +34,12 @@ export default function (pi: ExtensionAPI) {
     name: "zynk_start_worktree",
     label: "Start Zynk Worktree",
     description:
-      "Create a Zynk-linked git worktree from the Zynk master checkout, continue the active pi session in it, " +
+      "Create a Zynk-linked git worktree from the Zynk main checkout, continue the active pi session in it, " +
       "start pi in the new Zynk pane, then shut down and clean up the old pane.",
     promptSnippet: "Create a Zynk worktree workspace and continue the active pi session in it",
     promptGuidelines: [
       "Use zynk_start_worktree when work in the Zynk repo should continue in a fresh git worktree.",
-      "zynk_start_worktree creates the checkout from the current zynk repo (override with the ZYNK_WORKTREE_SOURCE env var) on master by default.",
+      "zynk_start_worktree creates the checkout from the current zynk repo (override with the ZYNK_WORKTREE_SOURCE env var) on main by default.",
       "Prefer passing a clear branch name such as issue/123-short-slug when the work relates to an issue.",
       "After zynk_start_worktree succeeds, the current pi process will shut down and the old Zynk pane will close.",
     ],
@@ -52,7 +52,7 @@ export default function (pi: ExtensionAPI) {
       ),
       base: Type.Optional(
         Type.String({
-          description: "Base ref for the new worktree. Defaults to master.",
+          description: "Base ref for the new worktree. Defaults to main.",
         }),
       ),
       label: Type.Optional(
@@ -86,7 +86,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("zynk-worktree-start", {
     description:
-      "Create a Zynk worktree from master, continue this pi session in it, and clean up the old pane",
+      "Create a Zynk worktree from main, continue this pi session in it, and clean up the old pane",
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
       try {

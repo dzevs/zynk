@@ -14,7 +14,7 @@ SCOPE_FILE = ("AGENTS.md", "CLAUDE.md", "WORKFLOW.md")
 
 # Product-specific reference terms. Case-insensitive so Mastra/Studio/Discord are caught too.
 TERMS = [r"\bmastracode\b", r"\bmastra\b", r"\bstudio\b", r"\bcoderabbit\b", r"\bdiscord\b",
-         r"\bpnpm\b", r"\bchangeset\b", r"\$?MASTRA_[A-Z0-9_]+"]
+         r"\bpnpm\b", r"\bchangesets?\b", r"\$?MASTRA_[A-Z0-9_]+"]
 PAT = re.compile("|".join(TERMS), re.IGNORECASE)
 
 

@@ -5,85 +5,88 @@ description: Use early when debugging a medium or hard bug, especially when test
 
 # Debugging Difficult Bugs
 
-Use this skill early for medium or hard bugs where normal TDD may give false confidence because the
-test does not fully capture the real bug. This is common in zynk: a passing unit test on pure
-`AppState` can be green while the live `PaneRuntime`, the tokio async ordering, the PTY/terminal
-stream, the unix-socket IPC layer, or the persistence path is where the real failure lives.
+Reach for this skill at the start of a medium or hard bug, when an ordinary TDD loop can mislead you
+because the test never touches the failure. zynk runs into this constantly: a unit test over pure
+`AppState` can stay green while the breakage actually lives in the live `PaneRuntime`, in tokio's
+async ordering, in the PTY/terminal stream, in the unix-socket IPC layer, or somewhere on the
+persistence path.
 
-Core idea: **instrument the actual runtime path, reproduce the real issue, then inspect append-only
-JSONL logs before deciding on a fix.**
+The central move: **wire instrumentation into the path the runtime actually takes, trigger the real
+failure, and study the append-only JSONL it produces before you commit to a fix.**
 
 ## When to Use
 
-Use this workflow near the start of debugging when any of these are true:
+Pull this workflow in early whenever one or more of the following holds:
 
-- The bug is medium or hard complexity, especially if it spans multiple modules, processes
-  (CLI client vs. socket server), or TUI/runtime boundaries.
-- A test is red, but the failing test might be an incomplete model of the real bug (e.g. it
-  exercises `AppState` but not the live runtime).
-- You are tempted to make a second speculative fix without new runtime evidence.
-- The bug depends on runtime ordering, state, caching, PTY/terminal streaming, tokio concurrency,
-  persistence (the conversation DB), TUI interaction, detection gates, or external services.
-- The user says they can reproduce the issue manually in the live zynk runtime.
-- The test passes after a change, but you are not confident it proves the actual reported bug is fixed.
+- The bug rates medium or hard, particularly when it crosses module lines, separate processes
+  (the CLI client versus the socket server), or the TUI/runtime divide.
+- A test is failing, but you suspect the failure only partially represents the real bug — for
+  instance, it covers `AppState` while the live runtime goes untested.
+- You feel the urge to try another guess at a fix without having gathered fresh runtime evidence.
+- The defect hinges on runtime ordering, state, caching, PTY/terminal streaming, tokio concurrency,
+  persistence (the conversation DB), TUI interaction, detection gates, or an external service.
+- The user reports they can trigger the failure by hand inside the live zynk runtime.
+- A change turns the test green, yet you cannot be sure that proves the bug as reported is actually
+  resolved.
 
-Do **not** keep iterating only on tests if you do not understand the runtime behavior.
+Resist the pull to keep grinding on tests alone when the runtime behavior is still a mystery to you.
 
-Skip this workflow only when the root cause is already directly proven by a stack trace or by a
-deterministic failing test that exercises the real runtime path. If you are tempted to make a second
-speculative fix, use this workflow.
+Bypass this workflow only if a stack trace or a deterministic failing test that runs the genuine
+runtime path has already pinned down the root cause. The moment you catch yourself reaching for a
+second speculative fix, switch to this workflow.
 
 ## Required Approach
 
-1. **State the uncertainty**
-   - Acknowledge that the current test may not capture the actual bug.
-   - Identify the real code path that must be observed (which module, which boundary — IPC handler,
-     PTY read loop, render/compute_view, detection, persistence write).
+1. **Name what you don't know**
+   - Admit out loud that the current test might not be hitting the real defect.
+   - Pin down the exact code path you need eyes on (which module, which boundary — the IPC handler,
+     the PTY read loop, render/compute_view, detection, or the persistence write).
 
-2. **Add temporary unconditional instrumentation**
-   - Add minimal but sufficient logs through the suspected code flow.
-   - Log boundaries, meaningful branch decisions, state transitions, async ordering points, return
-     values, and caught errors; do not log every line.
-   - Logs must be unconditional: do **not** route them through `tracing` levels, an env var, or a
-     debug flag. The point is to capture the real path regardless of how logging is configured.
-   - Each log point must append one JSON object per line to a `.jsonl` file in the current working
-     directory.
-   - Include enough context to reconstruct the path: event name, timestamp, relevant ids
-     (pane id, session id, trace id), input shape, state transitions, branch decisions, return
-     values, and caught errors.
+2. **Drop in temporary, always-on instrumentation**
+   - Place just enough logging across the code flow you suspect — enough to follow it, no more.
+   - Capture boundaries, the branch decisions that matter, state transitions, async ordering points,
+     return values, and any errors you catch; skip line-by-line noise.
+   - Keep the logging unconditional: never run it through `tracing` levels, an env var, or a debug
+     flag. You want the real path recorded no matter how logging happens to be set up.
+   - Every log site appends a single JSON object on its own line to a `.jsonl` file under the
+     current working directory.
+   - Record enough to rebuild the path later: an event name, a timestamp, the ids that matter
+     (pane id, session id, trace id), the shape of the input, state transitions, branch decisions,
+     return values, and caught errors.
 
-3. **Reproduce the real issue**
-   - Prefer to run the reproduction yourself if possible — drive an isolated dev runtime (isolated
-     `CARGO_TARGET_DIR`, never the live socket/config) so you never touch the live installed binary.
-   - If the issue requires the user's environment or manual TUI interaction, ask the user to
-     reproduce it after instrumentation is added.
-   - Tell the user exactly which `.jsonl` file to send or ask them to tell you when reproduction is
-     complete so you can inspect it.
+3. **Make the real failure happen**
+   - Run the repro yourself when you can — drive an isolated dev runtime (isolated
+     `CARGO_TARGET_DIR`, never the live socket/config) so the live installed binary stays untouched.
+   - When the bug needs the user's environment or hands-on TUI interaction, hand instrumentation
+     over and have them reproduce it.
+   - Point the user at the precise `.jsonl` file to return to you, or have them ping you the moment
+     the repro finishes so you can read it.
 
-4. **Analyze the log before fixing**
-   - Read the JSONL log chronologically.
-   - Compare expected flow vs actual flow.
-   - Identify the first point where state or behavior diverges.
-   - Only then implement the fix.
+4. **Read the log before you touch the code**
+   - Walk the JSONL log in time order.
+   - Hold the flow you expected against the flow that actually happened.
+   - Find the first place where state or behavior peels away from what you expected.
+   - Write the fix only after that.
 
-5. **Clean up instrumentation**
-   - Remove all temporary unconditional logs after root cause is understood and the fix is verified.
-   - Remove debug imports, helper functions, generated `.jsonl` files, and any other temporary
-     artifacts.
-   - Check the final diff for instrumentation remnants (`git diff`). A stray `debug_bug` call or a
-     committed `.jsonl` will fail review and lint.
-   - Do not leave debug files, log helpers, or noisy runtime logging in the final diff unless the
-     user explicitly asks.
+5. **Tear the instrumentation back out**
+   - Once you understand the root cause and have confirmed the fix, strip every temporary
+     unconditional log.
+   - Delete debug imports, helper functions, the generated `.jsonl` files, and anything else you
+     added for the hunt.
+   - Scan the final diff for leftovers (`git diff`). A forgotten `debug_bug` call or a committed
+     `.jsonl` will trip review and lint.
+   - Leave no debug files, log helpers, or chatty runtime logging in the final diff unless the user
+     asked for it.
 
-6. **Keep or improve tests**
-   - Add or adjust a focused regression test once the real bug is understood.
-   - Make the test assert the actual broken behavior discovered from logs, not the earlier incorrect
-     assumption. Where possible, make it exercise the real runtime path, not just pure state.
+6. **Lock the lesson into a test**
+   - With the real bug now understood, write or refine a tight regression test.
+   - Have the test assert the actual broken behavior the logs exposed — not the wrong guess you
+     started with. Push it to run the real runtime path where you can, rather than pure state alone.
 
 ## JSONL Logging Pattern
 
-Use append-only JSONL in `cwd` so it works across the CLI, the socket server, tests, and manual TUI
-reproduction.
+Append-only JSONL in `cwd` is the right vehicle because it survives the CLI, the socket server, the
+test harness, and a manual TUI repro alike.
 
 ### Rust
 
@@ -105,7 +108,7 @@ fn debug_bug(event: &str, data: serde_json::Value) {
 }
 ```
 
-Call it at every meaningful branch or state transition:
+Drop a call at each branch or state change worth recording:
 
 ```rust
 debug_bug("pane.spawn", serde_json::json!({ "pane_id": pane_id, "cmd": cmd_name }));
@@ -136,29 +139,29 @@ match execute_step() {
 
 ## What to Log
 
-Prefer compact, structured data over huge dumps.
+Favor tight, structured records over sprawling dumps.
 
-Log:
+Capture:
 
-- Function, module, or phase name.
+- The function, module, or phase you are in.
 - Stable ids: pane id, session id, runtime session id, trace id, request id.
-- Input/output **shape**: keys, counts, byte lengths, statuses, pane states.
-- Branch decisions and the data that caused them (e.g. which detection gate fired).
-- State before and after mutation (`AppState`/`PaneState` transitions).
-- Error names/messages and relevant metadata.
-- Ordering markers for async tokio tasks, PTY streaming, or concurrent flows.
+- The **shape** of inputs and outputs: keys, counts, byte lengths, statuses, pane states.
+- Which branch was taken and the data behind that choice (e.g. the detection gate that fired).
+- State on either side of a mutation (`AppState`/`PaneState` transitions).
+- Error names and messages plus the metadata that matters.
+- Sequence markers for async tokio tasks, PTY streaming, or concurrent flows.
 
-Avoid logging:
+Keep out:
 
-- API keys, auth headers, tokens, cookies, credentials, socket paths that embed secrets.
-- Full pane/terminal content unless necessary and safe.
-- Large payloads (full screen snapshots, full diffs) that make the log unreadable.
-- Binary PTY data or full model responses unless the bug requires it.
+- API keys, auth headers, tokens, cookies, credentials, or socket paths that carry secrets.
+- Whole pane/terminal contents, unless it is both needed and safe.
+- Bulky payloads (full screen snapshots, full diffs) that drown the log.
+- Raw binary PTY data or entire model responses, unless the bug genuinely demands them.
 
-Treat debug logs as potentially sensitive. Do not ask the user to paste them into public issues,
-PRs, or shared channels unless they have reviewed/redacted them first.
+Assume debug logs may carry sensitive material. Don't ask the user to drop them into public issues,
+PRs, or shared channels before they have looked them over and redacted as needed.
 
-If sensitive data might appear, log redacted summaries:
+When sensitive values could surface, log a redacted summary instead:
 
 ```rust
 debug_bug("request.received", serde_json::json!({
@@ -170,7 +173,7 @@ debug_bug("request.received", serde_json::json!({
 
 ## Reproduction Handoff to User
 
-When the user needs to reproduce manually in the live TUI, say exactly this shape:
+When the bug needs a hands-on repro in the live TUI, phrase the handoff roughly like this:
 
 ```text
 I added temporary unconditional JSONL instrumentation. Please reproduce the issue once, then send me
@@ -181,30 +184,31 @@ or point me at:
 After I inspect that log, I'll remove the instrumentation and make the actual fix.
 ```
 
-If multiple processes have different working directories (CLI client vs. socket server), either:
+When separate processes run with different working directories (the CLI client versus the socket
+server), pick one of:
 
-- log the absolute `std::env::current_dir()`, process role, and pid at startup, or
-- write distinct files like `debug-server-flow.jsonl`, `debug-pty-flow.jsonl`, and
+- log the absolute `std::env::current_dir()`, the process role, and the pid at startup, or
+- split the output into named files such as `debug-server-flow.jsonl`, `debug-pty-flow.jsonl`, and
   `debug-client-flow.jsonl`.
 
 ## Analysis Checklist
 
-Before writing the fix, answer:
+Settle these before you write the fix:
 
-- Did the instrumented code path actually run?
-- What was the expected sequence of events?
-- What was the actual sequence?
-- What is the first incorrect state, missing value, duplicate event, or wrong branch?
-- Does the original red test capture that exact divergence?
-- If not, how should the regression test change?
+- Did the instrumented path even execute?
+- What sequence of events did you expect?
+- What sequence actually occurred?
+- Where is the first wrong state, missing value, duplicated event, or mistaken branch?
+- Does the original failing test pin down that precise divergence?
+- If it doesn't, what does the regression test need to become?
 
 ## Final Verification
 
-A difficult bug is not done until:
+A difficult bug stays open until all of these hold:
 
-- The real reproduction path passes.
-- The regression test fails before the fix and passes after the fix, when feasible.
-- Temporary unconditional instrumentation is removed.
-- The final diff contains only the fix and intentional tests.
+- The real reproduction path runs clean.
+- The regression test fails before the fix and passes after it, wherever that is feasible.
+- Every temporary unconditional log is gone.
+- The final diff carries only the fix and the tests you meant to keep.
 - `just check` is clean.
-- You can explain the root cause using evidence from the JSONL log.
+- You can narrate the root cause straight from the JSONL evidence.

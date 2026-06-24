@@ -13,7 +13,8 @@ SCRUB = str(pathlib.Path(__file__).parent / "scrub_check.py")
 class ScrubHitsTests(unittest.TestCase):
     def test_flags_product_terms_case_insensitive(self):
         for s in ["create-mastra and Mastracode Studio with pnpm", "see $MASTRA_DB_URL and the changeset",
-                  "Mastra", "Discord", "discord.com/channels/123", "MASTRA_DISCORD_BOT_TOKEN", "CodeRabbit"]:
+                  "zynk uses no changesets", "Mastra", "Discord", "discord.com/channels/123",
+                  "MASTRA_DISCORD_BOT_TOKEN", "CodeRabbit"]:
             self.assertTrue(m.hits(s), s)
 
     def test_clean_zynk_text_passes(self):

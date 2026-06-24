@@ -185,6 +185,8 @@ CREATE INDEX idx_messages_trace ON messages(trace_id) WHERE trace_id IS NOT NULL
 -- A later migration may add the NOT NULL/contract phase, once all writers populate it.
 ```
 
+> Illustrative shape only. zynk's real message `trace_id` is indexed out of `messages.meta_json` (see `migrations/zynk/0003_trace_index.sql`), not a dedicated `trace_id` column — match the actual table you're migrating rather than copying this verbatim.
+
 > Editing an already-applied migration breaks the migrator's checksum on any existing DB. Treat shipped migrations as immutable; deprecate a column or table with a *new* migration.
 
 ## Zombie Code

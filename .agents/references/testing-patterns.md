@@ -200,7 +200,7 @@ std::env::remove_var("XDG_CONFIG_HOME");
 A large class of zynk tests pin down exact wire/persistence behavior so a refactor can't silently change it. These are the highest-value tests in the conversation/protocol layer — protect these invariants:
 
 - **Wire IDs / protocol-ID fields** — characterize the exact persisted `protocol_json` shape: which fields appear, which are omitted when `None`, and the schema version. E.g. `protocol_id_fields_omit_type_when_none` asserts the optional `type` field is absent unless set. A change here is a wire/format break and must be intentional.
-- **Delivery transitions** — assert the `delivery_status` derived from the latest `delivery_events` row resolves correctly (`received`, `observed`, `queued`, …). Pin the "latest event wins" ordering (`ORDER BY seq DESC LIMIT 1`).
+- **Delivery transitions** — assert the `delivery_status` derived from the latest `delivery_events` row resolves correctly across the real `DeliveryEventType` set (`drafted`/`submitted`/`received`/`failed`). Pin the "latest event wins" ordering (`ORDER BY seq DESC LIMIT 1`) and that only `submitted → received` auto-advances.
 - **FTS body purity** — the FTS path reads body/FTS only and ranks by `bm25(...)` ASC. Tests assert that retrieval reads the message body unchanged (no injection of header/protocol noise into the searchable body) and that a malformed query is classified as a *query* error, not an infra failure.
 - **Retrieval ranking** — characterize FTS bm25 ordering and RRF fusion against known fixtures (e.g. `both_list_doc_outranks_single_mode`) so a ranking change is a deliberate, reviewed delta.
 
