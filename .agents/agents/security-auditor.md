@@ -40,7 +40,7 @@ zynk is a local, single-host tool. There is **no network listener and no web sur
 
 ### 4. Process & Filesystem (least privilege)
 - Are child processes spawned **argv-style** via `CommandBuilder` (`src/pty/backend/`), never via a shell string — so a crafted argument can't become shell injection?
-- Are temp paths, socket paths, and runtime-id files created without TOCTOU races or predictable-name hijack? Is the dev runtime path-isolation (`zynk preflight`) preserved?
+- Are temp paths, socket paths, and runtime-id files created without TOCTOU races or predictable-name hijack? Is the dev runtime path-isolation (isolated `ZYNK_*` env, confirmed via `zynk status`) preserved?
 - Is OS-specific privileged behavior confined to `src/platform/` with conservative permissions (e.g. helper binaries created `0o700`)?
 - Are error messages free of sensitive internal detail when surfaced to a pane?
 
