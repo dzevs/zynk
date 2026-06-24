@@ -118,5 +118,38 @@ class ReorgPathPolicyTests(unittest.TestCase):
             self.assertTrue(m.violations([p]), p)
 
 
+class SymlinkCliTests(unittest.TestCase):  # real-git: a tracked symlink target is uncontrolled public metadata
+    TARGET = "/home" + "/zeus/secret"  # split so this test file itself stays gate-clean
+
+    def _repo(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(["git", "-C", str(d), "config", "user.email", "t@example.com"], check=True)
+        subprocess.run(["git", "-C", str(d), "config", "user.name", "t"], check=True)
+        return d
+
+    def _run(self, d, *args):
+        return subprocess.run(["python3", SCRIPT, *args], cwd=d).returncode
+
+    def test_staged_symlink_forbidden(self):
+        d = self._repo()
+        (d / "private-link").symlink_to(self.TARGET)
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        self.assertEqual(self._run(d, "--staged"), 1, "a staged symlink must fail the structural gate")
+
+    def test_committed_symlink_forbidden(self):
+        d = self._repo()
+        (d / "private-link").symlink_to(self.TARGET)
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "x"], check=True)
+        self.assertEqual(self._run(d), 1, "a committed symlink must fail the no-arg/CI gate")
+
+    def test_regular_file_passes(self):
+        d = self._repo()
+        (d / "README.md").write_text("clean public file\n")
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        self.assertEqual(self._run(d, "--staged"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

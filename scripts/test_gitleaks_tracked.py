@@ -65,6 +65,12 @@ class GitleaksTrackedTests(unittest.TestCase):
         rc = subprocess.run(["gitleaks", "protect", "--staged", "--config", ".gitleaks.toml"], cwd=d).returncode
         self.assertNotEqual(rc, 0, "staged nested .gitleaks.toml must not be exempted by protect --staged")
 
+    def test_unstaged_deletion_does_not_false_fail(self):
+        # A tracked file deleted in the worktree (unstaged) must not crash the helper at `tar: Cannot stat`.
+        d = self._repo({"README.md": "clean\n", "extra.txt": "more clean text\n"})
+        (d / "extra.txt").unlink()
+        self.assertEqual(self._run(d), 0, "an unstaged deletion of a tracked file must not fail the gate")
+
 
 if __name__ == "__main__":
     unittest.main()

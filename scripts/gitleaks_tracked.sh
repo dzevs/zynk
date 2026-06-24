@@ -15,7 +15,10 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # Materialize the current working-tree content of every tracked file (-z handles spaces/newlines).
-git ls-files -z | tar --null --files-from=- --create --file - | tar --extract --directory "$tmp"
+# Skip paths missing from the worktree (an unstaged deletion of a tracked file) so a normal worktree
+# doesn't false-fail at `tar: Cannot stat`; a deleted file has no content to leak anyway.
+git ls-files -z | (while IFS= read -r -d '' f; do [ -e "$f" ] && printf '%s\0' "$f"; done) \
+  | tar --null --files-from=- --create --file - | tar --extract --directory "$tmp"
 # The ROOT config legitimately contains every forbidden string as its own rule regex, so drop just that one
 # file from the scanned copy (gitleaks reports absolute paths under --source, which a path allowlist can't
 # anchor reliably). A NESTED `.gitleaks.toml` is kept and scanned — only the root config is exempt.
