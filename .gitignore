@@ -19,7 +19,7 @@ __pycache__/
 /website/
 /docs/next/
 /docs/superpowers/
-/WORKFLOW.md
+/.claude/settings.local.json
 /CLAUDE.local.md
 /docs/zynk/plans/
 /docs/zynk/release-3.0.0-prep.md

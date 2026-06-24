@@ -10,7 +10,7 @@ import sys
 FORBIDDEN = [
     ".codex", ".pi", ".zed", ".local", "backlog",
     "website", "docs/next", "docs/superpowers", "public",
-    "CLAUDE.local.md", "WORKFLOW.md", "scripts/export-public.sh",
+    "CLAUDE.local.md", ".claude/settings.local.json", "scripts/export-public.sh",
     "docs/zynk/plans", "docs/zynk/release-3.0.0-prep.md",
     "docs/zynk/cutover-readiness.md", "docs/zynk/dev-ux.md",
     "scripts/preview.py", "scripts/changelog.py",

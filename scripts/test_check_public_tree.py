@@ -92,5 +92,29 @@ class StagedGateIntegrationTests(unittest.TestCase):
         self.assertIn("pyc", (r.stdout + r.stderr).lower())
 
 
+class ReorgPathPolicyTests(unittest.TestCase):
+    """docs+skills reorg: WORKFLOW.md becomes committed; committed agent tooling is allowed; only
+    settings.local.json is newly forbidden; all private state stays forbidden."""
+
+    def test_workflow_md_now_allowed(self):
+        self.assertEqual(m.violations(["WORKFLOW.md"]), [])
+
+    def test_settings_local_forbidden(self):
+        self.assertEqual([f for f, _ in m.violations([".claude/settings.local.json"])],
+                         [".claude/settings.local.json"])
+
+    def test_committed_agent_tooling_allowed(self):
+        self.assertEqual(m.violations([
+            ".claude/skills/x/SKILL.md", ".claude/commands/pr.md", ".claude/settings.json",
+            ".agents/skills/y/SKILL.md", ".agents/agents/code-reviewer.md", ".agents/references/z.md",
+            "docs/styleguides/STYLEGUIDE.md", "docs/styles/Zynk/x.yml"]), [])
+
+    def test_private_state_still_forbidden(self):
+        for p in [".codex/sessions/a.jsonl", ".pi/todos/x", ".zed/s.json", "CLAUDE.local.md",
+                  "docs/superpowers/specs/x.md", "docs/next/x.md", "website/i.html",
+                  "docs/zynk/plans/p.md"]:
+            self.assertTrue(m.violations([p]), p)
+
+
 if __name__ == "__main__":
     unittest.main()
