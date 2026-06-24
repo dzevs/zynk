@@ -142,9 +142,10 @@ exports above.
   ```
 
   This runs `cargo nextest run --locked` plus the maintenance-script unit tests
-  (Python `unittest`): agent-detection manifest checks, the vendored
-  `libghostty-vt` guard, the conventional-commit check, the public-tree gate, the
-  gitleaks-config check, and the scrub check.
+  (Python `unittest`) that guard agent-detection manifests, the vendored
+  `libghostty-vt`, conventional commits, the public-tree / scrub / gitleaks
+  content gates (including the tracked-tree scan), the skills catalog, and the
+  release-audit references.
 
 - **One test by filter:**
 

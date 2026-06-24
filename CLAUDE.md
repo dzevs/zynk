@@ -10,7 +10,7 @@ in the chat; a chat reply never reaches them.
 
 ## Commands (`just`)
 
-- **Test:** `just test` (nextest + 6 maintenance unittests). One: `just test-one <filter>`. TS: `just test-ts` (Bun).
+- **Test:** `just test` (nextest + the maintenance unittests). One: `just test-one <filter>`. TS: `just test-ts` (Bun).
 - **Lint:** `just lint` = `cargo fmt --check` + `cargo clippy --all-targets --locked -- -D warnings` (dead code fails the lint gate).
 - **Check:** `just check` (= `ci` + maintenance unittests) — run before committing; never bypass a failing check.
 - **Gates:** `just gate` (tracked-path + scrub + gitleaks). **Build:** `just build`. **Hooks:** `just install-hooks` (once per checkout).
@@ -45,7 +45,7 @@ in the chat; a chat reply never reaches them.
 - **No `unwrap()` in production**; `tracing` for logging. The header renderer must **never panic on a sparse party** — missing cwd/agent/pane render as `-` (`src/zynk/header.rs::or_dash`). Dead code fails `clippy -D warnings` → targeted `#![allow(dead_code)]` **with a justifying comment**.
 - **Body purity is sacred.** `messages.body` + `body_hash` + FTS store the **pure body only**. The visible awareness header (ADR 0009), structured protocol IDs (`protocol_json`), and `trace_id` (`meta_json`) are **wire-only/sidecar — never in body/body_hash/FTS**. WHY: a polluted `body_hash ≠ sha256(body)` fails receipt correlation on every message.
 - **Submit ≠ receipt.** `delivery_status ∈ {drafted, submitted, received, failed}` (the `DeliveryEventType` set) never auto-promotes; only the server-validated `zynk.message_received` event reaches `received` (ADR 0002/0009). `agent send`/`pane run` dispatch via native `pane.send_input` → `submitted`; `pane send-text` (persist only, no dispatch) → `drafted`. A resolved-then-failed dispatch records `failed` and returns an F4 error (e.g. `transport_failed`), never `submitted`. (`pane submit` is ADR-0004-deferred — not a current command.)
-- **F4 envelope on every command** — no silent `ok`, no bare exit code: `{result, command, ids, target_resolution, status, proof/receipt, next}`; failure → `{code, message, context}`.
+- **F4 envelope on mutating commands** — no silent `ok`, no bare exit code: `{result, command, ids, target_resolution, status, proof/receipt, next}`; failure → `{code, message, context}`. Read/status commands (`status`/`thread`/`inbox`/`query`/`who`) default to human text, with `--json` for the structured form.
 - **Read paths write zero delivery events** — `thread`/`inbox`/`query` open via `db::open_query_readonly` (`PRAGMA query_only=1`); a query must never synthesize state.
 - **Durable keys must be stable anchors** (`terminal_id`, `agent_session.value`, `git_sha`, `agent_label`), never live compact pane ids (`w…-1`, which rotate on restart). Threading `derived_parent_id` is keyed by `agent_label`.
 
@@ -53,7 +53,7 @@ in the chat; a chat reply never reaches them.
 
 - **Hermetic** — each test spawns its own temp config/socket, so `just test` is safe to run directly. Pure state via `AppState::test_new()` / `Workspace::test_new()`; `PaneRuntime` has a `#[cfg(test)] TestChannel` so panes run without a PTY. All tests use the std-only deterministic `FakeEmbedder` and **must not touch the network** (real `fastembed` is behind a feature, absent from the default graph).
 - **Isolated dev runtime is MANDATORY** — never the live socket/config (`~/.config/zynk/`) and never the default `CARGO_TARGET_DIR` (the machine runs `cargo-watch` on it). Set an isolated `CARGO_TARGET_DIR` + isolated `ZYNK_SOCKET_PATH`/`ZYNK_HOME`/`ZYNK_SQLITE_HOME` (and `XDG_*`) so nothing resolves to a live default; the spawned server then binds the isolated socket (`zynk status` reports the active client/server — confirm it's the isolated socket, not the live one; it doesn't print config/DB/target paths). DB tests plant a fake DB in a temp `ZYNK_SQLITE_HOME` — never touch `~/.zynk/zynk.db`.
-- **Maintenance unittests (Python, in `just test`/`check`):** `test_agent_detection_manifest_check`, `test_vendor_libghostty_vt`, `test_conventional_commits`, `test_check_public_tree`, `test_gitleaks_config`, `test_scrub_check`, `test_skills_catalog`, `test_release_audit_refs`.
+- **Maintenance unittests (Python, in `just test`/`check`):** `test_agent_detection_manifest_check`, `test_vendor_libghostty_vt`, `test_conventional_commits`, `test_check_public_tree`, `test_gitleaks_config`, `test_scrub_check`, `test_skills_catalog`, `test_release_audit_refs`, `test_gitleaks_tracked`.
 - **Characterization/parity tests are REQUIRED for:** wire IDs (`Method` `serde(rename)` — breaks clients), protocol-ID field set (`header::protocol_id_fields` ↔ persisted `protocol_json`), the delivery-transition matrix (only `submitted→received`), receipt invariants, integration-asset version parity (`PI_INTEGRATION_VERSION` ↔ the `// ZYNK_INTEGRATION_VERSION=N` asset marker), and FTS/body purity.
 
 ## Gotchas

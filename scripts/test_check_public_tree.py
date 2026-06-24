@@ -111,8 +111,9 @@ class ReorgPathPolicyTests(unittest.TestCase):
             ".pi/prompts/p.md", ".pi/extensions/x/index.ts", ".zed/settings.json"]), [])
 
     def test_private_state_still_forbidden(self):
-        for p in [".codex/sessions/a.jsonl", ".pi/cache/refs.json", ".local/x",
-                  "CLAUDE.local.md", "docs/superpowers/specs/x.md", "docs/next/x.md", "website/i.html",
+        for p in [".codex/sessions/a.jsonl", ".pi/cache/refs.json", ".pi/private/state.json",
+                  ".zed/secret.json", ".zed/tasks.json", ".local/x", "CLAUDE.local.md",
+                  "docs/superpowers/specs/x.md", "docs/next/x.md", "website/i.html",
                   "docs/zynk/plans/p.md"]:
             self.assertTrue(m.violations([p]), p)
 

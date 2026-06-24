@@ -53,14 +53,14 @@ Two complementary approaches — use both:
 
 **Render / hot path:**
 ```bash
-# Synthetic: criterion microbenchmark of compute_view/render
-cargo bench --bench render
+# Synthetic: zynk has no `benches/` criterion target yet, so `cargo bench` does not apply here —
+# add a criterion bench first, or use the in-process render profiler below.
 
 # Real-run: sampling profiler over a live session under load
 samply record -- ./target/release/zynk   # or `perf record` / a flamegraph
 
-# In-process timing spans (zynk has a render profiler module — prefer it
-# over ad-hoc timing so spans are consistent and toggleable).
+# In-process timing spans — zynk's built-in render profiler (src/render_prof.rs); prefer it over
+# ad-hoc timing so spans are consistent and toggleable.
 let _span = tracing::info_span!("render").entered();
 ```
 
@@ -263,9 +263,9 @@ Conversation query p95:                < 50ms (indexed)
 
 **Enforce in CI:**
 ```bash
-# Criterion benchmarks with a regression threshold (fail the build if a hot path slows).
-cargo bench --bench render -- --save-baseline main
-# Compare a PR run against the saved baseline and gate on regression.
+# zynk has no `benches/` criterion target yet, so CI perf gating is behavior-only (`just check`).
+# To add bench-level regression gating, create a criterion `benches/` target, then compare a PR run
+# against a saved baseline.
 
 # Keep the full check green — perf changes must not break behavior.
 just check

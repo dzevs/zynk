@@ -143,8 +143,10 @@ Design guarantees (binding):
   from screen scraping or a socket ACK. A receiver without the zynk integration stays at `submitted`.
 - **Body purity.** The message body is pure text; all provenance (identity, workspace/tab, branch, `git_sha`,
   cwd) plus zynk's protocol IDs persist as structured metadata, indexed apart from the body.
-- **Structured responses.** No silent success and no bare `ok` — every command returns structured JSON plus
-  concise human text, with `result`, the relevant ids, delivery state, and a `next` hint.
+- **Structured responses.** No silent success and no bare `ok` — mutating commands return a structured
+  response (stable JSON for automation plus concise human text) with `result`, the relevant ids, delivery
+  state, and a `next` hint. Read commands (`query`/`thread`/`inbox`/`status`) default to human text, with
+  `--json` for the structured form.
 - **Read-only retrieval.** `query` / `thread` / `inbox` open the DB read-only (`PRAGMA query_only=1`) and write
   **zero** delivery events. `query` is hybrid: FTS5 keyword (BM25) + on-device embeddings via sqlite-vec, fused
   with RRF.

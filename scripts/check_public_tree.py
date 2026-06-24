@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 FORBIDDEN = [
-    ".codex", ".pi/cache", ".local", "backlog",
+    ".codex", ".local", "backlog",
     "website", "docs/next", "docs/superpowers", "public",
     "CLAUDE.local.md", ".claude/settings.local.json", "scripts/export-public.sh",
     "docs/zynk/plans", "docs/zynk/release-3.0.0-prep.md",
@@ -21,6 +21,21 @@ FORBIDDEN = [
     ".github/workflows/pr-gate.yml", ".github/workflows/issue-gate.yml",
     ".github/workflows/label-next-release-issues.yml",
 ]
+
+# `.pi/` and `.zed/` are ALLOWLISTED, not denylisted: only the intended public tooling may be tracked —
+# the Pi prompts/extensions and the shared Zed editor config. Everything else under them (caches, sessions,
+# local agent state) is forbidden, so a force-added `.pi/private/state.json` or `.zed/secret.json` cannot slip
+# through just because its CONTENT happens not to match a gitleaks pattern.
+PI_ZED_ALLOWED_PREFIXES = (".pi/prompts/", ".pi/extensions/")
+PI_ZED_ALLOWED_EXACT = {".zed/settings.json"}
+
+
+def pi_zed_forbidden(f):
+    if f.startswith(".pi/"):
+        return not f.startswith(PI_ZED_ALLOWED_PREFIXES)
+    if f.startswith(".zed/"):
+        return f not in PI_ZED_ALLOWED_EXACT
+    return False
 
 
 def tracked_files(staged):
@@ -43,6 +58,9 @@ def violations(files):
         # (`git add -f pkg/__pycache__/leak.pyc`) bypass where a private string in bytecode would slip both gates.
         if f.endswith((".pyc", ".pyo")) or "__pycache__" in f.split("/"):
             bad.append((f, "python bytecode/cache (.pyc/__pycache__)"))
+            continue
+        if pi_zed_forbidden(f):
+            bad.append((f, ".pi/.zed allowlist (only .pi/prompts, .pi/extensions, .zed/settings.json)"))
             continue
         for p in FORBIDDEN:
             if f == p or f.startswith(p + "/"):

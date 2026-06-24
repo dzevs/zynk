@@ -35,5 +35,5 @@ tags = ["zynk", "private"]
 description = "gitignored python bytecode (tracked bytecode blocked by check_public_tree.py) + this gate config itself"
 paths = [
     '''(^|/)__pycache__/''',
-    '''(^|/)\.gitleaks\.toml$''',
+    '''^\.gitleaks\.toml$''',
 ]
