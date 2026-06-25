@@ -197,6 +197,7 @@ export default function (pi) {
   let lastMessage: string | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let rootSession = false;
 
   function clearTimer(timer: ReturnType<typeof setTimeout> | undefined) {
     if (timer) {
@@ -267,6 +268,9 @@ export default function (pi) {
   }
 
   pi.events.on("zynk:blocked", (data) => {
+    if (!rootSession) {
+      return;
+    }
     if (!data?.active) {
       blockedCount = Math.max(0, blockedCount - 1);
       if (blockedCount === 0) {
@@ -283,11 +287,18 @@ export default function (pi) {
   });
 
   pi.on("session_start", (_event, ctx) => {
+    rootSession = ctx?.hasUI === true;
+    if (!rootSession) {
+      return;
+    }
     updateSessionRef(ctx);
     publishState(true);
   });
 
   pi.on("agent_start", () => {
+    if (!rootSession) {
+      return;
+    }
     clearPendingTimers();
     clearFailureState();
     agentActive = true;
@@ -295,6 +306,9 @@ export default function (pi) {
   });
 
   pi.on("agent_end", (event) => {
+    if (!rootSession) {
+      return;
+    }
     if (!agentActive) {
       // OMP can emit duplicate/late end events while auto-retry is already
       // holding the pane in Working. Do not let an unqualified duplicate end
@@ -314,6 +328,9 @@ export default function (pi) {
   });
 
   pi.on("session_shutdown", async () => {
+    if (!rootSession) {
+      return;
+    }
     clearPendingTimers();
     await releaseAgent();
   });

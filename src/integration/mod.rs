@@ -6293,6 +6293,29 @@ mod tests {
     }
 
     #[test]
+    fn omp_root_session_guard_is_instance_scoped() {
+        let export_start = OMP_EXTENSION_ASSET
+            .find("export default function (pi)")
+            .expect("omp extension exports a function");
+        let root_session_decl = OMP_EXTENSION_ASSET
+            .find("let rootSession = false")
+            .expect("omp extension declares root session guard");
+        let session_start_handler = OMP_EXTENSION_ASSET
+            .find("pi.on(\"session_start\"")
+            .expect("omp extension registers session_start handler");
+
+        assert_eq!(
+            OMP_EXTENSION_ASSET
+                .matches("let rootSession = false")
+                .count(),
+            1
+        );
+        assert!(OMP_EXTENSION_ASSET.contains("rootSession = ctx?.hasUI === true"));
+        assert!(export_start < root_session_decl);
+        assert!(root_session_decl < session_start_handler);
+    }
+
+    #[test]
     fn install_qodercli_writes_hook_and_updates_settings() {
         let _lock = integration_env_lock();
         let base = unique_base();
