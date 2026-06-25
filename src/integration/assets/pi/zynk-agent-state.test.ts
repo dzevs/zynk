@@ -74,9 +74,9 @@ describe("receiver/footer/receipt surface is fully removed (state-only)", () => 
 // ---------------------------------------------------------------------------
 
 describe("install markers + identity are preserved", () => {
-  test("integration id stays pi and version is bumped to 4", () => {
+  test("integration id stays pi and version is bumped to 5", () => {
     expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_ID=pi");
-    expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_VERSION=4");
+    expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_VERSION=5");
   });
 
   test("ZYNK_* env reads keep the ZYNK_* fallback", () => {
@@ -92,7 +92,10 @@ describe("install markers + identity are preserved", () => {
   test("host-protocol source stays zynk:pi and report methods are state-only", () => {
     expect(ASSET_SRC).toContain('const source = "zynk:pi"');
     expect(ASSET_SRC).toContain("pane.report_agent");
-    expect(ASSET_SRC).toContain("pane.release_agent");
+    // root-agent restore: the asset reports its session ref on session_start and no
+    // longer releases on shutdown (release moved off the pi/omp shutdown path).
+    expect(ASSET_SRC).toContain("pane.report_agent_session");
+    expect(ASSET_SRC).not.toContain("pane.release_agent");
     // session-ref reporting (report_agent_session via withSessionRef) is kept.
     expect(ASSET_SRC).toContain("agent_session_path: currentAgentSessionPath");
     expect(ASSET_SRC).toContain("agent_session_id: currentAgentSessionId");
@@ -150,7 +153,7 @@ function makeSocketSink() {
   return { server, sockPath, requests };
 }
 
-function waitFor(pred: () => boolean, timeoutMs = 2000): Promise<void> {
+function waitFor(pred: () => boolean, timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const tick = () => {
@@ -195,24 +198,38 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     expect(fake.has("session_start")).toBe(true);
     expect(fake.has("agent_start")).toBe(true);
     expect(fake.has("agent_end")).toBe(true);
-    expect(fake.has("session_shutdown")).toBe(true);
+    // root-agent restore: shutdown no longer releases from this asset.
+    expect(fake.has("session_shutdown")).toBe(false);
     // The receiver hook is gone.
     expect(fake.has("input")).toBe(false);
   });
 
-  test("agent_start reports working; agent_end reports idle; session_shutdown releases", async () => {
-    const fake = makeFakePi();
-    factory(fake.pi);
-
-    const before = sink.requests.length;
-
-    // session_start forces an initial (idle) report and records the session ref.
-    fake.emit("session_start", {}, {
+  // The lifecycle handlers only fire for a root (hasUI) session — a non-root pi
+  // instance must not publish/release pane state. Every test below activates the
+  // root session via session_start with `hasUI: true`.
+  function startRootSession(fake: ReturnType<typeof makeFakePi>) {
+    fake.emit("session_start", { hasUI: true }, {
+      hasUI: true,
       sessionManager: {
         getSessionId: () => "sess-xyz",
         getSessionFile: () => "/tmp/pi/session.json",
       },
     });
+  }
+
+  test("session_start reports the session ref; agent_start->working; agent_end->idle", async () => {
+    const fake = makeFakePi();
+    factory(fake.pi);
+
+    const before = sink.requests.length;
+
+    // session_start forces an initial (idle) report and reports the session ref.
+    startRootSession(fake);
+    await waitFor(() =>
+      sink.requests
+        .slice(before)
+        .some((r) => r.method === "pane.report_agent_session"),
+    );
 
     // agent_start -> working
     fake.emit("agent_start");
@@ -230,12 +247,6 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
         .some((r) => r.method === "pane.report_agent" && r.params?.state === "idle"),
     );
 
-    // session_shutdown -> release_agent
-    await fake.emit("session_shutdown");
-    await waitFor(() =>
-      sink.requests.slice(before).some((r) => r.method === "pane.release_agent"),
-    );
-
     const reports = sink.requests
       .slice(before)
       .filter((r) => r.method === "pane.report_agent");
@@ -246,6 +257,13 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
       expect(r.params.pane_id).toBe("pane-test-1");
       expect(r.params.agent_session_path).toBe("/tmp/pi/session.json");
     }
+    // The session report carries the same captured ref.
+    const sessionReport = sink.requests
+      .slice(before)
+      .find((r) => r.method === "pane.report_agent_session");
+    expect(sessionReport.params.agent_session_path).toBe("/tmp/pi/session.json");
+    // Shutdown is no longer a release path in this asset.
+    expect(sink.requests.every((r) => r.method !== "pane.release_agent")).toBe(true);
     // None of the requests is a receipt — that capability is not fired here.
     expect(sink.requests.every((r) => r.method !== "zynk.message_received")).toBe(true);
   });
@@ -253,6 +271,10 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
   test("zynk:blocked active->inactive toggles blocked then clears", async () => {
     const fake = makeFakePi();
     factory(fake.pi);
+    startRootSession(fake);
+    await waitFor(() =>
+      sink.requests.some((r) => r.method === "pane.report_agent_session"),
+    );
     const before = sink.requests.length;
 
     fake.pi.events.emit("zynk:blocked", { active: true, label: "awaiting-approval" });
@@ -277,6 +299,13 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
   test("retryable provider error at agent_end holds working (not idle)", async () => {
     const fake = makeFakePi();
     factory(fake.pi);
+    startRootSession(fake);
+    // Let the initial session_start (idle) report settle, then anchor `before`
+    // so the retry-hold assertion ignores the pre-agent idle publish.
+    await waitFor(() =>
+      sink.requests.some((r) => r.method === "pane.report_agent_session"),
+    );
+    await new Promise((r) => setTimeout(r, 10));
     const before = sink.requests.length;
 
     fake.emit("agent_start");

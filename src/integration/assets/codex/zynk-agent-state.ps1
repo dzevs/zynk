@@ -2,7 +2,7 @@
 # managed by zynk; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # ZYNK_INTEGRATION_ID=codex
-# ZYNK_INTEGRATION_VERSION=5
+# ZYNK_INTEGRATION_VERSION=6
 
 param([string]$Action = "")
 
@@ -22,11 +22,29 @@ try {
     exit 0
 }
 
+if ($payload.hook_event_name -and $payload.hook_event_name -ne "SessionStart") { exit 0 }
+
 $sessionId = $payload.session_id
 if ([string]::IsNullOrWhiteSpace($sessionId)) { exit 0 }
 
 $seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 try {
-    & zynk pane report-agent-session $zynkPaneId --source zynk:codex --agent codex --seq $seq --agent-session-id $sessionId 2>$null | Out-Null
+    $args = @(
+        "pane",
+        "report-agent-session",
+        $zynkPaneId,
+        "--source",
+        "zynk:codex",
+        "--agent",
+        "codex",
+        "--seq",
+        "$seq",
+        "--agent-session-id",
+        "$sessionId"
+    )
+    if ($payload.hook_event_name -eq "SessionStart" -and $payload.source -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.source)) {
+        $args += @("--session-start-source", "$($payload.source)")
+    }
+    & zynk @args 2>$null | Out-Null
 } catch {
 }

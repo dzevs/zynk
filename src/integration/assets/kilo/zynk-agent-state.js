@@ -2,7 +2,7 @@
 // managed by zynk; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // ZYNK_INTEGRATION_ID=kilo
-// ZYNK_INTEGRATION_VERSION=1
+// ZYNK_INTEGRATION_VERSION=2
 
 import net from "node:net";
 
@@ -96,10 +96,6 @@ function reportState(state, sessionID) {
   return request("pane.report_agent", params);
 }
 
-function releaseAgent() {
-  return request("pane.release_agent", {});
-}
-
 export const ZynkAgentStatePlugin = async () => {
   if (
     (process.env.ZYNK_ENV ?? process.env.ZYNK_ENV) !== "1" ||
@@ -149,7 +145,6 @@ export const ZynkAgentStatePlugin = async () => {
           await reportState("idle", sessionID);
           break;
         case "session.deleted":
-          await releaseAgent();
           break;
         default:
           break;

@@ -88,6 +88,35 @@ function withSessionRef(params: Record<string, unknown>): Record<string, unknown
   return params;
 }
 
+function currentSessionRef(): Record<string, unknown> | undefined {
+  if (currentAgentSessionPath) {
+    return { agent_session_path: currentAgentSessionPath };
+  }
+  if (currentAgentSessionId) {
+    return { agent_session_id: currentAgentSessionId };
+  }
+  return undefined;
+}
+
+function reportSession(): Promise<void> {
+  const sessionRef = currentSessionRef();
+  if (!sessionRef) {
+    return Promise.resolve();
+  }
+
+  return sendRequest({
+    id: `${source}:session:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    method: "pane.report_agent_session",
+    params: {
+      pane_id: paneId,
+      source,
+      agent: "omp",
+      seq: nextReportSeq(),
+      ...sessionRef,
+    },
+  });
+}
+
 function parseDurationEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) {
@@ -167,19 +196,6 @@ function retryableErrorMessage(event: any): string | undefined {
     return undefined;
   }
   return errorMessage || "retryable provider error";
-}
-
-function releaseAgent(): Promise<void> {
-  return sendRequest({
-    id: `${source}:release:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    method: "pane.release_agent",
-    params: {
-      pane_id: paneId,
-      source,
-      agent: "omp",
-      seq: nextReportSeq(),
-    },
-  });
 }
 
 export default function (pi) {
@@ -287,11 +303,12 @@ export default function (pi) {
   });
 
   pi.on("session_start", (_event, ctx) => {
-    rootSession = ctx?.hasUI === true;
-    if (!rootSession) {
+    if (ctx?.hasUI !== true) {
       return;
     }
+    rootSession = true;
     updateSessionRef(ctx);
+    void reportSession();
     publishState(true);
   });
 
@@ -325,13 +342,5 @@ export default function (pi) {
     }
 
     scheduleIdle();
-  });
-
-  pi.on("session_shutdown", async () => {
-    if (!rootSession) {
-      return;
-    }
-    clearPendingTimers();
-    await releaseAgent();
   });
 }

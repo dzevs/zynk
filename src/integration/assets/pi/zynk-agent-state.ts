@@ -2,7 +2,7 @@
 // managed by zynk; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // ZYNK_INTEGRATION_ID=pi
-// ZYNK_INTEGRATION_VERSION=4
+// ZYNK_INTEGRATION_VERSION=5
 // @ts-nocheck
 
 import { createConnection } from "node:net";
@@ -100,6 +100,35 @@ function withSessionRef(params: Record<string, unknown>): Record<string, unknown
   return params;
 }
 
+function currentSessionRef(): Record<string, unknown> | undefined {
+  if (currentAgentSessionPath) {
+    return { agent_session_path: currentAgentSessionPath };
+  }
+  if (currentAgentSessionId) {
+    return { agent_session_id: currentAgentSessionId };
+  }
+  return undefined;
+}
+
+function reportSession(): Promise<void> {
+  const sessionRef = currentSessionRef();
+  if (!sessionRef) {
+    return Promise.resolve();
+  }
+
+  return sendRequest({
+    id: `${source}:session:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    method: "pane.report_agent_session",
+    params: {
+      pane_id: paneId,
+      source,
+      agent: "pi",
+      seq: nextReportSeq(),
+      ...sessionRef,
+    },
+  });
+}
+
 function sendState(state: AgentState, message?: string, seq = nextReportSeq()): Promise<void> {
   return sendRequest({
     id: `${source}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
@@ -169,19 +198,6 @@ function retryableErrorMessage(event: any): string | undefined {
   return errorMessage || "retryable provider error";
 }
 
-function releaseAgent(): Promise<void> {
-  return sendRequest({
-    id: `${source}:release:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    method: "pane.release_agent",
-    params: {
-      pane_id: paneId,
-      source,
-      agent: "pi",
-      seq: nextReportSeq(),
-    },
-  });
-}
-
 export default function (pi) {
   if (!enabled()) {
     return;
@@ -197,6 +213,7 @@ export default function (pi) {
   let lastMessage: string | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let rootSession = false;
 
   function clearTimer(timer: ReturnType<typeof setTimeout> | undefined) {
     if (timer) {
@@ -266,12 +283,10 @@ export default function (pi) {
     retryTimer.unref?.();
   }
 
-  pi.on("session_start", (_event, ctx) => {
-    updateSessionRef(ctx);
-    publishState(true);
-  });
-
   pi.events.on("zynk:blocked", (data) => {
+    if (!rootSession) {
+      return;
+    }
     if (!data?.active) {
       blockedCount = Math.max(0, blockedCount - 1);
       if (blockedCount === 0) {
@@ -287,7 +302,20 @@ export default function (pi) {
     publishState();
   });
 
+  pi.on("session_start", (_event, ctx) => {
+    if (ctx?.hasUI !== true) {
+      return;
+    }
+    rootSession = true;
+    updateSessionRef(ctx);
+    void reportSession();
+    publishState(true);
+  });
+
   pi.on("agent_start", () => {
+    if (!rootSession) {
+      return;
+    }
     clearPendingTimers();
     clearFailureState();
     agentActive = true;
@@ -295,6 +323,9 @@ export default function (pi) {
   });
 
   pi.on("agent_end", (event) => {
+    if (!rootSession) {
+      return;
+    }
     if (!agentActive) {
       // Pi can emit duplicate/late end events while auto-retry is already
       // holding the pane in Working. Do not let an unqualified duplicate end
@@ -311,10 +342,5 @@ export default function (pi) {
     }
 
     scheduleIdle();
-  });
-
-  pi.on("session_shutdown", async () => {
-    clearPendingTimers();
-    await releaseAgent();
   });
 }
