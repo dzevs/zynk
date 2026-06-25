@@ -487,7 +487,31 @@ fn agent_name_from_path_token(token: &str) -> Option<String> {
     }
 
     agent_name_from_basename(path_basename(trimmed))
+        .or_else(|| agent_name_from_known_package_path(trimmed))
         .or_else(|| resolved_agent_name_from_path_token(trimmed))
+}
+
+fn agent_name_from_known_package_path(path: &str) -> Option<String> {
+    let components: Vec<String> = path
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+        .map(normalized_agent_lookup_name)
+        .collect();
+
+    for window in components.windows(5) {
+        if window
+            == [
+                "node_modules",
+                "@earendil-works",
+                "pi-coding-agent",
+                "dist",
+                "cli",
+            ]
+        {
+            return Some(agent_label(Agent::Pi).to_string());
+        }
+    }
+    None
 }
 
 fn resolved_agent_name_from_path_token(token: &str) -> Option<String> {
@@ -784,6 +808,43 @@ mod tests {
             identify_agent_in_job(&job),
             Some((Agent::Pi, "pi".to_string()))
         );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_node_wrapped_pi_package_cli() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "node.exe",
+                &[
+                    "node.exe",
+                    "C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js",
+                ],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Pi, "pi".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_ignores_non_cli_pi_package_script() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "node.exe",
+                &[
+                    "node.exe",
+                    "C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\scripts\\build.js",
+                ],
+            )],
+        };
+
+        assert_eq!(identify_agent_in_job(&job), None);
     }
 
     #[test]
