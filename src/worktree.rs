@@ -241,6 +241,65 @@ pub(crate) fn build_worktree_add_new_branch_command(
     }
 }
 
+pub(crate) fn build_worktree_add_existing_branch_command(
+    repo_root: &Path,
+    path: &Path,
+    branch: &str,
+) -> WorktreeCommand {
+    WorktreeCommand {
+        program: "git".to_string(),
+        args: vec![
+            "-C".to_string(),
+            repo_root.display().to_string(),
+            "worktree".to_string(),
+            "add".to_string(),
+            path.display().to_string(),
+            branch.to_string(),
+        ],
+    }
+}
+
+pub(crate) fn local_branch_exists(repo_root: &Path, branch: &str) -> Result<bool, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stderr.is_empty() {
+        Err(stderr)
+    } else if !stdout.is_empty() {
+        Err(stdout)
+    } else {
+        Err(format!("git show-ref failed with status {}", output.status))
+    }
+}
+
+pub(crate) fn run_worktree_add_command(
+    repo_root: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<(), String> {
+    let command = if local_branch_exists(repo_root, branch)? {
+        build_worktree_add_existing_branch_command(repo_root, path, branch)
+    } else {
+        build_worktree_add_new_branch_command(repo_root, path, branch, base)
+    };
+    run_worktree_command(&command)
+}
+
 pub(crate) fn run_worktree_command(command: &WorktreeCommand) -> Result<(), String> {
     let output = std::process::Command::new(&command.program)
         .args(&command.args)
@@ -663,6 +722,27 @@ prunable stale
                 "worktree/brave-river",
                 "/w/zynk/worktree-brave-river",
                 "HEAD"
+            ]
+        );
+    }
+
+    #[test]
+    fn worktree_add_command_checks_out_existing_branch() {
+        let command = build_worktree_add_existing_branch_command(
+            Path::new("/repo/zynk"),
+            Path::new("/w/zynk/worktree-brave-river"),
+            "worktree/brave-river",
+        );
+        assert_eq!(command.program, "git");
+        assert_eq!(
+            command.args,
+            vec![
+                "-C",
+                "/repo/zynk",
+                "worktree",
+                "add",
+                "/w/zynk/worktree-brave-river",
+                "worktree/brave-river"
             ]
         );
     }

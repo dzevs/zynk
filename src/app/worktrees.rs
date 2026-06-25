@@ -502,12 +502,6 @@ impl App {
         create.creating = true;
         create.error = None;
 
-        let command = crate::worktree::build_worktree_add_new_branch_command(
-            &create.source_checkout_path,
-            &create.checkout_path,
-            &create.branch,
-            "HEAD",
-        );
         let parent_dir = create
             .checkout_path
             .parent()
@@ -519,15 +513,23 @@ impl App {
             "starting git worktree add"
         );
         let path = create.checkout_path.clone();
+        let source_checkout_path = create.source_checkout_path.clone();
+        let branch = create.branch.clone();
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = if let Some(parent_dir) = parent_dir {
-                std::fs::create_dir_all(&parent_dir)
-                    .map_err(|err| err.to_string())
-                    .and_then(|()| crate::worktree::run_worktree_command(&command))
+                std::fs::create_dir_all(&parent_dir).map_err(|err| err.to_string())
             } else {
-                crate::worktree::run_worktree_command(&command)
-            };
+                Ok(())
+            }
+            .and_then(|()| {
+                crate::worktree::run_worktree_add_command(
+                    &source_checkout_path,
+                    &path,
+                    &branch,
+                    "HEAD",
+                )
+            });
             let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(WorktreeAddResult {
                 path,
                 result,
@@ -1154,6 +1156,66 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
         assert!(checkout.join("README.md").exists());
+
+        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
+        crate::worktree::run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    // Port upstream 89ca3ba: when the requested branch already exists locally, the
+    // worktree-add worker checks it out instead of failing on a `git worktree add -b`.
+    #[test]
+    fn start_worktree_add_existing_branch_checks_out_branch() {
+        let repo = create_committed_repo("app-worktree-add-existing-branch-repo");
+        let worktree_root = unique_temp_path("app-worktree-add-existing-branch-root");
+        let branch = "foo";
+        let checkout = crate::worktree::default_checkout_path(&worktree_root, "zynk", branch);
+        run_git(&repo, &["branch", branch]);
+        let mut app = app_for_worktree_tests();
+        app.state.worktree_directory = worktree_root.clone();
+        app.state.name_input = branch.into();
+        app.state.worktree_create = Some(WorktreeCreateState {
+            source_workspace_id: "source".into(),
+            source_checkout_path: repo.clone(),
+            source_existing_membership: None,
+            source_repo_root: repo.clone(),
+            repo_key: "repo-key".into(),
+            repo_name: "zynk".into(),
+            branch: branch.into(),
+            checkout_path: checkout.clone(),
+            error: None,
+            creating: false,
+        });
+
+        app.start_worktree_add();
+
+        assert!(app
+            .state
+            .worktree_create
+            .as_ref()
+            .is_some_and(|create| create.creating));
+        let event = wait_for_worktree_event(&mut app);
+        match event {
+            AppEvent::WorktreeAddFinished(result) => {
+                assert_eq!(result.path, checkout);
+                assert_eq!(result.result, Ok(()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        assert!(checkout.join("README.md").exists());
+        let branch_name = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap();
+        assert!(branch_name.status.success());
+        assert_eq!(
+            String::from_utf8(branch_name.stdout).unwrap().trim(),
+            branch
+        );
 
         let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
         crate::worktree::run_worktree_command(&remove).unwrap();
