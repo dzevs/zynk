@@ -120,7 +120,25 @@ impl App {
         }
 
         let overlay_state = if let AppEvent::PaneDied { pane_id } = &ev {
-            self.overlay_panes.remove(pane_id)
+            self.overlay_panes.remove(pane_id).map(|overlay| {
+                let was_overlay_active =
+                    self.state
+                        .is_active_pane(overlay.ws_idx, overlay.tab_idx, *pane_id);
+                let tab_before_exit = self
+                    .state
+                    .workspaces
+                    .get(overlay.ws_idx)
+                    .and_then(|ws| ws.tabs.get(overlay.tab_idx));
+                let was_overlay_focused_in_tab =
+                    tab_before_exit.is_some_and(|tab| tab.layout.focused() == *pane_id);
+                let tab_zoomed_before_exit = tab_before_exit.map(|tab| tab.zoomed);
+                (
+                    overlay,
+                    was_overlay_active,
+                    was_overlay_focused_in_tab,
+                    tab_zoomed_before_exit,
+                )
+            })
         } else {
             None
         };
@@ -193,8 +211,19 @@ impl App {
             self.emit_pane_state_update(update);
         }
         self.sync_agent_metadata_deadline();
-        if let Some(overlay) = overlay_state {
-            self.restore_overlay_after_exit(overlay);
+        if let Some((
+            overlay,
+            was_overlay_active,
+            was_overlay_focused_in_tab,
+            tab_zoomed_before_exit,
+        )) = overlay_state
+        {
+            self.restore_overlay_after_exit(
+                overlay,
+                was_overlay_active,
+                was_overlay_focused_in_tab,
+                tab_zoomed_before_exit,
+            );
         }
 
         if self.local_terminal_notifications
@@ -319,7 +348,13 @@ impl App {
         self.copy_feedback_deadline = Some(Instant::now() + super::COPY_FEEDBACK_DURATION);
     }
 
-    fn restore_overlay_after_exit(&mut self, overlay: OverlayPaneState) {
+    fn restore_overlay_after_exit(
+        &mut self,
+        overlay: OverlayPaneState,
+        was_overlay_active: bool,
+        was_overlay_focused_in_tab: bool,
+        tab_zoomed_before_exit: Option<bool>,
+    ) {
         for temp_file in &overlay.temp_files {
             let _ = std::fs::remove_file(temp_file);
         }
@@ -331,14 +366,23 @@ impl App {
             return;
         }
 
-        ws.active_tab = overlay.tab_idx;
+        if !was_overlay_focused_in_tab {
+            if let Some(tab_zoomed_before_exit) = tab_zoomed_before_exit {
+                ws.tabs[overlay.tab_idx].zoomed = tab_zoomed_before_exit;
+            }
+            return;
+        }
+
+        if was_overlay_active {
+            ws.active_tab = overlay.tab_idx;
+        }
         let tab = &mut ws.tabs[overlay.tab_idx];
         if tab.panes.contains_key(&overlay.previous_focus) {
             tab.layout.focus_pane(overlay.previous_focus);
         }
         tab.zoomed = overlay.previous_zoomed;
 
-        if self.state.active == Some(overlay.ws_idx) {
+        if was_overlay_active && self.state.active == Some(overlay.ws_idx) {
             self.state.mode = Mode::Terminal;
         }
     }
@@ -1069,6 +1113,37 @@ mod tests {
         assert!(status.success(), "git init failed for {}", path.display());
     }
 
+    fn app_with_overlay(
+        workspace: crate::workspace::Workspace,
+        overlay_pane: crate::layout::PaneId,
+        previous_focus: crate::layout::PaneId,
+        previous_zoomed: bool,
+    ) -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.overlay_panes.insert(
+            overlay_pane,
+            OverlayPaneState {
+                ws_idx: 0,
+                tab_idx: 0,
+                previous_focus,
+                previous_zoomed,
+                temp_files: Vec::new(),
+            },
+        );
+        app
+    }
+
     #[tokio::test]
     async fn manifest_update_event_resets_matching_agent_detection_runtime() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1479,6 +1554,66 @@ mod tests {
             runtime.shutdown();
         }
         let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn overlay_exit_preserves_focus_changed_before_exit() {
+        let mut workspace = crate::workspace::Workspace::test_new("overlay");
+        let previous_focus = workspace.tabs[0].root_pane;
+        let overlay_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].zoomed = true;
+        let new_tab = workspace.test_add_tab(Some("new"));
+        workspace.switch_tab(new_tab);
+        let mut app = app_with_overlay(workspace, overlay_pane, previous_focus, true);
+
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id: overlay_pane,
+        });
+
+        let overlay_tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(app.state.workspaces[0].active_tab, new_tab);
+        assert_eq!(overlay_tab.layout.focused(), previous_focus);
+        assert!(overlay_tab.zoomed);
+        assert!(app.overlay_panes.is_empty());
+    }
+
+    #[test]
+    fn overlay_exit_preserves_same_tab_focus_changed_before_exit() {
+        let mut workspace = crate::workspace::Workspace::test_new("overlay");
+        let previous_focus = workspace.tabs[0].root_pane;
+        let overlay_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(previous_focus);
+        workspace.tabs[0].zoomed = true;
+        let mut app = app_with_overlay(workspace, overlay_pane, previous_focus, false);
+
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id: overlay_pane,
+        });
+
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        assert_eq!(tab.layout.focused(), previous_focus);
+        assert!(tab.zoomed);
+        assert!(app.overlay_panes.is_empty());
+    }
+
+    #[test]
+    fn overlay_exit_restores_previous_focus_when_overlay_still_focused() {
+        let mut workspace = crate::workspace::Workspace::test_new("overlay");
+        let previous_focus = workspace.tabs[0].root_pane;
+        let overlay_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].zoomed = true;
+        let mut app = app_with_overlay(workspace, overlay_pane, previous_focus, false);
+
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id: overlay_pane,
+        });
+
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        assert_eq!(tab.layout.focused(), previous_focus);
+        assert!(!tab.zoomed);
+        assert!(app.overlay_panes.is_empty());
     }
 
     #[tokio::test]
