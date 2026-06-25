@@ -968,13 +968,15 @@ async fn run_client_loop(
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
 
     // Spawn the stdin reader thread.
+    let will_query_host_terminal_theme =
+        state.attach_escape.is_none() && should_query_host_terminal_theme();
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     std::thread::spawn(move || {
-        input::stdin_reader_loop(stdin_tx, &stdin_quit);
+        input::stdin_reader_loop(stdin_tx, &stdin_quit, will_query_host_terminal_theme);
     });
 
-    if state.attach_escape.is_none() && should_query_host_terminal_theme() {
+    if will_query_host_terminal_theme {
         query_host_terminal_theme();
     }
 

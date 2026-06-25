@@ -135,6 +135,10 @@ impl RawInputFramer {
         self.byte_framer.has_pending_bracketed_paste()
     }
 
+    pub(crate) fn host_color_query_sent(&mut self) {
+        self.byte_framer.host_color_query_sent();
+    }
+
     pub(crate) fn flush_timeout(&mut self) -> Vec<RawInputEvent> {
         Self::events_from_chunks(self.byte_framer.flush_timeout())
     }
@@ -163,7 +167,11 @@ pub(crate) struct RawInputByteFramer {
     buffer: Vec<u8>,
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
+    host_color_replies_awaited: u8,
+    held_pending_color_esc: bool,
 }
+
+const HOST_COLOR_QUERY_REPLIES: u8 = 2;
 
 impl RawInputByteFramer {
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
@@ -175,6 +183,14 @@ impl RawInputByteFramer {
     pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
         self.buffer.starts_with(BRACKETED_PASTE_START)
             && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
+    }
+
+    /// Hold a lone trailing ESC for one idle flush so an OSC 10/11 reply split
+    /// at its ESC introducer stitches back together instead of leaking
+    /// (upstream 6f9ca0e).
+    pub(crate) fn host_color_query_sent(&mut self) {
+        self.host_color_replies_awaited = HOST_COLOR_QUERY_REPLIES;
+        self.held_pending_color_esc = false;
     }
 
     pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
@@ -243,6 +259,14 @@ impl RawInputByteFramer {
         }
 
         if self.buffer.as_slice() == [ESC] {
+            if self.host_color_replies_awaited > 0 && !self.held_pending_color_esc {
+                self.held_pending_color_esc = true;
+                tracing::trace!("holding lone escape one flush while awaiting host color reply");
+                return chunks;
+            }
+            // No continuation arrived; give up the window so Escape is not delayed again.
+            self.host_color_replies_awaited = 0;
+            self.held_pending_color_esc = false;
             tracing::warn!(
                 bytes = ?self.buffer,
                 "flushing lone escape after input timeout; if this follows an alt chord or focus switch it may reach the pane as plain esc"
@@ -290,9 +314,13 @@ impl RawInputByteFramer {
                 continue;
             }
 
-            let Some((_event, consumed)) = extract_one_event(&self.buffer) else {
+            let Some((event, consumed)) = extract_one_event(&self.buffer) else {
                 break;
             };
+            if matches!(event, RawInputEvent::HostDefaultColor { .. }) {
+                self.host_color_replies_awaited = self.host_color_replies_awaited.saturating_sub(1);
+            }
+            self.held_pending_color_esc = false;
             chunks.push(self.buffer[..consumed].to_vec());
             self.buffer.drain(..consumed);
         }
@@ -357,6 +385,7 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
         let mut reader = stdin.lock();
         let mut scratch = [0u8; 1024];
         let mut framer = RawInputFramer::default();
+        framer.host_color_query_sent();
 
         loop {
             match reader.read(&mut scratch) {
@@ -427,8 +456,7 @@ fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent
 pub(crate) fn flush_incomplete_input_bytes(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     let mut framer = RawInputByteFramer {
         buffer: std::mem::take(buffer),
-        discard_until: None,
-        discarded_tail_bytes: 0,
+        ..Default::default()
     };
     let mut chunks = framer.flush_timeout();
     *buffer = framer.buffer;
@@ -1880,5 +1908,64 @@ mod tests {
 
         assert_eq!(chunks.len(), 11);
         assert!(framer.flush_timeout().is_empty());
+    }
+
+    #[test]
+    fn holds_lone_escape_and_stitches_split_host_color_reply() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
+
+        // The reply is split right at its ESC introducer.
+        assert!(framer.push(b"\x1b").is_empty());
+        // The idle flush must not release the ESC as an Escape key while a host
+        // color reply is still outstanding.
+        assert!(framer.flush_timeout().is_empty());
+
+        // The rest of the OSC 11 reply arrives and stitches back together
+        // instead of leaking its payload into the focused pane.
+        let chunks = framer.push(b"]11;rgb:2424/2727/3a3a\x1b\\");
+        assert_eq!(chunks.len(), 1);
+        let (event, _) = extract_one_event(&chunks[0]).unwrap();
+        assert!(matches!(
+            event,
+            RawInputEvent::HostDefaultColor {
+                kind: DefaultColorKind::Background,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn flushes_lone_escape_when_not_awaiting_host_color_reply() {
+        let mut framer = RawInputByteFramer::default();
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
+    fn gives_up_holding_lone_escape_after_one_idle_flush() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
+
+        assert!(framer.push(b"\x1b").is_empty());
+        // First idle flush holds the escape.
+        assert!(framer.flush_timeout().is_empty());
+        // No continuation arrived; the second idle flush releases it as Escape.
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
+    fn stops_holding_lone_escape_after_host_color_reply_completes() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
+
+        let chunks =
+            framer.push(b"\x1b]10;rgb:6565/7b7b/8383\x1b\\\x1b]11;rgb:2424/2727/3a3a\x1b\\");
+        assert_eq!(chunks.len(), 2);
+
+        // Window closed: a later lone Escape flushes immediately.
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
     }
 }

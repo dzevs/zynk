@@ -35,20 +35,34 @@ mod windows_vti;
 /// This runs on a dedicated thread because stdin reading is blocking.
 /// The main loop receives the raw bytes and forwards them as
 /// `ClientMessage::Input` to the server.
-pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &Arc<AtomicBool>) {
+pub fn stdin_reader_loop(
+    event_tx: mpsc::Sender<ClientLoopEvent>,
+    should_quit: &Arc<AtomicBool>,
+    host_color_query_sent: bool,
+) {
     #[cfg(windows)]
-    windows_stdin_reader_loop(event_tx, should_quit);
+    {
+        let _ = host_color_query_sent;
+        windows_stdin_reader_loop(event_tx, should_quit);
+    }
 
     #[cfg(unix)]
-    unix_stdin_reader_loop(event_tx, should_quit);
+    unix_stdin_reader_loop(event_tx, should_quit, host_color_query_sent);
 }
 
 #[cfg(unix)]
-fn unix_stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &Arc<AtomicBool>) {
+fn unix_stdin_reader_loop(
+    event_tx: mpsc::Sender<ClientLoopEvent>,
+    should_quit: &Arc<AtomicBool>,
+    host_color_query_sent: bool,
+) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let mut scratch = [0u8; 4096];
     let mut framer = crate::raw_input::RawInputByteFramer::default();
+    if host_color_query_sent {
+        framer.host_color_query_sent();
+    }
 
     while !should_quit.load(Ordering::Acquire) {
         match reader.read(&mut scratch) {
