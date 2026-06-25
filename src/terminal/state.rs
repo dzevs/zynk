@@ -837,7 +837,7 @@ impl TerminalState {
                 "zynk:codex",
                 "codex",
                 Some("startup" | "clear" | "resume" | "compact")
-            )
+            ) | ("zynk:opencode", "opencode", Some("new"))
         )
     }
 
@@ -2281,6 +2281,70 @@ mod tests {
                 Some(next_session.as_str())
             );
         }
+    }
+
+    #[test]
+    fn opencode_new_session_ref_replaces_existing_session_ref() {
+        let mut terminal = test_terminal();
+        terminal
+            .set_agent_session_ref(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                crate::agent_resume::AgentSessionRef::id("opencode-old"),
+                Some(20),
+            )
+            .expect("initial session should be accepted");
+
+        let mutation = terminal
+            .set_agent_session_ref_for_session_start(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                crate::agent_resume::AgentSessionRef::id("opencode-new"),
+                Some(21),
+                Some("new".into()),
+            )
+            .expect("new should replace the session");
+
+        assert!(mutation.session_ref_changed);
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("opencode-new")
+        );
+    }
+
+    #[test]
+    fn opencode_session_ref_without_start_source_does_not_replace_existing() {
+        let mut terminal = test_terminal();
+        terminal
+            .set_agent_session_ref(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                crate::agent_resume::AgentSessionRef::id("opencode-old"),
+                Some(20),
+            )
+            .expect("initial session should be accepted");
+
+        // session.updated reports carry no session_start_source, so a different
+        // id must not displace the established session (cross-talk guard).
+        let mutation = terminal.set_agent_session_ref_for_session_start(
+            "zynk:opencode".into(),
+            "opencode".into(),
+            crate::agent_resume::AgentSessionRef::id("opencode-other"),
+            Some(21),
+            None,
+        );
+
+        assert!(mutation.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("opencode-old")
+        );
     }
 
     #[test]
