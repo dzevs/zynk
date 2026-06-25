@@ -634,6 +634,25 @@ fn is_remote_client_process() -> bool {
     std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
 }
 
+/// Time to wait for the server's Welcome reply during the handshake.
+///
+/// A local client talks to an already-connected server, so 5s is plenty. The
+/// remote bridge client (`zynk --remote`) sits behind a fresh per-attach ssh
+/// connection whose cold-connect (TCP + key exchange + auth) happens inside this
+/// window; on a high-latency link that easily exceeds 5s, so it gets a far
+/// larger budget. See upstream issue #753.
+const LOCAL_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const REMOTE_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn handshake_read_timeout() -> Duration {
+    #[cfg(unix)]
+    if is_remote_client_process() {
+        return REMOTE_HANDSHAKE_READ_TIMEOUT;
+    }
+    LOCAL_HANDSHAKE_READ_TIMEOUT
+}
+
 fn requested_keybindings() -> ClientKeybindings {
     match std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR)
         .ok()
@@ -713,7 +732,7 @@ fn do_handshake(
     // Read Welcome.
     set_handshake_recv_timeout(
         stream,
-        Some(Duration::from_secs(5)),
+        Some(handshake_read_timeout()),
         "client handshake read timeout unavailable",
     )?;
     let welcome: ServerMessage = protocol::read_message(stream, MAX_FRAME_SIZE)?;
@@ -2078,6 +2097,19 @@ mod tests {
             msg.contains("Run `zynk session attach work` to reattach"),
             "should suggest named session reattach command: {msg}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handshake_read_timeout_extends_for_remote_client() {
+        let _guard = env_lock().lock().unwrap();
+
+        let _local_env = EnvVarsRemovedGuard::new(&[crate::remote::REMOTE_KEYBINDINGS_ENV_VAR]);
+        assert_eq!(handshake_read_timeout(), LOCAL_HANDSHAKE_READ_TIMEOUT);
+        assert!(REMOTE_HANDSHAKE_READ_TIMEOUT > LOCAL_HANDSHAKE_READ_TIMEOUT);
+
+        let _remote_env = EnvVarGuard::set(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR, "server");
+        assert_eq!(handshake_read_timeout(), REMOTE_HANDSHAKE_READ_TIMEOUT);
     }
 
     #[test]
