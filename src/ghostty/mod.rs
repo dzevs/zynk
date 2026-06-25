@@ -742,9 +742,11 @@ impl Terminal {
         })
     }
 
-    pub fn screen_graphemes(&self, x: u16, y: u32) -> Result<Vec<u32>, Error> {
+    pub fn screen_cell(&self, x: u16, y: u32) -> Result<(CellWide, Vec<u32>), Error> {
         let grid_ref = self.grid_ref(ghostty_screen_point(x, y))?;
-        grid_ref_graphemes(&grid_ref)
+        let wide = grid_ref_wide(&grid_ref)?;
+        let graphemes = grid_ref_graphemes(&grid_ref)?;
+        Ok((wide, graphemes))
     }
 
     fn viewport_graphemes_and_style(&self, x: u16, y: u32) -> Result<(Vec<u32>, CellStyle), Error> {
@@ -1391,6 +1393,24 @@ fn grid_ref_graphemes(grid_ref: &ffi::GhosttyGridRef) -> Result<Vec<u32>, Error>
     }
     buffer.truncate(required);
     Ok(buffer)
+}
+
+fn grid_ref_wide(grid_ref: &ffi::GhosttyGridRef) -> Result<CellWide, Error> {
+    let mut raw = ffi::GhosttyCell::default();
+    unsafe {
+        ffi::ghostty_grid_ref_cell(grid_ref, &mut raw).into_result()?;
+    }
+
+    let mut wide = ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW;
+    unsafe {
+        ffi::ghostty_cell_get(
+            raw,
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE,
+            (&mut wide as *mut ffi::GhosttyCellWide).cast(),
+        )
+        .into_result()?;
+    }
+    Ok(CellWide::from_raw(wide))
 }
 
 fn kitty_placement_u32(
