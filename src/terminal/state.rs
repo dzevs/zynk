@@ -1496,6 +1496,52 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Working);
     }
 
+    // omp has no Agent identity (the process is pi), so its release suppression
+    // can only be cleared by a fresh session ref, never by process detection.
+    // Regression for upstream #614: a same-pane restart must reacquire lifecycle authority.
+    #[test]
+    fn omp_reacquires_full_lifecycle_hook_after_release_with_fresh_session_ref() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:omp".into(),
+            "omp".into(),
+            AgentState::Working,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("omp-old"),
+            Some(20),
+        );
+        terminal.release_agent("zynk:omp", "omp", Some(21));
+
+        // A late report from the released run keeps its old session ref and stays
+        // suppressed, so a just-exited omp cannot resurrect the pane.
+        let stale = terminal.set_hook_authority_with_session_ref(
+            "zynk:omp".into(),
+            "omp".into(),
+            AgentState::Working,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("omp-old"),
+            Some(22),
+        );
+        assert!(stale.is_none());
+        assert!(terminal.hook_authority.is_none());
+
+        // A fresh omp run carries a new session ref and reacquires authority.
+        let fresh = terminal.set_hook_authority_with_session_ref(
+            "zynk:omp".into(),
+            "omp".into(),
+            AgentState::Working,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("omp-new"),
+            Some(23),
+        );
+        assert!(fresh.is_some());
+        assert!(terminal.hook_authority.is_some());
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
     #[test]
     fn visible_blocker_overrides_non_blocked_hook_for_same_agent() {
         let mut terminal = test_terminal();

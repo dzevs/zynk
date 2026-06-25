@@ -63,7 +63,7 @@ pub fn session_ref_from_report(
         return None;
     }
 
-    if agent == "pi" {
+    if agent == "pi" || agent == "omp" {
         return _agent_session_path
             .and_then(AgentSessionRef::path)
             .or_else(|| agent_session_id.and_then(AgentSessionRef::id));
@@ -102,7 +102,7 @@ pub fn session_ref_from_snapshot(
         return None;
     }
     let session_ref = match (agent, kind) {
-        ("pi", AgentSessionRefKind::Path) => AgentSessionRef::path(value)?,
+        ("pi" | "omp", AgentSessionRefKind::Path) => AgentSessionRef::path(value)?,
         (_, AgentSessionRefKind::Id) => AgentSessionRef::id(value)?,
         _ => return None,
     };
@@ -197,6 +197,11 @@ fn canonical_resume_argv(
         ("zynk:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
         }
+        ("zynk:omp", "omp", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
+            // omp resume is `-r, --resume=<value>` (ID prefix or path); it has no
+            // `--session` flag, unlike pi.
+            vec!["omp".into(), format!("--resume={}", session_ref.value)]
+        }
         ("zynk:hermes", "hermes", AgentSessionRefKind::Id) => {
             vec![
                 "hermes".into(),
@@ -250,6 +255,7 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("zynk:devin", "devin")
             | ("zynk:droid", "droid")
             | ("zynk:kimi", "kimi")
+            | ("zynk:omp", "omp")
             | ("zynk:pi", "pi")
             | ("zynk:hermes", "hermes")
             | ("zynk:opencode", "opencode")
@@ -1101,6 +1107,7 @@ mod tests {
     #[test]
     fn planner_allows_supported_agents() {
         let pi_session = absolute_test_path("pi-session.jsonl");
+        let omp_session = absolute_test_path("omp-session.jsonl");
         assert_eq!(
             plan(
                 "zynk:claude",
@@ -1180,6 +1187,17 @@ mod tests {
         );
         assert_eq!(
             plan(
+                "zynk:omp",
+                "omp",
+                &AgentSessionRef::path(&omp_session).unwrap(),
+                None,
+            )
+            .unwrap()
+            .argv,
+            vec!["omp", format!("--resume={omp_session}").as_str()]
+        );
+        assert_eq!(
+            plan(
                 "zynk:hermes",
                 "hermes",
                 &AgentSessionRef::id("hermes-session").unwrap(),
@@ -1255,8 +1273,9 @@ mod tests {
     }
 
     #[test]
-    fn report_ref_prefers_pi_path_and_validates_values() {
+    fn report_ref_prefers_pi_and_omp_paths_and_validates_values() {
         let pi_session = absolute_test_path("pi-session.jsonl");
+        let omp_session = absolute_test_path("omp-session.jsonl");
         let claude_session = absolute_test_path("claude-session");
         let copilot_session = absolute_test_path("copilot-session");
         let session_ref = session_ref_from_report(
@@ -1274,6 +1293,35 @@ mod tests {
             session_ref_from_report("zynk:pi", "pi", None, Some("relative.jsonl".into())).is_none()
         );
         assert!(session_ref_from_report("custom:pi", "pi", Some("pi-id".into()), None).is_none());
+
+        let session_ref = session_ref_from_report(
+            "zynk:omp",
+            "omp",
+            Some("omp-id".into()),
+            Some(omp_session.clone()),
+        )
+        .unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Path);
+        assert_eq!(session_ref.value, omp_session);
+
+        let session_ref =
+            session_ref_from_report("zynk:omp", "omp", Some("omp-id".into()), None).unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "omp-id");
+        let session_ref = session_ref_from_report(
+            "zynk:omp",
+            "omp",
+            Some("omp-id".into()),
+            Some("relative.jsonl".into()),
+        )
+        .unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "omp-id");
+        assert!(
+            session_ref_from_report("zynk:omp", "omp", None, Some("relative.jsonl".into()))
+                .is_none()
+        );
+
         assert!(
             session_ref_from_report("zynk:claude", "claude", None, Some(claude_session)).is_none()
         );
