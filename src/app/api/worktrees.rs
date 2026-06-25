@@ -880,6 +880,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deferred_api_worktree_create_checks_out_existing_branch() {
+        // upstream 89ca3ba: the deferred API create path must check out an EXISTING
+        // local branch (git worktree add <path> <branch>) rather than always passing -b.
+        let repo = create_committed_repo("api-worktree-create-existing-branch-repo");
+        let worktree_root = unique_temp_path("api-worktree-create-existing-branch-root");
+        let branch = "foo";
+        run_git(&repo, &["branch", branch]);
+        let mut app = app_with_parent(&repo);
+        app.state.worktree_directory = worktree_root.clone();
+        let workspace_id = app.state.workspaces[0].id.clone();
+
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeCreate(WorktreeCreateParams {
+                    workspace_id: Some(workspace_id),
+                    branch: Some(branch.into()),
+                    ..WorktreeCreateParams::default()
+                }),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeCreated { worktree, .. } = success.result else {
+            panic!("expected worktree_created response");
+        };
+        assert_eq!(worktree.branch.as_deref(), Some(branch));
+        let checkout = Path::new(&worktree.path);
+        assert!(checkout.join("README.md").exists());
+        let current = std::process::Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap();
+        assert!(current.status.success());
+        assert_eq!(String::from_utf8(current.stdout).unwrap().trim(), branch);
+        assert!(app.pending_api_worktree_creates.is_empty());
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let remove = crate::worktree::build_worktree_remove_command(&repo, checkout, false);
+        crate::worktree::run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
     async fn api_worktree_create_from_cwd_emits_parent_with_membership() {
         let repo = create_committed_repo("api-worktree-create-cwd-repo");
         let worktree_root = unique_temp_path("api-worktree-create-cwd-root");
