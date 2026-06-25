@@ -327,10 +327,13 @@ fn foreground_group_changed(
 
 fn should_skip_process_probe_for_lifecycle_authority(
     full_lifecycle_authority_active: bool,
-    process_exit_pending: bool,
-    release_pending: bool,
+    input: ProcessProbeInput,
 ) -> bool {
-    full_lifecycle_authority_active && !process_exit_pending && !release_pending
+    full_lifecycle_authority_active
+        && !input.pending_foreground_shell_clear
+        && input.suppressed_agent.is_none()
+        && input.has_process_probe
+        && !foreground_group_changed(input.foreground_pgid, input.last_foreground_pgid)
 }
 
 fn should_probe_foreground_job(input: ProcessProbeInput) -> bool {
@@ -527,9 +530,6 @@ fn spawn_basic_detection_task(
             let pid = child_pid.load(Ordering::Acquire);
             let mut agent_changed = false;
             let mut agent = agent_presence.current_agent();
-            let process_exit_pending = pending_foreground_shell_clear
-                && agent.is_some()
-                && !foreground_shell_exit_reported;
             let lifecycle_authority_active =
                 full_lifecycle_authority_active.load(Ordering::Acquire);
             let foreground_pgid = (pid > 0)
@@ -537,13 +537,8 @@ fn spawn_basic_detection_task(
                 .flatten();
             let process_group_changed =
                 foreground_group_changed(foreground_pgid, last_foreground_pgid);
-            let should_check_process = pid > 0
-                && !should_skip_process_probe_for_lifecycle_authority(
-                    lifecycle_authority_active,
-                    process_exit_pending,
-                    suppressed_agent.is_some(),
-                )
-                && should_probe_foreground_job(ProcessProbeInput {
+            let should_check_process = pid > 0 && {
+                let process_probe_input = ProcessProbeInput {
                     current_agent: agent,
                     suppressed_agent,
                     foreground_pgid,
@@ -554,7 +549,12 @@ fn spawn_basic_detection_task(
                     pending_foreground_shell_clear,
                     pending_restore_probe: false,
                     elapsed_since_process_check: now.duration_since(last_process_check),
-                });
+                };
+                !should_skip_process_probe_for_lifecycle_authority(
+                    lifecycle_authority_active,
+                    process_probe_input,
+                ) && should_probe_foreground_job(process_probe_input)
+            };
 
             if should_check_process {
                 last_process_check = now;
@@ -1879,9 +1879,6 @@ impl PaneRuntime {
                     release_was_active = suppressed_agent.is_some();
                     let pid = child_pid.load(Ordering::Acquire);
                     let mut agent = agent_presence.current_agent();
-                    let process_exit_pending = pending_foreground_shell_clear
-                        && agent.is_some()
-                        && !foreground_shell_exit_reported;
                     let lifecycle_authority_active =
                         full_lifecycle_authority_active_for_task.load(Ordering::Acquire);
                     let foreground_pgid = (pid > 0)
@@ -1889,13 +1886,8 @@ impl PaneRuntime {
                         .flatten();
                     let process_group_changed =
                         foreground_group_changed(foreground_pgid, last_foreground_pgid);
-                    let should_check_process = pid > 0
-                        && !should_skip_process_probe_for_lifecycle_authority(
-                            lifecycle_authority_active,
-                            process_exit_pending,
-                            suppressed_agent.is_some(),
-                        )
-                        && should_probe_foreground_job(ProcessProbeInput {
+                    let should_check_process = pid > 0 && {
+                        let process_probe_input = ProcessProbeInput {
                             current_agent: agent,
                             suppressed_agent,
                             foreground_pgid,
@@ -1906,7 +1898,12 @@ impl PaneRuntime {
                             pending_foreground_shell_clear,
                             pending_restore_probe,
                             elapsed_since_process_check: now.duration_since(last_process_check),
-                        });
+                        };
+                        !should_skip_process_probe_for_lifecycle_authority(
+                            lifecycle_authority_active,
+                            process_probe_input,
+                        ) && should_probe_foreground_job(process_probe_input)
+                    };
 
                     let mut agent_changed = false;
                     if should_check_process {
@@ -3181,22 +3178,62 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_authority_skips_normal_process_probe() {
+    fn lifecycle_authority_skips_stable_routine_process_probe() {
         assert!(should_skip_process_probe_for_lifecycle_authority(
-            true, false, false
+            true,
+            ProcessProbeInput {
+                current_agent: Some(Agent::Pi),
+                elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED,
+                ..process_probe_input()
+            }
         ));
         assert!(!should_skip_process_probe_for_lifecycle_authority(
-            false, false, false
+            false,
+            ProcessProbeInput {
+                current_agent: Some(Agent::Pi),
+                elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED,
+                ..process_probe_input()
+            }
         ));
     }
 
     #[test]
     fn lifecycle_authority_preserves_process_exit_and_release_probes() {
         assert!(!should_skip_process_probe_for_lifecycle_authority(
-            true, true, false
+            true,
+            ProcessProbeInput {
+                current_agent: Some(Agent::Pi),
+                pending_foreground_shell_clear: true,
+                ..process_probe_input()
+            }
         ));
         assert!(!should_skip_process_probe_for_lifecycle_authority(
-            true, false, true
+            true,
+            ProcessProbeInput {
+                current_agent: Some(Agent::Pi),
+                suppressed_agent: Some(Agent::Pi),
+                ..process_probe_input()
+            }
+        ));
+    }
+
+    #[test]
+    fn lifecycle_authority_preserves_initial_and_foreground_group_change_probes() {
+        assert!(!should_skip_process_probe_for_lifecycle_authority(
+            true,
+            ProcessProbeInput {
+                current_agent: None,
+                has_process_probe: false,
+                ..process_probe_input()
+            }
+        ));
+        assert!(!should_skip_process_probe_for_lifecycle_authority(
+            true,
+            ProcessProbeInput {
+                current_agent: Some(Agent::Pi),
+                foreground_pgid: Some(43),
+                ..process_probe_input()
+            }
         ));
     }
 
