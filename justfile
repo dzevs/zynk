@@ -19,6 +19,16 @@ lint:
     cargo fmt --check
     cargo clippy --all-targets --locked -- -D warnings
 
+# Run the Windows target clippy from Unix/macOS to catch cfg(windows) compile + clippy
+# failures before the windows-latest CI job. NOTE: zynk's bundled C deps (sqlite-vec /
+# libsqlite3-sys, ADR 0006) need an MSVC-compatible archiver (`lib.exe`) to cross-compile
+# the build scripts, so this requires an MSVC C toolchain (clang-cl/llvm-lib or a Windows
+# host). It is intentionally NOT wired into `check` — the authoritative Windows runtime
+# check is the ci.yml windows-latest job. (mirrors herdr b7a504b)
+windows-lint:
+    rustup target add x86_64-pc-windows-msvc
+    LIBGHOSTTY_VT_SIMD=false cargo clippy --bin zynk --locked --target x86_64-pc-windows-msvc -- -D warnings
+
 # Run PR CI checks
 ci filter='all()': lint test-ts
     cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
