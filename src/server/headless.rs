@@ -4311,7 +4311,8 @@ next_tab = ""
     }
 
     #[test]
-    fn invalid_server_keybindings_do_not_cache_local_keybindings_after_settings_save() {
+    fn invalid_server_keybindings_apply_valid_subset_after_settings_save_without_caching_local_keybindings(
+    ) {
         let path = std::env::temp_dir().join(format!(
             "zynk-headless-invalid-settings-{}-{}.toml",
             std::process::id(),
@@ -4377,16 +4378,17 @@ next_tab = ""
         }));
         assert_eq!(
             server.app.state.prefix_code,
-            crossterm::event::KeyCode::Char('c')
+            crossterm::event::KeyCode::Char('b')
         );
-        assert!(server
+        assert!(!server
             .app
             .state
             .keybinds
             .new_workspace
             .bindings
             .iter()
-            .any(|binding| binding.label == "prefix+m"));
+            .any(|binding| binding.label == "prefix+n"));
+        assert!(server.app.state.keybinds.new_workspace.bindings.is_empty());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_file(path);
