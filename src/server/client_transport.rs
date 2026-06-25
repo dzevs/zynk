@@ -911,6 +911,9 @@ mod tests {
     fn client_writer_closes_queue_after_socket_write_failure() {
         let (client_stream, server_stream, _path) =
             local_stream_pair("client-writer-socket-failure");
+        // upstream 3366121: windows named pipes don't support I/O send timeouts; skip this
+        // setup on windows (the closed-client socket-write-failure close path still runs).
+        #[cfg(not(windows))]
         server_stream
             .set_send_timeout(Some(Duration::from_millis(100)))
             .expect("set test send timeout");
