@@ -381,6 +381,42 @@ fn devin_manifest_detects_idle_working_and_blocked_states() {
 }
 
 #[test]
+fn copilot_manifest_detects_ask_user_accept_prompt_and_ignores_bare_cancel_hint() {
+    // ask_user accept prompt: an esc-cancel hint AND an enter-action hint must
+    // both be present for the blocker. The new `enter accept` / `esc cancel`
+    // phrasings (upstream #725) now resolve to Blocked.
+    let accept_prompt = explain(
+        Agent::GithubCopilot,
+        "Allow Copilot to run this command?\n  $ rm tmp\n> Yes\n  No\nenter accept · esc cancel",
+    );
+    assert_eq!(accept_prompt.state, AgentState::Blocked);
+    assert!(accept_prompt.visible_blocker);
+    assert_eq!(
+        accept_prompt
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("selection_blocker")
+    );
+
+    let select_prompt = explain(
+        Agent::GithubCopilot,
+        "Pick a file to edit\n> src/main.rs\n  src/lib.rs\nenter to select · esc to cancel",
+    );
+    assert_eq!(select_prompt.state, AgentState::Blocked);
+    assert!(select_prompt.visible_blocker);
+
+    // A bare cancel hint with no enter-action line is the working spinner, not a
+    // selection blocker — the `all` gate must require the enter-family hint too.
+    let working_cancel = explain(
+        Agent::GithubCopilot,
+        "Thinking about your request...\nesc to cancel",
+    );
+    assert_eq!(working_cancel.state, AgentState::Working);
+    assert!(!working_cancel.visible_blocker);
+}
+
+#[test]
 fn manifest_validation_rejects_unknown_fields_empty_rules_invalid_regions_and_regexes() {
     assert!(parse_manifest(
         r#"
