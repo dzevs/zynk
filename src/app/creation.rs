@@ -61,31 +61,60 @@ impl App {
             .workspace_creation_source()
             .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
-        if let Err(e) = self.create_workspace_with_options(initial_cwd, true) {
+        if let Err(e) = self.create_workspace_with_events(initial_cwd, true) {
             error!(err = %e, "failed to create workspace");
             self.state.mode = Mode::Navigate;
         }
     }
 
+    /// Create a workspace and emit the workspace/tab/pane plugin lifecycle events.
+    /// The UI-driven create flows must mirror the socket API flows, which already
+    /// emit these events (port upstream d74ba8c).
+    pub(crate) fn create_workspace_with_events(
+        &mut self,
+        initial_cwd: PathBuf,
+        focus: bool,
+    ) -> std::io::Result<()> {
+        let ws_idx = self.create_workspace_with_options(initial_cwd, focus)?;
+        self.emit_workspace_open_events(ws_idx);
+        Ok(())
+    }
+
     pub(crate) fn create_tab(&mut self) {
         let custom_name = self.state.requested_new_tab_name.take();
+        let active_before = self.state.active;
         let follow_cwd = self
             .state
             .active
             .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         match self.create_tab_with_options(initial_cwd, true) {
-            Ok(tab_idx) => {
+            Ok(created_idx) => {
+                // With no active workspace, `create_tab_with_options` falls back to
+                // creating a fresh workspace; its returned index is then a workspace
+                // index and the new tab is the workspace's first tab (index 0).
+                let created_workspace = active_before.is_none();
+                let ws_idx = if created_workspace {
+                    Some(created_idx)
+                } else {
+                    self.state.active
+                };
+                let tab_idx = if created_workspace { 0 } else { created_idx };
                 if let Some(name) = custom_name {
-                    if let Some(ws) = self
-                        .state
-                        .active
-                        .and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
+                    if let Some(ws) =
+                        ws_idx.and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
                     {
                         if let Some(tab) = ws.tabs.get_mut(tab_idx) {
                             tab.set_custom_name(name);
                         }
                         self.schedule_session_save();
+                    }
+                }
+                if let Some(ws_idx) = ws_idx {
+                    if created_workspace {
+                        self.emit_workspace_open_events(ws_idx);
+                    } else {
+                        self.emit_tab_created_events(ws_idx, tab_idx);
                     }
                 }
             }

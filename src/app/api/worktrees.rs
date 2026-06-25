@@ -777,7 +777,7 @@ impl App {
         })
     }
 
-    fn emit_workspace_open_events(&mut self, ws_idx: usize) {
+    pub(crate) fn emit_workspace_open_events(&mut self, ws_idx: usize) {
         let workspace_info = self.workspace_info(ws_idx);
         let Some(tab) = self.tab_info(ws_idx, 0) else {
             return;
@@ -791,6 +791,25 @@ impl App {
                 workspace: workspace_info,
             },
         });
+        self.emit_event(EventEnvelope {
+            event: EventKind::TabCreated,
+            data: EventData::TabCreated { tab },
+        });
+        self.emit_event(EventEnvelope {
+            event: EventKind::PaneCreated,
+            data: EventData::PaneCreated { pane: root_pane },
+        });
+    }
+
+    /// Emit `TabCreated` + `PaneCreated` plugin lifecycle events for a tab added to an
+    /// existing workspace (no `WorkspaceCreated`, unlike `emit_workspace_open_events`).
+    pub(crate) fn emit_tab_created_events(&mut self, ws_idx: usize, tab_idx: usize) {
+        let Some(tab) = self.tab_info(ws_idx, tab_idx) else {
+            return;
+        };
+        let Some(root_pane) = self.root_pane_info(ws_idx, tab_idx) else {
+            return;
+        };
         self.emit_event(EventEnvelope {
             event: EventKind::TabCreated,
             data: EventData::TabCreated { tab },
@@ -1039,6 +1058,66 @@ mod tests {
         crate::worktree::run_worktree_command(&remove).unwrap();
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    // Port upstream d74ba8c: the UI-driven create flows must emit the same
+    // workspace/tab/pane plugin lifecycle events the socket API flows already emit.
+    #[tokio::test]
+    async fn ui_create_workspace_and_tab_emit_plugin_lifecycle_events() {
+        let event_hub = crate::api::EventHub::default();
+        let mut app = test_app_with_event_hub(event_hub.clone());
+        app.state.default_shell = test_shell().into();
+        app.state.mode = crate::app::Mode::Navigate;
+
+        // UI new-workspace flow emits WorkspaceCreated + TabCreated + PaneCreated.
+        app.create_workspace();
+        let after_workspace = event_hub.events_after(0);
+        assert!(
+            after_workspace
+                .iter()
+                .any(|(_, e)| matches!(e.data, EventData::WorkspaceCreated { .. })),
+            "ui create_workspace should emit WorkspaceCreated"
+        );
+        assert!(
+            after_workspace
+                .iter()
+                .any(|(_, e)| matches!(e.data, EventData::TabCreated { .. })),
+            "ui create_workspace should emit TabCreated"
+        );
+        assert!(
+            after_workspace
+                .iter()
+                .any(|(_, e)| matches!(e.data, EventData::PaneCreated { .. })),
+            "ui create_workspace should emit PaneCreated"
+        );
+
+        // UI new-tab flow on the existing workspace emits TabCreated + PaneCreated,
+        // and NOT a second WorkspaceCreated.
+        let baseline = event_hub.current_sequence();
+        app.create_tab();
+        let after_tab = event_hub.events_after(baseline);
+        assert!(
+            after_tab
+                .iter()
+                .any(|(_, e)| matches!(e.data, EventData::TabCreated { .. })),
+            "ui create_tab should emit TabCreated"
+        );
+        assert!(
+            after_tab
+                .iter()
+                .any(|(_, e)| matches!(e.data, EventData::PaneCreated { .. })),
+            "ui create_tab should emit PaneCreated"
+        );
+        assert!(
+            !after_tab
+                .iter()
+                .any(|(_, e)| matches!(e.data, EventData::WorkspaceCreated { .. })),
+            "ui create_tab on an existing workspace should not emit WorkspaceCreated"
+        );
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     #[test]
