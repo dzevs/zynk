@@ -24,7 +24,7 @@ lint:
 # libsqlite3-sys, ADR 0006) need an MSVC-compatible archiver (`lib.exe`) to cross-compile
 # the build scripts, so this requires an MSVC C toolchain (clang-cl/llvm-lib or a Windows
 # host). It is intentionally NOT wired into `check` — the authoritative Windows runtime
-# check is the ci.yml windows-latest job. (mirrors herdr b7a504b)
+# check is the ci.yml windows-latest job. (mirrors upstream b7a504b)
 windows-lint:
     rustup target add x86_64-pc-windows-msvc
     LIBGHOSTTY_VT_SIMD=false cargo clippy --bin zynk --locked --target x86_64-pc-windows-msvc -- -D warnings
