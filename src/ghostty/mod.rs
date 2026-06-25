@@ -601,7 +601,7 @@ impl Terminal {
     pub fn enable_kitty_graphics(&mut self) -> Result<(), Error> {
         install_png_decoder_once();
         let storage_limit = KITTY_IMAGE_STORAGE_LIMIT_BYTES;
-        let disable_medium = false;
+        let enable_medium = true;
         unsafe {
             ffi::ghostty_terminal_set(
                 self.raw,
@@ -612,19 +612,19 @@ impl Terminal {
             ffi::ghostty_terminal_set(
                 self.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE,
-                (&disable_medium as *const bool).cast(),
+                (&enable_medium as *const bool).cast(),
             )
             .into_result()?;
             ffi::ghostty_terminal_set(
                 self.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE,
-                (&disable_medium as *const bool).cast(),
+                (&enable_medium as *const bool).cast(),
             )
             .into_result()?;
             ffi::ghostty_terminal_set(
                 self.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM,
-                (&disable_medium as *const bool).cast(),
+                (&enable_medium as *const bool).cast(),
             )
             .into_result()?;
             ffi::ghostty_terminal_set(
@@ -697,16 +697,7 @@ impl Terminal {
     }
 
     pub fn mouse_tracking_enabled(&self) -> Result<bool, Error> {
-        let mut out = false;
-        unsafe {
-            ffi::ghostty_terminal_get(
-                self.raw,
-                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING,
-                (&mut out as *mut bool).cast(),
-            )
-            .into_result()?;
-        }
-        Ok(out)
+        self.get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING)
     }
 
     pub fn active_screen(&self) -> Result<ActiveScreen, Error> {
@@ -1045,6 +1036,15 @@ impl Terminal {
         let mut out = 0usize;
         unsafe {
             ffi::ghostty_terminal_get(self.raw, data, (&mut out as *mut usize).cast())
+                .into_result()?;
+        }
+        Ok(out)
+    }
+
+    fn get_bool(&self, data: ffi::GhosttyTerminalData) -> Result<bool, Error> {
+        let mut out = false;
+        unsafe {
+            ffi::ghostty_terminal_get(self.raw, data, (&mut out as *mut bool).cast())
                 .into_result()?;
         }
         Ok(out)
@@ -2700,6 +2700,58 @@ mod tests {
         assert_eq!(placements[0].data, [255, 0, 0, 255]);
         assert_eq!(placements[0].render.grid_cols, 10);
         assert_eq!(placements[0].render.grid_rows, 5);
+    }
+
+    #[test]
+    fn kitty_graphics_local_media_are_enabled() {
+        let mut terminal = Terminal::new(10, 5, 0).unwrap();
+        terminal.enable_kitty_graphics().unwrap();
+
+        assert!(terminal
+            .get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_FILE)
+            .unwrap());
+        assert!(terminal
+            .get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_TEMP_FILE)
+            .unwrap());
+        assert!(terminal
+            .get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_SHARED_MEM)
+            .unwrap());
+    }
+
+    #[test]
+    fn kitty_graphics_file_medium_rgba_placement_is_queryable() {
+        use base64::Engine;
+
+        let dir = std::env::temp_dir().join(format!(
+            "zynk-kitty-file-medium-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pixel.rgba");
+        std::fs::write(&path, [255, 0, 0, 255]).unwrap();
+
+        let mut terminal = Terminal::new(10, 5, 0).unwrap();
+        terminal.enable_kitty_graphics().unwrap();
+        terminal.resize(10, 5, 8, 16).unwrap();
+        let encoded_path =
+            base64::engine::general_purpose::STANDARD.encode(path.as_os_str().as_encoded_bytes());
+        let command =
+            format!("\x1b_Ga=T,f=32,t=f,i=9,p=4,s=1,v=1,c=10,r=5,q=2;{encoded_path}\x1b\\");
+        terminal.write(command.as_bytes());
+        terminal.write(b"\x1b_Ga=p,U=1,i=9,c=10,r=5\x1b\\");
+
+        let placements = terminal.kitty_image_placements().unwrap();
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].image_id, 9);
+        assert_eq!(placements[0].placement_id, 4);
+        assert_eq!(placements[0].image_width, 1);
+        assert_eq!(placements[0].image_height, 1);
+        assert_eq!(placements[0].format, KittyImageFormat::Rgba);
+        assert_eq!(placements[0].data, [255, 0, 0, 255]);
+        assert_eq!(placements[0].render.grid_cols, 10);
+        assert_eq!(placements[0].render.grid_rows, 5);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
