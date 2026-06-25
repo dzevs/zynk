@@ -79,8 +79,19 @@ impl Config {
         prefix_diag
             .into_iter()
             .chain(keybind_diags)
+            .chain(self.remote_image_paste_key().err())
             .chain(self.ui.sound.diagnostics())
             .collect()
+    }
+
+    pub(crate) fn remote_image_paste_key(&self) -> Result<Option<(KeyCode, KeyModifiers)>, String> {
+        let raw = self.keys.remote_image_paste.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        parse_key_combo(raw).map(Some).ok_or_else(|| {
+            format!("invalid keybinding: keys.remote_image_paste = {raw:?}; disabling binding")
+        })
     }
 
     pub fn live_keybinds(&self) -> Result<LiveKeybindConfig, Vec<String>> {
@@ -133,5 +144,20 @@ command = "lazygit"
         assert!(!profile.contains("lazygit"));
         assert!(!profile.contains("command ="));
         assert!(!profile.contains("[[keys.command]]"));
+    }
+
+    #[test]
+    fn remote_image_paste_key_defaults_to_ctrl_v() {
+        let config = Config::default();
+        assert_eq!(
+            config.remote_image_paste_key().unwrap(),
+            Some((KeyCode::Char('v'), KeyModifiers::CONTROL))
+        );
+    }
+
+    #[test]
+    fn remote_image_paste_key_can_be_disabled() {
+        let config: Config = toml::from_str("[keys]\nremote_image_paste = ''\n").unwrap();
+        assert_eq!(config.remote_image_paste_key().unwrap(), None);
     }
 }

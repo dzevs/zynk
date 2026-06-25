@@ -49,6 +49,16 @@ static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::ne
 // Client state
 // ---------------------------------------------------------------------------
 
+struct ClientLoopConfig {
+    sound_config: crate::config::SoundConfig,
+    mouse_scroll_lines: usize,
+    redraw_on_focus_gained: bool,
+    kitty_graphics_enabled: bool,
+    mouse_capture_active: bool,
+    #[cfg(unix)]
+    remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+}
+
 /// State tracking for the thin client.
 struct ClientState {
     /// Stateful semantic-frame encoder used when the server sends FrameData.
@@ -66,6 +76,9 @@ struct ClientState {
     /// Rows scrolled for one direct-attach wheel notch.
     #[cfg(unix)]
     mouse_scroll_lines: usize,
+    /// Local-client shortcut that sends a clipboard image to a remote zynk session.
+    #[cfg(unix)]
+    remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     /// Whether outer focus gain should force a full host-terminal redraw.
     redraw_on_focus_gained: bool,
 }
@@ -616,6 +629,11 @@ fn requested_render_encoding() -> RenderEncoding {
     }
 }
 
+#[cfg(unix)]
+fn is_remote_client_process() -> bool {
+    std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
+}
+
 fn requested_keybindings() -> ClientKeybindings {
     match std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR)
         .ok()
@@ -791,10 +809,20 @@ fn run_client_with_mode(
     let mouse_capture = loaded_config.config.ui.mouse_capture;
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
-    let sound_config = loaded_config.config.ui.sound;
     let direct_attach_requested = attach_request.is_some();
+    #[cfg(unix)]
+    let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
     let kitty_graphics_enabled =
         loaded_config.config.experimental.kitty_graphics && !direct_attach_requested;
+    let loop_config = ClientLoopConfig {
+        sound_config: loaded_config.config.ui.sound,
+        mouse_scroll_lines,
+        redraw_on_focus_gained,
+        kitty_graphics_enabled,
+        mouse_capture_active: mouse_capture,
+        #[cfg(unix)]
+        remote_image_paste_key,
+    };
 
     let socket_path = client_socket_path();
     crate::logging::startup("client");
@@ -892,11 +920,7 @@ fn run_client_with_mode(
             cols,
             rows,
             should_quit,
-            sound_config,
-            mouse_scroll_lines,
-            redraw_on_focus_gained,
-            kitty_graphics_enabled,
-            mouse_capture,
+            loop_config,
             negotiated_encoding,
             attach_escape,
         )
@@ -940,27 +964,25 @@ async fn run_client_loop(
     cols: u16,
     rows: u16,
     should_quit: Arc<AtomicBool>,
-    sound_config: crate::config::SoundConfig,
-    mouse_scroll_lines: usize,
-    redraw_on_focus_gained: bool,
-    kitty_graphics_enabled: bool,
-    mouse_capture_active: bool,
+    config: ClientLoopConfig,
     negotiated_encoding: RenderEncoding,
     attach_escape: Option<AttachEscapeState>,
 ) -> Result<(), ClientError> {
     #[cfg(windows)]
-    let _ = mouse_scroll_lines;
+    let _ = config.mouse_scroll_lines;
 
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
-        mouse_capture_active,
+        mouse_capture_active: config.mouse_capture_active,
         reported_size: (cols, rows),
-        sound_config,
-        kitty_graphics_enabled,
+        sound_config: config.sound_config,
+        kitty_graphics_enabled: config.kitty_graphics_enabled,
         attach_escape,
         #[cfg(unix)]
-        mouse_scroll_lines,
-        redraw_on_focus_gained,
+        mouse_scroll_lines: config.mouse_scroll_lines,
+        #[cfg(unix)]
+        remote_image_paste_key: config.remote_image_paste_key,
+        redraw_on_focus_gained: config.redraw_on_focus_gained,
     };
     debug!(?negotiated_encoding, "client render encoding active");
 
@@ -983,6 +1005,7 @@ async fn run_client_loop(
     // Spawn the resize poller thread.
     let resize_quit = should_quit.clone();
     let resize_tx = event_tx.clone();
+    let kitty_graphics_enabled = state.kitty_graphics_enabled;
     std::thread::spawn(move || {
         resize_poll_loop(resize_tx, cols, rows, kitty_graphics_enabled, &resize_quit);
     });
@@ -1070,7 +1093,7 @@ async fn run_client_loop(
                     }
                     data
                 };
-                if should_bridge_clipboard_image_paste(&data) {
+                if should_bridge_clipboard_image_paste(&data, state.remote_image_paste_key) {
                     if let Some(image) = crate::platform::read_clipboard_image() {
                         if image.bytes.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
                             warn!(
@@ -1187,6 +1210,8 @@ async fn run_client_loop(
                     reload_local_client_config(
                         &mut state.sound_config,
                         &mut state.redraw_on_focus_gained,
+                        #[cfg(unix)]
+                        &mut state.remote_image_paste_key,
                     );
                 }
                 ServerMessage::MouseCapture { enabled } => {
@@ -1290,17 +1315,44 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
 // Notifications
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
+fn client_remote_image_paste_key(
+    config: &crate::config::Config,
+) -> Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
+    if !is_remote_client_process() {
+        return None;
+    }
+
+    match config.remote_image_paste_key() {
+        Ok(key) => key,
+        Err(diagnostic) => {
+            warn!(diagnostic = %diagnostic, "local remote image paste key config diagnostic");
+            None
+        }
+    }
+}
+
 fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
     redraw_on_focus_gained: &mut bool,
+    #[cfg(unix)] remote_image_paste_key: &mut Option<(
+        crossterm::event::KeyCode,
+        crossterm::event::KeyModifiers,
+    )>,
 ) {
     match crate::config::load_live_config() {
         Ok(loaded) => {
             for diagnostic in loaded.config.ui.sound.diagnostics() {
                 warn!(diagnostic = %diagnostic, "local sound config diagnostic");
             }
+            #[cfg(unix)]
+            let loaded_remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
             *sound_config = loaded.config.ui.sound;
             *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
+            #[cfg(unix)]
+            {
+                *remote_image_paste_key = loaded_remote_image_paste_key;
+            }
             debug!("reloaded local client config");
         }
         Err(diagnostics) => {
@@ -1376,18 +1428,24 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
 }
 
 #[cfg(unix)]
-fn should_bridge_clipboard_image_paste(data: &[u8]) -> bool {
+fn should_bridge_clipboard_image_paste(
+    data: &[u8],
+    remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+) -> bool {
     if data == b"\x1b[200~\x1b[201~" {
         return true;
     }
+
+    let Some(remote_image_paste_key) = remote_image_paste_key else {
+        return false;
+    };
 
     let events = crate::raw_input::parse_raw_input_bytes_sync(data);
     matches!(
         events.as_slice(),
         [crate::raw_input::RawInputEvent::Key(key)]
             if key.kind == crossterm::event::KeyEventKind::Press
-                && key.modifiers == crossterm::event::KeyModifiers::CONTROL
-                && matches!(key.code, crossterm::event::KeyCode::Char('v' | 'V'))
+                && crate::config::terminal_key_matches_combo(*key, remote_image_paste_key)
     )
 }
 
@@ -1668,14 +1726,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn clipboard_image_paste_bridge_triggers_on_ctrl_v_and_empty_paste() {
-        assert!(should_bridge_clipboard_image_paste(&[0x16]));
-        assert!(should_bridge_clipboard_image_paste(b"\x1b[118;5u"));
-        assert!(should_bridge_clipboard_image_paste(b"\x1b[200~\x1b[201~"));
-        assert!(!should_bridge_clipboard_image_paste(
-            b"\x1b[200~text\x1b[201~"
+    fn clipboard_image_paste_bridge_triggers_on_configured_key_and_empty_paste() {
+        let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
+        assert!(should_bridge_clipboard_image_paste(&[0x16], Some(ctrl_v)));
+        assert!(should_bridge_clipboard_image_paste(
+            b"\x1b[118;5u",
+            Some(ctrl_v)
         ));
-        assert!(!should_bridge_clipboard_image_paste(b"v"));
+        assert!(should_bridge_clipboard_image_paste(
+            b"\x1b[200~\x1b[201~",
+            None
+        ));
+        assert!(!should_bridge_clipboard_image_paste(
+            b"\x1b[200~text\x1b[201~",
+            Some(ctrl_v)
+        ));
+        assert!(!should_bridge_clipboard_image_paste(&[0x16], None));
+        assert!(!should_bridge_clipboard_image_paste(b"v", Some(ctrl_v)));
     }
 
     #[test]
@@ -2079,8 +2146,15 @@ mod tests {
         let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
         let mut sound_config = crate::config::SoundConfig::default();
         let mut redraw_on_focus_gained = true;
+        #[cfg(unix)]
+        let mut remote_image_paste_key = None;
 
-        reload_local_client_config(&mut sound_config, &mut redraw_on_focus_gained);
+        reload_local_client_config(
+            &mut sound_config,
+            &mut redraw_on_focus_gained,
+            #[cfg(unix)]
+            &mut remote_image_paste_key,
+        );
 
         assert!(!redraw_on_focus_gained);
         let _ = std::fs::remove_file(path);
