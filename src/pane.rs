@@ -243,14 +243,6 @@ struct AgentDetectionPresence {
     consecutive_misses: u8,
 }
 
-fn should_clear_agent_for_foreground_shell(
-    previous_agent: Option<Agent>,
-    new_agent: Option<Agent>,
-    foreground_is_pane_shell: bool,
-) -> bool {
-    previous_agent.is_some() && new_agent.is_none() && foreground_is_pane_shell
-}
-
 #[cfg(unix)]
 fn usable_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
     crate::platform::process_cwd(pid).filter(|cwd| cwd.is_absolute() && cwd.is_dir())
@@ -289,19 +281,22 @@ fn foreground_shell_agent_action(
     foreground_is_pane_shell: bool,
     process_exit_reported: bool,
 ) -> ForegroundShellAgentAction {
-    if !should_clear_agent_for_foreground_shell(previous_agent, new_agent, foreground_is_pane_shell)
-    {
+    if previous_agent.is_none() || new_agent.is_some() {
         return ForegroundShellAgentAction::ObserveProbe;
     }
 
-    // Do not clear identity immediately. First publish an idle process-exit
-    // transition for the previous agent so notifications and wait-agent callers
-    // observe completion before the pane becomes unknown.
     if process_exit_reported {
-        ForegroundShellAgentAction::ClearAgent
-    } else {
-        ForegroundShellAgentAction::ReportProcessExit
+        return ForegroundShellAgentAction::ClearAgent;
     }
+
+    if foreground_is_pane_shell {
+        // Do not clear identity immediately. First publish an idle process-exit
+        // transition for the previous agent so notifications and wait-agent callers
+        // observe completion before the pane becomes unknown.
+        return ForegroundShellAgentAction::ReportProcessExit;
+    }
+
+    ForegroundShellAgentAction::ObserveProbe
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -421,23 +416,108 @@ struct ProcessProbeResult {
     process_name: Option<String>,
 }
 
-fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessProbeResult {
-    if let Some(job) = foreground_pgid.and_then(crate::detect::foreground_group_leader_job) {
-        if let Some((agent, process_name)) = crate::detect::identify_agent_in_job(&job) {
-            return ProcessProbeResult {
-                process_group_id: Some(job.process_group_id),
-                foreground_is_pane_shell: job.processes.iter().any(|p| p.pid == pid),
-                agent: Some(agent),
-                process_name: Some(process_name),
-            };
+fn agent_hint_for_foreground_job_members(
+    job: &crate::platform::ForegroundJob,
+    read_hint: impl Fn(u32) -> Option<Agent>,
+) -> Option<Agent> {
+    read_hint(job.process_group_id)
+        .or_else(|| agent_hint_for_non_leader_foreground_job_members(job, read_hint))
+}
+
+fn agent_hint_for_non_leader_foreground_job_members(
+    job: &crate::platform::ForegroundJob,
+    read_hint: impl Fn(u32) -> Option<Agent>,
+) -> Option<Agent> {
+    job.processes
+        .iter()
+        .filter(|process| process.pid != job.process_group_id)
+        .find_map(|process| read_hint(process.pid))
+}
+
+fn identify_process_group_leader_in_job(
+    job: &crate::platform::ForegroundJob,
+) -> Option<(Agent, String)> {
+    let leader = job
+        .processes
+        .iter()
+        .find(|process| process.pid == job.process_group_id)?;
+    let leader_job = crate::platform::ForegroundJob {
+        process_group_id: job.process_group_id,
+        processes: vec![leader.clone()],
+    };
+    crate::detect::identify_agent_in_job(&leader_job)
+}
+
+fn process_probe_result(
+    job: &crate::platform::ForegroundJob,
+    pid: u32,
+    agent: Agent,
+    process_name: String,
+) -> ProcessProbeResult {
+    ProcessProbeResult {
+        process_group_id: Some(job.process_group_id),
+        foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
+        agent: Some(agent),
+        process_name: Some(process_name),
+    }
+}
+
+fn hinted_process_probe_result(
+    job: &crate::platform::ForegroundJob,
+    pid: u32,
+    read_hint: impl Fn(u32) -> Option<Agent>,
+) -> Option<ProcessProbeResult> {
+    let agent = agent_hint_for_foreground_job_members(job, read_hint)?;
+    Some(process_probe_result(
+        job,
+        pid,
+        agent,
+        crate::detect::agent_label(agent).to_string(),
+    ))
+}
+
+fn probe_foreground_process_from_jobs(
+    pid: u32,
+    foreground_pgid: Option<u32>,
+    leader_job: Option<crate::platform::ForegroundJob>,
+    foreground_job: impl FnOnce() -> Option<crate::platform::ForegroundJob>,
+    read_hint: impl Fn(u32) -> Option<Agent> + Copy,
+) -> ProcessProbeResult {
+    if let Some(job) = leader_job.as_ref() {
+        if let Some(hinted) = hinted_process_probe_result(job, pid, read_hint) {
+            return hinted;
+        }
+        if let Some((agent, process_name)) = crate::detect::identify_agent_in_job(job) {
+            return process_probe_result(job, pid, agent, process_name);
         }
     }
 
-    if let Some(job) = crate::detect::foreground_job(pid) {
-        let identified = crate::detect::identify_agent_in_job(&job);
+    let foreground_job = foreground_job();
+    if let Some(job) = foreground_job.as_ref() {
+        if let Some(agent) = read_hint(job.process_group_id) {
+            return process_probe_result(
+                job,
+                pid,
+                agent,
+                crate::detect::agent_label(agent).to_string(),
+            );
+        }
+        if let Some((agent, process_name)) = identify_process_group_leader_in_job(job) {
+            return process_probe_result(job, pid, agent, process_name);
+        }
+        if let Some(agent) = agent_hint_for_non_leader_foreground_job_members(job, read_hint) {
+            return process_probe_result(
+                job,
+                pid,
+                agent,
+                crate::detect::agent_label(agent).to_string(),
+            );
+        }
+
+        let identified = crate::detect::identify_agent_in_job(job);
         return ProcessProbeResult {
             process_group_id: Some(job.process_group_id),
-            foreground_is_pane_shell: job.processes.iter().any(|p| p.pid == pid),
+            foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
             agent: identified.as_ref().map(|(agent, _)| *agent),
             process_name: identified.map(|(_, process_name)| process_name),
         };
@@ -449,6 +529,16 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
         agent: None,
         process_name: None,
     }
+}
+
+fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessProbeResult {
+    probe_foreground_process_from_jobs(
+        pid,
+        foreground_pgid,
+        foreground_pgid.and_then(crate::detect::foreground_group_leader_job),
+        || crate::detect::foreground_job(pid),
+        crate::platform::process_agent_hint,
+    )
 }
 
 #[cfg(unix)]
@@ -3058,15 +3148,6 @@ mod tests {
     }
 
     #[test]
-    fn foreground_shell_without_agent_is_immediate_clear_signal() {
-        assert!(should_clear_agent_for_foreground_shell(
-            Some(Agent::Claude),
-            None,
-            true
-        ));
-    }
-
-    #[test]
     fn foreground_shell_reports_process_exit_before_clearing_agent() {
         assert_eq!(
             foreground_shell_agent_action(Some(Agent::Codex), None, true, false),
@@ -3080,20 +3161,151 @@ mod tests {
 
     #[test]
     fn unknown_non_shell_foreground_job_is_not_immediate_clear_signal() {
-        assert!(!should_clear_agent_for_foreground_shell(
-            Some(Agent::Claude),
-            None,
-            false
-        ));
+        assert_eq!(
+            foreground_shell_agent_action(Some(Agent::Claude), None, false, false),
+            ForegroundShellAgentAction::ObserveProbe
+        );
+    }
+
+    #[test]
+    fn reported_process_exit_clears_before_unknown_foreground_probe() {
+        assert_eq!(
+            foreground_shell_agent_action(Some(Agent::Claude), None, false, true),
+            ForegroundShellAgentAction::ClearAgent
+        );
     }
 
     #[test]
     fn foreground_agent_job_is_not_clear_signal() {
-        assert!(!should_clear_agent_for_foreground_shell(
-            Some(Agent::Claude),
-            Some(Agent::OpenCode),
-            true
-        ));
+        assert_eq!(
+            foreground_shell_agent_action(Some(Agent::Claude), Some(Agent::OpenCode), true, false),
+            ForegroundShellAgentAction::ObserveProbe
+        );
+    }
+
+    fn foreground_process(pid: u32, name: &str) -> crate::platform::ForegroundProcess {
+        crate::platform::ForegroundProcess {
+            pid,
+            name: name.to_string(),
+            argv0: None,
+            argv: None,
+            cmdline: None,
+        }
+    }
+
+    #[test]
+    fn foreground_agent_hint_accepts_pane_shell_environment() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 42,
+            processes: vec![foreground_process(42, "bash")],
+        };
+
+        assert_eq!(
+            agent_hint_for_foreground_job_members(&job, |pid| {
+                (pid == 42).then_some(Agent::Claude)
+            }),
+            Some(Agent::Claude)
+        );
+    }
+
+    #[test]
+    fn foreground_agent_hint_accepts_non_leader_foreground_process_environment() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 99,
+            processes: vec![
+                foreground_process(99, "fence"),
+                foreground_process(100, "pi"),
+            ],
+        };
+
+        assert_eq!(
+            agent_hint_for_foreground_job_members(&job, |pid| {
+                (pid == 100).then_some(Agent::Codex)
+            }),
+            Some(Agent::Codex)
+        );
+    }
+
+    #[test]
+    fn foreground_agent_hint_wins_over_process_name_detection() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 99,
+            processes: vec![foreground_process(99, "codex")],
+        };
+
+        let result = probe_foreground_process_from_jobs(
+            42,
+            Some(99),
+            Some(job),
+            || None,
+            |pid| (pid == 99).then_some(Agent::Claude),
+        );
+
+        assert_eq!(result.agent, Some(Agent::Claude));
+        assert_eq!(result.process_name.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn foreground_agent_hint_on_inherited_child_environment_is_authoritative() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 99,
+            processes: vec![foreground_process(99, "vim")],
+        };
+
+        let result = probe_foreground_process_from_jobs(
+            42,
+            Some(99),
+            None,
+            || Some(job),
+            |pid| (pid == 99).then_some(Agent::Claude),
+        );
+
+        assert_eq!(result.agent, Some(Agent::Claude));
+        assert_eq!(result.process_name.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn non_leader_agent_hint_does_not_override_identifiable_leader() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 99,
+            processes: vec![
+                foreground_process(99, "codex"),
+                foreground_process(100, "vim"),
+            ],
+        };
+
+        let result = probe_foreground_process_from_jobs(
+            42,
+            Some(99),
+            None,
+            || Some(job),
+            |pid| (pid == 100).then_some(Agent::Claude),
+        );
+
+        assert_eq!(result.agent, Some(Agent::Codex));
+        assert_eq!(result.process_name.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn non_leader_agent_hint_wins_when_leader_is_unidentified() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 99,
+            processes: vec![
+                foreground_process(99, "some_vm"),
+                foreground_process(100, "vim"),
+            ],
+        };
+
+        let result = probe_foreground_process_from_jobs(
+            42,
+            Some(99),
+            None,
+            || Some(job),
+            |pid| (pid == 100).then_some(Agent::Claude),
+        );
+
+        assert_eq!(result.agent, Some(Agent::Claude));
+        assert_eq!(result.process_name.as_deref(), Some("claude"));
     }
 
     fn process_probe_input() -> ProcessProbeInput {

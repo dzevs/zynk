@@ -121,6 +121,11 @@ mod fallback;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use fallback::*;
 
+#[cfg(not(target_os = "linux"))]
+pub fn process_agent_hint(_pid: u32) -> Option<crate::detect::Agent> {
+    None
+}
+
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug)]
 pub(crate) struct InputSourceRestore;
