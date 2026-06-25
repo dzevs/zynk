@@ -100,7 +100,7 @@ const COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS: [&str; 9] = [
 ];
 const DEVIN_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 const DEVIN_HOOK_ASSET: &str = include_str!("assets/devin/zynk-agent-state.sh");
-const DEVIN_INTEGRATION_VERSION: u32 = 1;
+const DEVIN_INTEGRATION_VERSION: u32 = 2;
 const DEVIN_HOOK_EVENTS: [(&str, &str); 6] = [
     ("SessionStart", "session"),
     ("UserPromptSubmit", "session"),
