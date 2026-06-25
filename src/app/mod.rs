@@ -115,6 +115,8 @@ pub struct App {
     pub(crate) next_animation_tick: Option<Instant>,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
+    pub(crate) update_version_check_enabled: bool,
+    pub(crate) update_manifest_check_enabled: bool,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
@@ -192,6 +194,10 @@ fn repeat_key_identity(
 
 fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
+}
+
+fn background_update_check_enabled(no_session: bool, check_enabled: bool) -> bool {
+    auto_updates_enabled(no_session) && check_enabled
 }
 
 fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginRegistry {
@@ -652,9 +658,15 @@ impl App {
         // Background auto-update is disabled in monolithic no-session mode
         // and in debug/test builds so local development never mutates the
         // running binary out from under spawned test processes.
-        if auto_updates_enabled(no_session) {
+        let version_check_enabled =
+            background_update_check_enabled(no_session, config.update.version_check);
+        let manifest_check_enabled =
+            background_update_check_enabled(no_session, config.update.manifest_check);
+        if version_check_enabled {
             let update_tx = event_tx.clone();
             std::thread::spawn(move || crate::update::auto_update(update_tx));
+        }
+        if manifest_check_enabled {
             let manifest_update_tx = event_tx.clone();
             std::thread::spawn(move || {
                 crate::detect::manifest_update::auto_update(manifest_update_tx)
@@ -685,10 +697,12 @@ impl App {
             last_pane_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_animation_tick: None,
-            next_auto_update_check: auto_updates_enabled(no_session)
+            next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
-            next_agent_manifest_update_check: auto_updates_enabled(no_session)
+            next_agent_manifest_update_check: manifest_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
+            update_version_check_enabled: config.update.version_check,
+            update_manifest_check_enabled: config.update.manifest_check,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
@@ -741,13 +755,15 @@ impl App {
         let pane_id_aliases = crate::persist::handoff_pane_aliases(snapshot, &workspaces);
 
         app.no_session = false;
-        if auto_updates_enabled(app.no_session) {
-            let now = Instant::now();
+        let now = Instant::now();
+        if background_update_check_enabled(app.no_session, app.update_version_check_enabled) {
             app.next_auto_update_check = app
                 .state
                 .update_available
                 .is_none()
                 .then_some(now + AUTO_UPDATE_CHECK_INTERVAL);
+        }
+        if background_update_check_enabled(app.no_session, app.update_manifest_check_enabled) {
             app.next_agent_manifest_update_check = Some(now + AUTO_UPDATE_CHECK_INTERVAL);
         }
         app.state.detach_exits = false;
@@ -1358,6 +1374,37 @@ impl App {
 
         if !invalid_section("advanced") {
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
+        }
+
+        if !invalid_section("update") {
+            let now = Instant::now();
+            let previous_version_check_enabled = self.update_version_check_enabled;
+            let previous_manifest_check_enabled = self.update_manifest_check_enabled;
+            self.update_version_check_enabled = config.update.version_check;
+            self.update_manifest_check_enabled = config.update.manifest_check;
+
+            if !self.update_version_check_enabled {
+                self.next_auto_update_check = None;
+            } else if !previous_version_check_enabled
+                && background_update_check_enabled(
+                    self.no_session,
+                    self.update_version_check_enabled,
+                )
+                && self.state.update_available.is_none()
+            {
+                self.next_auto_update_check = Some(now);
+            }
+
+            if !self.update_manifest_check_enabled {
+                self.next_agent_manifest_update_check = None;
+            } else if !previous_manifest_check_enabled
+                && background_update_check_enabled(
+                    self.no_session,
+                    self.update_manifest_check_enabled,
+                )
+            {
+                self.next_agent_manifest_update_check = Some(now);
+            }
         }
 
         if !invalid_section("terminal") {
@@ -2348,12 +2395,14 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"zynk\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"zynk\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
+        app.next_auto_update_check = Some(Instant::now());
+        app.next_agent_manifest_update_check = Some(Instant::now());
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
@@ -2384,6 +2433,10 @@ mod tests {
             app.state.new_terminal_cwd,
             crate::config::NewTerminalCwdConfig::Home
         );
+        assert!(!app.update_version_check_enabled);
+        assert!(!app.update_manifest_check_enabled);
+        assert!(app.next_auto_update_check.is_none());
+        assert!(app.next_agent_manifest_update_check.is_none());
         assert!(app.state.switch_ascii_input_source_in_prefix);
         assert!(app.state.config_diagnostic.is_none());
         let toast = app.state.toast.as_ref().unwrap();

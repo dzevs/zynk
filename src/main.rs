@@ -152,9 +152,15 @@ const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # new_cwd = "follow"
 
 [update]
-# Update channel used by background checks and `zynk update`.
+# Update channel used by background version checks and `zynk update`.
 # Use "stable" for normal releases or "preview" for opt-in preview builds.
 # channel = "stable"
+
+# Check for new zynk versions in the background.
+# version_check = true
+
+# Check for remote agent-detection manifest updates in the background.
+# manifest_check = true
 
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")

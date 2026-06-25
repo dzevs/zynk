@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crossterm::terminal;
 
 use super::{
-    auto_updates_enabled, repeat_key_identity, App, Mode, ANIMATION_INTERVAL,
+    background_update_check_enabled, repeat_key_identity, App, Mode, ANIMATION_INTERVAL,
     AUTO_UPDATE_CHECK_INTERVAL, GIT_REMOTE_STATUS_REFRESH_INTERVAL, MIN_RENDER_INTERVAL,
     RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
 };
@@ -438,7 +438,7 @@ impl App {
     }
 
     pub(crate) fn run_auto_update_check(&mut self) {
-        if !auto_updates_enabled(self.no_session) {
+        if !background_update_check_enabled(self.no_session, self.update_version_check_enabled) {
             self.next_auto_update_check = None;
             return;
         }
@@ -458,7 +458,7 @@ impl App {
     }
 
     pub(crate) fn run_agent_manifest_update_check(&mut self) {
-        if !auto_updates_enabled(self.no_session) {
+        if !background_update_check_enabled(self.no_session, self.update_manifest_check_enabled) {
             self.next_agent_manifest_update_check = None;
             return;
         }
