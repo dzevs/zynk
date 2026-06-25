@@ -3,6 +3,7 @@
 /result-*
 /vendor/libghostty-vt/zig-pkg/
 __pycache__/
+node_modules/
 *.pyc
 *.swp
 *.swo
@@ -12,14 +13,18 @@ __pycache__/
 # Maintainer-private paths — never committed to the public repo.
 # Enforced by scripts/check_public_tree.py (structural gate) + .gitleaks.toml (content gate).
 /.codex/
-/.pi/
-/.zed/
+# .pi / .zed are allowlisted (only the committed tooling); ignore all other private state under them.
+/.pi/*
+!/.pi/prompts/
+!/.pi/extensions/
+/.zed/*
+!/.zed/settings.json
 /.local/
 /backlog/
 /website/
 /docs/next/
 /docs/superpowers/
-/WORKFLOW.md
+/.claude/settings.local.json
 /CLAUDE.local.md
 /docs/zynk/plans/
 /docs/zynk/release-3.0.0-prep.md

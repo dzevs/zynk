@@ -20,6 +20,9 @@ jobs:
       - name: Tracked-path gate (no forbidden private path is tracked)
         run: python3 scripts/check_public_tree.py
 
+      - name: Scrub gate (no product-specific reference terms in copied tooling/docs)
+        run: python3 scripts/scrub_check.py
+
       - name: Install gitleaks 8.30.0
         run: |
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_x64.tar.gz -o /tmp/gitleaks.tgz
@@ -27,5 +30,5 @@ jobs:
           sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
 
-      - name: Content gate (no private strings)
-        run: gitleaks detect --no-git --config .gitleaks.toml --source . --redact
+      - name: Content gate (no private strings, tracked tree)
+        run: bash scripts/gitleaks_tracked.sh

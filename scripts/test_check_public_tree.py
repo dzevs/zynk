@@ -92,5 +92,64 @@ class StagedGateIntegrationTests(unittest.TestCase):
         self.assertIn("pyc", (r.stdout + r.stderr).lower())
 
 
+class ReorgPathPolicyTests(unittest.TestCase):
+    """docs+skills reorg: WORKFLOW.md becomes committed; committed agent tooling is allowed; only
+    settings.local.json is newly forbidden; all private state stays forbidden."""
+
+    def test_workflow_md_now_allowed(self):
+        self.assertEqual(m.violations(["WORKFLOW.md"]), [])
+
+    def test_settings_local_forbidden(self):
+        self.assertEqual([f for f, _ in m.violations([".claude/settings.local.json"])],
+                         [".claude/settings.local.json"])
+
+    def test_committed_agent_tooling_allowed(self):
+        self.assertEqual(m.violations([
+            ".claude/skills/x/SKILL.md", ".claude/commands/pr.md", ".claude/settings.json",
+            ".agents/skills/y/SKILL.md", ".agents/agents/code-reviewer.md", ".agents/references/z.md",
+            "docs/styleguides/STYLEGUIDE.md", "docs/styles/zynk/x.yml",
+            ".pi/prompts/p.md", ".pi/extensions/x/index.ts", ".zed/settings.json"]), [])
+
+    def test_private_state_still_forbidden(self):
+        for p in [".codex/sessions/a.jsonl", ".pi/cache/refs.json", ".pi/private/state.json",
+                  ".zed/secret.json", ".zed/tasks.json", ".local/x", "CLAUDE.local.md",
+                  "docs/superpowers/specs/x.md", "docs/next/x.md", "website/i.html",
+                  "docs/zynk/plans/p.md"]:
+            self.assertTrue(m.violations([p]), p)
+
+
+class SymlinkCliTests(unittest.TestCase):  # real-git: a tracked symlink target is uncontrolled public metadata
+    TARGET = "/home" + "/zeus/secret"  # split so this test file itself stays gate-clean
+
+    def _repo(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(["git", "-C", str(d), "config", "user.email", "t@example.com"], check=True)
+        subprocess.run(["git", "-C", str(d), "config", "user.name", "t"], check=True)
+        return d
+
+    def _run(self, d, *args):
+        return subprocess.run(["python3", SCRIPT, *args], cwd=d).returncode
+
+    def test_staged_symlink_forbidden(self):
+        d = self._repo()
+        (d / "private-link").symlink_to(self.TARGET)
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        self.assertEqual(self._run(d, "--staged"), 1, "a staged symlink must fail the structural gate")
+
+    def test_committed_symlink_forbidden(self):
+        d = self._repo()
+        (d / "private-link").symlink_to(self.TARGET)
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "x"], check=True)
+        self.assertEqual(self._run(d), 1, "a committed symlink must fail the no-arg/CI gate")
+
+    def test_regular_file_passes(self):
+        d = self._repo()
+        (d / "README.md").write_text("clean public file\n")
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        self.assertEqual(self._run(d, "--staged"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -610,6 +610,19 @@ fn current_checkout_root() -> &'static Path {
 }
 
 fn is_test_zynk_binary(path: &Path) -> bool {
+    // The replacement server runs the binary this integration test was built against
+    // (CARGO_BIN_EXE_zynk), which lives under the active CARGO_TARGET_DIR. An isolated
+    // dev/CI target sits OUTSIDE the checkout root (e.g. /tmp/.../debug/zynk), so the
+    // checkout-root check alone wrongly rejects it and replacement-server discovery fails.
+    let test_bin = Path::new(env!("CARGO_BIN_EXE_zynk"));
+    if path == test_bin
+        || matches!(
+            (path.canonicalize(), test_bin.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        )
+    {
+        return true;
+    }
     path.ends_with("target/debug/zynk") && path.starts_with(current_checkout_root())
 }
 
@@ -738,6 +751,17 @@ mod tests {
         assert!(
             is_test_zynk_binary(&binary),
             "current checkout debug binary should be considered test-owned"
+        );
+    }
+
+    #[test]
+    fn test_binary_matcher_accepts_cargo_bin_exe_under_isolated_target() {
+        // Under an isolated CARGO_TARGET_DIR the built binary lives OUTSIDE the checkout
+        // root; the matcher must still recognise it as test-owned. Regression guard for the
+        // replacement-server discovery failure under the repo's mandatory isolated-target rule.
+        assert!(
+            is_test_zynk_binary(Path::new(env!("CARGO_BIN_EXE_zynk"))),
+            "the CARGO_BIN_EXE_zynk binary must be test-owned even outside the checkout root"
         );
     }
 
