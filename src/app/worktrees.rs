@@ -530,10 +530,13 @@ impl App {
                     "HEAD",
                 )
             });
-            let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(WorktreeAddResult {
-                path,
-                result,
-            }));
+            let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(Box::new(
+                WorktreeAddResult {
+                    path,
+                    api_request: None,
+                    result,
+                },
+            )));
         });
     }
 
@@ -587,31 +590,42 @@ impl App {
             return;
         };
 
-        #[cfg(windows)]
-        if let Some(ws_idx) = self
-            .state
-            .workspaces
-            .iter()
-            .position(|ws| ws.id == workspace_id)
-        {
-            self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
+        if Self::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(force) {
+            if let Some(ws_idx) = self
+                .state
+                .workspaces
+                .iter()
+                .position(|ws| ws.id == workspace_id)
+            {
+                self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
+            }
         }
 
         let command = crate::worktree::build_worktree_remove_command(&repo_root, &path, force);
         tracing::info!(workspace_id = %workspace_id, path = %path.display(), force, "starting git worktree remove");
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = crate::worktree::run_worktree_command(&command);
-            let _ =
-                event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(WorktreeRemoveResult {
+            let result = crate::worktree::run_worktree_remove_command_with_recovery(
+                &command, &repo_root, &path, force,
+            );
+            let _ = event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(Box::new(
+                WorktreeRemoveResult {
                     workspace_id,
                     path,
+                    workspace: None,
+                    forced: force,
+                    api_request: None,
                     result,
-                }));
+                },
+            )));
         });
     }
 
     pub(crate) fn handle_worktree_add_finished(&mut self, result: WorktreeAddResult) {
+        if result.api_request.is_some() {
+            self.handle_api_worktree_add_finished(result);
+            return;
+        }
         let Some(create) = &mut self.state.worktree_create else {
             return;
         };
@@ -682,6 +696,10 @@ impl App {
         }
     }
     pub(crate) fn handle_worktree_remove_finished(&mut self, result: WorktreeRemoveResult) {
+        if result.api_request.is_some() {
+            self.handle_api_worktree_remove_finished(result);
+            return;
+        }
         let Some(remove) = &mut self.state.worktree_remove else {
             return;
         };
@@ -734,7 +752,15 @@ impl App {
         }
     }
 
-    #[cfg(windows)]
+    /// Whether terminal runtimes inside the checkout must be torn down before
+    /// removal: always on a forced remove (kill processes holding the dir), and
+    /// always on Windows (open handles block directory deletion). (upstream 46a2b25)
+    pub(crate) fn should_shutdown_workspace_terminal_runtimes_for_worktree_remove(
+        force: bool,
+    ) -> bool {
+        force || cfg!(windows)
+    }
+
     pub(crate) fn shutdown_workspace_terminal_runtimes_for_worktree_remove(
         &mut self,
         ws_idx: usize,
@@ -744,7 +770,7 @@ impl App {
                 tracing::debug!(
                     workspace_index = ws_idx,
                     terminal_id = %terminal_id,
-                    "shutting down terminal runtime before Windows worktree removal"
+                    "shutting down terminal runtime before worktree removal"
                 );
                 runtime.shutdown();
             }
@@ -1348,6 +1374,9 @@ mod tests {
         app.handle_worktree_remove_finished(WorktreeRemoveResult {
             workspace_id: "ws".into(),
             path,
+            workspace: None,
+            forced: false,
+            api_request: None,
             result: Err(
                 "fatal: '/w/zynk/dirty' contains modified or untracked files, use --force to delete it"
                     .into(),
@@ -1376,6 +1405,9 @@ mod tests {
         app.handle_worktree_remove_finished(WorktreeRemoveResult {
             workspace_id: "ws".into(),
             path,
+            workspace: None,
+            forced: false,
+            api_request: None,
             result: Err("fatal: '/w/zynk/missing' is not a working tree".into()),
         });
 
@@ -1430,7 +1462,7 @@ mod tests {
                     assert_eq!(result.workspace_id, workspace_id);
                     assert_eq!(result.path, checkout);
                     assert!(result.result.is_err());
-                    app.handle_worktree_remove_finished(result);
+                    app.handle_worktree_remove_finished(*result);
                 }
                 other => panic!("unexpected event: {other:?}"),
             }
@@ -1448,7 +1480,7 @@ mod tests {
                 assert_eq!(result.workspace_id, workspace_id);
                 assert_eq!(result.path, checkout);
                 assert_eq!(result.result, Ok(()));
-                app.handle_worktree_remove_finished(result);
+                app.handle_worktree_remove_finished(*result);
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -1458,5 +1490,14 @@ mod tests {
         assert!(app.state.workspaces.is_empty());
 
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn worktree_remove_runtime_shutdown_policy_preserves_windows_safe_remove() {
+        assert_eq!(
+            App::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(false),
+            cfg!(windows)
+        );
+        assert!(App::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(true));
     }
 }

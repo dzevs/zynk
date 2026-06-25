@@ -183,6 +183,11 @@ pub(crate) fn is_dirty_worktree_remove_error(message: &str) -> bool {
         && lower.contains("use --force to delete it")
 }
 
+pub(crate) fn is_not_working_tree_remove_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("is not a working tree") || lower.contains("is not a worktree")
+}
+
 #[cfg(windows)]
 pub(crate) fn worktree_dirty_remove_message(path: &Path) -> String {
     format!(
@@ -320,6 +325,88 @@ pub(crate) fn run_worktree_command(command: &WorktreeCommand) -> Result<(), Stri
     })
 }
 
+/// Run `git worktree remove`, recovering from a `force` removal that git refuses
+/// with "is not a working tree" when only a leftover checkout directory remains
+/// (the admin entry was already pruned). The directory is removed only when it
+/// is no longer registered AND its `.git` gitdir still points inside this repo's
+/// worktrees admin dir — an unrelated replacement directory is left untouched.
+/// (upstream 46a2b25)
+pub(crate) fn run_worktree_remove_command_with_recovery(
+    command: &WorktreeCommand,
+    repo_root: &Path,
+    path: &Path,
+    force: bool,
+) -> Result<(), String> {
+    match run_worktree_command(command) {
+        Ok(()) => Ok(()),
+        Err(err) if force && is_not_working_tree_remove_error(&err) => {
+            if worktree_list_contains_path(repo_root, path)? {
+                return Err(err);
+            }
+            if path.exists() {
+                if !leftover_worktree_checkout_matches_repo(repo_root, path) {
+                    return Err(err);
+                }
+                std::fs::remove_dir_all(path).map_err(|remove_err| {
+                    format!(
+                        "{err}; failed to remove leftover checkout {}: {remove_err}",
+                        path.display()
+                    )
+                })?;
+            }
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn leftover_worktree_checkout_matches_repo(repo_root: &Path, path: &Path) -> bool {
+    let git_file = path.join(".git");
+    let Ok(content) = std::fs::read_to_string(&git_file) else {
+        return false;
+    };
+    let Some(gitdir) = content.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let gitdir = PathBuf::from(gitdir.trim());
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        path.join(gitdir)
+    };
+    let Some(worktrees_dir) = git_common_worktrees_dir(repo_root) else {
+        return false;
+    };
+    canonical_or_original(&gitdir).starts_with(canonical_or_original(&worktrees_dir))
+}
+
+fn git_common_worktrees_dir(repo_root: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let common_dir = stdout.trim();
+    if common_dir.is_empty() {
+        None
+    } else {
+        let common_dir = PathBuf::from(common_dir);
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            repo_root.join(common_dir)
+        };
+        Some(common_dir.join("worktrees"))
+    }
+}
+
 pub(crate) fn parse_worktree_list_porcelain(output: &str) -> Vec<ExistingWorktree> {
     let mut entries = Vec::new();
     let mut path: Option<PathBuf> = None;
@@ -408,6 +495,13 @@ pub(crate) fn list_existing_worktrees(repo_root: &Path) -> Result<Vec<ExistingWo
     } else {
         stderr
     })
+}
+
+pub(crate) fn worktree_list_contains_path(repo_root: &Path, path: &Path) -> Result<bool, String> {
+    let expected = canonical_or_original(path);
+    Ok(list_existing_worktrees(repo_root)?
+        .into_iter()
+        .any(|entry| canonical_or_original(&entry.path) == expected))
 }
 
 #[cfg(test)]
@@ -773,6 +867,53 @@ prunable stale
         run_worktree_command(&remove).unwrap();
         assert!(!checkout.exists());
 
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn forced_worktree_remove_recovers_leftover_unregistered_checkout() {
+        let repo = create_committed_repo("worktree-recovery-repo");
+        let checkout = unique_temp_path("worktree-recovery-checkout");
+        let branch = "worktree/recovery";
+
+        let add = build_worktree_add_new_branch_command(&repo, &checkout, branch, "HEAD");
+        run_worktree_command(&add).unwrap();
+        let remove = build_worktree_remove_command(&repo, &checkout, true);
+        run_worktree_command(&remove).unwrap();
+        std::fs::create_dir_all(&checkout).unwrap();
+        let stale_admin_dir = git_common_worktrees_dir(&repo).unwrap().join("stale");
+        std::fs::write(
+            checkout.join(".git"),
+            format!("gitdir: {}\n", stale_admin_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(checkout.join("leftover"), "leftover\n").unwrap();
+
+        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, true).unwrap();
+
+        assert!(!checkout.exists());
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn forced_worktree_remove_recovery_keeps_unrelated_replacement_directory() {
+        let repo = create_committed_repo("worktree-recovery-unrelated-repo");
+        let checkout = unique_temp_path("worktree-recovery-unrelated-checkout");
+        let branch = "worktree/recovery-unrelated";
+
+        let add = build_worktree_add_new_branch_command(&repo, &checkout, branch, "HEAD");
+        run_worktree_command(&add).unwrap();
+        let remove = build_worktree_remove_command(&repo, &checkout, true);
+        run_worktree_command(&remove).unwrap();
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::write(checkout.join("unrelated"), "do not delete\n").unwrap();
+
+        let err = run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, true)
+            .expect_err("unrelated replacement directory should not be removed");
+
+        assert!(is_not_working_tree_remove_error(&err));
+        assert!(checkout.join("unrelated").exists());
+        let _ = std::fs::remove_dir_all(checkout);
         let _ = std::fs::remove_dir_all(repo);
     }
 }

@@ -9,16 +9,55 @@ use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
 use crate::workspace::{GitStatusCacheEntry, WorkspaceGitStatus};
 
+/// API-initiated (deferred) worktree-create request carried alongside the
+/// background `git worktree add` result. Present only when the create was
+/// dispatched through the async app-runtime path (`worktree.create` socket
+/// command); the synchronous UI flow leaves this `None`. (upstream 46a2b25)
+#[derive(Debug)]
+pub struct ApiWorktreeAddRequest {
+    pub id: String,
+    pub operation_id: u64,
+    pub checkout_key: std::path::PathBuf,
+    pub source_workspace_id: Option<String>,
+    pub source_existing_membership: Option<crate::workspace::WorktreeSpaceMembership>,
+    pub source_checkout_path: std::path::PathBuf,
+    pub source_repo_root: std::path::PathBuf,
+    pub repo_key: String,
+    pub repo_name: String,
+    pub label: Option<String>,
+    pub focus: bool,
+    pub respond_to: std::sync::mpsc::Sender<String>,
+}
+
 #[derive(Debug)]
 pub struct WorktreeAddResult {
     pub path: std::path::PathBuf,
+    pub api_request: Option<ApiWorktreeAddRequest>,
     pub result: Result<(), String>,
+}
+
+/// API-initiated (deferred) worktree-remove request carried alongside the
+/// background `git worktree remove` result. Present only for the async
+/// `worktree.remove` socket command; the synchronous UI flow leaves this
+/// `None`. (upstream 46a2b25)
+#[derive(Debug)]
+pub struct ApiWorktreeRemoveRequest {
+    pub id: String,
+    pub operation_id: u64,
+    pub checkout_key: std::path::PathBuf,
+    pub respond_to: std::sync::mpsc::Sender<String>,
 }
 
 #[derive(Debug)]
 pub struct WorktreeRemoveResult {
     pub workspace_id: String,
     pub path: std::path::PathBuf,
+    /// Workspace snapshot captured before removal. Carried only for the deferred
+    /// API path (the UI flow re-reads live state). (upstream 46a2b25)
+    pub workspace: Option<Box<crate::api::schema::WorkspaceInfo>>,
+    /// Whether the remove was forced. (upstream 46a2b25)
+    pub forced: bool,
+    pub api_request: Option<ApiWorktreeRemoveRequest>,
     pub result: Result<(), String>,
 }
 
@@ -122,7 +161,7 @@ pub enum AppEvent {
         error: Option<String>,
     },
     /// Background `git worktree add` completed.
-    WorktreeAddFinished(WorktreeAddResult),
+    WorktreeAddFinished(Box<WorktreeAddResult>),
     /// Background `git worktree remove` completed.
-    WorktreeRemoveFinished(WorktreeRemoveResult),
+    WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
 }

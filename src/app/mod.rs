@@ -109,6 +109,13 @@ pub struct App {
     pub(crate) git_refresh_in_flight: bool,
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    /// Deferred-API worktree operations in flight, keyed by canonical checkout
+    /// path (creates) / workspace id (removes) so stale completion events can be
+    /// discarded and concurrent operations on a checkout rejected. (upstream 46a2b25)
+    pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
+    pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
+    pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
+    pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) last_sidebar_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
     pub(crate) next_resize_poll: Instant,
@@ -695,6 +702,10 @@ impl App {
             git_refresh_in_flight: false,
             git_refresh_due_after_in_flight: false,
             git_status_cache: HashMap::new(),
+            pending_api_worktree_creates: HashMap::new(),
+            pending_api_worktree_removes: HashMap::new(),
+            pending_api_worktree_remove_paths: HashMap::new(),
+            next_api_worktree_operation_id: 1,
             last_sidebar_divider_click: None,
             last_pane_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
