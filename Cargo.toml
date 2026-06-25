@@ -32,6 +32,9 @@ include = [
     "/vendor/libghostty-vt.vendor.json",
     "/vendor/libghostty-vt.patches.md",
     "/vendor/patches/libghostty-vt/**/*",
+    "/vendor/portable-pty/**/*",
+    "/vendor/portable-pty.patches.md",
+    "/vendor/patches/portable-pty/**/*",
     "/migrations/**/*",
     "/SKILL.md",
     "/Cargo.lock",
@@ -61,7 +64,7 @@ libc = "0.2"
 # libsqlite3-sys node sqlx-sqlite links — load-bearing for the static
 # sqlite3_auto_extension registration (single-libsqlite3 invariant, guarded by a test).
 libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
-portable-pty = "0.9"
+portable-pty = "=0.9.0"
 png = "0.17"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 regex = "1"
@@ -90,10 +93,18 @@ fastembed = { version = "5", optional = true }
 default = []
 fastembed = ["dep:fastembed"]
 
+# Vendored portable-pty (force system ConPTY on Windows, ADR-aligned vendor model
+# mirroring vendor/libghostty-vt). The vendored Unix source is byte-identical to
+# crates.io 0.9.0; only src/win/psuedocon.rs carries the local patch (see
+# vendor/portable-pty.patches.md). Pin to =0.9.0 so the patch base stays exact.
+[patch.crates-io]
+portable-pty = { path = "vendor/portable-pty" }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Wdk_System_Threading",
     "Win32_Foundation",
+    "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Kernel",

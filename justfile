@@ -4,7 +4,7 @@
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
@@ -19,13 +19,23 @@ lint:
     cargo fmt --check
     cargo clippy --all-targets --locked -- -D warnings
 
+# Run the Windows target clippy from Unix/macOS to catch cfg(windows) compile + clippy
+# failures before the windows-latest CI job. NOTE: zynk's bundled C deps (sqlite-vec /
+# libsqlite3-sys, ADR 0006) need an MSVC-compatible archiver (`lib.exe`) to cross-compile
+# the build scripts, so this requires an MSVC C toolchain (clang-cl/llvm-lib or a Windows
+# host). It is intentionally NOT wired into `check` — the authoritative Windows runtime
+# check is the ci.yml windows-latest job. (mirrors upstream b7a504b)
+windows-lint:
+    rustup target add x86_64-pc-windows-msvc
+    LIBGHOSTTY_VT_SIMD=false cargo clippy --bin zynk --locked --target x86_64-pc-windows-msvc -- -D warnings
+
 # Run PR CI checks
 ci filter='all()': lint test-ts
     cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked
 
 # Install repo-local git hooks
 install-hooks:

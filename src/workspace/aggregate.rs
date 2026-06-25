@@ -17,6 +17,7 @@ pub struct PaneDetail {
     pub agent: Option<Agent>,
     pub state: AgentState,
     pub seen: bool,
+    pub last_agent_state_change_seq: Option<u64>,
     pub custom_status: Option<String>,
     pub state_labels: HashMap<String, String>,
 }
@@ -60,6 +61,7 @@ impl Tab {
                     agent: terminal.effective_known_agent(),
                     state: terminal.state,
                     seen: pane.seen,
+                    last_agent_state_change_seq: terminal.last_agent_state_change_seq,
                     custom_status: presentation.custom_status,
                     state_labels: presentation.state_labels,
                 })

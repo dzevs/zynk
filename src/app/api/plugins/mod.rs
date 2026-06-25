@@ -705,6 +705,28 @@ mod tests {
             .to_string()
     }
 
+    /// Wait for non-empty contents at `path`. Shell `>` creates the file empty
+    /// before the command writes, so waiting on existence alone can read EOF.
+    /// `pump` advances any event loop the command depends on.
+    /// (upstream 2fe57a5)
+    fn read_capture_when_ready(path: &std::path::Path, mut pump: impl FnMut()) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            pump();
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if !contents.is_empty() {
+                    return contents;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "plugin command did not write {} within deadline",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     fn write_manifest(root: &std::path::Path) -> std::path::PathBuf {
         std::fs::create_dir_all(root).unwrap();
         let manifest = root.join("zynk-plugin.toml");
@@ -1214,11 +1236,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$ZYNK_P
         };
         assert!(app.state.plugin_panes.contains_key(&opened_pane_id));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !capture.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let text = std::fs::read_to_string(&capture).expect("plugin pane command should write env");
+        let text = read_capture_when_ready(&capture, || {});
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some(canonical_path_string(&root).as_str()));
         assert_eq!(lines.next(), Some("example.pane"));
@@ -1313,11 +1331,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$ZYNK_PLUGIN_ROOT\" \"$ZYNK_PLUG
             panic!("expected plugin pane opened response: {open}");
         };
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !capture.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let text = std::fs::read_to_string(&capture).expect("plugin pane command should write env");
+        let text = read_capture_when_ready(&capture, || {});
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some(canonical_path_string(&root).as_str()));
         assert_eq!(
@@ -1789,13 +1803,11 @@ command = ["sh", "-c", "printf '%s' \"$ZYNK_PLUGIN_CONTEXT_JSON\" > {}"]
             },
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !capture.exists() && std::time::Instant::now() < deadline {
-            app.drain_all_internal_events();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
         let context: PluginInvocationContext =
-            serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
+            serde_json::from_str(&read_capture_when_ready(&capture, || {
+                app.drain_all_internal_events();
+            }))
+            .unwrap();
         assert_eq!(
             context.workspace_id.as_deref(),
             Some(target_workspace.workspace_id.as_str())

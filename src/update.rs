@@ -644,6 +644,12 @@ fn install_windows_update_with_installer(channel: UpdateChannel) -> Result<(), S
             "irm https://zynk.dev/install.ps1 | iex",
         ])
         .env("ZYNK_CHANNEL", channel.as_str())
+        // Drop any inherited PSModulePath. When zynk is launched from
+        // PowerShell 7, its Core module paths come first and Windows
+        // PowerShell 5.1 (this `powershell`) fails to autoload cmdlets like
+        // Get-FileHash. Removing it lets 5.1 compute its own default path.
+        // See PowerShell/PowerShell#8635.
+        .env_remove("PSModulePath")
         .status()
         .map_err(|err| format!("failed to run Windows installer: {err}"))?;
 

@@ -541,7 +541,7 @@ impl HeadlessServer {
             }
 
             if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
-                if let Err(err) = self.app.create_workspace_with_options(cwd, true) {
+                if let Err(err) = self.app.create_workspace_with_events(cwd, true) {
                     error!(err = %err, "failed to create workspace at requested cwd");
                     self.app.state.mode = app::Mode::Navigate;
                 }
@@ -778,6 +778,8 @@ impl HeadlessServer {
         let terminal_size = client.terminal_size;
         let outer_terminal_focus = client.outer_terminal_focus;
         let host_terminal_theme = client.host_terminal_theme;
+        let host_terminal_appearance = client.host_terminal_appearance;
+        let host_terminal_appearance_explicit = client.host_terminal_appearance_explicit;
         let uses_local_keybindings = client.keybindings.is_some();
         let keybindings = client
             .keybindings
@@ -792,9 +794,11 @@ impl HeadlessServer {
         if outer_terminal_focus == Some(true) {
             self.app.state.mark_active_tab_seen();
         }
-        if !host_terminal_theme.is_empty() {
-            self.app.set_host_terminal_theme(host_terminal_theme);
-        }
+        self.app.set_host_terminal_appearance_state(
+            host_terminal_appearance,
+            host_terminal_appearance_explicit,
+        );
+        self.app.set_host_terminal_theme(host_terminal_theme);
     }
 
     #[cfg(unix)]
@@ -861,7 +865,6 @@ impl HeadlessServer {
             &self.app.terminal_runtimes,
             self.app.state.active,
             self.app.state.selected,
-            self.app.state.agent_panel_scope,
             self.app.state.sidebar_width,
             self.app.state.sidebar_section_split,
             self.app.state.collapsed_space_keys.clone(),
@@ -1230,7 +1233,11 @@ impl HeadlessServer {
         }
 
         if self.foreground_client_id == Some(client_id) {
-            let changed = self.app.set_host_terminal_theme(client.host_terminal_theme);
+            let mut changed = self.app.set_host_terminal_appearance_state(
+                client.host_terminal_appearance,
+                client.host_terminal_appearance_explicit,
+            );
+            changed |= self.app.set_host_terminal_theme(client.host_terminal_theme);
             if changed {
                 self.resize_shared_runtime_to_effective_size_before_input();
             }
@@ -2604,6 +2611,18 @@ impl HeadlessServer {
         };
 
         self.sync_foreground_client_state();
+        // Worktree create/remove respond asynchronously through the deferral path;
+        // skip the synchronous response + post-call notification forwarding below.
+        // (upstream 46a2b25)
+        if matches!(
+            &msg.request.method,
+            api::schema::Method::WorktreeCreate(_) | api::schema::Method::WorktreeRemove(_)
+        ) {
+            let deferred_changed = self
+                .app
+                .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
+            return changed | deferred_changed;
+        }
         let response = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)
@@ -4042,10 +4061,7 @@ mod tests {
         let (control_tx, control_rx) = std::sync::mpsc::channel();
         let (render_tx, render_rx) = std::sync::mpsc::sync_channel(1);
         (
-            ClientWriter {
-                control: control_tx,
-                render: render_tx,
-            },
+            ClientWriter::test_channel(control_tx, render_tx),
             control_rx,
             render_rx,
         )
@@ -4292,7 +4308,8 @@ next_tab = ""
     }
 
     #[test]
-    fn invalid_server_keybindings_do_not_cache_local_keybindings_after_settings_save() {
+    fn invalid_server_keybindings_apply_valid_subset_after_settings_save_without_caching_local_keybindings(
+    ) {
         let path = std::env::temp_dir().join(format!(
             "zynk-headless-invalid-settings-{}-{}.toml",
             std::process::id(),
@@ -4358,16 +4375,17 @@ next_tab = ""
         }));
         assert_eq!(
             server.app.state.prefix_code,
-            crossterm::event::KeyCode::Char('c')
+            crossterm::event::KeyCode::Char('b')
         );
-        assert!(server
+        assert!(!server
             .app
             .state
             .keybinds
             .new_workspace
             .bindings
             .iter()
-            .any(|binding| binding.label == "prefix+m"));
+            .any(|binding| binding.label == "prefix+n"));
+        assert!(server.app.state.keybinds.new_workspace.bindings.is_empty());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_file(path);
@@ -5524,6 +5542,144 @@ next_tab = ""
     }
 
     #[test]
+    fn foreground_client_without_host_theme_clears_previous_host_theme() {
+        let mut server = test_headless_server();
+        let known_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 0x10,
+                g: 0x20,
+                b: 0x30,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x40,
+                g: 0x50,
+                b: 0x60,
+            }),
+        };
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                known_theme,
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+
+        assert!(server.promote_client_to_foreground(1));
+        assert_eq!(server.app.state.host_terminal_theme, known_theme);
+
+        assert!(server.promote_client_to_foreground(2));
+        assert_eq!(
+            server.app.state.host_terminal_theme,
+            crate::terminal_theme::TerminalTheme::default()
+        );
+    }
+
+    #[test]
+    fn foreground_client_appearance_controls_auto_theme() {
+        let mut server = test_headless_server();
+        server.app.state.theme_runtime.auto_switch = true;
+        server.app.state.theme_runtime.dark_name = "catppuccin".to_string();
+        server.app.state.theme_runtime.light_name = "catppuccin-latte".to_string();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme {
+                    foreground: None,
+                    background: Some(crate::terminal_theme::RgbColor { r: 0, g: 0, b: 0 }),
+                },
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme {
+                    foreground: None,
+                    background: Some(crate::terminal_theme::RgbColor {
+                        r: 255,
+                        g: 255,
+                        b: 255,
+                    }),
+                },
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+
+        assert!(server.promote_client_to_foreground(1));
+        assert_eq!(server.app.state.theme_name, "catppuccin");
+
+        assert!(server.promote_client_to_foreground(2));
+        assert_eq!(server.app.state.theme_name, "catppuccin-latte");
+    }
+
+    #[test]
+    fn color_scheme_change_event_is_inert_on_server() {
+        let mut server = test_headless_server();
+        let initial_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 0x10,
+                g: 0x20,
+                b: 0x30,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x40,
+                g: 0x50,
+                b: 0x60,
+            }),
+        };
+        server.app.state.host_terminal_theme = initial_theme;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                initial_theme,
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+
+        let changed = server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: crate::raw_input::GHOSTTY_COLOR_SCHEME_DARK_REPORT.to_vec(),
+        });
+
+        assert!(!changed);
+        assert_eq!(server.foreground_client_id, None);
+        assert_eq!(server.clients[&1].host_terminal_theme, initial_theme);
+        assert_eq!(server.app.state.host_terminal_theme, initial_theme);
+    }
+
+    #[test]
     fn focus_lost_updates_client_without_promoting_foreground() {
         let mut server = test_headless_server();
 
@@ -6187,7 +6343,7 @@ next_tab = ""
             .as_ref()
             .unwrap()
             .render
-            .send(queued)
+            .try_send(queued)
             .expect("pre-fill render queue");
 
         assert!(server.handle_server_event(ServerEvent::ClientInput {
@@ -6309,7 +6465,7 @@ next_tab = ""
             .expect("serialize dummy message");
         client_tx
             .render
-            .send(queued)
+            .try_send(queued)
             .expect("pre-fill render queue");
 
         server.clients.insert(
@@ -6353,7 +6509,7 @@ next_tab = ""
             .expect("serialize dummy message");
         client_tx
             .render
-            .send(queued)
+            .try_send(queued)
             .expect("pre-fill render queue");
 
         server.clients.insert(
@@ -6823,7 +6979,7 @@ next_tab = ""
             .as_ref()
             .unwrap()
             .render
-            .send(queued)
+            .try_send(queued)
             .expect("pre-fill render queue");
         server.app.full_redraw_pending = true;
 

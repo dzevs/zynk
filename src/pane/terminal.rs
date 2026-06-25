@@ -24,8 +24,8 @@ use super::{
     osc::{
         contains_scrollback_clear_sequence, current_transient_default_color_owner,
         maybe_filter_primary_screen_scrollback_clear, restore_host_terminal_theme_if_needed,
-        write_host_terminal_theme, AgentOscStateTracker, CwdOscTracker, DefaultColorEvent,
-        DefaultColorEventTracker, DefaultColorOscTracker, DefaultColorQuery,
+        write_host_terminal_theme_selective, AgentOscStateTracker, CwdOscTracker,
+        DefaultColorEvent, DefaultColorEventTracker, DefaultColorOscTracker, DefaultColorQuery,
         DefaultColorTrackedEvent, Osc52Forwarder, OscDebugTracker,
     },
     xtgettcap::{XtgettcapQueryTracker, XtgettcapResponse},
@@ -399,11 +399,18 @@ impl GhosttyPaneTerminal {
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         if let Ok(mut core) = self.core.lock() {
+            let foreground_unowned = !core.child_default_foreground_changed;
+            let background_unowned = !core.child_default_background_changed;
             core.host_terminal_theme = theme;
-            core.transient_default_color_owner_pgid = None;
-            core.child_default_foreground_changed = false;
-            core.child_default_background_changed = false;
-            write_host_terminal_theme(&mut core.terminal, theme);
+            if foreground_unowned && background_unowned {
+                core.transient_default_color_owner_pgid = None;
+            }
+            write_host_terminal_theme_selective(
+                &mut core.terminal,
+                theme,
+                foreground_unowned,
+                background_unowned,
+            );
         }
     }
 
@@ -645,6 +652,10 @@ impl GhosttyPaneTerminal {
         if written < bytes.len() {
             core.terminal.write(&bytes[written..]);
             terminal_responses.extend(self.drain_pending_pty_responses());
+        }
+
+        if !core.child_default_foreground_changed && !core.child_default_background_changed {
+            core.transient_default_color_owner_pgid = None;
         }
     }
 
@@ -1008,7 +1019,11 @@ impl GhosttyPaneTerminal {
             return crate::input::encode_terminal_key(key, protocol);
         };
         match encoder.encode(&event) {
-            Ok(bytes) if !bytes.is_empty() => bytes,
+            Ok(bytes)
+                if !bytes.is_empty() && encoded_key_preserves_event_kind(&bytes, key, protocol) =>
+            {
+                bytes
+            }
             Ok(_) | Err(_) => crate::input::encode_terminal_key(key, protocol),
         }
     }
@@ -1278,6 +1293,23 @@ impl GhosttyPaneTerminal {
             .map(|mut core| ghostty_collect_dirty_patch(&mut core, area_width, area_height))
             .unwrap_or(TerminalDirtyPatchOutcome::Fallback)
     }
+}
+
+fn encoded_key_preserves_event_kind(
+    bytes: &[u8],
+    key: crate::input::TerminalKey,
+    protocol: crate::input::KeyboardProtocol,
+) -> bool {
+    if !protocol.reports_event_types() || key.kind == crossterm::event::KeyEventKind::Press {
+        return true;
+    }
+
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(crate::input::parse_terminal_key_sequence)
+        .is_some_and(|parsed| {
+            parsed.code == key.code && parsed.modifiers == key.modifiers && parsed.kind == key.kind
+        })
 }
 
 fn cursor_position_settle_pending(core: &GhosttyPaneCore) -> bool {
@@ -1675,7 +1707,10 @@ fn ghostty_screen_row(
 ) -> Result<String, crate::ghostty::Error> {
     let mut line = String::new();
     for x in 0..cols {
-        let graphemes = core.terminal.screen_graphemes(x, y)?;
+        let (wide, graphemes) = core.terminal.screen_cell(x, y)?;
+        if wide == crate::ghostty::CellWide::SpacerTail {
+            continue;
+        }
         if graphemes.is_empty()
             || graphemes.first().copied() == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER)
         {
@@ -1704,6 +1739,9 @@ fn ghostty_line_from_cells(
 fn ghostty_cell_symbol(
     cells: &crate::ghostty::RowCellIter<'_>,
 ) -> Result<String, crate::ghostty::Error> {
+    if cells.wide()? == crate::ghostty::CellWide::SpacerTail {
+        return Ok(String::new());
+    }
     let text = cells.grapheme_text()?;
     if text.chars().next().map(u32::from) == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER) {
         return Ok(" ".to_string());
@@ -1929,7 +1967,10 @@ fn respond_to_default_color_event(
             }
         }
         DefaultColorEvent::Set(query) => mark_child_default_color_changed(core, query, true),
-        DefaultColorEvent::Reset(query) => mark_child_default_color_changed(core, query, false),
+        DefaultColorEvent::Reset(query) => {
+            mark_child_default_color_changed(core, query, false);
+            apply_cached_host_default_color(core, query);
+        }
     }
 }
 
@@ -1973,6 +2014,15 @@ fn osc_rgb_response(command: &str, r: u8, g: u8, b: u8) -> Bytes {
     let g = u16::from(g) * 257;
     let b = u16::from(b) * 257;
     Bytes::from(format!("\x1b]{command};rgb:{r:04x}/{g:04x}/{b:04x}\x1b\\"))
+}
+
+fn apply_cached_host_default_color(core: &mut GhosttyPaneCore, query: DefaultColorQuery) {
+    write_host_terminal_theme_selective(
+        &mut core.terminal,
+        core.host_terminal_theme,
+        matches!(query, DefaultColorQuery::Foreground),
+        matches!(query, DefaultColorQuery::Background),
+    );
 }
 
 fn mark_child_default_color_changed(
@@ -2401,6 +2451,60 @@ mod tests {
         );
 
         assert_eq!(encoded, b"a");
+    }
+
+    #[test]
+    fn ghostty_enter_backspace_release_in_legacy_pane_emits_nothing() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        for code in [
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyCode::Backspace,
+        ] {
+            let press = pane.encode_terminal_key(
+                crate::input::TerminalKey::new(code, crossterm::event::KeyModifiers::empty()),
+                crate::input::KeyboardProtocol::Legacy,
+            );
+            let release = pane.encode_terminal_key(
+                crate::input::TerminalKey::new(code, crossterm::event::KeyModifiers::empty())
+                    .with_kind(crossterm::event::KeyEventKind::Release),
+                crate::input::KeyboardProtocol::Legacy,
+            );
+            assert!(!press.is_empty(), "{code:?} press should emit bytes");
+            assert!(
+                release.is_empty(),
+                "{code:?} release should emit nothing in a legacy pane, got {release:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ghostty_release_still_encoded_for_report_event_pane() {
+        let (tx, _rx) = mpsc::channel(4);
+        // Push kitty flags including REPORT_EVENT_TYPES (0b10) + DISAMBIGUATE (0b1).
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>3u");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let release = pane.encode_terminal_key(
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::empty(),
+            )
+            .with_kind(crossterm::event::KeyEventKind::Release),
+            pane.keyboard_protocol().unwrap(),
+        );
+        let parsed =
+            crate::input::parse_terminal_key_sequence(std::str::from_utf8(&release).unwrap())
+                .unwrap();
+        assert_eq!(parsed.code, crossterm::event::KeyCode::Enter);
+        assert_eq!(
+            parsed.kind,
+            crossterm::event::KeyEventKind::Release,
+            "report-event pane should encode a release, got {release:?}"
+        );
     }
 
     #[test]
@@ -2931,6 +3035,19 @@ mod tests {
     }
 
     #[test]
+    fn plain_text_reads_skip_wide_character_spacer_cells() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(40, 3, 100).unwrap();
+        terminal.write("日本語テスト ABC 123".as_bytes());
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        assert_eq!(pane.visible_text(), "日本語テスト ABC 123\n");
+        assert_eq!(pane.recent_text(3), "日本語テスト ABC 123\n");
+        assert_eq!(pane.recent_unwrapped_text(3), "日本語テスト ABC 123");
+        assert_eq!(pane.detection_text(), "日本語テスト ABC 123\n");
+    }
+
+    #[test]
     fn visible_ansi_preserves_cell_style_sequences() {
         let (tx, _rx) = mpsc::channel(4);
         let mut terminal = crate::ghostty::Terminal::new(20, 3, 100).unwrap();
@@ -3381,6 +3498,57 @@ mod tests {
                 expected_xtgettcap_response("5463", None),
                 Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\"),
             ]
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn host_theme_update_preserves_child_default_color_override() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;#112233\x07", &tx);
+        assert!(result.terminal_responses.is_empty());
+
+        pane.apply_host_terminal_theme(crate::terminal_theme::TerminalTheme {
+            foreground: None,
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc,
+            }),
+        });
+
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
+        assert!(result.terminal_responses.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn child_default_color_reset_restores_cached_host_color() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b]11;#112233\x07", &tx);
+        pane.apply_host_terminal_theme(crate::terminal_theme::TerminalTheme {
+            foreground: None,
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc,
+            }),
+        });
+        pane.process_pty_bytes(pane_id, 0, b"\x1b]111\x07", &tx);
+        assert!(!pane.has_transient_default_color_override());
+
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
+        assert_eq!(
+            result.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\")]
         );
         assert!(rx.try_recv().is_err());
     }

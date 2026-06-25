@@ -49,6 +49,16 @@ static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::ne
 // Client state
 // ---------------------------------------------------------------------------
 
+struct ClientLoopConfig {
+    sound_config: crate::config::SoundConfig,
+    mouse_scroll_lines: usize,
+    redraw_on_focus_gained: bool,
+    kitty_graphics_enabled: bool,
+    mouse_capture_active: bool,
+    #[cfg(unix)]
+    remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+}
+
 /// State tracking for the thin client.
 struct ClientState {
     /// Stateful semantic-frame encoder used when the server sends FrameData.
@@ -66,6 +76,9 @@ struct ClientState {
     /// Rows scrolled for one direct-attach wheel notch.
     #[cfg(unix)]
     mouse_scroll_lines: usize,
+    /// Local-client shortcut that sends a clipboard image to a remote zynk session.
+    #[cfg(unix)]
+    remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     /// Whether outer focus gain should force a full host-terminal redraw.
     redraw_on_focus_gained: bool,
 }
@@ -313,6 +326,8 @@ fn setup_terminal_with_capabilities(
     mouse_capture: bool,
 ) -> io::Result<TerminalGuard> {
     ratatui::init();
+    let host_color_scheme_reports =
+        should_enable_host_color_scheme_reports(enable_client_protocols);
 
     if enable_client_protocols {
         if mouse_capture {
@@ -321,11 +336,19 @@ fn setup_terminal_with_capabilities(
             set_mouse_capture(false)?;
         }
         execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
+        if host_color_scheme_reports {
+            write_host_color_scheme_report_mode(&mut io::stdout(), true)?;
+        }
         push_keyboard_enhancement_flags()?;
-    } else if mouse_capture {
-        set_mouse_capture(true)?;
     } else {
-        set_mouse_capture(false)?;
+        if should_query_host_terminal_theme() {
+            write_host_color_scheme_report_mode(&mut io::stdout(), false)?;
+        }
+        if mouse_capture {
+            set_mouse_capture(true)?;
+        } else {
+            set_mouse_capture(false)?;
+        }
     }
 
     let modify_other_keys_mode = enable_client_protocols
@@ -342,20 +365,157 @@ fn setup_terminal_with_capabilities(
         io::stdout().flush()?;
     }
 
+    #[cfg(windows)]
+    let windows_virtual_terminal_input =
+        if enable_client_protocols && windows_vti_input_backend_enabled() {
+            enable_windows_virtual_terminal_input()
+        } else {
+            WindowsVirtualTerminalInputSetup::default()
+        };
+
+    #[cfg(windows)]
+    if enable_client_protocols
+        && windows_vti_input_backend_enabled()
+        && windows_virtual_terminal_input.active
+        && windows_win32_input_mode_enabled()
+    {
+        if let Err(err) = enable_windows_win32_input_mode(&mut io::stdout()) {
+            if let Some(mode) = windows_virtual_terminal_input.restore_mode {
+                restore_windows_input_mode_value(mode);
+            }
+            return Err(err);
+        }
+    }
+
     Ok(TerminalGuard {
         reset_modify_other_keys: modify_other_keys_mode.is_some(),
+        reset_host_color_scheme_reports: host_color_scheme_reports,
+        #[cfg(windows)]
+        restore_windows_input_mode: windows_virtual_terminal_input.restore_mode,
     })
+}
+
+fn should_enable_host_color_scheme_reports(enable_client_protocols: bool) -> bool {
+    enable_client_protocols && should_query_host_terminal_theme()
 }
 
 /// Guard that restores the terminal when dropped.
 struct TerminalGuard {
     reset_modify_other_keys: bool,
+    reset_host_color_scheme_reports: bool,
+    #[cfg(windows)]
+    restore_windows_input_mode: Option<u32>,
 }
 
-fn write_terminal_restore_postlude(writer: &mut impl io::Write) -> io::Result<()> {
+fn write_host_color_scheme_report_mode(
+    writer: &mut impl io::Write,
+    enabled: bool,
+) -> io::Result<()> {
+    let sequence = if enabled {
+        crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_ENABLE_SEQUENCE
+    } else {
+        crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE
+    };
+    writer.write_all(sequence.as_bytes())?;
+    writer.flush()
+}
+
+fn write_terminal_restore_postlude(
+    writer: &mut impl io::Write,
+    reset_host_color_scheme_reports: bool,
+) -> io::Result<()> {
+    if reset_host_color_scheme_reports {
+        writer.write_all(
+            crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE.as_bytes(),
+        )?;
+    }
     // Restore a visible cursor and reset DECSCUSR back to the terminal default.
     writer.write_all(b"\x1b[?25h\x1b[0 q")?;
     writer.flush()
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct WindowsVirtualTerminalInputSetup {
+    active: bool,
+    restore_mode: Option<u32>,
+}
+
+#[cfg(windows)]
+fn enable_windows_virtual_terminal_input() -> WindowsVirtualTerminalInputSetup {
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_INPUT,
+        STD_INPUT_HANDLE,
+    };
+
+    let handle: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        tracing::warn!("failed to get Windows console input handle for VT input");
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+
+    let mut mode = 0;
+    if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+        tracing::warn!("failed to read Windows console input mode for VT input");
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+
+    let desired = windows_virtual_terminal_input_mode(mode);
+    if desired == mode {
+        return WindowsVirtualTerminalInputSetup {
+            active: true,
+            restore_mode: None,
+        };
+    }
+
+    if unsafe { SetConsoleMode(handle, desired) } == 0 {
+        tracing::warn!("failed to enable Windows virtual terminal input");
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+
+    let mut applied = 0;
+    if unsafe { GetConsoleMode(handle, &mut applied) } == 0 {
+        tracing::warn!("failed to verify Windows virtual terminal input mode");
+        let _ = unsafe { SetConsoleMode(handle, mode) };
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+    if applied & ENABLE_VIRTUAL_TERMINAL_INPUT == 0 {
+        tracing::warn!("Windows virtual terminal input bit did not stick");
+        let _ = unsafe { SetConsoleMode(handle, mode) };
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+
+    WindowsVirtualTerminalInputSetup {
+        active: true,
+        restore_mode: Some(mode),
+    }
+}
+
+#[cfg(windows)]
+fn windows_vti_input_backend_enabled() -> bool {
+    std::env::var("ZYNK_WINDOWS_INPUT_BACKEND")
+        .map(|backend| !backend.eq_ignore_ascii_case("crossterm"))
+        .unwrap_or(true)
+}
+
+#[cfg(any(windows, test))]
+fn windows_virtual_terminal_input_mode(mode: u32) -> u32 {
+    mode | 0x0200
+}
+
+#[cfg(windows)]
+fn restore_windows_input_mode_value(mode: u32) {
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+
+    let handle: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return;
+    }
+    if unsafe { SetConsoleMode(handle, mode) } == 0 {
+        tracing::warn!("failed to restore Windows console input mode");
+    }
 }
 
 fn set_mouse_capture(enabled: bool) -> io::Result<()> {
@@ -371,7 +531,11 @@ fn set_mouse_capture(enabled: bool) -> io::Result<()> {
     }
 }
 
-fn restore_terminal_state(reset_modify_other_keys: bool) {
+fn restore_terminal_state(
+    reset_modify_other_keys: bool,
+    reset_host_color_scheme_reports: bool,
+    #[cfg(windows)] restore_windows_input_mode: Option<u32>,
+) {
     let _ = clear_received_kitty_graphics(&mut io::stdout());
 
     // Reset modifyOtherKeys if we enabled it.
@@ -387,8 +551,18 @@ fn restore_terminal_state(reset_modify_other_keys: bool) {
         DisableBracketedPaste,
         DisableMouseCapture
     );
+    #[cfg(windows)]
+    if let Some(mode) = restore_windows_input_mode {
+        restore_windows_input_mode_value(mode);
+    }
+
     ratatui::restore();
-    let _ = write_terminal_restore_postlude(&mut io::stdout());
+    let _ = write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
+
+    #[cfg(windows)]
+    if windows_vti_input_backend_enabled() && windows_win32_input_mode_enabled() {
+        let _ = disable_windows_win32_input_mode(&mut io::stdout());
+    }
 }
 
 #[cfg(not(windows))]
@@ -414,9 +588,33 @@ fn pop_keyboard_enhancement_flags() -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn windows_win32_input_mode_enabled() -> bool {
+    std::env::var("ZYNK_WINDOWS_INPUT_PROBE")
+        .map(|probe| probe.eq_ignore_ascii_case("win32"))
+        .unwrap_or(true)
+}
+
+#[cfg(windows)]
+fn enable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Result<()> {
+    writer.write_all(b"\x1b[?9001h")?;
+    writer.flush()
+}
+
+#[cfg(windows)]
+fn disable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Result<()> {
+    writer.write_all(b"\x1b[?9001l")?;
+    writer.flush()
+}
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        restore_terminal_state(self.reset_modify_other_keys);
+        restore_terminal_state(
+            self.reset_modify_other_keys,
+            self.reset_host_color_scheme_reports,
+            #[cfg(windows)]
+            self.restore_windows_input_mode,
+        );
     }
 }
 
@@ -429,6 +627,30 @@ fn requested_render_encoding() -> RenderEncoding {
         Some("terminal-ansi" | "terminal_ansi" | "ansi") => RenderEncoding::TerminalAnsi,
         _ => RenderEncoding::SemanticFrame,
     }
+}
+
+#[cfg(unix)]
+fn is_remote_client_process() -> bool {
+    std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
+}
+
+/// Time to wait for the server's Welcome reply during the handshake.
+///
+/// A local client talks to an already-connected server, so 5s is plenty. The
+/// remote bridge client (`zynk --remote`) sits behind a fresh per-attach ssh
+/// connection whose cold-connect (TCP + key exchange + auth) happens inside this
+/// window; on a high-latency link that easily exceeds 5s, so it gets a far
+/// larger budget. See upstream issue #753.
+const LOCAL_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const REMOTE_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn handshake_read_timeout() -> Duration {
+    #[cfg(unix)]
+    if is_remote_client_process() {
+        return REMOTE_HANDSHAKE_READ_TIMEOUT;
+    }
+    LOCAL_HANDSHAKE_READ_TIMEOUT
 }
 
 fn requested_keybindings() -> ClientKeybindings {
@@ -510,7 +732,7 @@ fn do_handshake(
     // Read Welcome.
     set_handshake_recv_timeout(
         stream,
-        Some(Duration::from_secs(5)),
+        Some(handshake_read_timeout()),
         "client handshake read timeout unavailable",
     )?;
     let welcome: ServerMessage = protocol::read_message(stream, MAX_FRAME_SIZE)?;
@@ -606,10 +828,20 @@ fn run_client_with_mode(
     let mouse_capture = loaded_config.config.ui.mouse_capture;
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
-    let sound_config = loaded_config.config.ui.sound;
     let direct_attach_requested = attach_request.is_some();
+    #[cfg(unix)]
+    let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
     let kitty_graphics_enabled =
         loaded_config.config.experimental.kitty_graphics && !direct_attach_requested;
+    let loop_config = ClientLoopConfig {
+        sound_config: loaded_config.config.ui.sound,
+        mouse_scroll_lines,
+        redraw_on_focus_gained,
+        kitty_graphics_enabled,
+        mouse_capture_active: mouse_capture,
+        #[cfg(unix)]
+        remote_image_paste_key,
+    };
 
     let socket_path = client_socket_path();
     crate::logging::startup("client");
@@ -673,9 +905,17 @@ fn run_client_with_mode(
 
     // Install a panic hook to restore the terminal on panic (same as monolithic).
     let panic_resets_modify_other_keys = terminal_guard.reset_modify_other_keys;
+    let panic_resets_host_color_scheme_reports = terminal_guard.reset_host_color_scheme_reports;
+    #[cfg(windows)]
+    let panic_restore_windows_input_mode = terminal_guard.restore_windows_input_mode;
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_state(panic_resets_modify_other_keys);
+        restore_terminal_state(
+            panic_resets_modify_other_keys,
+            panic_resets_host_color_scheme_reports,
+            #[cfg(windows)]
+            panic_restore_windows_input_mode,
+        );
         original_hook(info);
     }));
 
@@ -699,11 +939,7 @@ fn run_client_with_mode(
             cols,
             rows,
             should_quit,
-            sound_config,
-            mouse_scroll_lines,
-            redraw_on_focus_gained,
-            kitty_graphics_enabled,
-            mouse_capture,
+            loop_config,
             negotiated_encoding,
             attach_escape,
         )
@@ -747,27 +983,25 @@ async fn run_client_loop(
     cols: u16,
     rows: u16,
     should_quit: Arc<AtomicBool>,
-    sound_config: crate::config::SoundConfig,
-    mouse_scroll_lines: usize,
-    redraw_on_focus_gained: bool,
-    kitty_graphics_enabled: bool,
-    mouse_capture_active: bool,
+    config: ClientLoopConfig,
     negotiated_encoding: RenderEncoding,
     attach_escape: Option<AttachEscapeState>,
 ) -> Result<(), ClientError> {
     #[cfg(windows)]
-    let _ = mouse_scroll_lines;
+    let _ = config.mouse_scroll_lines;
 
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
-        mouse_capture_active,
+        mouse_capture_active: config.mouse_capture_active,
         reported_size: (cols, rows),
-        sound_config,
-        kitty_graphics_enabled,
+        sound_config: config.sound_config,
+        kitty_graphics_enabled: config.kitty_graphics_enabled,
         attach_escape,
         #[cfg(unix)]
-        mouse_scroll_lines,
-        redraw_on_focus_gained,
+        mouse_scroll_lines: config.mouse_scroll_lines,
+        #[cfg(unix)]
+        remote_image_paste_key: config.remote_image_paste_key,
+        redraw_on_focus_gained: config.redraw_on_focus_gained,
     };
     debug!(?negotiated_encoding, "client render encoding active");
 
@@ -775,19 +1009,22 @@ async fn run_client_loop(
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
 
     // Spawn the stdin reader thread.
+    let will_query_host_terminal_theme =
+        state.attach_escape.is_none() && should_query_host_terminal_theme();
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     std::thread::spawn(move || {
-        input::stdin_reader_loop(stdin_tx, &stdin_quit);
+        input::stdin_reader_loop(stdin_tx, &stdin_quit, will_query_host_terminal_theme);
     });
 
-    if state.attach_escape.is_none() && should_query_host_terminal_theme() {
+    if will_query_host_terminal_theme {
         query_host_terminal_theme();
     }
 
     // Spawn the resize poller thread.
     let resize_quit = should_quit.clone();
     let resize_tx = event_tx.clone();
+    let kitty_graphics_enabled = state.kitty_graphics_enabled;
     std::thread::spawn(move || {
         resize_poll_loop(resize_tx, cols, rows, kitty_graphics_enabled, &resize_quit);
     });
@@ -870,9 +1107,12 @@ async fn run_client_loop(
                     ) {
                         state.request_full_redraw();
                     }
+                    if crate::raw_input::events_require_host_terminal_theme_query(&events) {
+                        query_host_terminal_theme();
+                    }
                     data
                 };
-                if should_bridge_clipboard_image_paste(&data) {
+                if should_bridge_clipboard_image_paste(&data, state.remote_image_paste_key) {
                     if let Some(image) = crate::platform::read_clipboard_image() {
                         if image.bytes.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
                             warn!(
@@ -989,12 +1229,18 @@ async fn run_client_loop(
                     reload_local_client_config(
                         &mut state.sound_config,
                         &mut state.redraw_on_focus_gained,
+                        #[cfg(unix)]
+                        &mut state.remote_image_paste_key,
                     );
                 }
                 ServerMessage::MouseCapture { enabled } => {
                     let desired = enabled;
                     if desired != state.mouse_capture_active {
                         set_mouse_capture(desired).map_err(ClientError::ConnectionFailed)?;
+                        #[cfg(windows)]
+                        if windows_vti_input_backend_enabled() {
+                            let _ = enable_windows_virtual_terminal_input();
+                        }
                         state.mouse_capture_active = desired;
                     }
                 }
@@ -1088,17 +1334,44 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
 // Notifications
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
+fn client_remote_image_paste_key(
+    config: &crate::config::Config,
+) -> Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
+    if !is_remote_client_process() {
+        return None;
+    }
+
+    match config.remote_image_paste_key() {
+        Ok(key) => key,
+        Err(diagnostic) => {
+            warn!(diagnostic = %diagnostic, "local remote image paste key config diagnostic");
+            None
+        }
+    }
+}
+
 fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
     redraw_on_focus_gained: &mut bool,
+    #[cfg(unix)] remote_image_paste_key: &mut Option<(
+        crossterm::event::KeyCode,
+        crossterm::event::KeyModifiers,
+    )>,
 ) {
     match crate::config::load_live_config() {
         Ok(loaded) => {
             for diagnostic in loaded.config.ui.sound.diagnostics() {
                 warn!(diagnostic = %diagnostic, "local sound config diagnostic");
             }
+            #[cfg(unix)]
+            let loaded_remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
             *sound_config = loaded.config.ui.sound;
             *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
+            #[cfg(unix)]
+            {
+                *remote_image_paste_key = loaded_remote_image_paste_key;
+            }
             debug!("reloaded local client config");
         }
         Err(diagnostics) => {
@@ -1174,18 +1447,24 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
 }
 
 #[cfg(unix)]
-fn should_bridge_clipboard_image_paste(data: &[u8]) -> bool {
+fn should_bridge_clipboard_image_paste(
+    data: &[u8],
+    remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+) -> bool {
     if data == b"\x1b[200~\x1b[201~" {
         return true;
     }
+
+    let Some(remote_image_paste_key) = remote_image_paste_key else {
+        return false;
+    };
 
     let events = crate::raw_input::parse_raw_input_bytes_sync(data);
     matches!(
         events.as_slice(),
         [crate::raw_input::RawInputEvent::Key(key)]
             if key.kind == crossterm::event::KeyEventKind::Press
-                && key.modifiers == crossterm::event::KeyModifiers::CONTROL
-                && matches!(key.code, crossterm::event::KeyCode::Char('v' | 'V'))
+                && crate::config::terminal_key_matches_combo(*key, remote_image_paste_key)
     )
 }
 
@@ -1406,6 +1685,12 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[test]
+    fn windows_virtual_terminal_input_mode_sets_only_vti_bit() {
+        assert_eq!(windows_virtual_terminal_input_mode(0x01f0), 0x03f0);
+        assert_eq!(windows_virtual_terminal_input_mode(0x03f0), 0x03f0);
+    }
+
     fn restore_env_var(key: &str, value: Option<OsString>) {
         if let Some(value) = value {
             std::env::set_var(key, value);
@@ -1460,14 +1745,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn clipboard_image_paste_bridge_triggers_on_ctrl_v_and_empty_paste() {
-        assert!(should_bridge_clipboard_image_paste(&[0x16]));
-        assert!(should_bridge_clipboard_image_paste(b"\x1b[118;5u"));
-        assert!(should_bridge_clipboard_image_paste(b"\x1b[200~\x1b[201~"));
-        assert!(!should_bridge_clipboard_image_paste(
-            b"\x1b[200~text\x1b[201~"
+    fn clipboard_image_paste_bridge_triggers_on_configured_key_and_empty_paste() {
+        let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
+        assert!(should_bridge_clipboard_image_paste(&[0x16], Some(ctrl_v)));
+        assert!(should_bridge_clipboard_image_paste(
+            b"\x1b[118;5u",
+            Some(ctrl_v)
         ));
-        assert!(!should_bridge_clipboard_image_paste(b"v"));
+        assert!(should_bridge_clipboard_image_paste(
+            b"\x1b[200~\x1b[201~",
+            None
+        ));
+        assert!(!should_bridge_clipboard_image_paste(
+            b"\x1b[200~text\x1b[201~",
+            Some(ctrl_v)
+        ));
+        assert!(!should_bridge_clipboard_image_paste(&[0x16], None));
+        assert!(!should_bridge_clipboard_image_paste(b"v", Some(ctrl_v)));
     }
 
     #[test]
@@ -1529,15 +1823,62 @@ mod tests {
     }
 
     #[test]
+    fn write_host_color_scheme_report_mode_emits_mode_sequences() {
+        let mut output = Vec::new();
+        write_host_color_scheme_report_mode(&mut output, true).unwrap();
+        write_host_color_scheme_report_mode(&mut output, false).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(
+            crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_ENABLE_SEQUENCE.as_bytes(),
+        );
+        expected.extend_from_slice(
+            crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE.as_bytes(),
+        );
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn color_scheme_change_event_requests_host_theme_query() {
+        let events = crate::raw_input::parse_raw_input_bytes_sync(b"\x1b[?997;1n");
+
+        assert!(crate::raw_input::events_require_host_terminal_theme_query(
+            &events
+        ));
+    }
+
+    #[test]
     fn host_terminal_theme_query_is_disabled_on_windows() {
         assert_eq!(should_query_host_terminal_theme(), !cfg!(windows));
     }
 
     #[test]
+    fn color_scheme_reports_are_enabled_only_for_full_clients() {
+        assert_eq!(
+            should_enable_host_color_scheme_reports(true),
+            !cfg!(windows)
+        );
+        assert!(!should_enable_host_color_scheme_reports(false));
+    }
+
+    #[test]
     fn terminal_restore_postlude_restores_visible_default_cursor() {
         let mut output = Vec::new();
-        write_terminal_restore_postlude(&mut output).unwrap();
+        write_terminal_restore_postlude(&mut output, false).unwrap();
         assert_eq!(output, b"\x1b[?25h\x1b[0 q");
+    }
+
+    #[test]
+    fn terminal_restore_postlude_disables_color_scheme_reports_when_enabled() {
+        let mut output = Vec::new();
+        write_terminal_restore_postlude(&mut output, true).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(
+            crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE.as_bytes(),
+        );
+        expected.extend_from_slice(b"\x1b[?25h\x1b[0 q");
+        assert_eq!(output, expected);
     }
 
     #[cfg(unix)]
@@ -1758,6 +2099,19 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn handshake_read_timeout_extends_for_remote_client() {
+        let _guard = env_lock().lock().unwrap();
+
+        let _local_env = EnvVarsRemovedGuard::new(&[crate::remote::REMOTE_KEYBINDINGS_ENV_VAR]);
+        assert_eq!(handshake_read_timeout(), LOCAL_HANDSHAKE_READ_TIMEOUT);
+        assert!(REMOTE_HANDSHAKE_READ_TIMEOUT > LOCAL_HANDSHAKE_READ_TIMEOUT);
+
+        let _remote_env = EnvVarGuard::set(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR, "server");
+        assert_eq!(handshake_read_timeout(), REMOTE_HANDSHAKE_READ_TIMEOUT);
+    }
+
     #[test]
     fn client_error_display_detached_remote_reattach_hint_takes_precedence() {
         let _guard = env_lock().lock().unwrap();
@@ -1824,8 +2178,15 @@ mod tests {
         let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
         let mut sound_config = crate::config::SoundConfig::default();
         let mut redraw_on_focus_gained = true;
+        #[cfg(unix)]
+        let mut remote_image_paste_key = None;
 
-        reload_local_client_config(&mut sound_config, &mut redraw_on_focus_gained);
+        reload_local_client_config(
+            &mut sound_config,
+            &mut redraw_on_focus_gained,
+            #[cfg(unix)]
+            &mut remote_image_paste_key,
+        );
 
         assert!(!redraw_on_focus_gained);
         let _ = std::fs::remove_file(path);

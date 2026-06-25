@@ -5,6 +5,23 @@ pub struct RgbColor {
     pub b: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostAppearance {
+    Dark,
+    Light,
+}
+
+impl RgbColor {
+    pub fn inferred_appearance(self) -> HostAppearance {
+        let luminance = u32::from(self.r) * 299 + u32::from(self.g) * 587 + u32::from(self.b) * 114;
+        if luminance >= 128_000 {
+            HostAppearance::Light
+        } else {
+            HostAppearance::Dark
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TerminalTheme {
     pub foreground: Option<RgbColor>,
@@ -18,6 +35,8 @@ pub enum DefaultColorKind {
 }
 
 pub const HOST_COLOR_QUERY_SEQUENCE: &str = "\x1b]10;?\x1b\\\x1b]11;?\x1b\\";
+pub const HOST_COLOR_SCHEME_REPORT_ENABLE_SEQUENCE: &str = "\x1b[?2031h";
+pub const HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE: &str = "\x1b[?2031l";
 
 impl TerminalTheme {
     pub fn with_color(mut self, kind: DefaultColorKind, color: RgbColor) -> Self {
@@ -56,6 +75,13 @@ pub fn osc_set_default_color_sequence(kind: DefaultColorKind, color: RgbColor) -
         "\x1b]{command};rgb:{:02x}/{:02x}/{:02x}\x1b\\",
         color.r, color.g, color.b
     )
+}
+
+pub fn osc_reset_default_color_sequence(kind: DefaultColorKind) -> &'static str {
+    match kind {
+        DefaultColorKind::Foreground => "\x1b]110\x1b\\",
+        DefaultColorKind::Background => "\x1b]111\x1b\\",
+    }
 }
 
 fn parse_rgb_color(value: &str) -> Option<RgbColor> {
@@ -129,6 +155,18 @@ mod tests {
                     b: 0x56,
                 },
             ))
+        );
+    }
+
+    #[test]
+    fn default_color_reset_sequences_use_xterm_osc_numbers() {
+        assert_eq!(
+            osc_reset_default_color_sequence(DefaultColorKind::Foreground),
+            "\x1b]110\x1b\\"
+        );
+        assert_eq!(
+            osc_reset_default_color_sequence(DefaultColorKind::Background),
+            "\x1b]111\x1b\\"
         );
     }
 

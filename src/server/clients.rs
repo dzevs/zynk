@@ -33,6 +33,10 @@ pub(crate) struct ClientConnection {
     pub(crate) cell_size: crate::kitty_graphics::HostCellSize,
     /// Last known host terminal default colors for this client.
     pub(crate) host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    /// Last known host terminal appearance for this client.
+    pub(crate) host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
+    /// True when appearance came from an explicit host color-scheme report.
+    pub(crate) host_terminal_appearance_explicit: bool,
     /// Last reported focus state for this client's outer terminal.
     pub(crate) outer_terminal_focus: Option<bool>,
     /// Stateful parser for app-client input split across transport reads.
@@ -98,6 +102,10 @@ impl ClientConnection {
             keybindings,
             terminal_size,
             cell_size,
+            host_terminal_appearance: host_terminal_theme
+                .background
+                .map(crate::terminal_theme::RgbColor::inferred_appearance),
+            host_terminal_appearance_explicit: false,
             host_terminal_theme,
             outer_terminal_focus,
             raw_input: crate::raw_input::RawInputFramer::default(),
@@ -130,17 +138,47 @@ impl ClientConnection {
         events: &[crate::raw_input::RawInputEvent],
     ) -> bool {
         let mut next_theme = self.host_terminal_theme;
+        let mut changed = false;
         for event in events {
-            if let crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } = event {
-                next_theme = next_theme.with_color(*kind, *color);
+            match event {
+                crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
+                    next_theme = next_theme.with_color(*kind, *color);
+                    if matches!(kind, crate::terminal_theme::DefaultColorKind::Background)
+                        && !self.host_terminal_appearance_explicit
+                    {
+                        changed |=
+                            self.set_host_appearance(Some(color.inferred_appearance()), false);
+                    }
+                }
+                crate::raw_input::RawInputEvent::HostColorSchemeChanged(appearance) => {
+                    changed |= self.set_host_appearance(Some(*appearance), true);
+                }
+                _ => {}
             }
         }
 
-        if next_theme == self.host_terminal_theme {
+        if next_theme != self.host_terminal_theme {
+            self.host_terminal_theme = next_theme;
+            changed = true;
+        }
+        changed
+    }
+
+    fn set_host_appearance(
+        &mut self,
+        appearance: Option<crate::terminal_theme::HostAppearance>,
+        explicit: bool,
+    ) -> bool {
+        if self.host_terminal_appearance_explicit && !explicit {
             return false;
         }
-
-        self.host_terminal_theme = next_theme;
+        if self.host_terminal_appearance == appearance
+            && self.host_terminal_appearance_explicit == explicit
+        {
+            return false;
+        }
+        self.host_terminal_appearance = appearance;
+        self.host_terminal_appearance_explicit = explicit;
         true
     }
 

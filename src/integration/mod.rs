@@ -17,11 +17,11 @@ pub(crate) const ZYNK_TAB_ID_ENV_VAR: &str = "ZYNK_TAB_ID";
 pub(crate) const ZYNK_WORKSPACE_ID_ENV_VAR: &str = "ZYNK_WORKSPACE_ID";
 const PI_EXTENSION_INSTALL_NAME: &str = "zynk-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/zynk-agent-state.ts");
-const PI_INTEGRATION_VERSION: u32 = 4;
+const PI_INTEGRATION_VERSION: u32 = 5;
 const OMP_EXTENSION_INSTALL_NAME: &str = "zynk-omp-agent-state.ts";
 // Pre-rebrand on-disk name of the omp extension; uninstall strips it too.
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/zynk-agent-state.ts");
-const OMP_INTEGRATION_VERSION: u32 = 2;
+const OMP_INTEGRATION_VERSION: u32 = 3;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "zynk-agent-state.ps1"
@@ -33,7 +33,7 @@ const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/claude/zynk-agent-state.sh")
 };
-const CLAUDE_INTEGRATION_VERSION: u32 = 6;
+const CLAUDE_INTEGRATION_VERSION: u32 = 7;
 const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "zynk-agent-state.ps1"
@@ -45,7 +45,7 @@ const CODEX_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/codex/zynk-agent-state.sh")
 };
-const CODEX_INTEGRATION_VERSION: u32 = 5;
+const CODEX_INTEGRATION_VERSION: u32 = 6;
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 const KIMI_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "zynk-agent-state.ps1"
@@ -57,13 +57,13 @@ const KIMI_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/kimi/zynk-agent-state.sh")
 };
-const KIMI_INTEGRATION_VERSION: u32 = 3;
+const KIMI_INTEGRATION_VERSION: u32 = 4;
 const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
 const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> zynk kimi integration";
 const KIMI_CONFIG_BLOCK_END: &str = "# <<< zynk kimi integration";
 // Pre-rebrand kimi config-block fences; removal strips them too (migration compat).
 const KIMI_MIN_VERSION: &str = "0.14.0";
-const KIMI_HOOK_EVENTS: [(&str, &str); 10] = [
+const KIMI_HOOK_EVENTS: [(&str, &str); 9] = [
     ("SessionStart", "session"),
     ("UserPromptSubmit", "working"),
     ("PreToolUse", "working"),
@@ -73,7 +73,6 @@ const KIMI_HOOK_EVENTS: [(&str, &str); 10] = [
     ("PermissionResult", "working"),
     ("Stop", "idle"),
     ("Interrupt", "idle"),
-    ("SessionEnd", "release"),
 ];
 const COPILOT_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "zynk-agent-state.ps1"
@@ -101,7 +100,7 @@ const COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS: [&str; 9] = [
 ];
 const DEVIN_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 const DEVIN_HOOK_ASSET: &str = include_str!("assets/devin/zynk-agent-state.sh");
-const DEVIN_INTEGRATION_VERSION: u32 = 1;
+const DEVIN_INTEGRATION_VERSION: u32 = 2;
 const DEVIN_HOOK_EVENTS: [(&str, &str); 6] = [
     ("SessionStart", "session"),
     ("UserPromptSubmit", "session"),
@@ -143,10 +142,10 @@ const DROID_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 9] = [
 ];
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "zynk-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/zynk-agent-state.js");
-const OPENCODE_INTEGRATION_VERSION: u32 = 5;
+const OPENCODE_INTEGRATION_VERSION: u32 = 7;
 const KILO_PLUGIN_INSTALL_NAME: &str = "zynk-agent-state.js";
 const KILO_PLUGIN_ASSET: &str = include_str!("assets/kilo/zynk-agent-state.js");
-const KILO_INTEGRATION_VERSION: u32 = 1;
+const KILO_INTEGRATION_VERSION: u32 = 2;
 const HERMES_PLUGIN_INSTALL_NAME: &str = "zynk-agent-state";
 // Legacy hermes plugin name written by pre-rebrand installs; uninstall strips it
 // from the user's config + removes its plugin dir (bounded migration cleanup).
@@ -154,7 +153,7 @@ const HERMES_PLUGIN_MANIFEST_INSTALL_NAME: &str = "plugin.yaml";
 const HERMES_PLUGIN_INIT_INSTALL_NAME: &str = "__init__.py";
 const HERMES_PLUGIN_MANIFEST_ASSET: &str = include_str!("assets/hermes/plugin.yaml");
 const HERMES_PLUGIN_INIT_ASSET: &str = include_str!("assets/hermes/__init__.py");
-const HERMES_INTEGRATION_VERSION: u32 = 2;
+const HERMES_INTEGRATION_VERSION: u32 = 3;
 const QODERCLI_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "zynk-agent-state.ps1"
 } else {
@@ -4485,7 +4484,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(1));
-        assert_eq!(claude.expected_version, 6);
+        assert_eq!(claude.expected_version, 7);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -4515,7 +4514,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(2));
-        assert_eq!(claude.expected_version, 6);
+        assert_eq!(claude.expected_version, 7);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -4648,7 +4647,7 @@ mod tests {
 
         assert_eq!(codex.path, hook_path);
         assert_eq!(codex.installed_version, Some(2));
-        assert_eq!(codex.expected_version, 5);
+        assert_eq!(codex.expected_version, 6);
         assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -6197,16 +6196,17 @@ mod tests {
         // no fire-and-forget receipt send.
         assert!(!PI_EXTENSION_ASSET.contains(".catch(() => {})"));
 
-        // STILL state-only: it reports the agent session path/id, publishes state, and
-        // uses the report/release agent control surface.
+        // STILL state-only: it reports the agent session path/id, publishes state,
+        // reports the agent session, and releases on a root-session shutdown.
         assert!(PI_EXTENSION_ASSET.contains("agent_session_path: currentAgentSessionPath"));
         assert!(PI_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
         assert!(PI_EXTENSION_ASSET.contains("publishState(true)"));
         assert!(PI_EXTENSION_ASSET.contains("pane.report_agent"));
+        assert!(PI_EXTENSION_ASSET.contains("pane.report_agent_session"));
         assert!(PI_EXTENSION_ASSET.contains("pane.release_agent"));
 
-        // the asset version marker is bumped to the state-only revision.
-        assert_eq!(parse_integration_version(PI_EXTENSION_ASSET), Some(4));
+        // the asset version marker is bumped to the root-session-protected revision.
+        assert_eq!(parse_integration_version(PI_EXTENSION_ASSET), Some(5));
     }
 
     #[test]
@@ -6225,6 +6225,9 @@ mod tests {
         assert!(PI_EXTENSION_ASSET.contains("agent_session_path: currentAgentSessionPath"));
         assert!(PI_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
         assert!(PI_EXTENSION_ASSET.contains("publishState(true)"));
+        assert!(OMP_EXTENSION_ASSET.contains("agent_session_path: currentAgentSessionPath"));
+        assert!(OMP_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
+        assert!(OMP_EXTENSION_ASSET.contains("publishState(true)"));
         assert!(CLAUDE_HOOK_ASSET.contains("agent_session_id"));
         assert!(CLAUDE_HOOK_ASSET.contains("agent_session_path"));
         assert!(CLAUDE_HOOK_ASSET.contains("session_start_source"));
@@ -6240,7 +6243,7 @@ mod tests {
         assert!(KIMI_HOOK_ASSET.contains("agent_session_id"));
         assert!(KIMI_HOOK_ASSET.contains("pane.report_agent_session"));
         assert!(KIMI_HOOK_ASSET.contains("\"state\": action"));
-        assert!(KIMI_HOOK_ASSET.contains("pane.release_agent"));
+        assert!(!KIMI_HOOK_ASSET.contains("pane.release_agent"));
         assert!(COPILOT_HOOK_ASSET.contains("agent_session_id"));
         assert!(COPILOT_HOOK_ASSET.contains("pane.report_agent_session"));
         assert!(!COPILOT_HOOK_ASSET.contains("\"state\":"));
@@ -6261,16 +6264,16 @@ mod tests {
         assert!(OPENCODE_PLUGIN_ASSET.contains("params.agent_session_id = sessionID"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("pane.report_agent_session"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("reportState"));
-        assert!(OPENCODE_PLUGIN_ASSET.contains("pane.release_agent"));
+        assert!(!OPENCODE_PLUGIN_ASSET.contains("pane.release_agent"));
         assert!(KILO_PLUGIN_ASSET.contains("SOURCE = \"zynk:kilo\""));
         assert!(KILO_PLUGIN_ASSET.contains("AGENT = \"kilo\""));
         assert!(KILO_PLUGIN_ASSET.contains("pane.report_agent_session"));
         assert!(KILO_PLUGIN_ASSET.contains("reportState"));
-        assert!(KILO_PLUGIN_ASSET.contains("pane.release_agent"));
+        assert!(!KILO_PLUGIN_ASSET.contains("pane.release_agent"));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = _session_id(kwargs)"));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("pane.report_agent\","));
-        assert!(HERMES_PLUGIN_INIT_ASSET.contains("pane.release_agent"));
+        assert!(!HERMES_PLUGIN_INIT_ASSET.contains("pane.release_agent"));
         assert!(QODERCLI_HOOK_ASSET.contains("ZYNK_HOOK_INPUT_FILE"));
         assert!(QODERCLI_HOOK_ASSET.contains("agent_session_id"));
         assert!(QODERCLI_HOOK_ASSET.contains("pane.report_agent_session"));
@@ -6287,6 +6290,30 @@ mod tests {
         assert!(CURSOR_HOOK_ASSET.contains("sessionStart"));
         assert!(!CURSOR_HOOK_ASSET.contains("\"state\":"));
         assert!(!CURSOR_HOOK_ASSET.contains("pane.release_agent"));
+    }
+
+    #[test]
+    fn omp_root_session_guard_is_instance_scoped() {
+        let export_start = OMP_EXTENSION_ASSET
+            .find("export default function (pi)")
+            .expect("omp extension exports a function");
+        let root_session_decl = OMP_EXTENSION_ASSET
+            .find("let rootSession = false")
+            .expect("omp extension declares root session guard");
+        let session_start_handler = OMP_EXTENSION_ASSET
+            .find("pi.on(\"session_start\"")
+            .expect("omp extension registers session_start handler");
+
+        assert_eq!(
+            OMP_EXTENSION_ASSET
+                .matches("let rootSession = false")
+                .count(),
+            1
+        );
+        assert!(OMP_EXTENSION_ASSET.contains("ctx?.hasUI !== true"));
+        assert!(OMP_EXTENSION_ASSET.contains("rootSession = true"));
+        assert!(export_start < root_session_decl);
+        assert!(root_session_decl < session_start_handler);
     }
 
     #[test]

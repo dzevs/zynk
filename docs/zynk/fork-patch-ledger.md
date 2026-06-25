@@ -1798,3 +1798,125 @@ not a resume input; verified the `live_handoff_keeps_agent_started_pane_after_ag
 `None`). Re-validation: `fmt --check` clean; clippy `--all-targets -D warnings` exit 0; `nextest agent_resume
 persist::snapshot persist::restore app::agent_resume detect::tests::foreground_agent_argv` 105/105; `nextest
 persist handoff` 129/129. Files: EDIT `src/persist/snapshot.rs`, `docs/zynk/fork-patch-ledger.md`.
+
+
+---
+
+# v0.7.1 PORT LEDGER
+
+Port of upstream Herdr **v0.7.1** (`23b96e4`) into the zynk hard fork, on top of the v0.7.0-ported base
+(`fa14c5d`). Driven through the gated workflow: Gate-1 spec + plan (Codex, both APPROVED after revisions) →
+per-milestone Gate-2 (Codex, M1–M5 + this M6) → Gate-3 swarm → operator merge. Per-SHA ledger model
+(ADR 0010, full fork): re-apply only the genuine `v0.7.0..v0.7.1` upstream deltas ON TOP of zynk identity;
+never raw-merge.
+
+**Framing:** the fork base is AHEAD of v0.7.1 on rebrand + the net-new `src/zynk/` conversation layer, so the
+`base..v0.7.1` diff is mostly `zynk→herdr` reversion noise. Port = apply only the genuine deltas, adapted to
+zynk identity (no `herdr` in active source), dropping website/blog/docs-site/preview/admin hunks.
+
+**Totals (51 commits):** 36 PORT/SPLIT · 2 EVALUATE · 11 SKIP · 2 SKIP-DEFER. Branch `port/herdr-v0.7.1`;
+zynk version stays **3.0.1** (the `0.7.1` bump is SKIP). Every milestone ended green (`just check` + `just gate`)
+and Gate-2-approved by Codex.
+
+## Applied PORT/SPLIT — by milestone (zynk sha ← upstream sha)
+
+### M1 — Windows-ConPTY portable-pty vendoring
+| zynk | upstream | subject / handling |
+|---|---|---|
+| d04c136 | cc802c8 | drop needless return in windows stdin reader dispatch |
+| b3a43fc | b7a504b | add windows-msvc clippy recipe (justfile `windows-lint`) |
+| c4433f0 | 052f202 | preserve windows terminal multiline paste (vti backend) |
+| ef4a273 | 3366121 | record windows named-pipe timeout skip (test deferred to M5) |
+| bb984df | d7ae163 | **SPLIT** windows installer PSModulePath cleanup — `src/update.rs` only; dropped the installer-script hunk (fail-closed updater) |
+| bce7987 | c580840 | detect npm-wrapped pi on windows |
+| 27cb7c3 | a66f4c6 | **vendor portable-pty + force system ConPTY** — `vendor/portable-pty` + `0001-force-system-conpty.patch` + `vendor/portable-pty.patches.md` + `scripts/test_vendor_portable_pty.py` (wired into justfile) + `windows_smoke_conpty_path.ps1` + Cargo `[patch]`/`include` |
+| cef42a2 | 64a12de | include vendored portable-pty in nix package fileset |
+| 3cbb2c0 | — | (hygiene) scrub `herdr` from the windows-lint recipe comment |
+
+**§8 unix.rs check (M1.7):** vendored `vendor/portable-pty/src/unix.rs` is **sha256-identical** to crates.io
+`portable-pty 0.9.0/src/unix.rs` (also lib/cmdbuilder/serial/win-{conpty,mod,procthreadattr}); the ONLY source
+delta is `win/psuedocon.rs` (force system ConPTY via kernel32.dll). No Unix delta. `scripts.test_vendor_portable_pty` 6/6.
+
+### M2 — agent panel + theme
+| zynk | upstream | subject / handling |
+|---|---|---|
+| dc83d1d | 5449025 | sort agent panel by priority (zynk ranks Working>done — fork divergence; test order adapted) |
+| 0d896a9 | 36b4001 | sync theme with host appearance |
+| 9abdca5 | 9f4f163 | background update-check toggles (disable-only; updater stays fail-closed) |
+| 2b0838f | 4421c0f | configurable pane gaps (render stays pure) |
+
+### M3 — lifecycle + restore
+| zynk | upstream | subject / handling |
+|---|---|---|
+| bfe4fad | ebff340 | restore omp sessions after same-pane restart |
+| 4244907 | 5ffaf4f | isolate omp hook state to ui sessions |
+| 29980a6 | d74ba8c | emit plugin lifecycle events from ui worktree flows (UI-flow events ported; the dropped worktree-keyed plugin EventData arms stay dropped — fork divergence) |
+| d9cd202 | 26c5f97 | reanchor lifecycle hook generations (no `Agent::Omp` variant — fork keeps omp hook-only) |
+| 6a7d9b6 | 92a10fc | protect root agent restore sessions (owner-keyed, never detection-derived) |
+| b979a99 | 734bf3c | release pi and omp agents on shutdown |
+| 88a4d76 | 89ca3ba | check out existing branches for worktree create |
+| b883a8e | 46a2b25 | **defer api worktree operations** — full deferral plumbing (runtime/headless intercept, pending-op state, operation-ids, async response, recovery), adapted to zynk's event surface (no worktree-specific plugin events → workspace-lifecycle events). **Initially over-skipped (mis-attributed to the dropped plugin-EVENT subsystem); Codex Gate-2 caught it; re-ported.** |
+| b57fb05 | 89ca3ba | (test) deferred-API existing-branch regression test — portable only once 46a2b25 landed (Codex M3 non-blocking note) |
+
+### M4 — terminal / render / input
+| zynk | upstream | subject / handling |
+|---|---|---|
+| 7cd5e5f | 6f9ca0e | hold lone escape while awaiting host color reply (render pure) |
+| dbc87d6 | aca35ea | scope image paste shortcut to remote |
+| bbee9bf | 73b137a | preserve focus after temporary pane commands |
+| 2671043 | afc56d5 | enable kitty file media |
+| 8f14972 | 4846cb1 | skip wide spacer cells in pane reads (detection-snapshot tail UNCHANGED; manifest + 83 detect tests green) |
+| e4d4875 | 569c33b | active pane color for border intersections (render pure) |
+| e7d9e0d | 088922d | let user keybinds displace defaults (source-aware two-pass User-then-Default registry) |
+| a4c0838 | 520d0b8 | prevent release-key fallback from doubling input |
+| — | d998753 | **PORT-NOOP** cjk branch truncation — zynk's `truncate_text` (`src/ui/sidebar.rs:170-183`) is already char-based; never had the byte-slice bug (covered by `branch_row_truncates_non_ascii_branch_without_panic`) |
+
+### M5 — hooks / detect / remote
+| zynk | upstream | subject / handling |
+|---|---|---|
+| f79f6f9 | 2fe57a5 | **SPLIT** stabilize flaky plugin capture tests — test stabilization only; dropped the auto-website-deploy hunk |
+| bba0839 | ef0b4bc | support agent env hints (env hint `HERDR_AGENT`→`ZYNK_AGENT`) |
+| 1152bc5 | a518228 | support devin hook on python 3.9 (integration asset; `DEVIN_INTEGRATION_VERSION` 1→2 + marker) |
+| 630ec26 | 27ff4dd | block idle client writer (Condvar-backed queue; binary wire format unchanged) |
+| ca68184 | b76fb49 | **SPLIT** detect copilot ask_user accept prompt — `github-copilot.toml` manifest only (bounded `whole_recent` region); dropped the website mirror |
+| 631bf12 | 74fa90c | scope opencode hook to main agent + adopt new sessions (hook-authoritative; `OPENCODE_INTEGRATION_VERSION` 5→7 + marker) |
+| 93deec1 | a720367 | extend remote client handshake timeout for high-latency links |
+| 18914ff | b7a504b | **windows-cfg fix** — gate `events_require_host_terminal_theme_query` with `#[cfg(any(not(windows), test))]` (the deferred b7a504b gate). The fn was added by M2/`36b4001` WITHOUT the gate → dead code on windows; **caught by the windows-gnu cross-check** (linux `just check` never compiles `#[cfg(windows)]` code, so 5 milestones missed it). Re-ran windows-gnu clippy on the full HEAD → clean. |
+
+## EVALUATE (2) — macOS CI zig → DECISION: KEEP `mlugg/setup-zig` (no-op, with evidence)
+`5981ba4` ci: use homebrew zig on macos · `dbc45f6` ci: use homebrew zig in release workflow.
+zynk's `mlugg/setup-zig@v2.2.1` is SHA-pinned (`d1434d08`) AND pins the exact `version: 0.15.2` (the locked
+toolchain zig). Upstream's Homebrew `zig@0.15` tracks the latest 0.15.x (drifts off 0.15.2). For a fork that
+values reproducibility + a locked zig 0.15.2, the pinned mlugg action is strictly better; zynk shipped v3.0.0
+on it with no mlugg-attributed macOS fragility. **Kept mlugg unchanged**; re-evaluate only on a concrete
+mlugg-caused macOS CI failure.
+
+## SKIP (11) — website / blog / docs-site / preview-channel / chore / release-admin (zynk has none of these)
+`61ede89` website manifest · `41d1c14` plugin-trust/security docs-site guidance · `517ca81` preview-release CI
+baseline · `4cf9f8e` preview manifest · `003bef7` approve contributor (chore) · `24c7377` preview-preflight CI
+bun · `995a429` preview manifest · `705403f` blog author card · `74076a8` sponsorship docs · `bae1f14` finalize
+release docs · `23b96e4` release v0.7.1 (version bump — zynk stays 3.0.1).
+
+## SKIP-DEFER (2) — plugin marketplace (recorded for future, NOT rejected)
+`2eeea9a` feat: add plugin marketplace · `bf75226` feat: add plugin marketplace blacklist. The marketplace is a
+hosted Cloudflare worker (`workers/plugin-marketplace`) + an in-app client needing a registry backend zynk has
+no equivalent for. Deferred (not rejected): revisit when zynk has a registry backend. The ported plugin
+lifecycle code (M3) does NOT depend on the marketplace, so deferring it never breaks ported code — verified:
+`git grep -i marketplace` in committed source finds no half-ported marketplace symbol.
+
+## crates.io packaging caveat (M6.2b — operator-decided: accept crates.io-source as a non-primary channel)
+`cargo package` strips `[patch.crates-io]` + excludes the nested `vendor/portable-pty` source (it has its own
+`Cargo.toml` → package boundary), so the packaged crate builds against **registry `portable-pty 0.9.0`**. Net:
+Linux/core crates.io-SOURCE install builds fine; **only a Windows crates.io-SOURCE install lacks the ConPTY
+patch** (binary/Homebrew/Nix ship the patched vendored copy). The `include`-list keeps the patch/index files in
+the tarball for provenance. `cargo publish --dry-run --locked` passes; single `libsqlite3-sys` node preserved
+(ADR 0006, vec0). Accepted by the operator; documented here + in the release/package docs.
+
+## Windows verification note
+zynk's CI windows target is `x86_64-pc-windows-msvc`, which can't cross-build on the dev host (the C deps
+`sqlite-vec`/`libsqlite3-sys` need an MSVC archiver/SDK). The local windows proxy is
+`DOCS_RS=1 cargo clippy --target x86_64-pc-windows-gnu -- -D warnings` (or a temporary, uncommitted `build.rs`
+gnu mapping). This caught the M2/M5 `events_require_host_terminal_theme_query` dead-code break that 5 milestones
+of linux `just check` missed. The CI windows-latest msvc job remains authoritative.
+
+**herdr-base marker: v0.7.0 → v0.7.1.** zynk is now based on upstream Herdr **v0.7.1** (`23b96e4`).

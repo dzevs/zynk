@@ -1,7 +1,7 @@
 """Hermes plugin installed by Zynk to report agent lifecycle state."""
 
 # ZYNK_INTEGRATION_ID=hermes
-# ZYNK_INTEGRATION_VERSION=2
+# ZYNK_INTEGRATION_VERSION=3
 
 from __future__ import annotations
 
@@ -71,10 +71,6 @@ def _report(state: str, **kwargs) -> None:
     _send("pane.report_agent", params)
 
 
-def _release() -> None:
-    _send("pane.release_agent", {})
-
-
 def _working(**kwargs) -> None:
     _report("working", **kwargs)
 
@@ -87,11 +83,6 @@ def _idle(**kwargs) -> None:
     _report("idle", **kwargs)
 
 
-def _finalize(**kwargs) -> None:
-    del kwargs
-    _release()
-
-
 def register(ctx):
     ctx.register_hook("on_session_start", _idle)
     ctx.register_hook("pre_llm_call", _working)
@@ -102,4 +93,3 @@ def register(ctx):
     ctx.register_hook("post_approval_response", _working)
     ctx.register_hook("post_llm_call", _idle)
     ctx.register_hook("on_session_end", _idle)
-    ctx.register_hook("on_session_finalize", _finalize)

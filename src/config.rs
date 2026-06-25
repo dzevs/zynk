@@ -18,8 +18,8 @@ pub use self::{
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelScopeConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, HeaderOptions, KeysConfig, NewTerminalCwdConfig, ShellModeConfig,
+        validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
+        ConfigReloadStatus, HeaderOptions, NewTerminalCwdConfig, ShellModeConfig,
         ToastClipboardPosition, ToastConfig, ToastDelivery, ToastZynkPosition, UpdateChannelConfig,
         HEADER_VERBOSE_ENV_VAR, MAX_HEADER_MAX_WIDTH, MAX_TOAST_DELAY_SECONDS,
         MIN_HEADER_MAX_WIDTH,
@@ -79,30 +79,47 @@ impl Config {
         prefix_diag
             .into_iter()
             .chain(keybind_diags)
+            .chain(self.remote_image_paste_key().err())
             .chain(self.ui.sound.diagnostics())
             .collect()
     }
 
+    pub(crate) fn remote_image_paste_key(&self) -> Result<Option<(KeyCode, KeyModifiers)>, String> {
+        let raw = self.keys.remote_image_paste.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        parse_key_combo(raw).map(Some).ok_or_else(|| {
+            format!("invalid keybinding: keys.remote_image_paste = {raw:?}; disabling binding")
+        })
+    }
+
+    #[cfg(test)]
     pub fn live_keybinds(&self) -> Result<LiveKeybindConfig, Vec<String>> {
+        self.live_keybinds_with_diagnostics()
+            .map(|(live, _diagnostics)| live)
+    }
+
+    pub(crate) fn live_keybinds_with_diagnostics(
+        &self,
+    ) -> Result<(LiveKeybindConfig, Vec<String>), Vec<String>> {
         let (prefix_diag, prefix, keybind_diags, keybinds) = self.validated_keybinds();
-        let diagnostics: Vec<String> = prefix_diag.into_iter().chain(keybind_diags).collect();
-        if diagnostics.is_empty() {
-            Ok(LiveKeybindConfig { prefix, keybinds })
+        if let Some(prefix_diag) = prefix_diag {
+            Err(std::iter::once(prefix_diag).chain(keybind_diags).collect())
         } else {
-            Err(diagnostics)
+            Ok((LiveKeybindConfig { prefix, keybinds }, keybind_diags))
         }
     }
 
     pub(crate) fn local_keybindings_profile_toml(&self) -> Result<String, toml::ser::Error> {
-        let mut keys = self.keys.clone();
-        keys.command.clear();
-
         #[derive(serde::Serialize)]
         struct KeysProfile {
-            keys: KeysConfig,
+            keys: model::KeysConfigOverlay,
         }
 
-        toml::to_string_pretty(&KeysProfile { keys })
+        toml::to_string_pretty(&KeysProfile {
+            keys: self.keys.local_profile(&self.keybinds()),
+        })
     }
 }
 
@@ -133,5 +150,160 @@ command = "lazygit"
         assert!(!profile.contains("lazygit"));
         assert!(!profile.contains("command ="));
         assert!(!profile.contains("[[keys.command]]"));
+    }
+
+    #[test]
+    fn local_keybindings_profile_preserves_user_default_provenance() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+zoom = "prefix+?"
+"#,
+        )
+        .unwrap();
+
+        let profile = config.local_keybindings_profile_toml().unwrap();
+        let round_tripped: Config = toml::from_str(&profile).unwrap();
+
+        assert!(profile.contains("zoom = \"prefix+?\""));
+        assert!(!profile.contains("help = \"prefix+?\""));
+        assert!(round_tripped
+            .keybinds()
+            .zoom
+            .bindings
+            .iter()
+            .any(|binding| binding.label == "prefix+?"));
+        assert!(round_tripped.keybinds().help.bindings.is_empty());
+    }
+
+    #[test]
+    fn local_keybindings_profile_omits_default_displaced_by_user_prefix() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+prefix = "n"
+"#,
+        )
+        .unwrap();
+
+        let profile = config.local_keybindings_profile_toml().unwrap();
+        let round_tripped: Config = toml::from_str(&profile).unwrap();
+
+        assert!(profile.contains("prefix = \"n\""));
+        assert!(!profile.contains("next_tab = \"prefix+n\""));
+        assert!(round_tripped.keybinds().next_tab.bindings.is_empty());
+    }
+
+    #[test]
+    fn local_keybindings_profile_preserves_legacy_indexed_tab_source() {
+        let config: Config = toml::from_str(
+            r#"
+[keys.indexed]
+tabs = "ctrl"
+"#,
+        )
+        .unwrap();
+
+        let profile = config.local_keybindings_profile_toml().unwrap();
+        let round_tripped: Config = toml::from_str(&profile).unwrap();
+        let keybinds = round_tripped.keybinds();
+        let switch_tab_labels: Vec<_> = keybinds
+            .switch_tab
+            .iter()
+            .map(|binding| binding.label.as_str())
+            .collect();
+
+        assert!(profile.contains("[keys.indexed]"));
+        assert!(profile.contains("tabs = \"ctrl\""));
+        assert!(!profile.contains("switch_tab = \"prefix+1..9\""));
+        assert_eq!(switch_tab_labels.len(), 9);
+        assert!(switch_tab_labels
+            .iter()
+            .all(|label| label.starts_with("ctrl+")));
+    }
+
+    #[test]
+    fn local_keybindings_profile_keeps_invalid_legacy_indexed_default_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+[keys.indexed]
+tabs = "bogus"
+"#,
+        )
+        .unwrap();
+
+        let profile = config.local_keybindings_profile_toml().unwrap();
+        let round_tripped: Config = toml::from_str(&profile).unwrap();
+
+        assert!(profile.contains("[keys.indexed]"));
+        assert!(profile.contains("tabs = \"bogus\""));
+        assert!(!profile.contains("switch_tab = \"prefix+1..9\""));
+        assert!(round_tripped.keybinds().switch_tab.is_empty());
+    }
+
+    #[test]
+    fn local_keybindings_profile_keeps_default_displaced_by_omitted_command_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+[[keys.command]]
+key = "prefix+n"
+command = "echo next"
+"#,
+        )
+        .unwrap();
+
+        let profile = config.local_keybindings_profile_toml().unwrap();
+        let round_tripped: Config = toml::from_str(&profile).unwrap();
+
+        assert!(!profile.contains("[[keys.command]]"));
+        assert!(!profile.contains("command ="));
+        assert!(profile.contains("next_tab = \"\""));
+        assert!(round_tripped.keybinds().next_tab.bindings.is_empty());
+    }
+
+    #[test]
+    fn local_keybindings_profile_preserves_partially_displaced_indexed_default() {
+        let config: Config = toml::from_str(
+            r#"
+[[keys.command]]
+key = "prefix+1"
+command = "echo one"
+"#,
+        )
+        .unwrap();
+
+        let profile = config.local_keybindings_profile_toml().unwrap();
+        let round_tripped: Config = toml::from_str(&profile).unwrap();
+        let keybinds = round_tripped.keybinds();
+        let switch_tab_labels: Vec<_> = keybinds
+            .switch_tab
+            .iter()
+            .map(|binding| binding.label.as_str())
+            .collect();
+
+        assert!(!profile.contains("[[keys.command]]"));
+        assert!(!profile.contains("switch_tab = \"prefix+1..9\""));
+        assert!(profile.contains("\"prefix+2\""));
+        assert!(profile.contains("\"prefix+9\""));
+        assert!(!switch_tab_labels.contains(&"prefix+1"));
+        assert_eq!(switch_tab_labels.len(), 8);
+        assert!(switch_tab_labels
+            .iter()
+            .all(|label| label.starts_with("prefix+")));
+    }
+
+    #[test]
+    fn remote_image_paste_key_defaults_to_ctrl_v() {
+        let config = Config::default();
+        assert_eq!(
+            config.remote_image_paste_key().unwrap(),
+            Some((KeyCode::Char('v'), KeyModifiers::CONTROL))
+        );
+    }
+
+    #[test]
+    fn remote_image_paste_key_can_be_disabled() {
+        let config: Config = toml::from_str("[keys]\nremote_image_paste = ''\n").unwrap();
+        assert_eq!(config.remote_image_paste_key().unwrap(), None);
     }
 }

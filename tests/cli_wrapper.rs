@@ -1275,7 +1275,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));
     let status_stdout = String::from_utf8_lossy(&integration_status.stdout);
-    assert!(status_stdout.contains("pi: current (v4)"));
+    assert!(status_stdout.contains("pi: current (v5)"));
     assert!(status_stdout.contains("claude: not installed"));
 
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_zynk"))
@@ -1932,6 +1932,79 @@ fn worktree_management_commands_work() {
     );
     assert_eq!(force_removed["result"]["type"], "worktree_removed");
     assert_eq!(force_removed["result"]["forced"], true);
+    assert!(!checkout.exists());
+
+    cleanup_spawned_zynk(zynk, base);
+}
+
+// upstream 46a2b25: a forced worktree remove now tears down terminal runtimes
+// inside the checkout (shutdown policy) so processes holding the directory are
+// killed before `git worktree remove --force`, then recovers the leftover dir.
+#[test]
+fn forced_worktree_remove_terminates_processes_inside_checkout() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("zynk.sock");
+    let repo = base.join("repo");
+    let checkout = base.join("checkout-with-process");
+    create_committed_repo(&repo);
+
+    let zynk = spawn_zynk(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli_json(
+        &socket_path,
+        &[
+            "worktree",
+            "create",
+            "--cwd",
+            repo.to_str().unwrap(),
+            "--branch",
+            "worktree/force-process",
+            "--path",
+            checkout.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let child_workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let pid_file = base.join("worktree-remove-force.pid");
+    let command = format!(
+        "python3 -c 'import os,time,pathlib; pathlib.Path(r\"{}\").write_text(str(os.getpid())); time.sleep(1000)'",
+        pid_file.display()
+    );
+    let ran = run_cli(&socket_path, &["pane", "run", &pane_id, &command]);
+    assert!(
+        ran.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(5)).unwrap_or_else(|err| {
+        panic!("failed to read pane child pid: {err}");
+    });
+    assert!(process_exists(pid), "child process was not running");
+
+    let removed = run_cli_json(
+        &socket_path,
+        &[
+            "worktree",
+            "remove",
+            "--workspace",
+            &child_workspace_id,
+            "--force",
+            "--json",
+        ],
+    );
+    assert_eq!(removed["result"]["type"], "worktree_removed");
+    assert!(wait_for_pid_exit(pid, Duration::from_secs(3)));
     assert!(!checkout.exists());
 
     cleanup_spawned_zynk(zynk, base);

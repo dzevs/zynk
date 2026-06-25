@@ -3,7 +3,7 @@
 # managed by zynk; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # ZYNK_INTEGRATION_ID=codex
-# ZYNK_INTEGRATION_VERSION=5
+# ZYNK_INTEGRATION_VERSION=6
 
 set -eu
 
@@ -48,21 +48,31 @@ if hook_input_file:
     except Exception:
         hook_input = {}
 
+hook_event_name = str(hook_input.get("hook_event_name") or "")
+if hook_event_name and hook_event_name != "SessionStart":
+    raise SystemExit(0)
+
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
 session_id = hook_input.get("session_id")
 agent_session_id = session_id if isinstance(session_id, str) and session_id else None
+session_start_source = hook_input.get("source") if hook_event_name == "SessionStart" else None
+if not isinstance(session_start_source, str) or not session_start_source:
+    session_start_source = None
 if agent_session_id:
+    params = {
+        "pane_id": pane_id,
+        "source": source,
+        "agent": "codex",
+        "seq": report_seq,
+        "agent_session_id": agent_session_id,
+    }
+    if session_start_source:
+        params["session_start_source"] = session_start_source
     request = {
         "id": request_id,
         "method": "pane.report_agent_session",
-        "params": {
-            "pane_id": pane_id,
-            "source": source,
-            "agent": "codex",
-            "seq": report_seq,
-            "agent_session_id": agent_session_id,
-        },
+        "params": params,
     }
 else:
     raise SystemExit(0)

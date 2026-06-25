@@ -21,8 +21,6 @@ pub struct SessionSnapshot {
     pub active: Option<usize>,
     pub selected: usize,
     #[serde(default)]
-    pub agent_panel_scope: crate::app::state::AgentPanelScope,
-    #[serde(default)]
     pub sidebar_width: Option<u16>,
     #[serde(default)]
     pub sidebar_section_split: Option<f32>,
@@ -179,8 +177,6 @@ struct RawSessionSnapshot {
     #[serde(default)]
     selected: usize,
     #[serde(default)]
-    agent_panel_scope: crate::app::state::AgentPanelScope,
-    #[serde(default)]
     sidebar_width: Option<u16>,
     #[serde(default)]
     sidebar_section_split: Option<f32>,
@@ -198,7 +194,6 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
             .collect::<Result<Vec<_>, _>>()?,
         active: raw.active,
         selected: raw.selected,
-        agent_panel_scope: raw.agent_panel_scope,
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
@@ -261,7 +256,6 @@ pub fn capture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     active: Option<usize>,
     selected: usize,
-    agent_panel_scope: crate::app::state::AgentPanelScope,
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
@@ -274,7 +268,6 @@ pub fn capture(
             .collect(),
         active,
         selected,
-        agent_panel_scope,
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
@@ -540,7 +533,7 @@ mod tests {
     use ratatui::layout::{Direction, Rect};
 
     use super::*;
-    use crate::app::{state::AgentPanelScope, AppState, Mode};
+    use crate::app::{AppState, Mode};
     use crate::layout::NavDirection;
     use crate::workspace::Workspace;
 
@@ -594,7 +587,6 @@ mod tests {
             terminal_runtimes,
             state.active,
             state.selected,
-            state.agent_panel_scope,
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
@@ -622,7 +614,6 @@ mod tests {
             workspaces: vec![],
             active: None,
             selected: 0,
-            agent_panel_scope: AgentPanelScope::CurrentWorkspace,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
@@ -708,7 +699,6 @@ mod tests {
             }],
             active: Some(0),
             selected: 0,
-            agent_panel_scope: AgentPanelScope::CurrentWorkspace,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
@@ -734,10 +724,6 @@ mod tests {
             restored.workspaces[0].tabs[0].panes[&1].label.as_deref(),
             Some("website")
         );
-        assert_eq!(
-            restored.agent_panel_scope,
-            AgentPanelScope::CurrentWorkspace
-        );
         assert_eq!(restored.sidebar_width, Some(26));
         assert_eq!(restored.sidebar_section_split, Some(0.5));
     }
@@ -750,7 +736,6 @@ mod tests {
         assert_eq!(snap.workspaces.len(), 2);
         assert_eq!(snap.active, Some(0));
         assert_eq!(snap.selected, 0);
-        assert_eq!(snap.agent_panel_scope, AgentPanelScope::AllWorkspaces);
         assert_eq!(snap.sidebar_width, None);
         assert_eq!(snap.sidebar_section_split, None);
         assert_eq!(snap.workspaces[0].tabs.len(), 2);
@@ -766,14 +751,13 @@ mod tests {
 
         assert_eq!(snap.version, 3);
         assert_eq!(snap.workspaces.len(), 2);
-        assert_eq!(snap.agent_panel_scope, AgentPanelScope::CurrentWorkspace);
         assert_eq!(snap.sidebar_section_split, Some(0.4));
         assert_eq!(snap.workspaces[0].active_tab, 1);
         assert_eq!(snap.workspaces[1].tabs[0].panes.len(), 2);
     }
 
     #[test]
-    fn old_snapshot_defaults_agent_panel_scope() {
+    fn old_snapshot_defaults_sidebar_fields() {
         let json = serde_json::json!({
             "version": SNAPSHOT_VERSION,
             "workspaces": [],
@@ -784,7 +768,6 @@ mod tests {
 
         let restored = parse_snapshot(&json).unwrap();
 
-        assert_eq!(restored.agent_panel_scope, AgentPanelScope::AllWorkspaces);
         assert_eq!(restored.sidebar_width, None);
         assert_eq!(restored.sidebar_section_split, None);
     }
@@ -898,13 +881,11 @@ mod tests {
         let mut state = state_with_workspaces(&["one"]);
         state.sidebar_width = 31;
         state.sidebar_section_split = 0.4;
-        state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
         state.collapsed_space_keys.insert("repo-key".into());
 
         let snapshot = capture_from_state(&state);
         assert_eq!(snapshot.sidebar_width, Some(31));
         assert_eq!(snapshot.sidebar_section_split, Some(0.4));
-        assert_eq!(snapshot.agent_panel_scope, AgentPanelScope::AllWorkspaces);
         assert!(snapshot.collapsed_space_keys.contains("repo-key"));
     }
 
@@ -1366,7 +1347,6 @@ mod tests {
             }],
             active: Some(0),
             selected: 0,
-            agent_panel_scope: AgentPanelScope::CurrentWorkspace,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),

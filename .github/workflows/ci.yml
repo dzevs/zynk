@@ -120,35 +120,5 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $env:ZYNK_SESSION = "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\zynk.exe"
-
-          & $exe --version
-          & $exe --default-config | Out-Null
-
-          $server = Start-Process -FilePath $exe -ArgumentList "server" -PassThru -WindowStyle Hidden
-          try {
-            $deadline = (Get-Date).AddSeconds(10)
-            do {
-              Start-Sleep -Milliseconds 250
-              $status = & $exe status server 2>&1
-              if ($LASTEXITCODE -eq 0 -and (($status -join "`n") -match "status: running")) {
-                break
-              }
-            } while ((Get-Date) -lt $deadline)
-
-            if ((Get-Date) -ge $deadline) {
-              throw "server did not become ready"
-            }
-
-            & $exe agent start smoke -- "$env:ComSpec" /K dir
-            Start-Sleep -Seconds 2
-            $read = & $exe agent read smoke --source recent --lines 40 --format text
-            $text = $read -join "`n"
-            if ($text -notmatch "File\(s\)" -or $text -notmatch "Dir\(s\)") {
-              throw "pane read did not include cmd.exe directory output: $text"
-            }
-          } finally {
-            & $exe server stop 2>$null
-            Wait-Process -Id $server.Id -Timeout 10 -ErrorAction SilentlyContinue
-          }
+          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"

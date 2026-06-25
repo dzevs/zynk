@@ -46,7 +46,7 @@ pub(crate) struct RightClickPassthroughGesture {
     pub pane_info: PaneInfo,
     pub modifiers: KeyModifiers,
 }
-use crate::terminal_theme::TerminalTheme;
+use crate::terminal_theme::{HostAppearance, TerminalTheme};
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ use crate::workspace::Workspace;
 
 /// All colors used by the UI. Derived from a base accent color for now,
 /// but structured so a full theme system can replace it later.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // all fields defined for theming — some used later
 pub struct Palette {
     /// Primary accent (highlight, active borders).
@@ -832,11 +832,11 @@ pub(crate) enum CopyModeSelection {
     Linewise { anchor_row: u32 },
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum AgentPanelScope {
-    CurrentWorkspace,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentPanelSort {
     #[default]
-    AllWorkspaces,
+    Spaces,
+    Priority,
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,6 +1012,16 @@ impl SelectionListState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ThemeRuntimeConfig {
+    pub manual_name: String,
+    pub dark_name: String,
+    pub light_name: String,
+    pub auto_switch: bool,
+    pub custom: Option<crate::config::CustomThemeColors>,
+    pub legacy_accent: Option<String>,
+}
+
 pub struct SettingsState {
     /// Which section tab is active.
     pub section: SettingsSection,
@@ -1043,6 +1053,7 @@ pub(crate) enum DragTarget {
         path: Vec<bool>,
         direction: Direction,
         area: Rect,
+        grab_offset: u16,
     },
     PaneScrollbar {
         pane_id: crate::layout::PaneId,
@@ -1374,7 +1385,8 @@ pub struct AppState {
     pub sidebar_collapsed: bool,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
-    pub agent_panel_scope: AgentPanelScope,
+    pub agent_panel_sort: AgentPanelSort,
+    pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Zynk's own mouse UI. When false, Zynk only
     /// captures mouse while the focused pane app requests mouse reporting.
     pub mouse_capture: bool,
@@ -1384,6 +1396,8 @@ pub struct AppState {
     pub mouse_scroll_lines: usize,
     pub confirm_close: bool,
     pub prompt_new_tab_name: bool,
+    pub pane_borders: bool,
+    pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
@@ -1423,6 +1437,12 @@ pub struct AppState {
     pub palette: Palette,
     /// Currently applied theme name (for settings UI).
     pub theme_name: String,
+    /// Runtime theme configuration used to resolve manual and auto-switch palettes.
+    pub theme_runtime: ThemeRuntimeConfig,
+    /// Last known foreground host terminal appearance.
+    pub host_terminal_appearance: Option<HostAppearance>,
+    /// True when the foreground host explicitly reported appearance via Mode 2031.
+    pub host_terminal_appearance_explicit: bool,
     /// Settings panel state.
     pub settings: SettingsState,
     /// Cached integration recommendations for onboarding/settings UI.
@@ -1743,7 +1763,8 @@ impl AppState {
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,
-            agent_panel_scope: AgentPanelScope::AllWorkspaces,
+            agent_panel_sort: AgentPanelSort::Spaces,
+            next_agent_state_change_seq: 0,
             mouse_capture: true,
             right_click_passthrough_modifiers: None,
             right_click_passthrough: None,
@@ -1751,6 +1772,8 @@ impl AppState {
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,
             prompt_new_tab_name: true,
+            pane_borders: true,
+            pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
@@ -1776,6 +1799,16 @@ impl AppState {
             spinner_tick: 0,
             palette: Palette::catppuccin(),
             theme_name: "catppuccin".to_string(),
+            theme_runtime: ThemeRuntimeConfig {
+                manual_name: "catppuccin".to_string(),
+                dark_name: "catppuccin".to_string(),
+                light_name: "catppuccin-latte".to_string(),
+                auto_switch: false,
+                custom: None,
+                legacy_accent: None,
+            },
+            host_terminal_appearance: None,
+            host_terminal_appearance_explicit: false,
             settings: SettingsState {
                 section: SettingsSection::Theme,
                 list: SelectionListState::new(0),

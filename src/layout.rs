@@ -2,7 +2,10 @@
 
 use std::cmp::Reverse;
 
-use ratatui::layout::{Direction, Rect};
+use ratatui::{
+    layout::{Direction, Rect},
+    widgets::Borders,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PaneId(u32);
@@ -37,6 +40,8 @@ pub struct PaneInfo {
     /// Visible scrollbar lane, when scrollback is present. `inner_rect` may still
     /// exclude a stable hidden gutter when this is `None`.
     pub scrollbar_rect: Option<Rect>,
+    /// Borders drawn around this pane after UI chrome is applied.
+    pub borders: Borders,
     pub is_focused: bool,
 }
 
@@ -414,6 +419,7 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
                 // inner_rect is set during render when we know if borders are shown
                 inner_rect: area,
                 scrollbar_rect: None,
+                borders: Borders::NONE,
                 is_focused: *id == focus,
             });
         }
@@ -919,6 +925,7 @@ mod tests {
             rect: Rect::new(10, 10, 10, 10),
             inner_rect: Rect::new(10, 10, 10, 10),
             scrollbar_rect: None,
+            borders: Borders::NONE,
             is_focused: true,
         };
         let small_overlap_first = PaneInfo {
@@ -926,6 +933,7 @@ mod tests {
             rect: Rect::new(0, 10, 10, 2),
             inner_rect: Rect::new(0, 10, 10, 2),
             scrollbar_rect: None,
+            borders: Borders::NONE,
             is_focused: false,
         };
         let larger_overlap_second = PaneInfo {
@@ -933,6 +941,7 @@ mod tests {
             rect: Rect::new(0, 10, 10, 8),
             inner_rect: Rect::new(0, 10, 10, 8),
             scrollbar_rect: None,
+            borders: Borders::NONE,
             is_focused: false,
         };
         let panes = vec![focused.clone(), small_overlap_first, larger_overlap_second];

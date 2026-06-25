@@ -3,7 +3,7 @@
 # managed by zynk; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # ZYNK_INTEGRATION_ID=kimi
-# ZYNK_INTEGRATION_VERSION=3
+# ZYNK_INTEGRATION_VERSION=4
 
 set -eu
 
@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session|working|blocked|idle|release) ;;
+  session|working|blocked|idle) ;;
   *) exit 0 ;;
 esac
 
@@ -54,18 +54,7 @@ agent_session_id = session_id if isinstance(session_id, str) and session_id else
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
 
-if action == "release":
-    request = {
-        "id": request_id,
-        "method": "pane.release_agent",
-        "params": {
-            "pane_id": pane_id,
-            "source": source,
-            "agent": agent,
-            "seq": report_seq,
-        },
-    }
-elif action == "session":
+if action == "session":
     if not agent_session_id:
         raise SystemExit(0)
     request = {

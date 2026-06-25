@@ -885,20 +885,42 @@ pub(super) fn write_host_terminal_theme(
     terminal: &mut crate::ghostty::Terminal,
     theme: crate::terminal_theme::TerminalTheme,
 ) {
-    if let Some(color) = theme.foreground {
-        let sequence = crate::terminal_theme::osc_set_default_color_sequence(
+    write_host_terminal_theme_selective(terminal, theme, true, true);
+}
+
+pub(super) fn write_host_terminal_theme_selective(
+    terminal: &mut crate::ghostty::Terminal,
+    theme: crate::terminal_theme::TerminalTheme,
+    foreground: bool,
+    background: bool,
+) {
+    if foreground {
+        write_host_default_color(
+            terminal,
             crate::terminal_theme::DefaultColorKind::Foreground,
-            color,
+            theme.foreground,
         );
-        terminal.write(sequence.as_bytes());
     }
-    if let Some(color) = theme.background {
-        let sequence = crate::terminal_theme::osc_set_default_color_sequence(
+    if background {
+        write_host_default_color(
+            terminal,
             crate::terminal_theme::DefaultColorKind::Background,
-            color,
+            theme.background,
         );
-        terminal.write(sequence.as_bytes());
     }
+}
+
+fn write_host_default_color(
+    terminal: &mut crate::ghostty::Terminal,
+    kind: crate::terminal_theme::DefaultColorKind,
+    color: Option<crate::terminal_theme::RgbColor>,
+) {
+    let sequence = if let Some(color) = color {
+        crate::terminal_theme::osc_set_default_color_sequence(kind, color)
+    } else {
+        crate::terminal_theme::osc_reset_default_color_sequence(kind).to_string()
+    };
+    terminal.write(sequence.as_bytes());
 }
 
 pub(super) fn restore_host_terminal_theme_if_needed(

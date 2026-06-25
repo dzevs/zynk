@@ -502,12 +502,6 @@ impl App {
         create.creating = true;
         create.error = None;
 
-        let command = crate::worktree::build_worktree_add_new_branch_command(
-            &create.source_checkout_path,
-            &create.checkout_path,
-            &create.branch,
-            "HEAD",
-        );
         let parent_dir = create
             .checkout_path
             .parent()
@@ -519,19 +513,30 @@ impl App {
             "starting git worktree add"
         );
         let path = create.checkout_path.clone();
+        let source_checkout_path = create.source_checkout_path.clone();
+        let branch = create.branch.clone();
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = if let Some(parent_dir) = parent_dir {
-                std::fs::create_dir_all(&parent_dir)
-                    .map_err(|err| err.to_string())
-                    .and_then(|()| crate::worktree::run_worktree_command(&command))
+                std::fs::create_dir_all(&parent_dir).map_err(|err| err.to_string())
             } else {
-                crate::worktree::run_worktree_command(&command)
-            };
-            let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(WorktreeAddResult {
-                path,
-                result,
-            }));
+                Ok(())
+            }
+            .and_then(|()| {
+                crate::worktree::run_worktree_add_command(
+                    &source_checkout_path,
+                    &path,
+                    &branch,
+                    "HEAD",
+                )
+            });
+            let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(Box::new(
+                WorktreeAddResult {
+                    path,
+                    api_request: None,
+                    result,
+                },
+            )));
         });
     }
 
@@ -585,31 +590,42 @@ impl App {
             return;
         };
 
-        #[cfg(windows)]
-        if let Some(ws_idx) = self
-            .state
-            .workspaces
-            .iter()
-            .position(|ws| ws.id == workspace_id)
-        {
-            self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
+        if Self::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(force) {
+            if let Some(ws_idx) = self
+                .state
+                .workspaces
+                .iter()
+                .position(|ws| ws.id == workspace_id)
+            {
+                self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
+            }
         }
 
         let command = crate::worktree::build_worktree_remove_command(&repo_root, &path, force);
         tracing::info!(workspace_id = %workspace_id, path = %path.display(), force, "starting git worktree remove");
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = crate::worktree::run_worktree_command(&command);
-            let _ =
-                event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(WorktreeRemoveResult {
+            let result = crate::worktree::run_worktree_remove_command_with_recovery(
+                &command, &repo_root, &path, force,
+            );
+            let _ = event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(Box::new(
+                WorktreeRemoveResult {
                     workspace_id,
                     path,
+                    workspace: None,
+                    forced: force,
+                    api_request: None,
                     result,
-                }));
+                },
+            )));
         });
     }
 
     pub(crate) fn handle_worktree_add_finished(&mut self, result: WorktreeAddResult) {
+        if result.api_request.is_some() {
+            self.handle_api_worktree_add_finished(result);
+            return;
+        }
         let Some(create) = &mut self.state.worktree_create else {
             return;
         };
@@ -680,6 +696,10 @@ impl App {
         }
     }
     pub(crate) fn handle_worktree_remove_finished(&mut self, result: WorktreeRemoveResult) {
+        if result.api_request.is_some() {
+            self.handle_api_worktree_remove_finished(result);
+            return;
+        }
         let Some(remove) = &mut self.state.worktree_remove else {
             return;
         };
@@ -732,7 +752,15 @@ impl App {
         }
     }
 
-    #[cfg(windows)]
+    /// Whether terminal runtimes inside the checkout must be torn down before
+    /// removal: always on a forced remove (kill processes holding the dir), and
+    /// always on Windows (open handles block directory deletion). (upstream 46a2b25)
+    pub(crate) fn should_shutdown_workspace_terminal_runtimes_for_worktree_remove(
+        force: bool,
+    ) -> bool {
+        force || cfg!(windows)
+    }
+
     pub(crate) fn shutdown_workspace_terminal_runtimes_for_worktree_remove(
         &mut self,
         ws_idx: usize,
@@ -742,7 +770,7 @@ impl App {
                 tracing::debug!(
                     workspace_index = ws_idx,
                     terminal_id = %terminal_id,
-                    "shutting down terminal runtime before Windows worktree removal"
+                    "shutting down terminal runtime before worktree removal"
                 );
                 runtime.shutdown();
             }
@@ -1161,6 +1189,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(repo);
     }
 
+    // Port upstream 89ca3ba: when the requested branch already exists locally, the
+    // worktree-add worker checks it out instead of failing on a `git worktree add -b`.
+    #[test]
+    fn start_worktree_add_existing_branch_checks_out_branch() {
+        let repo = create_committed_repo("app-worktree-add-existing-branch-repo");
+        let worktree_root = unique_temp_path("app-worktree-add-existing-branch-root");
+        let branch = "foo";
+        let checkout = crate::worktree::default_checkout_path(&worktree_root, "zynk", branch);
+        run_git(&repo, &["branch", branch]);
+        let mut app = app_for_worktree_tests();
+        app.state.worktree_directory = worktree_root.clone();
+        app.state.name_input = branch.into();
+        app.state.worktree_create = Some(WorktreeCreateState {
+            source_workspace_id: "source".into(),
+            source_checkout_path: repo.clone(),
+            source_existing_membership: None,
+            source_repo_root: repo.clone(),
+            repo_key: "repo-key".into(),
+            repo_name: "zynk".into(),
+            branch: branch.into(),
+            checkout_path: checkout.clone(),
+            error: None,
+            creating: false,
+        });
+
+        app.start_worktree_add();
+
+        assert!(app
+            .state
+            .worktree_create
+            .as_ref()
+            .is_some_and(|create| create.creating));
+        let event = wait_for_worktree_event(&mut app);
+        match event {
+            AppEvent::WorktreeAddFinished(result) => {
+                assert_eq!(result.path, checkout);
+                assert_eq!(result.result, Ok(()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        assert!(checkout.join("README.md").exists());
+        let branch_name = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap();
+        assert!(branch_name.status.success());
+        assert_eq!(
+            String::from_utf8(branch_name.stdout).unwrap().trim(),
+            branch
+        );
+
+        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
+        crate::worktree::run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
     #[test]
     fn open_new_worktree_dialog_supports_standalone_bare_repo_source() {
         let repo = create_committed_repo("app-worktree-dialog-bare-origin");
@@ -1286,6 +1374,9 @@ mod tests {
         app.handle_worktree_remove_finished(WorktreeRemoveResult {
             workspace_id: "ws".into(),
             path,
+            workspace: None,
+            forced: false,
+            api_request: None,
             result: Err(
                 "fatal: '/w/zynk/dirty' contains modified or untracked files, use --force to delete it"
                     .into(),
@@ -1314,6 +1405,9 @@ mod tests {
         app.handle_worktree_remove_finished(WorktreeRemoveResult {
             workspace_id: "ws".into(),
             path,
+            workspace: None,
+            forced: false,
+            api_request: None,
             result: Err("fatal: '/w/zynk/missing' is not a working tree".into()),
         });
 
@@ -1368,7 +1462,7 @@ mod tests {
                     assert_eq!(result.workspace_id, workspace_id);
                     assert_eq!(result.path, checkout);
                     assert!(result.result.is_err());
-                    app.handle_worktree_remove_finished(result);
+                    app.handle_worktree_remove_finished(*result);
                 }
                 other => panic!("unexpected event: {other:?}"),
             }
@@ -1386,7 +1480,7 @@ mod tests {
                 assert_eq!(result.workspace_id, workspace_id);
                 assert_eq!(result.path, checkout);
                 assert_eq!(result.result, Ok(()));
-                app.handle_worktree_remove_finished(result);
+                app.handle_worktree_remove_finished(*result);
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -1396,5 +1490,14 @@ mod tests {
         assert!(app.state.workspaces.is_empty());
 
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn worktree_remove_runtime_shutdown_policy_preserves_windows_safe_remove() {
+        assert_eq!(
+            App::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(false),
+            cfg!(windows)
+        );
+        assert!(App::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(true));
     }
 }
