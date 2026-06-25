@@ -371,6 +371,9 @@ pub(crate) fn events_require_host_surface_redraw(
             .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
 }
 
+// upstream b7a504b: only the non-windows client input path queries the host terminal
+// theme; gate this off windows (keep it in tests) so it isn't dead code on the windows build.
+#[cfg(any(not(windows), test))]
 pub(crate) fn events_require_host_terminal_theme_query(events: &[RawInputEvent]) -> bool {
     events
         .iter()
