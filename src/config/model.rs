@@ -517,6 +517,10 @@ pub struct UiConfig {
     pub confirm_close: bool,
     /// Ask for a tab name before creating a new tab. Default: true.
     pub prompt_new_tab_name: bool,
+    /// Draw borders around split panes. Default: true.
+    pub pane_borders: bool,
+    /// Keep split panes visually separated instead of sharing divider borders. Default: true.
+    pub pane_gaps: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
@@ -704,6 +708,8 @@ impl Default for UiConfig {
             mouse_scroll_lines: None,
             confirm_close: true,
             prompt_new_tab_name: true,
+            pane_borders: true,
+            pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             accent: "cyan".into(),
@@ -905,15 +911,21 @@ agent_panel_sort = "workspaces"
     }
 
     #[test]
-    fn pane_border_agent_labels_default_off_and_parse() {
+    fn pane_appearance_defaults_and_parse() {
         let default_config = Config::default();
+        assert!(default_config.ui.pane_borders);
+        assert!(default_config.ui.pane_gaps);
         assert!(!default_config.ui.show_agent_labels_on_pane_borders);
 
         let toml = r#"
 [ui]
+pane_borders = false
+pane_gaps = true
 show_agent_labels_on_pane_borders = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.ui.pane_borders);
+        assert!(config.ui.pane_gaps);
         assert!(config.ui.show_agent_labels_on_pane_borders);
     }
 

@@ -280,6 +280,12 @@ const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Set false to create tabs immediately with generated names.
 # prompt_new_tab_name = true
 
+# Draw borders around split panes.
+# pane_borders = true
+
+# Keep split panes visually separated instead of sharing divider borders.
+# pane_gaps = true
+
 # Show detected/reported agent labels in split pane borders when no manual pane name is set.
 # show_agent_labels_on_pane_borders = false
 

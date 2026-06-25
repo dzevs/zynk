@@ -1571,18 +1571,20 @@ impl App {
         let tab = ws.tabs.get(tab_idx)?;
         let area = self.state.view.terminal_area;
         let focused_pane_id = self.public_pane_id(ws_idx, tab.layout.focused())?;
-        let panes = tab
-            .layout
-            .panes(area)
-            .into_iter()
-            .filter_map(|pane| {
-                Some(PaneLayoutPane {
-                    pane_id: self.public_pane_id(ws_idx, pane.id)?,
-                    focused: pane.is_focused,
-                    rect: pane.rect.into(),
-                })
+        let panes = crate::ui::apply_pane_chrome(
+            tab.layout.panes(area),
+            self.state.pane_borders,
+            self.state.pane_gaps,
+        )
+        .into_iter()
+        .filter_map(|pane| {
+            Some(PaneLayoutPane {
+                pane_id: self.public_pane_id(ws_idx, pane.id)?,
+                focused: pane.is_focused,
+                rect: pane.rect.into(),
             })
-            .collect();
+        })
+        .collect();
         let splits = tab
             .layout
             .splits(area)
