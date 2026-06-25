@@ -73,6 +73,7 @@ pub struct TerminalState {
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     metadata_report_sequences: HashMap<String, u64>,
     pub state: AgentState,
+    pub last_agent_state_change_seq: Option<u64>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -97,6 +98,7 @@ impl TerminalState {
             suppressed_full_lifecycle_hook_reports: HashMap::new(),
             metadata_report_sequences: HashMap::new(),
             state: AgentState::Unknown,
+            last_agent_state_change_seq: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -904,6 +906,7 @@ impl TerminalState {
         self.agent_metadata.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();
         self.state = AgentState::Unknown;
+        self.last_agent_state_change_seq = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.pending_agent_resume_plan = None;

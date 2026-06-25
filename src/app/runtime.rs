@@ -338,8 +338,9 @@ impl App {
     /// True when the spinner must keep ticking for any animated sidebar surface. This drives BOTH
     /// the agent-panel working spinners AND the `spaces` working dots. The spaces list always shows
     /// every workspace, so the spinner advances whenever ANY workspace has a working pane —
-    /// independent of `agent_panel_scope` (which only governs which agents the detail panel lists,
-    /// not whether a working space dot animates). Widened from the old `agent_panel_has_animation`.
+    /// independent of `agent_panel_sort` (which only governs the order the detail panel lists
+    /// agents, not whether a working space dot animates). Widened from the old
+    /// `agent_panel_has_animation`.
     fn sidebar_has_working_animation(&self) -> bool {
         self.state
             .workspaces
