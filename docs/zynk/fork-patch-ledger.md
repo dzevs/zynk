@@ -1879,7 +1879,7 @@ delta is `win/psuedocon.rs` (force system ConPTY via kernel32.dll). No Unix delt
 | 1152bc5 | a518228 | support devin hook on python 3.9 (integration asset; `DEVIN_INTEGRATION_VERSION` 1→2 + marker) |
 | 630ec26 | 27ff4dd | block idle client writer (Condvar-backed queue; binary wire format unchanged) |
 | ca68184 | b76fb49 | **SPLIT** detect copilot ask_user accept prompt — `github-copilot.toml` manifest only (bounded `whole_recent` region); dropped the website mirror |
-| 631bf12 | 74fa90c | scope opencode hook to main agent + adopt new sessions (hook-authoritative; `OPENCODE_INTEGRATION_VERSION` 6→7 + marker) |
+| 631bf12 | 74fa90c | scope opencode hook to main agent + adopt new sessions (hook-authoritative; `OPENCODE_INTEGRATION_VERSION` 5→7 + marker) |
 | 93deec1 | a720367 | extend remote client handshake timeout for high-latency links |
 | 18914ff | b7a504b | **windows-cfg fix** — gate `events_require_host_terminal_theme_query` with `#[cfg(any(not(windows), test))]` (the deferred b7a504b gate). The fn was added by M2/`36b4001` WITHOUT the gate → dead code on windows; **caught by the windows-gnu cross-check** (linux `just check` never compiles `#[cfg(windows)]` code, so 5 milestones missed it). Re-ran windows-gnu clippy on the full HEAD → clean. |
 
