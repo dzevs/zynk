@@ -92,10 +92,10 @@ describe("install markers + identity are preserved", () => {
   test("host-protocol source stays zynk:pi and report methods are state-only", () => {
     expect(ASSET_SRC).toContain('const source = "zynk:pi"');
     expect(ASSET_SRC).toContain("pane.report_agent");
-    // root-agent restore: the asset reports its session ref on session_start and no
-    // longer releases on shutdown (release moved off the pi/omp shutdown path).
+    // root-agent restore: the asset reports its session ref on session_start and
+    // releases the agent on a root-session shutdown.
     expect(ASSET_SRC).toContain("pane.report_agent_session");
-    expect(ASSET_SRC).not.toContain("pane.release_agent");
+    expect(ASSET_SRC).toContain("pane.release_agent");
     // session-ref reporting (report_agent_session via withSessionRef) is kept.
     expect(ASSET_SRC).toContain("agent_session_path: currentAgentSessionPath");
     expect(ASSET_SRC).toContain("agent_session_id: currentAgentSessionId");
@@ -198,8 +198,8 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     expect(fake.has("session_start")).toBe(true);
     expect(fake.has("agent_start")).toBe(true);
     expect(fake.has("agent_end")).toBe(true);
-    // root-agent restore: shutdown no longer releases from this asset.
-    expect(fake.has("session_shutdown")).toBe(false);
+    // root-agent restore: a root-session shutdown releases the agent.
+    expect(fake.has("session_shutdown")).toBe(true);
     // The receiver hook is gone.
     expect(fake.has("input")).toBe(false);
   });
@@ -262,8 +262,18 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
       .slice(before)
       .find((r) => r.method === "pane.report_agent_session");
     expect(sessionReport.params.agent_session_path).toBe("/tmp/pi/session.json");
-    // Shutdown is no longer a release path in this asset.
-    expect(sink.requests.every((r) => r.method !== "pane.release_agent")).toBe(true);
+
+    // A root-session shutdown releases the agent.
+    await fake.emit("session_shutdown");
+    await waitFor(() =>
+      sink.requests.slice(before).some((r) => r.method === "pane.release_agent"),
+    );
+    const release = sink.requests
+      .slice(before)
+      .find((r) => r.method === "pane.release_agent");
+    expect(release.params.agent).toBe("pi");
+    expect(release.params.source).toBe("zynk:pi");
+
     // None of the requests is a receipt — that capability is not fired here.
     expect(sink.requests.every((r) => r.method !== "zynk.message_received")).toBe(true);
   });

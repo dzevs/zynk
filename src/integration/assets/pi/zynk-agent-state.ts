@@ -144,6 +144,19 @@ function sendState(state: AgentState, message?: string, seq = nextReportSeq()): 
   });
 }
 
+function releaseAgent(): Promise<void> {
+  return sendRequest({
+    id: `${source}:release:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    method: "pane.release_agent",
+    params: {
+      pane_id: paneId,
+      source,
+      agent: "pi",
+      seq: nextReportSeq(),
+    },
+  });
+}
+
 let sendInFlight = false;
 let queuedState: QueuedState | undefined;
 
@@ -342,5 +355,13 @@ export default function (pi) {
     }
 
     scheduleIdle();
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (!rootSession) {
+      return;
+    }
+    clearPendingTimers();
+    await releaseAgent();
   });
 }

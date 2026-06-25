@@ -6196,13 +6196,14 @@ mod tests {
         // no fire-and-forget receipt send.
         assert!(!PI_EXTENSION_ASSET.contains(".catch(() => {})"));
 
-        // STILL state-only: it reports the agent session path/id, publishes state, and
-        // reports the agent session control surface (root-session scoped).
+        // STILL state-only: it reports the agent session path/id, publishes state,
+        // reports the agent session, and releases on a root-session shutdown.
         assert!(PI_EXTENSION_ASSET.contains("agent_session_path: currentAgentSessionPath"));
         assert!(PI_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
         assert!(PI_EXTENSION_ASSET.contains("publishState(true)"));
         assert!(PI_EXTENSION_ASSET.contains("pane.report_agent"));
         assert!(PI_EXTENSION_ASSET.contains("pane.report_agent_session"));
+        assert!(PI_EXTENSION_ASSET.contains("pane.release_agent"));
 
         // the asset version marker is bumped to the root-session-protected revision.
         assert_eq!(parse_integration_version(PI_EXTENSION_ASSET), Some(5));
