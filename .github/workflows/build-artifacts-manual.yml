@@ -147,13 +147,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.15.2
+      # upstream dbc45f6: mlugg's prebuilt zig can't link libSystem on macos-latest; use
+      # Homebrew's macOS-patched zig@0.15 (this build-macos job is macOS-only).
+      - name: Install patched Zig (macOS)
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
+          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
+          "$(brew --prefix zig@0.15)/bin/zig" version
 
       - name: Install macOS build tools
-        run: brew install cmake ninja
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja
 
       - name: Remove Zig caches
         run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out

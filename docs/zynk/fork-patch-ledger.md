@@ -1920,3 +1920,23 @@ gnu mapping). This caught the M2/M5 `events_require_host_terminal_theme_query` d
 of linux `just check` missed. The CI windows-latest msvc job remains authoritative.
 
 **herdr-base marker: v0.7.0 → v0.7.1.** zynk is now based on upstream Herdr **v0.7.1** (`23b96e4`).
+
+
+## POST-MERGE CI FIX (2026-06-25) — macOS + Windows CI failures (branch fix/v071-ci)
+
+The post-merge CI on `main` (`f640fdd`) surfaced 2 platform failures that the local linux `just check` +
+windows-gnu proxy missed — the CI macOS/Windows jobs are the AUTHORITATIVE cross-platform check, and they
+were not watched before the merge was declared done (a process miss; corrected going forward).
+
+1. **Windows** — `server::client_transport::tests::client_writer_closes_queue_after_socket_write_failure`
+   panicked: `named pipes do not support I/O timeouts` (`client_transport.rs:916`). The upstream `3366121`
+   `#[cfg(not(windows))]` guard on the test's `set_send_timeout` was DEFERRED-to-M5 during M1 (the test
+   ships with `27ff4dd`), but M5 never applied it. **Fixed:** guard applied in
+   `src/server/client_transport.rs`. (The windows-gnu proxy ran clippy only, not the windows tests, so it
+   slipped.)
+2. **macOS** — the zig build-runner can't link libSystem on the macos-latest runner. **The M6.1 EVALUATE
+   decision to KEEP `mlugg/setup-zig` was WRONG:** the upstream `5981ba4`/`dbc45f6` switch to Homebrew's
+   macOS-patched `zig@0.15` was a macOS-zig-LINK FIX, not a mere preference. **M6.1 REVISED — adopt the
+   homebrew-zig switch** for the macOS jobs in `.github/workflows/{ci,release-dryrun,build-artifacts-manual}.yml`
+   (gate `mlugg` to `runner.os != 'macOS'` + `brew install zig@0.15` on macOS). `mlugg/setup-zig@v2.2.1`
+   with `version: 0.15.2` stays for linux + windows (still SHA-pinned + reproducible there).
