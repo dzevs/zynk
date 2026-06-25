@@ -34,7 +34,7 @@ use super::ClientLoopEvent;
 /// `ClientMessage::Input` to the server.
 pub fn stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: &Arc<AtomicBool>) {
     #[cfg(windows)]
-    return windows_stdin_reader_loop(event_tx, should_quit);
+    windows_stdin_reader_loop(event_tx, should_quit);
 
     #[cfg(unix)]
     unix_stdin_reader_loop(event_tx, should_quit);
