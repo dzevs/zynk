@@ -130,7 +130,7 @@ pub enum ClientInputEvent {
 }
 
 impl ClientKeyKind {
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn from_crossterm(kind: crossterm::event::KeyEventKind) -> Self {
         match kind {
             crossterm::event::KeyEventKind::Press => Self::Press,
@@ -149,7 +149,7 @@ impl ClientKeyKind {
 }
 
 impl ClientKeyCode {
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn from_crossterm(code: crossterm::event::KeyCode) -> Option<Self> {
         use crossterm::event::KeyCode;
         Some(match code {
@@ -201,7 +201,7 @@ impl ClientKeyCode {
 }
 
 impl ClientMouseButton {
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn from_crossterm(button: crossterm::event::MouseButton) -> Self {
         match button {
             crossterm::event::MouseButton::Left => Self::Left,
@@ -220,7 +220,7 @@ impl ClientMouseButton {
 }
 
 impl ClientMouseKind {
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn from_crossterm(kind: crossterm::event::MouseEventKind) -> Option<Self> {
         use crossterm::event::MouseEventKind;
         Some(match kind {

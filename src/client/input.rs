@@ -23,6 +23,9 @@ use tokio::sync::mpsc;
 
 use super::ClientLoopEvent;
 
+#[cfg(any(windows, test))]
+mod windows_vti;
+
 // ---------------------------------------------------------------------------
 // Stdin reader thread
 // ---------------------------------------------------------------------------
@@ -83,6 +86,23 @@ fn unix_stdin_reader_loop(event_tx: mpsc::Sender<ClientLoopEvent>, should_quit: 
 
 #[cfg(windows)]
 fn windows_stdin_reader_loop(
+    event_tx: mpsc::Sender<ClientLoopEvent>,
+    should_quit: &Arc<AtomicBool>,
+) {
+    if !super::windows_vti_input_backend_enabled() {
+        windows_crossterm_reader_loop(event_tx, should_quit);
+    } else {
+        match windows_vti::console_input_handle() {
+            Ok(handle) if windows_vti::virtual_terminal_input_enabled(handle) => {
+                windows_vti::raw_console_reader_loop(handle, event_tx, should_quit);
+            }
+            _ => windows_crossterm_reader_loop(event_tx, should_quit),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_crossterm_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
 ) {
@@ -226,7 +246,7 @@ fn send_windows_raw_events(
         .is_ok()
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn windows_client_input_event_from_raw(
     event: crate::raw_input::RawInputEvent,
 ) -> Option<crate::protocol::ClientInputEvent> {

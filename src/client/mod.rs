@@ -342,20 +342,130 @@ fn setup_terminal_with_capabilities(
         io::stdout().flush()?;
     }
 
+    #[cfg(windows)]
+    let windows_virtual_terminal_input =
+        if enable_client_protocols && windows_vti_input_backend_enabled() {
+            enable_windows_virtual_terminal_input()
+        } else {
+            WindowsVirtualTerminalInputSetup::default()
+        };
+
+    #[cfg(windows)]
+    if enable_client_protocols
+        && windows_vti_input_backend_enabled()
+        && windows_virtual_terminal_input.active
+        && windows_win32_input_mode_enabled()
+    {
+        if let Err(err) = enable_windows_win32_input_mode(&mut io::stdout()) {
+            if let Some(mode) = windows_virtual_terminal_input.restore_mode {
+                restore_windows_input_mode_value(mode);
+            }
+            return Err(err);
+        }
+    }
+
     Ok(TerminalGuard {
         reset_modify_other_keys: modify_other_keys_mode.is_some(),
+        #[cfg(windows)]
+        restore_windows_input_mode: windows_virtual_terminal_input.restore_mode,
     })
 }
 
 /// Guard that restores the terminal when dropped.
 struct TerminalGuard {
     reset_modify_other_keys: bool,
+    #[cfg(windows)]
+    restore_windows_input_mode: Option<u32>,
 }
 
 fn write_terminal_restore_postlude(writer: &mut impl io::Write) -> io::Result<()> {
     // Restore a visible cursor and reset DECSCUSR back to the terminal default.
     writer.write_all(b"\x1b[?25h\x1b[0 q")?;
     writer.flush()
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct WindowsVirtualTerminalInputSetup {
+    active: bool,
+    restore_mode: Option<u32>,
+}
+
+#[cfg(windows)]
+fn enable_windows_virtual_terminal_input() -> WindowsVirtualTerminalInputSetup {
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_INPUT,
+        STD_INPUT_HANDLE,
+    };
+
+    let handle: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        tracing::warn!("failed to get Windows console input handle for VT input");
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+
+    let mut mode = 0;
+    if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+        tracing::warn!("failed to read Windows console input mode for VT input");
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+
+    let desired = windows_virtual_terminal_input_mode(mode);
+    if desired == mode {
+        return WindowsVirtualTerminalInputSetup {
+            active: true,
+            restore_mode: None,
+        };
+    }
+
+    if unsafe { SetConsoleMode(handle, desired) } == 0 {
+        tracing::warn!("failed to enable Windows virtual terminal input");
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+
+    let mut applied = 0;
+    if unsafe { GetConsoleMode(handle, &mut applied) } == 0 {
+        tracing::warn!("failed to verify Windows virtual terminal input mode");
+        let _ = unsafe { SetConsoleMode(handle, mode) };
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+    if applied & ENABLE_VIRTUAL_TERMINAL_INPUT == 0 {
+        tracing::warn!("Windows virtual terminal input bit did not stick");
+        let _ = unsafe { SetConsoleMode(handle, mode) };
+        return WindowsVirtualTerminalInputSetup::default();
+    }
+
+    WindowsVirtualTerminalInputSetup {
+        active: true,
+        restore_mode: Some(mode),
+    }
+}
+
+#[cfg(windows)]
+fn windows_vti_input_backend_enabled() -> bool {
+    std::env::var("ZYNK_WINDOWS_INPUT_BACKEND")
+        .map(|backend| !backend.eq_ignore_ascii_case("crossterm"))
+        .unwrap_or(true)
+}
+
+#[cfg(any(windows, test))]
+fn windows_virtual_terminal_input_mode(mode: u32) -> u32 {
+    mode | 0x0200
+}
+
+#[cfg(windows)]
+fn restore_windows_input_mode_value(mode: u32) {
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+
+    let handle: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return;
+    }
+    if unsafe { SetConsoleMode(handle, mode) } == 0 {
+        tracing::warn!("failed to restore Windows console input mode");
+    }
 }
 
 fn set_mouse_capture(enabled: bool) -> io::Result<()> {
@@ -371,7 +481,10 @@ fn set_mouse_capture(enabled: bool) -> io::Result<()> {
     }
 }
 
-fn restore_terminal_state(reset_modify_other_keys: bool) {
+fn restore_terminal_state(
+    reset_modify_other_keys: bool,
+    #[cfg(windows)] restore_windows_input_mode: Option<u32>,
+) {
     let _ = clear_received_kitty_graphics(&mut io::stdout());
 
     // Reset modifyOtherKeys if we enabled it.
@@ -387,8 +500,18 @@ fn restore_terminal_state(reset_modify_other_keys: bool) {
         DisableBracketedPaste,
         DisableMouseCapture
     );
+    #[cfg(windows)]
+    if let Some(mode) = restore_windows_input_mode {
+        restore_windows_input_mode_value(mode);
+    }
+
     ratatui::restore();
     let _ = write_terminal_restore_postlude(&mut io::stdout());
+
+    #[cfg(windows)]
+    if windows_vti_input_backend_enabled() && windows_win32_input_mode_enabled() {
+        let _ = disable_windows_win32_input_mode(&mut io::stdout());
+    }
 }
 
 #[cfg(not(windows))]
@@ -414,9 +537,32 @@ fn pop_keyboard_enhancement_flags() -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn windows_win32_input_mode_enabled() -> bool {
+    std::env::var("ZYNK_WINDOWS_INPUT_PROBE")
+        .map(|probe| probe.eq_ignore_ascii_case("win32"))
+        .unwrap_or(true)
+}
+
+#[cfg(windows)]
+fn enable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Result<()> {
+    writer.write_all(b"\x1b[?9001h")?;
+    writer.flush()
+}
+
+#[cfg(windows)]
+fn disable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Result<()> {
+    writer.write_all(b"\x1b[?9001l")?;
+    writer.flush()
+}
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        restore_terminal_state(self.reset_modify_other_keys);
+        restore_terminal_state(
+            self.reset_modify_other_keys,
+            #[cfg(windows)]
+            self.restore_windows_input_mode,
+        );
     }
 }
 
@@ -673,9 +819,15 @@ fn run_client_with_mode(
 
     // Install a panic hook to restore the terminal on panic (same as monolithic).
     let panic_resets_modify_other_keys = terminal_guard.reset_modify_other_keys;
+    #[cfg(windows)]
+    let panic_restore_windows_input_mode = terminal_guard.restore_windows_input_mode;
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_state(panic_resets_modify_other_keys);
+        restore_terminal_state(
+            panic_resets_modify_other_keys,
+            #[cfg(windows)]
+            panic_restore_windows_input_mode,
+        );
         original_hook(info);
     }));
 
@@ -995,6 +1147,10 @@ async fn run_client_loop(
                     let desired = enabled;
                     if desired != state.mouse_capture_active {
                         set_mouse_capture(desired).map_err(ClientError::ConnectionFailed)?;
+                        #[cfg(windows)]
+                        if windows_vti_input_backend_enabled() {
+                            let _ = enable_windows_virtual_terminal_input();
+                        }
                         state.mouse_capture_active = desired;
                     }
                 }
@@ -1404,6 +1560,12 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn windows_virtual_terminal_input_mode_sets_only_vti_bit() {
+        assert_eq!(windows_virtual_terminal_input_mode(0x01f0), 0x03f0);
+        assert_eq!(windows_virtual_terminal_input_mode(0x03f0), 0x03f0);
     }
 
     fn restore_env_var(key: &str, value: Option<OsString>) {
