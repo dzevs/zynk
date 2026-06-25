@@ -104,7 +104,13 @@ fn preview_selected_theme(state: &mut AppState) {
     use crate::app::state::Palette;
 
     let name = THEME_NAMES[state.settings.list.selected];
-    if let Some(palette) = Palette::from_name(name) {
+    if let Some(mut palette) = Palette::from_name(name) {
+        if let Some(custom) = &state.theme_runtime.custom {
+            palette = palette.with_overrides(custom);
+        }
+        if let Some(accent) = &state.theme_runtime.legacy_accent {
+            palette.accent = crate::config::parse_color(accent);
+        }
         state.palette = palette;
         state.theme_name = name.to_string();
     }

@@ -46,7 +46,7 @@ pub(crate) struct RightClickPassthroughGesture {
     pub pane_info: PaneInfo,
     pub modifiers: KeyModifiers,
 }
-use crate::terminal_theme::TerminalTheme;
+use crate::terminal_theme::{HostAppearance, TerminalTheme};
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ use crate::workspace::Workspace;
 
 /// All colors used by the UI. Derived from a base accent color for now,
 /// but structured so a full theme system can replace it later.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // all fields defined for theming — some used later
 pub struct Palette {
     /// Primary accent (highlight, active borders).
@@ -1012,6 +1012,16 @@ impl SelectionListState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ThemeRuntimeConfig {
+    pub manual_name: String,
+    pub dark_name: String,
+    pub light_name: String,
+    pub auto_switch: bool,
+    pub custom: Option<crate::config::CustomThemeColors>,
+    pub legacy_accent: Option<String>,
+}
+
 pub struct SettingsState {
     /// Which section tab is active.
     pub section: SettingsSection,
@@ -1424,6 +1434,12 @@ pub struct AppState {
     pub palette: Palette,
     /// Currently applied theme name (for settings UI).
     pub theme_name: String,
+    /// Runtime theme configuration used to resolve manual and auto-switch palettes.
+    pub theme_runtime: ThemeRuntimeConfig,
+    /// Last known foreground host terminal appearance.
+    pub host_terminal_appearance: Option<HostAppearance>,
+    /// True when the foreground host explicitly reported appearance via Mode 2031.
+    pub host_terminal_appearance_explicit: bool,
     /// Settings panel state.
     pub settings: SettingsState,
     /// Cached integration recommendations for onboarding/settings UI.
@@ -1778,6 +1794,16 @@ impl AppState {
             spinner_tick: 0,
             palette: Palette::catppuccin(),
             theme_name: "catppuccin".to_string(),
+            theme_runtime: ThemeRuntimeConfig {
+                manual_name: "catppuccin".to_string(),
+                dark_name: "catppuccin".to_string(),
+                light_name: "catppuccin-latte".to_string(),
+                auto_switch: false,
+                custom: None,
+                legacy_accent: None,
+            },
+            host_terminal_appearance: None,
+            host_terminal_appearance_explicit: false,
             settings: SettingsState {
                 section: SettingsSection::Theme,
                 list: SelectionListState::new(0),

@@ -43,7 +43,13 @@ impl App {
 
     pub(super) fn save_theme(&mut self, name: &str) {
         if self.update_config_file("theme", |content| {
-            crate::config::upsert_section_value(content, "theme", "name", &format!("\"{name}\""))
+            let content = crate::config::upsert_section_value(
+                content,
+                "theme",
+                "name",
+                &format!("\"{name}\""),
+            );
+            crate::config::upsert_section_bool(&content, "theme", "auto_switch", false)
         }) {
             self.apply_config_from_disk(false);
         }

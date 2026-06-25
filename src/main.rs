@@ -49,6 +49,18 @@ fn pop_keyboard_enhancement_flags() -> io::Result<()> {
     Ok(())
 }
 
+fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
+    use std::io::Write;
+
+    let sequence = if enabled {
+        crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_ENABLE_SEQUENCE
+    } else {
+        crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE
+    };
+    io::stdout().write_all(sequence.as_bytes())?;
+    io::stdout().flush()
+}
+
 mod agent_resume;
 mod api;
 mod app;
@@ -110,6 +122,12 @@ const DEFAULT_CONFIG: &str = r##"# zynk configuration
 #                  gruvbox, one-dark, solarized, kanagawa, rose-pine,
 #                  vesper
 # name = "catppuccin"
+
+# Follow host terminal light/dark appearance and switch zynk UI themes.
+# Existing manual behavior is unchanged unless this is true.
+# auto_switch = false
+# dark_name = "catppuccin"
+# light_name = "catppuccin-latte"
 
 # Override individual color tokens on top of the base theme.
 # Accepts: hex (#rrggbb), named colors, rgb(r,g,b), or panel_bg = "reset"
@@ -718,6 +736,7 @@ fn main() -> io::Result<()> {
             DisableBracketedPaste,
             DisableMouseCapture
         );
+        let _ = set_host_color_scheme_reports(false);
         let _ = pop_keyboard_enhancement_flags();
         ratatui::restore();
         original_hook(info);
@@ -744,6 +763,7 @@ fn main() -> io::Result<()> {
             execute!(io::stdout(), DisableMouseCapture)?;
         }
         execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
+        set_host_color_scheme_reports(true)?;
         push_keyboard_enhancement_flags()?;
 
         // Some hosts do not honor Kitty keyboard enhancement pushes for
@@ -781,6 +801,7 @@ fn main() -> io::Result<()> {
             DisableBracketedPaste,
             DisableMouseCapture
         )?;
+        set_host_color_scheme_reports(false)?;
         ratatui::restore();
 
         // Drop app (and all workspaces/panes) before runtime shuts down

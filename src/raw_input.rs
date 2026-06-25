@@ -95,9 +95,13 @@ use std::os::fd::AsRawFd;
 use tokio::sync::mpsc;
 
 use crate::input::{parse_terminal_key_sequence, TerminalKey};
-use crate::terminal_theme::{parse_default_color_response, DefaultColorKind, RgbColor};
+use crate::terminal_theme::{
+    parse_default_color_response, DefaultColorKind, HostAppearance, RgbColor,
+};
 
 const ESC: u8 = 0x1b;
+pub(crate) const GHOSTTY_COLOR_SCHEME_DARK_REPORT: &[u8] = b"\x1b[?997;1n";
+pub(crate) const GHOSTTY_COLOR_SCHEME_LIGHT_REPORT: &[u8] = b"\x1b[?997;2n";
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
@@ -112,6 +116,7 @@ pub enum RawInputEvent {
         kind: DefaultColorKind,
         color: RgbColor,
     },
+    HostColorSchemeChanged(HostAppearance),
     Unsupported,
 }
 
@@ -213,6 +218,17 @@ impl RawInputByteFramer {
             return chunks;
         }
 
+        if starts_with_incomplete_host_color_scheme_report(&self.buffer) {
+            tracing::debug!(
+                len = self.buffer.len(),
+                "discarding incomplete host color scheme report after input timeout"
+            );
+            self.discard_until = Some(ControlStringFamily::HostColorSchemeCsi);
+            self.discarded_tail_bytes = 0;
+            self.buffer.clear();
+            return chunks;
+        }
+
         if let Some(ControlString::Incomplete { family }) = control_string(&self.buffer) {
             tracing::debug!(
                 len = self.buffer.len(),
@@ -311,6 +327,9 @@ fn plausible_control_string_tail(family: ControlStringFamily, buffer: &[u8]) -> 
                 )
         }),
         ControlStringFamily::StTerminated => buffer.last() == Some(&ESC),
+        ControlStringFamily::HostColorSchemeCsi => buffer
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b';' | b'?' | b'n')),
     }
 }
 
@@ -322,6 +341,12 @@ pub(crate) fn events_require_host_surface_redraw(
         && events
             .iter()
             .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
+}
+
+pub(crate) fn events_require_host_terminal_theme_query(events: &[RawInputEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, RawInputEvent::HostColorSchemeChanged(_)))
 }
 
 pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
@@ -481,6 +506,10 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
             _ => {}
         }
 
+        if let Some(appearance) = parse_host_color_scheme_report(&buffer[..seq_len]) {
+            return Some((RawInputEvent::HostColorSchemeChanged(appearance), seq_len));
+        }
+
         if let Some(mouse) = parse_sgr_mouse(seq) {
             return Some((RawInputEvent::Mouse(mouse), seq_len));
         }
@@ -503,6 +532,7 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
 enum ControlStringFamily {
     Osc,
     StTerminated,
+    HostColorSchemeCsi,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -516,6 +546,14 @@ enum ControlString {
     },
 }
 
+fn parse_host_color_scheme_report(buffer: &[u8]) -> Option<HostAppearance> {
+    match buffer {
+        GHOSTTY_COLOR_SCHEME_DARK_REPORT => Some(HostAppearance::Dark),
+        GHOSTTY_COLOR_SCHEME_LIGHT_REPORT => Some(HostAppearance::Light),
+        _ => None,
+    }
+}
+
 fn starts_with_incomplete_default_color_response(buffer: &[u8]) -> bool {
     matches!(
         control_string(buffer),
@@ -523,6 +561,13 @@ fn starts_with_incomplete_default_color_response(buffer: &[u8]) -> bool {
             family: ControlStringFamily::Osc
         })
     ) && matches!(buffer.get(..5), Some(b"\x1b]10;" | b"\x1b]11;"))
+}
+
+fn starts_with_incomplete_host_color_scheme_report(buffer: &[u8]) -> bool {
+    buffer.starts_with(b"\x1b[?")
+        && (GHOSTTY_COLOR_SCHEME_DARK_REPORT.starts_with(buffer)
+            || GHOSTTY_COLOR_SCHEME_LIGHT_REPORT.starts_with(buffer))
+        && buffer.len() < GHOSTTY_COLOR_SCHEME_DARK_REPORT.len()
 }
 
 fn control_string(buffer: &[u8]) -> Option<ControlString> {
@@ -634,6 +679,10 @@ fn control_string_terminator_for_family(
     match family {
         ControlStringFamily::Osc => osc_string_terminator(buffer),
         ControlStringFamily::StTerminated => st_string_terminator(buffer),
+        ControlStringFamily::HostColorSchemeCsi => buffer
+            .iter()
+            .position(|byte| *byte == b'n')
+            .map(|idx| idx + 1),
     }
 }
 
@@ -918,6 +967,81 @@ mod tests {
 
         let events = parse_raw_input_bytes_sync(b"\x1b[O");
         assert!(!events_require_host_surface_redraw(&events, true));
+    }
+
+    #[test]
+    fn parses_ghostty_color_scheme_reports() {
+        for bytes in [
+            GHOSTTY_COLOR_SCHEME_DARK_REPORT,
+            GHOSTTY_COLOR_SCHEME_LIGHT_REPORT,
+        ] {
+            let events = parse_raw_input_bytes_sync(bytes);
+            assert_eq!(events.len(), 1, "bytes: {bytes:?}");
+            assert!(matches!(
+                events[0],
+                RawInputEvent::HostColorSchemeChanged(HostAppearance::Dark | HostAppearance::Light)
+            ));
+            assert!(events_require_host_terminal_theme_query(&events));
+        }
+    }
+
+    #[test]
+    fn ghostty_color_scheme_report_parser_is_exact() {
+        for bytes in [
+            b"\x1b[?997;0n".as_slice(),
+            b"\x1b[?997;3n".as_slice(),
+            b"\x1b[?998;1n".as_slice(),
+        ] {
+            let events = parse_raw_input_bytes_sync(bytes);
+            assert_eq!(events.len(), 1, "bytes: {bytes:?}");
+            assert!(matches!(events[0], RawInputEvent::Unsupported));
+            assert!(!events_require_host_terminal_theme_query(&events));
+        }
+    }
+
+    #[test]
+    fn raw_input_framer_reassembles_split_color_scheme_report() {
+        let mut framer = RawInputFramer::default();
+
+        assert!(framer.push(b"\x1b[?997;").is_empty());
+        let events = framer.push(b"1n");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            RawInputEvent::HostColorSchemeChanged(HostAppearance::Dark)
+        ));
+    }
+
+    #[test]
+    fn split_color_scheme_timeout_does_not_swallow_legacy_alt_bracket() {
+        let mut framer = RawInputByteFramer::default();
+
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b[".to_vec()]);
+    }
+
+    #[test]
+    fn raw_input_byte_framer_discards_timed_out_split_color_scheme_report_tail() {
+        let mut framer = RawInputByteFramer::default();
+
+        assert!(framer.push(b"\x1b[?997;").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b"1n").is_empty());
+        assert_eq!(framer.push(b"a"), vec![b"a".to_vec()]);
+        assert!(framer.flush_timeout().is_empty());
+    }
+
+    #[test]
+    fn default_byte_framer_does_not_rearm_after_color_scheme_report() {
+        let mut framer = RawInputByteFramer::default();
+
+        assert_eq!(
+            framer.push(GHOSTTY_COLOR_SCHEME_DARK_REPORT),
+            vec![GHOSTTY_COLOR_SCHEME_DARK_REPORT.to_vec()]
+        );
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
     }
 
     #[test]

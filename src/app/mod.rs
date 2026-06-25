@@ -232,44 +232,107 @@ fn parse_cjk_ime_agents(names: &[String]) -> Vec<crate::detect::Agent> {
     out
 }
 
-/// Resolve the palette from config: base theme + optional custom overrides.
-fn resolve_palette(config: &crate::config::Config) -> state::Palette {
-    resolve_palette_with_legacy_accent(config, true)
+fn normalize_theme_name(name: &str) -> String {
+    name.to_lowercase().replace([' ', '_'], "-")
 }
 
-fn resolve_palette_with_legacy_accent(
+fn sibling_theme_names(name: &str) -> (String, String) {
+    match normalize_theme_name(name).as_str() {
+        "catppuccin" | "catppuccin-mocha" | "catppuccin-latte" | "latte" | "light" => {
+            ("catppuccin".to_string(), "catppuccin-latte".to_string())
+        }
+        "tokyo-night" | "tokyonight" | "tokyo-night-day" | "tokyo-day" | "tokyonight-day" => {
+            ("tokyo-night".to_string(), "tokyo-night-day".to_string())
+        }
+        "gruvbox" | "gruvbox-dark" | "gruvbox-light" => {
+            ("gruvbox".to_string(), "gruvbox-light".to_string())
+        }
+        "one-dark" | "onedark" | "one-light" | "onelight" => {
+            ("one-dark".to_string(), "one-light".to_string())
+        }
+        "solarized" | "solarized-dark" | "solarized-light" => {
+            ("solarized".to_string(), "solarized-light".to_string())
+        }
+        "kanagawa" | "kanagawa-lotus" | "lotus" => {
+            ("kanagawa".to_string(), "kanagawa-lotus".to_string())
+        }
+        "rose-pine" | "rosepine" | "rose-pine-dawn" | "rosepine-dawn" | "dawn" => {
+            ("rose-pine".to_string(), "rose-pine-dawn".to_string())
+        }
+        _ => (name.to_string(), name.to_string()),
+    }
+}
+
+fn theme_runtime_config(
     config: &crate::config::Config,
     use_legacy_ui_accent: bool,
+) -> state::ThemeRuntimeConfig {
+    let manual_name = config
+        .theme
+        .name
+        .clone()
+        .unwrap_or_else(|| "catppuccin".to_string());
+    let (default_dark, default_light) = sibling_theme_names(&manual_name);
+    state::ThemeRuntimeConfig {
+        manual_name,
+        dark_name: config.theme.dark_name.clone().unwrap_or(default_dark),
+        light_name: config.theme.light_name.clone().unwrap_or(default_light),
+        auto_switch: config.theme.auto_switch,
+        custom: config.theme.custom.clone(),
+        legacy_accent: (use_legacy_ui_accent
+            && config.ui.accent != "cyan"
+            && config
+                .theme
+                .custom
+                .as_ref()
+                .and_then(|c| c.accent.as_ref())
+                .is_none())
+        .then(|| config.ui.accent.clone()),
+    }
+}
+
+fn resolve_palette_for_theme_name(
+    name: &str,
+    fallback_name: &str,
+    runtime: &state::ThemeRuntimeConfig,
 ) -> state::Palette {
-    // Start with the named theme (default: catppuccin)
-    let base_name = config.theme.name.as_deref().unwrap_or("catppuccin");
-    let mut palette = state::Palette::from_name(base_name).unwrap_or_else(|| {
+    let mut palette = state::Palette::from_name(name).unwrap_or_else(|| {
         tracing::warn!(
-            theme = base_name,
-            "unknown theme, falling back to catppuccin"
+            theme = name,
+            fallback = fallback_name,
+            "unknown theme, falling back"
         );
-        state::Palette::catppuccin()
+        state::Palette::from_name(fallback_name).unwrap_or_else(state::Palette::catppuccin)
     });
 
-    // Apply custom overrides if present
-    if let Some(custom) = &config.theme.custom {
+    if let Some(custom) = &runtime.custom {
         palette = palette.with_overrides(custom);
     }
-
-    // Legacy: if ui.accent is set and no theme.custom.accent, use it for compat
-    if use_legacy_ui_accent
-        && config.ui.accent != "cyan"
-        && config
-            .theme
-            .custom
-            .as_ref()
-            .and_then(|c| c.accent.as_ref())
-            .is_none()
-    {
-        palette.accent = crate::config::parse_color(&config.ui.accent);
+    if let Some(accent) = &runtime.legacy_accent {
+        palette.accent = crate::config::parse_color(accent);
     }
 
     palette
+}
+
+fn resolve_effective_theme(
+    runtime: &state::ThemeRuntimeConfig,
+    appearance: Option<crate::terminal_theme::HostAppearance>,
+) -> (state::Palette, String) {
+    let (name, fallback) = if runtime.auto_switch {
+        match appearance.unwrap_or(crate::terminal_theme::HostAppearance::Dark) {
+            crate::terminal_theme::HostAppearance::Dark => (&runtime.dark_name, "catppuccin"),
+            crate::terminal_theme::HostAppearance::Light => {
+                (&runtime.light_name, "catppuccin-latte")
+            }
+        }
+    } else {
+        (&runtime.manual_name, "catppuccin")
+    };
+    (
+        resolve_palette_for_theme_name(name, fallback, runtime),
+        name.clone(),
+    )
 }
 
 impl App {
@@ -420,6 +483,8 @@ impl App {
         };
 
         let agent_manifest_summaries = crate::detect::manifest::reload_manifests();
+        let theme_runtime = theme_runtime_config(config, true);
+        let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
@@ -549,12 +614,11 @@ impl App {
             header_max_width: config.header.max_width,
             keybinds: config.keybinds(),
             spinner_tick: 0,
-            palette: resolve_palette(config),
-            theme_name: config
-                .theme
-                .name
-                .clone()
-                .unwrap_or_else(|| "catppuccin".to_string()),
+            palette: theme_palette,
+            theme_name,
+            theme_runtime,
+            host_terminal_appearance: None,
+            host_terminal_appearance_explicit: false,
             settings: state::SettingsState {
                 section: state::SettingsSection::Theme,
                 list: state::SelectionListState::new(0),
@@ -1308,12 +1372,8 @@ impl App {
         }
 
         if !invalid_section("theme") {
-            self.state.palette = resolve_palette_with_legacy_accent(config, !invalid_section("ui"));
-            self.state.theme_name = config
-                .theme
-                .name
-                .clone()
-                .unwrap_or_else(|| "catppuccin".to_string());
+            self.state.theme_runtime = theme_runtime_config(config, !invalid_section("ui"));
+            self.refresh_effective_app_theme();
         }
 
         let status = if diagnostics.is_empty() {
@@ -1449,6 +1509,11 @@ impl App {
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                     if apply_host_terminal_theme {
                         self.update_host_terminal_theme(kind, color);
+                    }
+                }
+                crate::raw_input::RawInputEvent::HostColorSchemeChanged(appearance) => {
+                    if apply_host_terminal_theme {
+                        self.set_host_terminal_appearance(appearance, true);
                     }
                 }
                 crate::raw_input::RawInputEvent::Unsupported => {}
@@ -2095,6 +2160,82 @@ mod tests {
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
         assert!(!app.state.redraw_on_focus_gained);
+    }
+
+    #[test]
+    fn theme_auto_switch_is_opt_in_and_preserves_manual_default() {
+        let mut config = Config::default();
+        config.theme.name = Some("tokyo-night".to_string());
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert!(!app.state.theme_runtime.auto_switch);
+        assert_eq!(app.state.theme_name, "tokyo-night");
+        assert_eq!(app.state.palette, state::Palette::tokyo_night());
+    }
+
+    #[test]
+    fn theme_auto_switch_uses_sibling_map_and_explicit_appearance() {
+        let mut config = Config::default();
+        config.theme.name = Some("tokyo-night".to_string());
+        config.theme.auto_switch = true;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(app.state.theme_name, "tokyo-night");
+        assert!(
+            app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Light, true)
+        );
+
+        assert_eq!(app.state.theme_name, "tokyo-night-day");
+        assert_eq!(app.state.palette, state::Palette::tokyo_night_day());
+    }
+
+    #[test]
+    fn theme_auto_switch_applies_custom_overrides_after_active_base() {
+        let mut config = Config::default();
+        config.theme.name = Some("gruvbox".to_string());
+        config.theme.auto_switch = true;
+        config.theme.custom = Some(crate::config::CustomThemeColors {
+            accent: Some("#010203".to_string()),
+            ..Default::default()
+        });
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Light, true);
+
+        assert_eq!(app.state.theme_name, "gruvbox-light");
+        assert_eq!(
+            app.state.palette.accent,
+            ratatui::style::Color::Rgb(1, 2, 3)
+        );
+    }
+
+    #[test]
+    fn inferred_background_appearance_does_not_override_explicit_report() {
+        let mut config = Config::default();
+        config.theme.name = Some("catppuccin".to_string());
+        config.theme.auto_switch = true;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Dark, true);
+        app.update_host_terminal_theme(
+            crate::terminal_theme::DefaultColorKind::Background,
+            crate::terminal_theme::RgbColor {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+            },
+        );
+
+        assert_eq!(
+            app.state.host_terminal_appearance,
+            Some(crate::terminal_theme::HostAppearance::Dark)
+        );
+        assert_eq!(app.state.theme_name, "catppuccin");
     }
 
     #[test]

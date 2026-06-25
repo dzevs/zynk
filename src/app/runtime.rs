@@ -159,6 +159,10 @@ impl App {
             crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                 self.update_host_terminal_theme(kind, color)
             }
+            crate::raw_input::RawInputEvent::HostColorSchemeChanged(appearance) => {
+                self.query_host_terminal_theme();
+                self.set_host_terminal_appearance(appearance, true)
+            }
             crate::raw_input::RawInputEvent::Unsupported => false,
         };
         self.sync_prefix_input_source(previous_mode);

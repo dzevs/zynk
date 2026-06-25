@@ -778,6 +778,8 @@ impl HeadlessServer {
         let terminal_size = client.terminal_size;
         let outer_terminal_focus = client.outer_terminal_focus;
         let host_terminal_theme = client.host_terminal_theme;
+        let host_terminal_appearance = client.host_terminal_appearance;
+        let host_terminal_appearance_explicit = client.host_terminal_appearance_explicit;
         let uses_local_keybindings = client.keybindings.is_some();
         let keybindings = client
             .keybindings
@@ -792,9 +794,11 @@ impl HeadlessServer {
         if outer_terminal_focus == Some(true) {
             self.app.state.mark_active_tab_seen();
         }
-        if !host_terminal_theme.is_empty() {
-            self.app.set_host_terminal_theme(host_terminal_theme);
-        }
+        self.app.set_host_terminal_appearance_state(
+            host_terminal_appearance,
+            host_terminal_appearance_explicit,
+        );
+        self.app.set_host_terminal_theme(host_terminal_theme);
     }
 
     #[cfg(unix)]
@@ -1229,7 +1233,11 @@ impl HeadlessServer {
         }
 
         if self.foreground_client_id == Some(client_id) {
-            let changed = self.app.set_host_terminal_theme(client.host_terminal_theme);
+            let mut changed = self.app.set_host_terminal_appearance_state(
+                client.host_terminal_appearance,
+                client.host_terminal_appearance_explicit,
+            );
+            changed |= self.app.set_host_terminal_theme(client.host_terminal_theme);
             if changed {
                 self.resize_shared_runtime_to_effective_size_before_input();
             }
@@ -5520,6 +5528,144 @@ next_tab = ""
             server.app.state.host_terminal_theme,
             server.clients[&1].host_terminal_theme
         );
+    }
+
+    #[test]
+    fn foreground_client_without_host_theme_clears_previous_host_theme() {
+        let mut server = test_headless_server();
+        let known_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 0x10,
+                g: 0x20,
+                b: 0x30,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x40,
+                g: 0x50,
+                b: 0x60,
+            }),
+        };
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                known_theme,
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+
+        assert!(server.promote_client_to_foreground(1));
+        assert_eq!(server.app.state.host_terminal_theme, known_theme);
+
+        assert!(server.promote_client_to_foreground(2));
+        assert_eq!(
+            server.app.state.host_terminal_theme,
+            crate::terminal_theme::TerminalTheme::default()
+        );
+    }
+
+    #[test]
+    fn foreground_client_appearance_controls_auto_theme() {
+        let mut server = test_headless_server();
+        server.app.state.theme_runtime.auto_switch = true;
+        server.app.state.theme_runtime.dark_name = "catppuccin".to_string();
+        server.app.state.theme_runtime.light_name = "catppuccin-latte".to_string();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme {
+                    foreground: None,
+                    background: Some(crate::terminal_theme::RgbColor { r: 0, g: 0, b: 0 }),
+                },
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme {
+                    foreground: None,
+                    background: Some(crate::terminal_theme::RgbColor {
+                        r: 255,
+                        g: 255,
+                        b: 255,
+                    }),
+                },
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+
+        assert!(server.promote_client_to_foreground(1));
+        assert_eq!(server.app.state.theme_name, "catppuccin");
+
+        assert!(server.promote_client_to_foreground(2));
+        assert_eq!(server.app.state.theme_name, "catppuccin-latte");
+    }
+
+    #[test]
+    fn color_scheme_change_event_is_inert_on_server() {
+        let mut server = test_headless_server();
+        let initial_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 0x10,
+                g: 0x20,
+                b: 0x30,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x40,
+                g: 0x50,
+                b: 0x60,
+            }),
+        };
+        server.app.state.host_terminal_theme = initial_theme;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                initial_theme,
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+
+        let changed = server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: crate::raw_input::GHOSTTY_COLOR_SCHEME_DARK_REPORT.to_vec(),
+        });
+
+        assert!(!changed);
+        assert_eq!(server.foreground_client_id, None);
+        assert_eq!(server.clients[&1].host_terminal_theme, initial_theme);
+        assert_eq!(server.app.state.host_terminal_theme, initial_theme);
     }
 
     #[test]
