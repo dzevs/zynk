@@ -232,16 +232,18 @@ impl Drop for InitLock {
 /// Read the user-table set of an OPEN connection (excludes sqlite/fts internals).
 async fn user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, DbError> {
     let rows = sqlx::query(
+        // GLOB (literal `_`), not LIKE (`_` = any one character): this only shapes the DISPLAY list
+        // — classification uses `all_user_table_names` — but the patterns must not over-match.
         "SELECT name FROM sqlite_master \
          WHERE type='table' \
-           AND name NOT LIKE 'sqlite_%' \
-           AND name NOT LIKE '%_fts' \
-           AND name NOT LIKE '%_fts_%' \
-           AND name NOT LIKE '%_data' \
-           AND name NOT LIKE '%_idx' \
-           AND name NOT LIKE '%_content' \
-           AND name NOT LIKE '%_docsize' \
-           AND name NOT LIKE '%_config' \
+           AND name NOT GLOB 'sqlite_*' \
+           AND name NOT GLOB '*_fts' \
+           AND name NOT GLOB '*_fts_*' \
+           AND name NOT GLOB '*_data' \
+           AND name NOT GLOB '*_idx' \
+           AND name NOT GLOB '*_content' \
+           AND name NOT GLOB '*_docsize' \
+           AND name NOT GLOB '*_config' \
          ORDER BY name",
     )
     .fetch_all(&mut *conn)
@@ -296,7 +298,9 @@ async fn classify_open_conn(conn: &mut SqliteConnection) -> Result<DbClassificat
 /// reason about, as opposed to the display view in `user_table_names`.
 async fn all_user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, DbError> {
     let rows = sqlx::query(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        // GLOB, not LIKE: in LIKE `_` is a one-character wildcard, so 'sqlite_%' would also hide a
+        // user table such as `sqliteCustomer`. SQLite's reserved prefix is literally `sqlite_`.
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -604,6 +608,40 @@ mod tests {
             Err(_) => panic!("init-lock wait is unbounded"),
         }
         holder.unlock().unwrap();
+    }
+
+    #[test]
+    fn foreign_table_named_with_sqlite_prefix_lookalike_fails_closed() {
+        // Gate-2 round-2 P1: `LIKE 'sqlite_%'` treats `_` as a one-character wildcard, so a user table
+        // named `sqliteCustomer` was dropped from the table set and — next to an empty ledger — the DB
+        // classified Empty and got migrated. The reserved prefix must be matched literally.
+        for (tag, ddl) in [
+            (
+                "sqlite-lookalike-with-ledger",
+                format!(
+                    "{SQLX_LEDGER_DDL}; CREATE TABLE sqliteCustomer (secret TEXT); \
+                     INSERT INTO sqliteCustomer VALUES ('s')"
+                ),
+            ),
+            (
+                "sqlite-lookalike-no-ledger",
+                "CREATE TABLE sqliteCustomer (secret TEXT); INSERT INTO sqliteCustomer VALUES ('s')"
+                    .to_string(),
+            ),
+        ] {
+            let path = tmp_db(tag);
+            plant_foreign_db(&path, &ddl);
+            let before = std::fs::read(&path).unwrap();
+            match block_on(classify_db_at(&path)).unwrap() {
+                DbClassification::Foreign { tables } => {
+                    assert!(tables.iter().any(|t| t == "sqliteCustomer"), "{tag}: {tables:?}")
+                }
+                other => panic!("{tag}: expected Foreign, got {other:?}"),
+            }
+            let err = block_on(open_migrated_at(&path)).unwrap_err();
+            assert_eq!(err.code, "db_foreign_conflict", "{tag}: {}", err.message);
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{tag}: bytes changed");
+        }
     }
 
     #[test]
