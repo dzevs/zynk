@@ -38,8 +38,9 @@ config key is removed (see **Changed**).
   initialization is serialized across processes, and a database that holds only an empty migration ledger is
   treated as new. A database is recognized as zynk's own by its recorded migration lineage (versions and
   checksums), never by table names alone; any other non-empty database — whatever its objects are named — fails
-  closed and is left byte-for-byte unmodified. A server that cannot initialize or migrate its database now exits
-  with the error instead of starting without persistence.
+  closed and its existing data bytes are left unmodified (inspecting a WAL-mode database may create the usual
+  SQLite `-shm`/empty `-wal` sidecars; see ADR 0011). A server that cannot initialize or migrate its database
+  now exits with the error — printed and written to its server log — instead of starting without persistence.
 - Sessions: OMP resumes in the same pane after a restart with root-only hook state; lifecycle hook generations
   re-anchor; root-agent restore ownership is protected; Pi/OMP agents are released on shutdown.
 - Plugins: workspace/tab/pane lifecycle events also fire for panes created from the UI.
