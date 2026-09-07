@@ -257,8 +257,8 @@ Residual, documented limits (outside ADR 0008's accidental-data-loss threat mode
   holds — a main file whose schema still lives in un-checkpointed WAL frames reads as **empty** and is
   initialized. Never move or copy a WAL database without its `-wal` (standard SQLite guidance; `zynk db
   adopt`/`backup` move the sidecars along).
-- The file-identity check is Unix-only (`std` exposes no stable file identity on Windows); the pinned
-  connection and the post-switch re-inspection apply everywhere.
+- The opener's file-identity check uses device + inode on Unix and volume serial + file index on Windows; on any
+  other platform it is skipped, while the pinned connection and the post-switch re-inspection apply everywhere.
 - The orphan-recovery grace window (5 min) is a recovery policy, not a provable upper bound on the gap between
   persisting a message and its first transport event: a sender suspended for longer is recovered as failed by
   a peer's start (exactly once). The embedding attempt cap bounds retries after a recorded failure, not the
