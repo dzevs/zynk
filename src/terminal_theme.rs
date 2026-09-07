@@ -147,6 +147,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_rgb_with_wrong_component_count() {
+        // Characterization for the 1.98 `some_filter` rewrite: all three components are consumed
+        // BEFORE the trailing check, so a fourth component is rejected and two are not enough.
+        assert_eq!(
+            parse_rgb_color("rgb:ff/00/00"),
+            Some(RgbColor {
+                r: 0xff,
+                g: 0x00,
+                b: 0x00,
+            })
+        );
+        assert_eq!(parse_rgb_color("rgb:ff/00/00/00"), None);
+        assert_eq!(parse_rgb_color("rgb:ff/00"), None);
+        assert_eq!(parse_rgb_color("rgb:ff/00/00/"), None);
+    }
+
+    #[test]
     fn parses_bel_terminated_hash_response() {
         let parsed = parse_default_color_response("\x1b]11;#123456\u{7}");
         assert_eq!(
