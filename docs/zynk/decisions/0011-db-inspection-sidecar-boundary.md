@@ -114,6 +114,22 @@ The decision above stands; the swarm's second round showed the guard could still
     only AFTER "committed"; a failed commit restores the old server's workers before it rolls back. A job is
     therefore never owned by two workers (the replacement's startup recovery resets `running` jobs, and two
     pollers would select the same pending batch).
+15. **One SQLite-effective pathname** (Codex Gate-2 round 9). The opener and `db status` resolve the configured
+    path the way SQLite's `unixFullPathname` does — made absolute, the FINAL component's symlink chain followed
+    (a relative target joined with the link's directory, bounded), no lexical `..`/`.` normalization,
+    intermediate directory links left alone; Windows: absolute form only — and use that one name for the
+    sidecar guards, the init lock, the identity capture and the connection. A stable `zynk.db -> foreign.db`
+    link used to let the guards inspect `zynk.db-journal` while SQLite replayed `foreign.db-journal`.
+16. **The DB-worker handover is a protocol contract: handoff version 2.** A version-1 peer (zynk 3.0.x sends
+    "committed" with its workers still running) is refused before "validated" in either direction, with the
+    remedy (restart zynk normally) returned to the requester and written to the replacement's durable log; the
+    sender rolls back and keeps serving.
+17. **Worker quiescence is bounded and decided before service moves.** Both DB workers are paused — a bounded
+    wait for an idle point between units of work (`ZYNK_HANDOFF_WORKER_IDLE_MS`, default 10 s), after which no
+    new unit starts until resume — BEFORE any socket is withdrawn. Busy past the deadline: the handoff is
+    refused, the workers resume, ownership is retained. Idle: the handoff proceeds and the idle handles are
+    joined at commit (immediate), so a slow or stuck provider never couples to the replacement's 30 s
+    "committed" wait; every pre-commit rollback resumes the workers.
 
 Residual, documented limits (outside ADR 0008's accidental-data-loss threat model):
 
