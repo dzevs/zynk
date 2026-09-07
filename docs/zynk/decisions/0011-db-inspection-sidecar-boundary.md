@@ -148,9 +148,16 @@ The decision above stands; the swarm's second round showed the guard could still
     relocate the main file together with every existing `-journal`, `-wal` and `-shm` to ONE backup slot
     chosen so that neither the base nor any member target exists; every target is re-checked before the first
     rename, sidecars move first and the main file last, and any failure moves the members already relocated
-    back and reports an error — never a "success" with a stranded member, never an overwritten backup. The
-    commands also relocate what the guards refuse to open (a journal that looks hot; orphan sidecars beside an
-    absent main file), which is exactly the remedy those refusals name.
+    back and reports an error — never a "success" with a stranded member, never an overwritten backup. A slot
+    or target counts as occupied when ANY directory entry exists there (a dangling symlink included — `exists`
+    follows links), and the move itself never replaces: it hard-links the member to its target (which fails
+    when the name exists in any form) and unlinks the source only then, so a competitor that appears after the
+    preflight turns into a refusal and a rollback rather than an overwrite (filesystems without hard links
+    fall back to rename after the entry check; that residual race is documented). Relocation acts on the
+    SQLite-effective path — the final symlink chain resolved, exactly as inspection classifies — so what the
+    guards refuse through a link is what moves; the link stays. The commands also relocate what the guards
+    refuse to open (a journal that looks hot; orphan sidecars beside an absent main file), which is exactly
+    the remedy those refusals name.
 19. **Terminal-safe output covers Unicode format and bidi controls, and paths.** The hostile-character rule
     is C0/C1 controls plus the Unicode format (`Cf`), bidi/invisible characters and the line/paragraph
     separators (`Zl`/`Zp`) — a U+202E override can reorder displayed text as surely as ESC can recolor it —
@@ -162,18 +169,25 @@ The decision above stands; the swarm's second round showed the guard could still
     returns the job's incremented `attempts` — nothing else ever changes that counter — and that value is the
     claim token: the job's `done`/`failed` updates match the id, `status = 'running'` AND the token, so a worker
     that stalled past the running lease (10 min; recovery hands such jobs back to the queue) can neither
-    complete nor fail the job its successor owns. Zero rows affected on the claim means another worker owns
-    the job and it is skipped, never run twice.
+    complete nor fail the job its successor owns. The fence is the FIRST statement of the immediate write
+    transaction, before the vector and `message_embeddings` rows: a stale claim's late success rolls back and
+    leaves no trace (a vector committed under the new owner would make the owner's own completion fail on the
+    vec0 uniqueness and strand the job `failed` beside a live vector). Zero rows affected on the claim means
+    another worker owns the job and it is skipped, never run twice.
 21. **Orphan-message recovery has a grace window.** Every ordinary server start runs cold-start recovery over
     the shared database, but a message with no delivery event is IN FLIGHT until it is older than the grace
     window (5 min): a sender persists the message before its first transport event, and a peer server's
-    start must not fail it. Only older event-less messages are failed (`system.recovery`).
+    start must not fail it. Only older event-less messages are failed (`system.recovery`), and each exactly
+    once across every server recovering at the same time: the claim (bumping `delivery_seq`) is conditioned
+    on the message STILL having no delivery event inside one immediate transaction, so the second claimant
+    sees zero rows and records nothing.
 22. **A receipt binds to the stored target participant, never to an agent label.** The participant key is
     label + terminal + hook session — pane ids rotate and are deliberately not part of it. The durable anchor
     is the hook session value: it survives pane churn, a restart and a live handoff (the restored terminal
     keeps its persisted agent session, while terminal ids are allocated per server lifetime). When the stored
     participant carried a session, the authoritative receiver (hook authority only) must present the same
-    one; when it carried none (a hook that reported no session id — a generic `hook` source cannot carry
+    one — the full triple the participant key hashes (source, kind, value), never the value alone; when it
+    carried none (a hook that reported no session id — a generic `hook` source cannot carry
     one), the terminal id binds instead, within this server's lifetime; otherwise
     `receiver_identity_mismatch`. A second pane carrying the same label under another session (or,
     session-less, on another terminal) is not the addressee. Limit: a session-less target cannot be re-bound
