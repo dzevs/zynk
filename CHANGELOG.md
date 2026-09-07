@@ -41,6 +41,13 @@ config key is removed (see **Changed**).
   closed and its existing data bytes are left unmodified (inspecting a WAL-mode database may create the usual
   SQLite `-shm`/empty `-wal` sidecars; see ADR 0011). A server that cannot initialize or migrate its database
   now exits with the error — printed and written to its server log — instead of starting without persistence.
+  The guard inspects and writes on one pinned connection (a symlink flip or rename under it cannot redirect
+  the writes), creates a new database only after the init lock is held, refuses to initialize over a
+  nonempty `-wal`/`-journal` left beside a missing database, counts `sqlite_*`-named user tables, reports a
+  database migrated by a newer zynk as *newer* (never "ready") and refuses to open it, and escapes control
+  characters in schema names it prints. The Unix live-handoff replacement runs the same pre-flight before
+  serving (a failure rolls back to the old server) and owns the DB workers, so receipts keep working after a
+  handoff.
 - Sessions: OMP resumes in the same pane after a restart with root-only hook state; lifecycle hook generations
   re-anchor; root-agent restore ownership is protected; Pi/OMP agents are released on shutdown.
 - Plugins: workspace/tab/pane lifecycle events also fire for panes created from the UI.

@@ -55,3 +55,59 @@ Two sidecar-clean alternatives were tried and rejected:
   with copied public checksums is outside ADR 0008's threat model (accidental data loss).
 - The lock sidecar `<db>.init-lock` may appear next to a database that zynk was asked to open; it holds no
   data and is safe to delete when no zynk process is running.
+
+## Addendum — Gate-3 round 2 (release 3.1.0 prep, before merge; findings G3-R2-DB-001…006, G3-R2-SRV-001)
+
+The decision above stands; the swarm's second round showed the guard could still be **redirected** or
+**bypassed** around it. The following are part of the same decision:
+
+5. **One pinned connection.** The opener inspects and writes on the SAME read-write connection: the open
+   binds the target file, so a symlink flip or an atomic rename between the verdict and the writable use
+   cannot redirect the writes to a different file (classification authority is never reused for a swapped
+   target). Connecting changes no journal mode (no header write), and SQLite's checkpoint-on-close is
+   disabled (`SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`) until the open succeeds, so a refused foreign WAL database
+   is never checkpointed into its main file. A WAL-mode database — every zynk-initialized database — binds
+   its `-wal`/`-shm` to the connection during the inspection read; where a by-name sidecar open is still
+   ahead (first-time initialization; a database externally converted to rollback journaling) the opener
+   verifies the path's file identity (Unix `dev`/`inode`) around the switch to WAL and re-inspects on the
+   same connection afterwards, failing closed (`db_target_changed`) if the name no longer refers to the
+   inspected file. The connection also keeps its WAL **persistent** (`SQLITE_FCNTL_PERSIST_WAL`): SQLite's
+   close path otherwise removes `<db>-wal` by NAME after its checkpoint, the one sidecar operation the
+   connection could not bind — so a zynk-opened database keeps an (empty or checkpointed) `-wal`/`-shm`
+   beside it, which this ADR already allows. The `zynk db status` read-only inspection is unchanged.
+6. **Lock before create.** An absent or zero-byte database is created only AFTER the init lock is held;
+   nothing is created while another opener initializes or a foreign holder blocks us (an existing database is
+   inspected first, then re-inspected under the lock when initialization or an upgrade is needed).
+7. **Orphan sidecars are data.** A nonempty `-wal` or `-journal` beside an absent/zero-byte main file is
+   refused before ANY connection exists (`db_orphan_sidecar`): SQLite discards a stale `-wal` on the first
+   read of a zero-page database and would replay a hot journal, so initialization would consume or destroy
+   existing bytes. `zynk db status` reports the same refusal.
+8. **`sqlite_*` is not a free pass.** The complete object set excludes only entries SQLite itself maintains,
+   recognized by exact kind/name/shape — the implicit autoindex `sqlite_autoindex_<table>_<N>` (no SQL) of a
+   table that is present, and `sqlite_sequence` / `sqlite_stat1` / `sqlite_stat4` with their fixed DDL. A
+   readable table raw-renamed into the reserved prefix counts as foreign schema (and is named, escaped, in
+   the diagnostic). ANALYZE'd native databases and AUTOINCREMENT bookkeeping remain native/empty as before.
+9. **Newer lineage is ours but not openable.** Unknown newer ledger rows are tolerated only when EVERY
+   built-in migration is recorded with matching checksums; the result is native **newer** — `zynk db status`
+   never calls it "ready", and the opener refuses it (`db_newer_lineage`) before any writable pragma. A
+   partial known prefix plus unknown newer rows is not serially producible and fails closed as foreign.
+10. **Diagnostics are terminal-safe.** Schema names in `db status` and foreign-database errors have control
+    characters (LF, ESC, C1) escaped; non-UTF-8 names are shown as hex.
+11. **The handoff-import server is covered.** The Unix live-handoff replacement runs the same fail-closed
+    DB pre-flight before any public service (on failure it exits before "restored" and the old server rolls
+    back and keeps serving) and installs the receipt/embedding DB workers like a primary start.
+
+Residual, documented limits (outside ADR 0008's accidental-data-loss threat model):
+
+- During first-time initialization SQLite itself deletes a `-wal` that appears beside the zero-page database
+  and creates the new `-wal`/`-shm` by name; the orphan-sidecar guard therefore runs before the database is
+  created, and a sidecar renamed into place DURING initialization is SQLite's to discard.
+- A hot `-journal` belonging to another database but carrying the inspected database's name is replayed by
+  SQLite on the first read, as for any SQLite client.
+- A WAL-mode database separated from its `-wal` is, to SQLite and therefore to zynk, whatever its main file
+  holds — a main file whose schema still lives in un-checkpointed WAL frames reads as **empty** and is
+  initialized. Never move or copy a WAL database without its `-wal` (standard SQLite guidance; `zynk db
+  adopt`/`backup` move the sidecars along).
+- The file-identity check is Unix-only (`std` exposes no stable file identity on Windows); the pinned
+  connection and the post-switch re-inspection apply everywhere.
+

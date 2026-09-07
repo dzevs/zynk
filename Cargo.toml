@@ -45,8 +45,8 @@ include = [
 ]
 
 # zynk fork (ADR 0010 — hard fork, full rebrand): the Cargo package/crate name is `zynk`
-# and the produced binary is `zynk`. ADR 0007 §1's minimal-rebrand carve-out (crate stays
-# (ADR 0007 §1) is superseded — we no longer track upstream.
+# and the produced binary is `zynk`. ADR 0007 §1's minimal-rebrand carve-out (which kept the
+# upstream crate name to ease rebases) is superseded by ADR 0010 — we no longer track upstream.
 # Cargo exposes `CARGO_BIN_EXE_zynk` to integration tests (keyed on the bin name, unchanged).
 [[bin]]
 name = "zynk"
