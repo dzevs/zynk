@@ -1,12 +1,13 @@
 //! zynk fork: SQLite connection, migration, and recovery helpers (ADR 0003,
 //! foreign-DB guard finalized by ADR 0008).
 
+use std::ffi::{c_int, c_void};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sqlx::migrate::Migrator;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
+use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, Executor, Row, SqliteConnection};
 
 static MIGRATOR: Migrator = sqlx::migrate!("migrations/zynk");
@@ -33,6 +34,19 @@ pub enum DbClassification {
     Foreign {
         tables: Vec<String>,
     },
+}
+
+/// What the built-in migrator would have to do with a database, decided from the ledger.
+///
+/// - `Current` — every built-in migration is recorded: open without waiting on the init lock.
+/// - `Pending` — first-time initialization or an upgrade is needed: serialize under the init lock.
+/// - `Newer`   — the ledger records versions this build does not know (a NEWER zynk migrated it):
+///   ownership is ours, but this build must not touch it — never "ready".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationState {
+    Current,
+    Pending,
+    Newer(Vec<i64>),
 }
 
 #[derive(Debug, Clone)]
@@ -127,51 +141,283 @@ pub async fn open_migrated_at(path: &Path) -> Result<SqliteConnection, DbError> 
 }
 
 pub async fn open_migrated_at_without_recovery(path: &Path) -> Result<SqliteConnection, DbError> {
+    open_migrated_at_with_hook(path, &mut || {}).await
+}
+
+/// The opener with a hook that runs after the inspection verdict and before the writable use of the
+/// file — a no-op in production; tests use it to swap the file behind `path` and prove the verdict
+/// cannot be reused for a different target.
+async fn open_migrated_at_with_hook(
+    path: &Path,
+    after_inspection: &mut dyn FnMut(),
+) -> Result<SqliteConnection, DbError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // ADR 0008 foreign-DB guard: classify FIRST, with a READ-ONLY connection (existing data bytes
-    // are never modified — ADR 0011), BEFORE
-    // the writable open below. This matters for byte-immutability: the writable `connect_with`
-    // applies `journal_mode = WAL`, which rewrites the SQLite file header (bytes 18-19) on connect.
-    // Classifying read-only first means a FOREIGN database's data bytes are never modified — we fail closed
-    // before any mutation. The guard sits in this shared low-level opener, so every PRODUCT open
-    // (open_migrated_at, append, query-readonly, workers) is protected.
+    // Existing data beside an absent/zero-page main file is refused BEFORE any connection exists:
+    // SQLite discards a stale `-wal` on the first read of a zero-page database (ADR 0011).
+    refuse_orphan_sidecars(path)?;
+    // ONE connection for inspection AND writing (Gate-3 round 2): the open pins the target file, so a
+    // symlink flip or a rename between the verdict and the writable use cannot redirect the writes to
+    // a different file — classification authority is never reused for a swapped target. Connecting
+    // changes no journal mode (no header write) and checkpoint-on-close is disabled until the open
+    // succeeds, so a refused foreign WAL database is never checkpointed into its main file (ADR 0008
+    // fails closed before any mutation; ADR 0011's data-byte boundary holds).
     //
-    // The cross-process init lock (see `InitLock`) is taken ONLY when initialization is actually
-    // needed (Absent/Empty): two processes opening a fresh shared DB at once must not observe each
-    // other's half-initialized state, and a native DB with PENDING migrations is upgraded under the
-    // same lock (sqlx's SQLite migrator has none of its own); only a fully CURRENT native DB opens
-    // without waiting on any lock holder. After acquiring, inspect again — the other process may have
-    // finished.
-    let mut _init_lock = None;
-    match inspect_db_at(path).await? {
-        // Fully CURRENT native DB: nothing to initialize or migrate, so never wait on a lock holder.
-        (DbClassification::Native, false) => {}
-        (DbClassification::Foreign { tables }, _) => return Err(foreign_db_error(path, &tables)),
-        // Absent, new, or native with PENDING migrations: serialize with every other opener.
-        (DbClassification::Absent | DbClassification::Empty | DbClassification::Native, _) => {
-            _init_lock = Some(InitLock::acquire(path).await?);
-            if let (DbClassification::Foreign { tables }, _) = inspect_db_at(path).await? {
-                return Err(foreign_db_error(path, &tables));
+    // The cross-process init lock (see `InitLock`) is taken ONLY when initialization or a pending
+    // migration is actually needed: an absent/zero-byte database is created only AFTER the lock is
+    // held (nothing is created while another opener initializes or a foreign holder blocks us); an
+    // existing database is inspected first and, when new or native with PENDING migrations, inspected
+    // again on the SAME connection under the lock (sqlx's SQLite migrator has no cross-process lock of
+    // its own). Only a fully CURRENT native database opens without waiting on any lock holder.
+    let (mut conn, identity, _init_lock, verdict) = if existing_nonempty_file(path) {
+        let (mut conn, identity) = connect_pinned(path, false).await?;
+        match classify_open_conn(&mut conn).await? {
+            (DbClassification::Native, MigrationState::Current) => {
+                (conn, identity, None, DbClassification::Native)
+            }
+            (DbClassification::Foreign { tables }, _) => {
+                return refuse(conn, foreign_db_error(path, &tables)).await;
+            }
+            (DbClassification::Native, MigrationState::Newer(versions)) => {
+                return refuse(conn, newer_lineage_error(path, &versions)).await;
+            }
+            // Empty (ledger-only init in progress/aborted) or native with pending migrations.
+            (_, _) => {
+                let lock = InitLock::acquire(path).await?;
+                match classify_open_conn(&mut conn).await? {
+                    (DbClassification::Foreign { tables }, _) => {
+                        return refuse(conn, foreign_db_error(path, &tables)).await;
+                    }
+                    (DbClassification::Native, MigrationState::Newer(versions)) => {
+                        return refuse(conn, newer_lineage_error(path, &versions)).await;
+                    }
+                    (class, _) => (conn, identity, Some(lock), class),
+                }
             }
         }
+    } else {
+        let lock = InitLock::acquire(path).await?;
+        // Another opener may have initialized (or a sidecar appeared) while we waited.
+        refuse_orphan_sidecars(path)?;
+        let (mut conn, identity) = connect_pinned(path, true).await?;
+        match classify_open_conn(&mut conn).await? {
+            (DbClassification::Foreign { tables }, _) => {
+                return refuse(conn, foreign_db_error(path, &tables)).await;
+            }
+            (DbClassification::Native, MigrationState::Newer(versions)) => {
+                return refuse(conn, newer_lineage_error(path, &versions)).await;
+            }
+            (class, _) => (conn, identity, Some(lock), class),
+        }
+    };
+    // A WAL-mode database (every zynk-initialized database) bound its `-wal`/`-shm` to this
+    // connection during the inspection read, so no later open happens by name. Otherwise (first-time
+    // initialization, or a database externally converted to rollback journaling) the switch to WAL in
+    // `apply_pragmas` opens the sidecars by NAME: the name must still refer to the inspected file.
+    let wal_bound = journal_mode(&mut conn).await? == "wal";
+    after_inspection();
+    if !wal_bound && file_identity(path) != identity {
+        return refuse(conn, target_changed_error(path)).await;
     }
-    let options = SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_millis(2000))
-        .pragma("foreign_keys", "ON")
-        .pragma("page_size", "4096");
-    let mut conn = SqliteConnection::connect_with(&options).await?;
     apply_pragmas(&mut conn).await?;
+    if !wal_bound && file_identity(path) != identity {
+        return refuse(conn, target_changed_error(path)).await;
+    }
+    // Belt and braces: what this connection sees after the switch must still be what was inspected.
+    match classify_open_conn(&mut conn).await? {
+        (DbClassification::Foreign { tables }, _) => {
+            return refuse(conn, foreign_db_error(path, &tables)).await;
+        }
+        (class, _) if std::mem::discriminant(&class) != std::mem::discriminant(&verdict) => {
+            return refuse(conn, target_changed_error(path)).await;
+        }
+        _ => {}
+    }
     MIGRATOR
         .run(&mut conn)
         .await
         .map_err(|err| DbError::new("migration_failed", err.to_string()))?;
+    set_checkpoint_on_close(&mut conn, true).await?;
     Ok(conn)
+}
+
+fn existing_nonempty_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
+}
+
+/// `(dev, inode)` of whatever `path` currently refers to — the identity the pinned connection is
+/// compared against while a by-name sidecar open is still ahead. Unsupported (always `None`, so the
+/// check is skipped) where `std` exposes no stable file identity.
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// The single pinned connection: no journal-mode change at connect, checkpoint-on-close disabled
+/// until the open succeeds. Returns the file identity captured right after the open.
+async fn connect_pinned(
+    path: &Path,
+    create: bool,
+) -> Result<(SqliteConnection, Option<(u64, u64)>), DbError> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(create)
+        .busy_timeout(Duration::from_millis(2000));
+    let mut conn = SqliteConnection::connect_with(&options).await?;
+    let identity = file_identity(path);
+    let configured = async {
+        set_checkpoint_on_close(&mut conn, false).await?;
+        set_persist_wal(&mut conn).await
+    }
+    .await;
+    if let Err(err) = configured {
+        let _ = conn.close().await;
+        return Err(err);
+    }
+    Ok((conn, identity))
+}
+
+/// `SQLITE_FCNTL_PERSIST_WAL`: after its close-time checkpoint SQLite normally removes `<db>-wal`
+/// BY NAME — the one sidecar operation the pinned connection could not bind. With a persistent WAL
+/// the log is truncated through the connection's own descriptor instead, so a file moved to that
+/// name in the meantime is never deleted (ADR 0011 already allows an empty `-wal`/`-shm` to remain).
+async fn set_persist_wal(conn: &mut SqliteConnection) -> Result<(), DbError> {
+    let mut handle = conn.lock_handle().await?;
+    let mut persist: c_int = 1;
+    // SAFETY: `handle` keeps the `sqlite3*` alive and exclusively locked for the call; "main" is a
+    // NUL-terminated database name and the argument is a valid `int` the call reads and writes.
+    let rc = unsafe {
+        libsqlite3_sys::sqlite3_file_control(
+            handle.as_raw_handle().as_ptr(),
+            c"main".as_ptr(),
+            libsqlite3_sys::SQLITE_FCNTL_PERSIST_WAL,
+            (&mut persist as *mut c_int).cast::<c_void>(),
+        )
+    };
+    if rc != libsqlite3_sys::SQLITE_OK {
+        return Err(DbError::new(
+            "db_config_failed",
+            format!("sqlite3_file_control(PERSIST_WAL) failed: rc={rc}"),
+        ));
+    }
+    Ok(())
+}
+
+async fn refuse<T>(conn: SqliteConnection, err: DbError) -> Result<T, DbError> {
+    let _ = conn.close().await;
+    Err(err)
+}
+
+async fn journal_mode(conn: &mut SqliteConnection) -> Result<String, DbError> {
+    Ok(sqlx::query_scalar::<_, String>("PRAGMA journal_mode")
+        .fetch_one(&mut *conn)
+        .await?
+        .to_ascii_lowercase())
+}
+
+/// `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`: closing the last read-write connection to a WAL database
+/// normally checkpoints the log into the main file — a data-byte mutation the fail-closed path must
+/// never perform on a refused database.
+async fn set_checkpoint_on_close(
+    conn: &mut SqliteConnection,
+    enabled: bool,
+) -> Result<(), DbError> {
+    let mut handle = conn.lock_handle().await?;
+    let wanted = c_int::from(!enabled);
+    let mut applied: c_int = -1;
+    // SAFETY: `handle` keeps the `sqlite3*` alive and exclusively locked for the duration of the call;
+    // the option takes an `int` and an out-pointer to an `int`, both provided as valid values.
+    let rc = unsafe {
+        libsqlite3_sys::sqlite3_db_config(
+            handle.as_raw_handle().as_ptr(),
+            libsqlite3_sys::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            wanted,
+            &mut applied as *mut c_int,
+        )
+    };
+    if rc != libsqlite3_sys::SQLITE_OK || applied != wanted {
+        return Err(DbError::new(
+            "db_config_failed",
+            format!(
+                "sqlite3_db_config(NO_CKPT_ON_CLOSE={wanted}) failed: rc={rc}, applied={applied}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Sidecars SQLite would consume or discard while creating a database at `path`.
+const ORPHAN_SIDECAR_SUFFIXES: &[&str] = &["-wal", "-journal"];
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// ADR 0011: a nonempty `-wal`/`-journal` beside an absent or zero-byte main file is existing data —
+/// initialization would let SQLite discard or replay it, so fail closed before any connection.
+fn refuse_orphan_sidecars(path: &Path) -> Result<(), DbError> {
+    if existing_nonempty_file(path) {
+        return Ok(());
+    }
+    for suffix in ORPHAN_SIDECAR_SUFFIXES {
+        let sidecar = sidecar_path(path, suffix);
+        let len = std::fs::metadata(&sidecar)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        if len > 0 {
+            return Err(DbError::new(
+                "db_orphan_sidecar",
+                format!(
+                    "zynk: refusing to initialize a database at {}: the file is absent or empty but \
+                     {} ({len} bytes) holds data that initialization would discard. Restore the \
+                     matching database file beside it, or move the sidecar aside, then retry \
+                     (`zynk db status` to inspect).",
+                    path.display(),
+                    sidecar.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn newer_lineage_error(path: &Path, versions: &[i64]) -> DbError {
+    let listed: Vec<String> = versions.iter().map(i64::to_string).collect();
+    DbError::new(
+        "db_newer_lineage",
+        format!(
+            "zynk: the database at {} was migrated by a NEWER zynk (migration versions {} are \
+             unknown to this build); refusing to open it. Upgrade zynk, or restore a database that \
+             matches this build.",
+            path.display(),
+            listed.join(", ")
+        ),
+    )
+}
+
+fn target_changed_error(path: &Path) -> DbError {
+    DbError::new(
+        "db_target_changed",
+        format!(
+            "zynk: the file at {} was replaced while the database was being initialized; nothing \
+             was written to the new file. Retry once the path is stable (`zynk db status` to inspect).",
+            path.display()
+        ),
+    )
 }
 
 /// Exclusive advisory lock beside the DB (`<db>.init-lock`) that serializes first-time initialization
@@ -243,32 +489,33 @@ impl Drop for InitLock {
 
 /// Read the user-table set of an OPEN connection (excludes sqlite/fts internals).
 async fn user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, DbError> {
-    // GLOB (literal `_`), not LIKE (`_` = any one character): this only shapes the DISPLAY list —
-    // classification uses `schema_objects` — but the patterns must not over-match. Names are read as
-    // bytes and labeled losslessly when they are not valid UTF-8.
-    let rows = sqlx::query(
-        "SELECT CAST(name AS BLOB) AS name FROM sqlite_master \
-         WHERE type='table' \
-           AND name NOT GLOB 'sqlite_*' \
-           AND name NOT GLOB '*_fts' \
-           AND name NOT GLOB '*_fts_*' \
-           AND name NOT GLOB '*_data' \
-           AND name NOT GLOB '*_idx' \
-           AND name NOT GLOB '*_content' \
-           AND name NOT GLOB '*_docsize' \
-           AND name NOT GLOB '*_config' \
-         ORDER BY name",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    let mut names = Vec::with_capacity(rows.len());
-    for row in rows {
-        let name = row.try_get::<Vec<u8>, _>("name")?;
-        names.push(match String::from_utf8(name) {
-            Ok(name) => name,
-            Err(err) => format!("<non-utf8 0x{}>", hex(err.as_bytes())),
-        });
-    }
+    // The DISPLAY list: the same complete object set the decision uses (`schema_objects`), reduced to
+    // tables and without FTS shadow/suffixed names; every name is escaped for terminals and logs.
+    // Classification never depends on this list.
+    const HIDDEN_SUFFIXES: &[&[u8]] = &[
+        b"_fts",
+        b"_data",
+        b"_idx",
+        b"_content",
+        b"_docsize",
+        b"_config",
+    ];
+    let mut names: Vec<String> = schema_objects(conn)
+        .await?
+        .into_iter()
+        .filter(|object| object.kind == "table")
+        .filter(|object| {
+            !HIDDEN_SUFFIXES
+                .iter()
+                .any(|suffix| object.name.ends_with(suffix))
+                && !object
+                    .name
+                    .windows(b"_fts_".len())
+                    .any(|window| window == b"_fts_")
+        })
+        .map(|object| printable_name(&object.name))
+        .collect();
+    names.sort();
     Ok(names)
 }
 
@@ -282,7 +529,7 @@ async fn user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, Db
 /// so a caller that goes on to wait for the init lock holds no snapshot while waiting.
 async fn classify_open_conn(
     conn: &mut SqliteConnection,
-) -> Result<(DbClassification, bool), DbError> {
+) -> Result<(DbClassification, MigrationState), DbError> {
     classify_open_conn_with_hook(conn, &mut || {}).await
 }
 
@@ -292,7 +539,7 @@ async fn classify_open_conn(
 async fn classify_open_conn_with_hook(
     conn: &mut SqliteConnection,
     after_schema_read: &mut dyn FnMut(),
-) -> Result<(DbClassification, bool), DbError> {
+) -> Result<(DbClassification, MigrationState), DbError> {
     let mut tx = conn.begin().await?;
     let inspection = classify_snapshot(&mut tx, after_schema_read).await;
     tx.rollback().await?;
@@ -304,14 +551,14 @@ async fn classify_open_conn_with_hook(
 async fn classify_snapshot(
     conn: &mut SqliteConnection,
     after_schema_read: &mut dyn FnMut(),
-) -> Result<(DbClassification, bool), DbError> {
+) -> Result<(DbClassification, MigrationState), DbError> {
     // Every schema object counts — tables, views, indexes and triggers — with names read as bytes so
     // a name that is not valid UTF-8 still counts (it is never dropped). `user_table_names` is a
     // DISPLAY view that hides FTS-shadow/suffixed names; it never drives this decision.
     let objects = schema_objects(conn).await?;
     after_schema_read();
     if objects.is_empty() {
-        return Ok((DbClassification::Empty, true));
+        return Ok((DbClassification::Empty, MigrationState::Pending));
     }
     let ledger_present = objects
         .iter()
@@ -324,7 +571,10 @@ async fn classify_snapshot(
         if tables.is_empty() {
             tables = objects.iter().map(SchemaObject::display).collect();
         }
-        return Ok((DbClassification::Foreign { tables }, false));
+        return Ok((
+            DbClassification::Foreign { tables },
+            MigrationState::Current,
+        ));
     }
     if objects.len() == 1 && ledger_present {
         // sqlx creates its `_sqlx_migrations` ledger BEFORE the first migration's transaction commits.
@@ -332,29 +582,32 @@ async fn classify_snapshot(
         // progress (another zynk process) or an aborted one: nothing to protect → `Empty`. A ledger
         // that already RECORDS migrations but nothing else is unknown lineage → Foreign.
         if ledger_rows(conn).await?.is_empty() {
-            return Ok((DbClassification::Empty, true));
+            return Ok((DbClassification::Empty, MigrationState::Pending));
         }
         return Ok((
             DbClassification::Foreign {
                 tables: vec!["_sqlx_migrations".to_string()],
             },
-            false,
+            MigrationState::Current,
         ));
     }
     if ledger_present {
-        if let Some(needs_migration) = native_lineage(conn, &objects).await? {
-            return Ok((DbClassification::Native, needs_migration));
+        if let Some(state) = native_lineage(conn, &objects).await? {
+            return Ok((DbClassification::Native, state));
         }
     }
     let mut tables = user_table_names(conn).await?;
     if tables.is_empty() {
         tables = objects.iter().map(SchemaObject::display).collect();
     }
-    Ok((DbClassification::Foreign { tables }, false))
+    Ok((
+        DbClassification::Foreign { tables },
+        MigrationState::Current,
+    ))
 }
 
 /// Positive native recognition = migration PROVENANCE, never table names. Returns
-/// `Some(needs_migration)` when the ledger is ours, `None` otherwise.
+/// `Some(state)` when the ledger is ours, `None` otherwise.
 ///
 /// The rule, in order:
 ///
@@ -371,7 +624,7 @@ async fn classify_snapshot(
 async fn native_lineage(
     conn: &mut SqliteConnection,
     objects: &[SchemaObject],
-) -> Result<Option<bool>, DbError> {
+) -> Result<Option<MigrationState>, DbError> {
     let rows = ledger_rows(conn).await?;
     if rows.is_empty() || rows.iter().any(|(_, _, success)| *success != 1) {
         return Ok(None);
@@ -379,17 +632,23 @@ async fn native_lineage(
     let ours: Vec<_> = MIGRATOR.iter().collect();
     let newest_ours = ours.iter().map(|m| m.version).max().unwrap_or(0);
     let mut known: Vec<i64> = Vec::new();
+    let mut newer: Vec<i64> = Vec::new();
     for (version, checksum, _) in &rows {
         match ours.iter().find(|m| m.version == *version) {
             Some(m) if m.checksum.as_ref() == checksum.as_slice() => known.push(*version),
             Some(_) => return Ok(None), // known version, foreign checksum
-            None if *version > newest_ours => {} // newer zynk
+            None if *version > newest_ours => newer.push(*version), // newer zynk
             None => return Ok(None),    // unknown older version interleaved
         }
     }
     known.sort_unstable();
     let expected_prefix: Vec<i64> = ours.iter().take(known.len()).map(|m| m.version).collect();
     if known.is_empty() || known != expected_prefix {
+        return Ok(None);
+    }
+    // A newer zynk records EVERY built-in migration before adding its own: a partial known prefix
+    // plus unknown newer rows is not serially producible (Gate-3 round 2) — fail closed.
+    if !newer.is_empty() && known.len() < ours.len() {
         return Ok(None);
     }
     let lineage_tables = NATIVE_LINEAGE_TABLES.iter().all(|table| {
@@ -402,8 +661,17 @@ async fn native_lineage(
     }
     // Current = every built-in migration is recorded. Only a CURRENT native DB may open without the
     // init lock: sqlx's SQLite migrator has no cross-process lock of its own, so pending upgrades must
-    // be serialized exactly like first-time initialization.
-    Ok(Some(known.len() < ours.len()))
+    // be serialized exactly like first-time initialization. Newer = ours, but migrated by a newer
+    // zynk: this build must not open it (the migrator would reject the unknown versions).
+    if !newer.is_empty() {
+        newer.sort_unstable();
+        return Ok(Some(MigrationState::Newer(newer)));
+    }
+    Ok(Some(if known.len() < ours.len() {
+        MigrationState::Pending
+    } else {
+        MigrationState::Current
+    }))
 }
 
 /// The canonical sqlx SQLite migration ledger (sqlx-sqlite 0.8.6 `migrate.rs`): `(name, declared type,
@@ -526,14 +794,79 @@ fn ledger_ddl_is_canonical(sql: &str) -> bool {
 struct SchemaObject {
     kind: String,
     name: Vec<u8>,
+    tbl_name: Vec<u8>,
+    /// The recorded DDL as bytes: a non-UTF-8 object NAME makes its DDL non-UTF-8 too, and such an
+    /// object must still count (fail closed), never error out of the decision.
+    sql: Option<Vec<u8>>,
 }
 
 impl SchemaObject {
     fn display(&self) -> String {
-        match std::str::from_utf8(&self.name) {
-            Ok(name) => format!("{}:{name}", self.kind),
-            Err(_) => format!("{}:<non-utf8 0x{}>", self.kind, hex(&self.name)),
+        format!("{}:{}", self.kind, printable_name(&self.name))
+    }
+
+    /// An entry SQLite itself maintains, recognized by EXACT kind/name/shape — never by its
+    /// `sqlite_` prefix alone, which a raw catalog edit can forge onto a readable user table
+    /// (Gate-3 round 2): the implicit UNIQUE/PRIMARY KEY autoindex of a table that is present, and
+    /// the AUTOINCREMENT / ANALYZE bookkeeping tables with their fixed DDL.
+    fn is_sqlite_owned(&self, tables: &[&[u8]]) -> bool {
+        match self.kind.as_str() {
+            "index" => {
+                self.sql.is_none()
+                    && tables.contains(&self.tbl_name.as_slice())
+                    && autoindex_name_matches(&self.name, &self.tbl_name)
+            }
+            "table" => {
+                self.tbl_name == self.name
+                    && SQLITE_OWNED_TABLES.iter().any(|(name, ddl)| {
+                        self.name == name.as_bytes() && self.sql.as_deref() == Some(ddl.as_bytes())
+                    })
+            }
+            _ => false,
         }
+    }
+}
+
+/// SQLite's own bookkeeping tables and the exact DDL it records for them (`build.c`, `analyze.c`).
+const SQLITE_OWNED_TABLES: &[(&str, &str)] = &[
+    ("sqlite_sequence", "CREATE TABLE sqlite_sequence(name,seq)"),
+    ("sqlite_stat1", "CREATE TABLE sqlite_stat1(tbl,idx,stat)"),
+    (
+        "sqlite_stat4",
+        "CREATE TABLE sqlite_stat4(tbl,idx,neq,nlt,ndlt,sample)",
+    ),
+];
+
+/// `sqlite_autoindex_<table>_<N>` for exactly `table`, with a nonempty decimal `N`.
+fn autoindex_name_matches(name: &[u8], table: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"sqlite_autoindex_";
+    let Some(rest) = name.strip_prefix(PREFIX) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix(table) else {
+        return false;
+    };
+    let Some(digits) = rest.strip_prefix(b"_") else {
+        return false;
+    };
+    !digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
+}
+
+/// A schema name for terminals and logs: valid UTF-8 with every control character (LF, ESC, C1)
+/// escaped so a hostile name cannot inject terminal or log control sequences; other bytes as hex.
+fn printable_name(name: &[u8]) -> String {
+    match std::str::from_utf8(name) {
+        Ok(name) => name
+            .chars()
+            .map(|c| {
+                if c.is_control() {
+                    c.escape_default().to_string()
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect(),
+        Err(_) => format!("<non-utf8 0x{}>", hex(name)),
     }
 }
 
@@ -541,12 +874,13 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Every schema object of any type except SQLite's own `sqlite_*` internals, losslessly: a decode
-/// failure is an error, never a silently dropped row.
+/// Every schema object of any type, losslessly (a decode failure is an error, never a silently
+/// dropped row), minus the entries SQLite itself maintains — recognized by exact shape, see
+/// `SchemaObject::is_sqlite_owned`.
 async fn schema_objects(conn: &mut SqliteConnection) -> Result<Vec<SchemaObject>, DbError> {
     let rows = sqlx::query(
-        "SELECT type, CAST(name AS BLOB) AS name FROM sqlite_master \
-         WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name",
+        "SELECT type, CAST(name AS BLOB) AS name, CAST(tbl_name AS BLOB) AS tbl_name, \
+         CAST(sql AS BLOB) AS sql FROM sqlite_master ORDER BY type, name",
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -555,9 +889,25 @@ async fn schema_objects(conn: &mut SqliteConnection) -> Result<Vec<SchemaObject>
         objects.push(SchemaObject {
             kind: row.try_get::<String, _>("type")?,
             name: row.try_get::<Vec<u8>, _>("name")?,
+            tbl_name: row.try_get::<Vec<u8>, _>("tbl_name")?,
+            sql: row.try_get::<Option<Vec<u8>>, _>("sql")?,
         });
     }
-    Ok(objects)
+    let tables: Vec<&[u8]> = objects
+        .iter()
+        .filter(|object| object.kind == "table")
+        .map(|object| object.name.as_slice())
+        .collect();
+    let owned: Vec<bool> = objects
+        .iter()
+        .map(|object| object.is_sqlite_owned(&tables))
+        .collect();
+    Ok(objects
+        .into_iter()
+        .zip(owned)
+        .filter(|(_, owned)| !owned)
+        .map(|(object, _)| object)
+        .collect())
 }
 
 /// `(version, checksum, success)` of every migration the ledger records; `success` is read as the
@@ -585,13 +935,24 @@ pub async fn classify_db_at(path: &Path) -> Result<DbClassification, DbError> {
     Ok(inspect_db_at(path).await?.0)
 }
 
+/// `classify_db_at` plus the migration state (`db status` must never call a database this build
+/// cannot open "ready").
+pub async fn classify_db_at_with_state(
+    path: &Path,
+) -> Result<(DbClassification, MigrationState), DbError> {
+    inspect_db_at(path).await
+}
+
 /// `classify_db_at` plus whether the built-in migrator still has work to do on it (always `true`
 /// for Absent/Empty; meaningful for Native). Read-only like `classify_db_at` (ADR 0011: existing data
 /// bytes are never modified).
-async fn inspect_db_at(path: &Path) -> Result<(DbClassification, bool), DbError> {
+async fn inspect_db_at(path: &Path) -> Result<(DbClassification, MigrationState), DbError> {
+    refuse_orphan_sidecars(path)?;
     match std::fs::metadata(path) {
-        Err(_) => return Ok((DbClassification::Absent, true)),
-        Ok(meta) if meta.len() == 0 => return Ok((DbClassification::Absent, true)),
+        Err(_) => return Ok((DbClassification::Absent, MigrationState::Pending)),
+        Ok(meta) if meta.len() == 0 => {
+            return Ok((DbClassification::Absent, MigrationState::Pending))
+        }
         Ok(_) => {}
     }
     let options = SqliteConnectOptions::new()
@@ -678,6 +1039,7 @@ pub async fn recover_orphan_messages(conn: &mut SqliteConnection) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqliteJournalMode;
 
     #[test]
     fn db_error_display_includes_code() {
@@ -1197,6 +1559,7 @@ mod tests {
                     .create_if_missing(true),
             )
             .await?;
+            conn.execute("PRAGMA journal_mode = WAL").await?;
             conn.execute(first.sql.as_ref()).await?;
             sqlx::query(
                 "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
@@ -1454,7 +1817,10 @@ mod tests {
     /// test runs with a hook that triggers that commit between its schema read and its ledger read.
     fn run_interleaved_inspection(
         tag: &str,
-        inspect: impl FnOnce(&mut SqliteConnection, &mut dyn FnMut()) -> (DbClassification, bool),
+        inspect: impl FnOnce(
+            &mut SqliteConnection,
+            &mut dyn FnMut(),
+        ) -> (DbClassification, MigrationState),
     ) -> DbClassification {
         let path = tmp_db(tag);
         block_on(async {
@@ -1670,6 +2036,479 @@ mod tests {
         assert_eq!(
             block_on(classify_db_at(&path)).unwrap(),
             DbClassification::Native
+        );
+    }
+
+    // ---- Gate-3 round 2 (arbiter/sentinel) regressions ----
+
+    fn sidecar(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        path.with_file_name(format!(
+            "{}{suffix}",
+            path.file_name().unwrap().to_str().unwrap()
+        ))
+    }
+
+    /// Main-file bytes plus the `-wal` bytes when a `-wal` exists: the ADR 0011 data-byte boundary.
+    fn data_bytes(path: &std::path::Path) -> (Vec<u8>, Option<Vec<u8>>) {
+        (
+            std::fs::read(path).unwrap(),
+            std::fs::read(sidecar(path, "-wal")).ok(),
+        )
+    }
+
+    /// A foreign WAL-mode database at `path` whose committed rows are still in a nonempty `-wal`
+    /// (no `-shm`): the shape of a WAL database copied or restored without a checkpoint.
+    fn plant_foreign_wal_db(path: &std::path::Path, ddl: &str) {
+        let src = tmp_db("wal-src");
+        let holder = block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&src)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await?;
+            conn.execute(ddl).await?;
+            Ok::<SqliteConnection, DbError>(conn)
+        })
+        .unwrap();
+        std::fs::copy(&src, path).unwrap();
+        std::fs::copy(sidecar(&src, "-wal"), sidecar(path, "-wal")).unwrap();
+        drop(holder);
+        assert!(std::fs::metadata(sidecar(path, "-wal")).unwrap().len() > 0);
+    }
+
+    /// Atomic replacement of `to` by `from` (plus `-wal` when `from` has one): what `mv` does.
+    fn rename_over(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::rename(from, to).unwrap();
+        if sidecar(from, "-wal").exists() {
+            std::fs::rename(sidecar(from, "-wal"), sidecar(to, "-wal")).unwrap();
+        }
+    }
+
+    fn hold_init_lock(path: &std::path::Path) -> std::fs::File {
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(init_lock_path(path))
+            .unwrap();
+        holder.lock().unwrap();
+        holder
+    }
+
+    #[test]
+    fn refusing_a_foreign_wal_copy_leaves_its_data_bytes_untouched() {
+        // Opener-level twin of the read-only sidecar tests: the opener inspects on a READ-WRITE
+        // connection (identity pinning), and closing a read-write connection normally checkpoints the
+        // WAL into the main file — for a refused foreign database that would rewrite its data bytes.
+        let path = tmp_db("g3r2-foreign-wal-copy");
+        plant_foreign_wal_db(
+            &path,
+            "CREATE TABLE projects (id TEXT PRIMARY KEY); INSERT INTO projects VALUES ('p')",
+        );
+        let before = data_bytes(&path);
+        let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+        assert_eq!(err.code, "db_foreign_conflict", "{}", err.message);
+        assert_eq!(data_bytes(&path), before, "foreign main/-wal bytes changed");
+    }
+
+    #[test]
+    fn held_init_lock_creates_no_database_file() {
+        // Sentinel: first-time initialization is serialized by the init lock, so nothing may be
+        // created before the lock is held — a foreign holder plus an absent DB times out and the
+        // database file still does not exist.
+        let path = tmp_db("g3r2-lock-no-create");
+        let holder = hold_init_lock(&path);
+        let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+        assert_eq!(err.code, "db_init_lock_timeout", "{}", err.message);
+        assert!(
+            !path.exists(),
+            "a database file was created before the init lock was held"
+        );
+        holder.unlock().unwrap();
+    }
+
+    /// Arbiter: classification authority for one target must not be reusable for a swapped target.
+    /// `zynk.db` is a symlink to a fully-current native `safe.db`; exactly after the verdict the link
+    /// is flipped to a foreign WAL database. The opener must keep working on the file it inspected
+    /// and never touch the foreign main file or its pre-existing `-wal`.
+    #[cfg(unix)]
+    #[test]
+    fn opener_pins_the_inspected_file_across_a_symlink_flip() {
+        let safe = tmp_db("g3r2-toctou-safe");
+        let foreign = tmp_db("g3r2-toctou-foreign");
+        let link = tmp_db("g3r2-toctou-link");
+        let _ = std::fs::remove_file(&link);
+        block_on(open_migrated_at_without_recovery(&safe)).unwrap();
+        plant_foreign_wal_db(
+            &foreign,
+            "CREATE TABLE secrets (v TEXT); INSERT INTO secrets VALUES ('FOREIGN-SYMLINK-SECRET')",
+        );
+        std::os::unix::fs::symlink(&safe, &link).unwrap();
+        let foreign_before = data_bytes(&foreign);
+        let (flip_foreign, flip_link) = (foreign.clone(), link.clone());
+        let mut flip = move || {
+            // Atomic replacement: build the new link beside the old one, then rename over it.
+            let staged = flip_link.with_extension("db.flip");
+            let _ = std::fs::remove_file(&staged);
+            std::os::unix::fs::symlink(&flip_foreign, &staged).unwrap();
+            std::fs::rename(&staged, &flip_link).unwrap();
+        };
+        let result = block_on(open_migrated_at_with_hook(&link, &mut flip));
+        assert_eq!(
+            data_bytes(&foreign),
+            foreign_before,
+            "the foreign database was reached through the flipped link"
+        );
+        result.expect("the open must complete on the file that was inspected (safe.db)");
+        match block_on(classify_db_at(&foreign)).unwrap() {
+            DbClassification::Foreign { tables } => assert_eq!(tables, vec!["secrets"]),
+            other => panic!("foreign.db must still be foreign, got {other:?}"),
+        }
+    }
+
+    /// Same rule for a REGULAR file: `zynk.db` is a partially migrated native DB (real pending
+    /// writes). Exactly after the verdict a foreign WAL database is renamed over `zynk.db` and its
+    /// `-wal` over `zynk.db-wal`. The writes must land in the inspected file — whose data and WAL
+    /// are bound to the connection — never in the foreign pair now carrying those names.
+    #[cfg(unix)]
+    #[test]
+    fn opener_pins_the_inspected_file_across_an_atomic_rename() {
+        let db = plant_partial_native_db("g3r2-rename-db");
+        let foreign = tmp_db("g3r2-rename-foreign");
+        plant_foreign_wal_db(
+            &foreign,
+            "CREATE TABLE secrets (v TEXT); INSERT INTO secrets VALUES ('FOREIGN-RENAME-SECRET')",
+        );
+        let foreign_before = data_bytes(&foreign);
+        let (from, to) = (foreign.clone(), db.clone());
+        let mut swap = move || rename_over(&from, &to);
+        let mut conn = block_on(open_migrated_at_with_hook(&db, &mut swap))
+            .expect("the open must complete on the inspected file");
+        assert_eq!(
+            data_bytes(&db),
+            foreign_before,
+            "the foreign pair renamed into place was modified"
+        );
+        assert_eq!(
+            block_on(classify_open_conn(&mut conn)).unwrap(),
+            (DbClassification::Native, MigrationState::Current),
+            "the pinned connection must see its own completed migration"
+        );
+        match block_on(classify_db_at(&db)).unwrap() {
+            DbClassification::Foreign { tables } => assert_eq!(tables, vec!["secrets"]),
+            other => panic!("the file at the name must be the foreign one, got {other:?}"),
+        }
+    }
+
+    /// First-time initialization has no WAL bound at verdict time (SQLite creates it only when the
+    /// journal mode is switched): if the name is re-pointed at another file in between, the opener
+    /// must fail closed rather than create sidecars beside a file it never inspected.
+    #[cfg(unix)]
+    #[test]
+    fn fresh_init_fails_closed_when_a_foreign_db_is_renamed_into_place_after_inspection() {
+        let db = tmp_db("g3r2-fresh-rename-db");
+        let foreign = tmp_db("g3r2-fresh-rename-foreign");
+        plant_foreign_db(
+            &foreign,
+            "CREATE TABLE secrets (v TEXT); INSERT INTO secrets VALUES ('FOREIGN-FRESH-SECRET')",
+        );
+        let foreign_before = data_bytes(&foreign);
+        let (from, to) = (foreign.clone(), db.clone());
+        let mut swap = move || rename_over(&from, &to);
+        let err = block_on(open_migrated_at_with_hook(&db, &mut swap)).unwrap_err();
+        assert_eq!(err.code, "db_target_changed", "{}", err.message);
+        assert_eq!(
+            data_bytes(&db),
+            foreign_before,
+            "the foreign file was modified"
+        );
+        match block_on(classify_db_at(&db)).unwrap() {
+            DbClassification::Foreign { tables } => assert_eq!(tables, vec!["secrets"]),
+            other => panic!("expected the foreign DB at the name, got {other:?}"),
+        }
+    }
+
+    /// A native DB externally converted to rollback journaling has no WAL bound at verdict time
+    /// either (the WAL is opened by name when `apply_pragmas` switches it back): a foreign WAL pair
+    /// renamed into place after the verdict must be refused with its bytes untouched.
+    #[cfg(unix)]
+    #[test]
+    fn rollback_mode_native_open_fails_closed_when_a_foreign_wal_db_is_renamed_into_place() {
+        let db = plant_partial_native_db("g3r2-rollback-rename-db");
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&db)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute("PRAGMA journal_mode = DELETE").await?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        let foreign = tmp_db("g3r2-rollback-rename-foreign");
+        plant_foreign_wal_db(
+            &foreign,
+            "CREATE TABLE secrets (v TEXT); INSERT INTO secrets VALUES ('FOREIGN-ROLLBACK-SECRET')",
+        );
+        let foreign_before = data_bytes(&foreign);
+        let (from, to) = (foreign.clone(), db.clone());
+        let mut swap = move || rename_over(&from, &to);
+        let err = block_on(open_migrated_at_with_hook(&db, &mut swap)).unwrap_err();
+        assert_eq!(err.code, "db_target_changed", "{}", err.message);
+        assert_eq!(
+            data_bytes(&db),
+            foreign_before,
+            "the foreign pair renamed into place was modified"
+        );
+    }
+
+    #[test]
+    fn closing_a_successful_open_never_deletes_the_wal_by_name() {
+        // SQLite's close path checkpoints and then removes `<db>-wal` BY NAME; a different file moved
+        // to that name in the meantime would be deleted. The pinned connection keeps its WAL
+        // persistent (truncated through its own descriptor), so the name is never touched.
+        let path = tmp_db("g3r2-persist-wal");
+        let conn = block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        let decoy = sidecar(&path, "-wal");
+        let staged = path.with_extension("decoy");
+        std::fs::write(&staged, b"DECOY-WAL-BYTES").unwrap();
+        std::fs::rename(&staged, &decoy).unwrap();
+        block_on(async { conn.close().await.map_err(DbError::from) }).unwrap();
+        assert_eq!(
+            std::fs::read(&decoy).unwrap(),
+            b"DECOY-WAL-BYTES",
+            "closing deleted or rewrote the file at the -wal name"
+        );
+    }
+
+    #[test]
+    fn raw_renamed_sqlite_prefix_table_is_foreign() {
+        // Arbiter: `sqlite_*` is a reserved prefix no SQL statement can create, but a raw catalog edit
+        // can forge it; such a table must count as foreign schema, never vanish from the decision.
+        let path = plant_real_sqlx_ledger("g3r2-prefix");
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute(
+                "CREATE TABLE xsqlite_foo (secret TEXT); \
+                 INSERT INTO xsqlite_foo VALUES ('prefix-sentinel')",
+            )
+            .await?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        // Length-preserving raw rename of every catalog occurrence (name, tbl_name, sql).
+        let original = std::fs::read(&path).unwrap();
+        let mut forged = Vec::with_capacity(original.len());
+        let mut hits = 0;
+        let mut i = 0;
+        while i < original.len() {
+            if original[i..].starts_with(b"xsqlite_foo") {
+                forged.extend_from_slice(b"sqlite_foox");
+                i += b"xsqlite_foo".len();
+                hits += 1;
+            } else {
+                forged.push(original[i]);
+                i += 1;
+            }
+        }
+        assert!(
+            hits >= 3,
+            "expected name, tbl_name and sql occurrences, got {hits}"
+        );
+        std::fs::write(&path, &forged).unwrap();
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { tables } => {
+                assert!(
+                    tables.iter().any(|t| t.contains("sqlite_foox")),
+                    "the forged table must be named in the diagnostic: {tables:?}"
+                );
+            }
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+        let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+        assert_eq!(err.code, "db_foreign_conflict", "{}", err.message);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            forged,
+            "forged DB bytes changed"
+        );
+    }
+
+    #[test]
+    fn sqlite_owned_catalog_tables_do_not_hide_or_taint_a_database() {
+        // Positive controls for the exact-shape catalog filter: ANALYZE's `sqlite_stat*` tables on a
+        // native DB keep it native and current; an AUTOINCREMENT-created `sqlite_sequence` beside a
+        // canonical empty ledger keeps it Empty (initializes).
+        let native = tmp_db("g3r2-analyzed-native");
+        block_on(open_migrated_at_without_recovery(&native)).unwrap();
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&native)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute("ANALYZE").await?;
+            let stats: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM sqlite_master WHERE name GLOB 'sqlite_stat*'",
+            )
+            .fetch_one(&mut conn)
+            .await?;
+            assert!(stats >= 1, "ANALYZE must leave a sqlite_stat table behind");
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        assert_eq!(
+            block_on(classify_db_at_with_state(&native)).unwrap(),
+            (DbClassification::Native, MigrationState::Current)
+        );
+        block_on(open_migrated_at_without_recovery(&native)).unwrap();
+
+        let empty = plant_real_sqlx_ledger("g3r2-sequence-empty");
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&empty)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT); \
+                 INSERT INTO t DEFAULT VALUES; DROP TABLE t",
+            )
+            .await?;
+            let sequence: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'sqlite_sequence'",
+            )
+            .fetch_one(&mut conn)
+            .await?;
+            assert_eq!(sequence, 1, "sqlite_sequence must persist after DROP TABLE");
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        assert_eq!(
+            block_on(classify_db_at(&empty)).unwrap(),
+            DbClassification::Empty
+        );
+        block_on(open_migrated_at_without_recovery(&empty)).unwrap();
+        assert_eq!(
+            block_on(classify_db_at(&empty)).unwrap(),
+            DbClassification::Native
+        );
+    }
+
+    #[test]
+    fn absent_db_with_a_nonempty_sidecar_fails_closed() {
+        // Arbiter: a nonempty `-wal` (or `-journal`) beside an absent/zero-byte main file is existing
+        // data (ADR 0011) — SQLite discards a stale log on the first read of a zero-page database, so
+        // the guard must run before any connection is opened.
+        for suffix in ["-wal", "-journal"] {
+            let path = tmp_db(&format!("g3r2-orphan{suffix}"));
+            let src = tmp_db("g3r2-orphan-src");
+            plant_foreign_wal_db(
+                &src,
+                "CREATE TABLE foreign_records (v TEXT); \
+                 INSERT INTO foreign_records VALUES ('sentinel-wal-only')",
+            );
+            std::fs::copy(sidecar(&src, "-wal"), sidecar(&path, suffix)).unwrap();
+            let before = std::fs::read(sidecar(&path, suffix)).unwrap();
+            let err = block_on(classify_db_at(&path)).unwrap_err();
+            assert_eq!(err.code, "db_orphan_sidecar", "{suffix}: {}", err.message);
+            let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+            assert_eq!(err.code, "db_orphan_sidecar", "{suffix}: {}", err.message);
+            assert!(!path.exists(), "{suffix}: the main file was created");
+            assert_eq!(
+                std::fs::read(sidecar(&path, suffix)).unwrap(),
+                before,
+                "{suffix}: sidecar bytes changed"
+            );
+            // A zero-byte main file counts as absent too.
+            std::fs::write(&path, b"").unwrap();
+            let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+            assert_eq!(err.code, "db_orphan_sidecar", "{suffix}: {}", err.message);
+            assert_eq!(std::fs::read(sidecar(&path, suffix)).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn partial_lineage_with_an_unknown_newer_row_is_foreign() {
+        // Arbiter: `{1 correct, 10003 unknown}` is not serially producible by any zynk — fail closed
+        // before any writable pragma (rollback journaling makes a header write visible in the SHA).
+        let path = plant_partial_native_db("g3r2-partial-newer");
+        set_ledger_rows(
+            &path,
+            "PRAGMA journal_mode = DELETE; \
+             INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+             VALUES (10003, 'future', 1, x'00', 0)",
+        );
+        let before = std::fs::read(&path).unwrap();
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+        let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+        assert_eq!(err.code, "db_foreign_conflict", "{}", err.message);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "main DB bytes changed"
+        );
+    }
+
+    #[test]
+    fn newer_lineage_is_native_but_never_ready() {
+        // Sentinel/arbiter: every built-in migration recorded plus a successful unknown newer row is
+        // ours (a newer zynk migrated it) — but this build cannot open it, so it is reported as NEWER,
+        // never "ready", and the opener refuses before any writable pragma.
+        let path = tmp_db("g3r2-newer-lineage");
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        set_ledger_rows(
+            &path,
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+             VALUES (9999, 'future', 1, x'00', 0)",
+        );
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            block_on(classify_db_at_with_state(&path)).unwrap(),
+            (DbClassification::Native, MigrationState::Newer(vec![9999]))
+        );
+        let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+        assert_eq!(err.code, "db_newer_lineage", "{}", err.message);
+        assert!(err.message.contains("9999"), "{}", err.message);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "main DB bytes changed"
+        );
+    }
+
+    #[test]
+    fn control_characters_in_object_names_are_escaped_in_diagnostics() {
+        // Sentinel: a foreign table name carrying LF/ESC must not reach a terminal or log raw.
+        let path = tmp_db("g3r2-control-name");
+        plant_foreign_db(&path, "CREATE TABLE \"evil\n\u{1b}[31mred\u{1b}[0m\" (x)");
+        let tables = match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { tables } => tables,
+            other => panic!("expected Foreign, got {other:?}"),
+        };
+        assert_eq!(tables, vec!["evil\\n\\u{1b}[31mred\\u{1b}[0m"]);
+        let message = foreign_db_error(&path, &tables).message;
+        assert!(
+            !message.chars().any(char::is_control),
+            "control characters leaked: {message:?}"
         );
     }
 

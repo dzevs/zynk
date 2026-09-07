@@ -1161,6 +1161,172 @@ fn daemon_style_server_writes_the_fatal_db_cause_to_its_log() {
     cleanup_test_base(&base);
 }
 
+/// Gate-3 round 2 fixtures: real SQLite files planted with sqlx (the same driver the product uses).
+fn sqlite_block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
+/// A rollback-journal SQLite file at `path` with `sql` applied (all bytes in the main file).
+fn plant_sqlite(path: &Path, sql: &str) {
+    use sqlx::{Connection, Executor};
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    sqlite_block_on(async {
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        conn.execute(sql).await.unwrap();
+        conn.close().await.unwrap();
+    });
+}
+
+/// The `-wal` of a WAL-mode database whose committed rows were never checkpointed: written to
+/// `wal_path` (only), as a copy/restore of a live WAL database leaves it.
+fn plant_orphan_wal(wal_path: &Path, sql: &str) {
+    use sqlx::{Connection, Executor};
+    let src = wal_path.with_file_name("wal-source.db");
+    fs::create_dir_all(wal_path.parent().unwrap()).unwrap();
+    let holder = sqlite_block_on(async {
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&src)
+                .create_if_missing(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap();
+        conn.execute(sql).await.unwrap();
+        conn
+    });
+    let src_wal = src.with_file_name("wal-source.db-wal");
+    assert!(fs::metadata(&src_wal).unwrap().len() > 0);
+    fs::copy(&src_wal, wal_path).unwrap();
+    drop(holder);
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&src_wal);
+    let _ = fs::remove_file(src.with_file_name("wal-source.db-shm"));
+}
+
+#[test]
+fn cli_fails_closed_on_an_orphan_wal_beside_an_absent_db() {
+    // Gate-3 round 2 (G3-R2-DB-002), at the CLI boundary: a nonempty `zynk.db-wal` with no
+    // `zynk.db` is existing data (ADR 0011). `db status` and `query` must refuse, create no
+    // database, and leave the WAL byte-identical.
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let sqlite_home = config_home.join("sqlite");
+    let wal = sqlite_home.join("zynk.db-wal");
+    plant_orphan_wal(
+        &wal,
+        "CREATE TABLE foreign_records (v TEXT); INSERT INTO foreign_records VALUES ('sentinel-wal-only')",
+    );
+    let before = fs::read(&wal).unwrap();
+
+    let status = run_named_cli(&config_home, &runtime_dir, &["db", "status"]);
+    assert!(
+        !status.status.success(),
+        "db status must fail closed: {status:?}"
+    );
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(stderr.contains("db_orphan_sidecar"), "{stderr}");
+
+    let query = run_named_cli(&config_home, &runtime_dir, &["query", "sentinel", "--json"]);
+    assert!(!query.status.success(), "query must fail closed: {query:?}");
+    let stdout = String::from_utf8_lossy(&query.stdout);
+    assert!(stdout.contains("db_orphan_sidecar"), "{stdout}");
+
+    assert!(
+        !sqlite_home.join("zynk.db").exists(),
+        "zynk.db was created over an orphan WAL"
+    );
+    assert_eq!(
+        fs::read(&wal).unwrap(),
+        before,
+        "the orphan WAL bytes changed"
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn cli_reports_a_newer_lineage_as_not_ready_and_refuses_to_open_it() {
+    // Gate-3 round 2 (G3-R2-DB-005): every built-in migration recorded plus a successful unknown
+    // newer row is a database a NEWER zynk migrated — `db status` must never call it "ready", and
+    // `query` must refuse it with a distinct code, leaving the file byte-identical.
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let db = config_home.join("sqlite").join("zynk.db");
+    let seeded = run_named_cli(&config_home, &runtime_dir, &["query", "warmup", "--json"]);
+    assert!(
+        seeded.status.success(),
+        "first query must initialize the DB: {seeded:?}"
+    );
+    assert!(db.exists());
+    plant_sqlite(
+        &db,
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+         VALUES (9999, 'future', 1, x'00', 0)",
+    );
+    let before = fs::read(&db).unwrap();
+
+    let status = run_named_cli(&config_home, &runtime_dir, &["db", "status"]);
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(status.status.success(), "{status:?}");
+    assert!(
+        stdout.contains("NEWER") && stdout.contains("9999"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("ready"), "{stdout}");
+
+    let query = run_named_cli(&config_home, &runtime_dir, &["query", "warmup", "--json"]);
+    assert!(
+        !query.status.success(),
+        "query must refuse a newer database: {query:?}"
+    );
+    let stdout = String::from_utf8_lossy(&query.stdout);
+    assert!(stdout.contains("db_newer_lineage"), "{stdout}");
+    assert_eq!(
+        fs::read(&db).unwrap(),
+        before,
+        "the newer database bytes changed"
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn cli_escapes_control_characters_in_foreign_schema_names() {
+    // Gate-3 round 2 (G3-R2-DB-006): a foreign table name carrying LF/ESC must reach the terminal
+    // escaped, never raw (terminal/log control injection).
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let db = config_home.join("sqlite").join("zynk.db");
+    plant_sqlite(&db, "CREATE TABLE \"evil\n\u{1b}[31mred\u{1b}[0m\" (x)");
+
+    let status = run_named_cli(&config_home, &runtime_dir, &["db", "status"]);
+    assert!(status.status.success(), "{status:?}");
+    assert!(
+        !status.stdout.contains(&0x1b) && !status.stderr.contains(&0x1b),
+        "raw ESC leaked: {:?}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("FOREIGN"), "{stdout}");
+    assert!(
+        stdout.contains("evil\\n\\u{1b}[31mred\\u{1b}[0m"),
+        "{stdout}"
+    );
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn server_startup_is_fatal_when_the_db_init_lock_is_held_elsewhere() {
     // Gate-3 G3-STARTUP-001: a pathological external holder of the DB init lock must make the

@@ -449,7 +449,8 @@ pub fn run_query(text: &str, filters: QueryFilters) -> QueryResponse {
             "db_unavailable",
             "the zynk database could not be opened or queried",
             serde_json::json!({ "code": err.code, "detail": err.message }),
-            "check ZYNK_SQLITE_HOME / the native zynk-v2 DB path",
+            "run `zynk db status` (the native database is ZYNK_HOME/zynk.db or ~/.zynk/zynk.db; \
+             ZYNK_SQLITE_HOME overrides the directory)",
         ),
     }
 }
@@ -609,6 +610,26 @@ mod tests {
             "it must mention the still-pending embeddings: {:?}",
             resp.next
         );
+    }
+
+    #[test]
+    fn db_unavailable_hint_points_at_the_native_path_not_the_retired_subdir() {
+        // Gate-3 round 2: ADR 0008 retired the `zynk-v2/` subdirectory as a default; the recovery
+        // hint must name the resolved native path and `zynk db status`, never the retired location.
+        let dir = std::env::temp_dir().join(format!("zynk-hint-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("not-a-dir");
+        std::fs::write(&blocker, b"").unwrap();
+        // A regular FILE where the sqlite home directory should be: the open fails (db_io_error).
+        std::env::set_var("ZYNK_SQLITE_HOME", blocker.join("sqlite"));
+        let resp = run_query("anything", QueryFilters::default());
+        std::env::remove_var("ZYNK_SQLITE_HOME");
+        assert!(resp.is_failed());
+        assert_eq!(resp.code.as_deref(), Some("db_unavailable"));
+        assert!(!resp.next.contains("zynk-v2"), "{:?}", resp.next);
+        assert!(resp.next.contains("zynk db status"), "{:?}", resp.next);
+        assert!(resp.next.contains("ZYNK_HOME/zynk.db"), "{:?}", resp.next);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

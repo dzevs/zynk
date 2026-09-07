@@ -21,7 +21,9 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::zynk::db::{block_on, classify_db_at, DbClassification};
+use crate::zynk::db::{
+    block_on, classify_db_at, classify_db_at_with_state, DbClassification, MigrationState,
+};
 use crate::zynk::db_path;
 
 /// Backup-target suffix base. The final name is `<db>.wrapper-backup-<N>` where
@@ -121,7 +123,15 @@ fn classify(path: &Path) -> Result<DbClassification, String> {
         .map_err(|e| format!("zynk: cannot classify {}: {e}", path.display()))
 }
 
-fn describe(class: &DbClassification) -> String {
+fn classify_with_state(path: &Path) -> Result<(DbClassification, MigrationState), String> {
+    block_on(classify_db_at_with_state(path))
+        .map_err(|e| format!("zynk: cannot classify {}: {e}", path.display()))
+}
+
+/// The status line. "ready" is claimed ONLY for a native database this build opens as-is: a
+/// pending upgrade is named, and a database migrated by a NEWER zynk — which this build refuses —
+/// is never called ready (Gate-3 round 2).
+fn describe(class: &DbClassification, state: &MigrationState) -> String {
     match class {
         DbClassification::Absent => {
             "absent (no database yet — zynk will create a native one)".into()
@@ -129,7 +139,20 @@ fn describe(class: &DbClassification) -> String {
         DbClassification::Empty => {
             "empty (no tables — zynk will initialize the native schema)".into()
         }
-        DbClassification::Native => "native (recognized zynk schema — ready)".into(),
+        DbClassification::Native => match state {
+            MigrationState::Current => "native (recognized zynk schema — ready)".into(),
+            MigrationState::Pending => {
+                "native (recognized zynk schema — upgrade pending; zynk migrates it on open)".into()
+            }
+            MigrationState::Newer(versions) => {
+                let listed: Vec<String> = versions.iter().map(i64::to_string).collect();
+                format!(
+                    "native but NEWER (migrated by a newer zynk — migration versions {} are \
+                     unknown to this build; this zynk will NOT open it — upgrade zynk)",
+                    listed.join(", ")
+                )
+            }
+        },
         DbClassification::Foreign { tables } => {
             if tables.is_empty() {
                 "FOREIGN (unrecognized schema — zynk will NOT touch it)".into()
@@ -264,10 +287,10 @@ fn classify_db_leaf_args(rest: &[String]) -> DbLeafArgs {
 }
 
 fn cmd_status(path: &Path, out: &mut dyn Sink, err: &mut dyn Sink) -> i32 {
-    match classify(path) {
-        Ok(class) => {
+    match classify_with_state(path) {
+        Ok((class, state)) => {
             out.line(&format!("zynk db path: {}", path.display()));
-            out.line(&format!("status:       {}", describe(&class)));
+            out.line(&format!("status:       {}", describe(&class, &state)));
             if let DbClassification::Foreign { .. } = class {
                 out.line(
                     "action:       run `zynk db adopt` (or `zynk db backup`) to relocate it aside,",
@@ -430,6 +453,40 @@ mod tests {
             before,
             "status must not mutate"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn status_never_calls_a_newer_lineage_ready() {
+        // Gate-3 round 2: a database migrated by a NEWER zynk is ours, but this build refuses to
+        // open it — `db status` must say so instead of "ready".
+        let dir = tmp_home("status-newer");
+        let db = dir.join("zynk.db");
+        block_on(crate::zynk::db::open_migrated_at_without_recovery(&db)).unwrap();
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&db)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+                 VALUES (9999, 'future', 1, x'00', 0)",
+            )
+            .await?;
+            conn.close().await?;
+            Ok::<(), crate::zynk::db::DbError>(())
+        })
+        .unwrap();
+
+        let mut out = Capture(vec![]);
+        let mut err = Capture(vec![]);
+        let code = run_db_command_at(&["status".to_string()], &db, &mut out, &mut err);
+        assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::SUCCESS));
+        let text = joined(&out);
+        assert!(text.contains("NEWER") && text.contains("9999"), "{text}");
+        assert!(!text.contains("ready"), "{text}");
         std::fs::remove_dir_all(dir).ok();
     }
 

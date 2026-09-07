@@ -3671,29 +3671,7 @@ pub fn run_server() -> io::Result<()> {
 
     let loaded_config = config::Config::load();
     let runtime_session_id = crate::zynk::runtime::ensure_runtime_id_file()?;
-    if let Err(err) = crate::zynk::db::block_on(crate::zynk::db::open_migrated()) {
-        // Fail-closed startup (ADR 0008): a FOREIGN database at the resolved native path is a
-        // safety-critical conflict — zynk must NEVER come up on foreign data (the foreign bytes are
-        // left byte-identical: the open path classifies read-only and never modifies existing data
-        // bytes, ADR 0011).
-        // Every other startup DB failure (init-lock timeout, migration failure, I/O) is fatal too:
-        // a server that binds its API socket without working persistence would run degraded for the
-        // whole session, so abort with the branded error and a non-zero exit instead.
-        // The daemon launcher discards stderr, so the cause must also reach the durable server log
-        // (the file writer is synchronous; this line is on disk before `exit`).
-        error!(
-            code = %err.code,
-            message = %err.message,
-            "server startup aborted: the database could not be opened or migrated"
-        );
-        eprintln!("{}", err.message);
-        if err.code != "db_foreign_conflict" {
-            eprintln!(
-                "zynk: server startup aborted ({}): the database could not be opened or migrated; \
-                 run `zynk db status` to inspect it, then retry",
-                err.code
-            );
-        }
+    if preflight_native_db().is_err() {
         std::process::exit(1);
     }
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3734,11 +3712,7 @@ pub fn run_server() -> io::Result<()> {
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
 
-        // zynk fork (M3a): spawn the App-owned receipt DB worker before the server
-        // takes ownership of `app`. The worker owns its own current-thread Tokio
-        // runtime + native DB connection and never touches live Zynk state.
-        app.zynk_receipt_worker = Some(crate::zynk::receipt_worker::spawn());
-        app.zynk_embedding_worker = Some(crate::zynk::embedding_worker::spawn());
+        install_db_workers(&mut app);
 
         // Create the headless server.
         let mut server = match HeadlessServer::new(
@@ -3802,11 +3776,56 @@ fn take_startup_cwd() -> Option<PathBuf> {
     (!cwd.is_empty()).then(|| PathBuf::from(cwd))
 }
 
+/// Fail-closed startup DB pre-flight (ADR 0008/0011), shared by the primary server and the
+/// handoff-import replacement (Gate-3 round 2: the replacement used to bind public service without
+/// it). A FOREIGN database at the resolved native path is a safety-critical conflict — zynk must
+/// NEVER come up on foreign data (the foreign bytes are left byte-identical: the open path inspects
+/// on one pinned connection and never modifies existing data bytes). Every other startup DB failure
+/// (init-lock timeout, orphan sidecar, newer lineage, migration failure, I/O) is fatal too: a server
+/// that binds its API socket without working persistence would run degraded for the whole session.
+/// The daemon launcher discards stderr, so the cause also reaches the durable server log (the file
+/// writer is synchronous; the line is on disk before the caller exits).
+fn preflight_native_db() -> Result<(), crate::zynk::db::DbError> {
+    let Err(err) = crate::zynk::db::block_on(crate::zynk::db::open_migrated()) else {
+        return Ok(());
+    };
+    error!(
+        code = %err.code,
+        message = %err.message,
+        "server startup aborted: the database could not be opened or migrated"
+    );
+    eprintln!("{}", err.message);
+    if err.code != "db_foreign_conflict" {
+        eprintln!(
+            "zynk: server startup aborted ({}): the database could not be opened or migrated; \
+             run `zynk db status` to inspect it, then retry",
+            err.code
+        );
+    }
+    Err(err)
+}
+
+/// zynk fork (M3a): the App-owned DB workers, spawned before the server takes ownership of `app`.
+/// Each owns its own current-thread Tokio runtime + native DB connection and never touches live
+/// state. Installed on the primary path AND on the handoff-import path (Gate-3 round 2: a replacement
+/// server without them answered every receipt with `receipt_worker_unavailable`).
+fn install_db_workers(app: &mut app::App) {
+    app.zynk_receipt_worker = Some(crate::zynk::receipt_worker::spawn());
+    app.zynk_embedding_worker = Some(crate::zynk::embedding_worker::spawn());
+    info!("zynk db workers installed");
+}
+
 #[cfg(unix)]
 fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
     let loaded_config = config::Config::load();
     let mut received = crate::server::handoff::receive(socket_path, token)?;
     crate::server::handoff::log_import_result(received.manifest.panes.len());
+    // Same fail-closed DB readiness as the primary path, before any public service: on failure the
+    // replacement exits here and the old server rolls back and keeps serving (the handoff stream
+    // closes before "restored").
+    if let Err(err) = preflight_native_db() {
+        return Err(io::Error::other(err.message));
+    }
 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
@@ -3839,6 +3858,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         )?;
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
+        install_db_workers(&mut app);
         crate::server::handoff::report_restored(&mut received.stream)?;
         if std::env::var("ZYNK_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(

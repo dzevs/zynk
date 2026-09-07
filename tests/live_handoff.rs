@@ -1284,6 +1284,209 @@ fn live_handoff_preserves_http_servers_across_multiple_sessions() {
     cleanup_test_base(&base);
 }
 
+/// Gate-3 round 2 fixture: a WAL-mode foreign SQLite database (main file + nonempty `-wal`,
+/// no `-shm`) planted with sqlx, the driver the product uses.
+fn plant_foreign_wal_db(path: &Path, sql: &str) {
+    use sqlx::{Connection, Executor};
+    let src = path.with_file_name("foreign-source.db");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let holder = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut conn = sqlx::SqliteConnection::connect_with(
+                &sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&src)
+                    .create_if_missing(true)
+                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+            )
+            .await
+            .unwrap();
+            conn.execute(sql).await.unwrap();
+            conn
+        });
+    fs::copy(&src, path).unwrap();
+    fs::copy(
+        src.with_file_name("foreign-source.db-wal"),
+        wal_sidecar(path),
+    )
+    .unwrap();
+    drop(holder);
+}
+
+fn wal_sidecar(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap().to_os_string();
+    name.push("-wal");
+    path.with_file_name(name)
+}
+
+fn count_in_file(path: &Path, needle: &str) -> usize {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .matches(needle)
+        .count()
+}
+
+#[test]
+fn live_handoff_fails_closed_on_a_foreign_db_and_rolls_back_old_server() {
+    // Gate-3 round 2 (G3-R2-SRV-001): the replacement runs the same fail-closed DB pre-flight as a
+    // primary start. A foreign WAL database renamed over the live `zynk.db` (the old server keeps
+    // its own open inode) makes the replacement exit before any public service; the old server
+    // rolls back and keeps serving, and the foreign main/-wal bytes stay identical.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let marker = base.join("child.pid");
+    let received_marker = base.join("received");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let command = format!(
+        "sh -c 'echo READY $$ > {}; while read line; do echo got:$line; echo got:$line >> {}; done'",
+        marker.display(),
+        received_marker.display()
+    );
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:run",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": command, "keys": ["Enter"]}
+        }),
+    ));
+    support::wait_for_file(&marker, Duration::from_secs(5));
+    let pid_text = fs::read_to_string(&marker).unwrap();
+    let child_pid: u32 = pid_text.split_whitespace().last().unwrap().parse().unwrap();
+
+    // The DB home is swapped as a whole: the old server keeps its open inodes (and its own
+    // `-wal`/`-shm`) under the moved-aside directory, and the replacement resolves the same
+    // `ZYNK_SQLITE_HOME` to a directory that now holds only the foreign pair.
+    let sqlite_home = config_home.join("sqlite");
+    let live_db = sqlite_home.join("zynk.db");
+    assert!(
+        live_db.exists(),
+        "the running server must have initialized its DB"
+    );
+    fs::rename(&sqlite_home, base.join("sqlite.old")).unwrap();
+    plant_foreign_wal_db(
+        &live_db,
+        "CREATE TABLE secrets (v TEXT); INSERT INTO secrets VALUES ('FOREIGN-HANDOFF-SECRET')",
+    );
+    let foreign_before = (
+        fs::read(&live_db).unwrap(),
+        fs::read(wal_sidecar(&live_db)).unwrap(),
+    );
+    let server_log = config_home.join("zynk-dev").join("zynk-server.log");
+    let aborted_before = count_in_file(&server_log, "server startup aborted");
+
+    let failed = request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff-foreign","method":"server.live_handoff","params":{}}),
+    );
+    assert!(
+        failed.get("error").is_some(),
+        "handoff onto a foreign DB must fail: {failed}"
+    );
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    assert_eq!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:send-after-foreign-handoff",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": "after-foreign-handoff", "keys": ["Enter"]}
+        }),
+    ));
+    wait_for_file_contains(
+        &received_marker,
+        "got:after-foreign-handoff",
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        (
+            fs::read(&live_db).unwrap(),
+            fs::read(wal_sidecar(&live_db)).unwrap()
+        ),
+        foreign_before,
+        "the foreign main/-wal bytes changed"
+    );
+    let log = wait_for_file_contains(&server_log, "db_foreign_conflict", Duration::from_secs(5));
+    assert!(
+        count_in_file(&server_log, "server startup aborted") > aborted_before,
+        "the replacement must log the fail-closed cause durably:\n{log}"
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    drop(spawned);
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_installs_the_db_workers_in_the_replacement() {
+    // Gate-3 round 2 (G3-R2-SRV-001): the replacement must own the receipt/embedding DB workers
+    // like a primary start — without them every receipt failed with `receipt_worker_unavailable`.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let client_socket = runtime_dir.join("zynk-client.sock");
+    let server_log = config_home.join("zynk-dev").join("zynk-server.log");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    wait_for_file_contains(
+        &server_log,
+        "zynk db workers installed",
+        Duration::from_secs(5),
+    );
+    assert_eq!(count_in_file(&server_log, "zynk db workers installed"), 1);
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(5));
+    let started_at = Instant::now();
+    while count_in_file(&server_log, "zynk db workers installed") < 2 {
+        assert!(
+            started_at.elapsed() < Duration::from_secs(5),
+            "the replacement never installed its DB workers:\n{}",
+            fs::read_to_string(&server_log).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn live_handoff_bad_expected_protocol_rolls_back_old_server() {
     let _lock = test_lock();
