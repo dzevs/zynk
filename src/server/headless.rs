@@ -844,6 +844,19 @@ impl HeadlessServer {
             ));
         }
 
+        // DB-worker quiescence is decided BEFORE any service is withdrawn and is bounded (Codex
+        // Gate-2 round 9): both workers stop starting units of work and we wait for each to be
+        // between units; past the deadline the handoff is rejected with this server untouched
+        // (workers resumed, ownership retained).
+        let idle_deadline = handoff_worker_idle_deadline();
+        if !self.pause_db_workers_for_handoff(idle_deadline) {
+            self.resume_db_workers();
+            return Err(io::Error::other(format!(
+                "live handoff rejected: a DB worker is busy (a job ran past the {} ms quiescence \
+                 deadline); retry when it is idle, or restart zynk normally",
+                idle_deadline.as_millis()
+            )));
+        }
         self.handoff_in_progress = true;
         self.disconnect_all_clients_for_handoff();
         let _ = reject_pending_client_connections(&self.client_listener);
@@ -1075,9 +1088,40 @@ impl HeadlessServer {
         self.restore_public_sockets_after_failed_handoff()
     }
 
-    /// Stop + join the App-owned DB workers before "committed" (bounded by the in-flight job: the
-    /// receipt queue drains, the embedding batch finishes). Public sockets are already down at this
-    /// point, so nothing new can be enqueued.
+    /// Bounded pause of both DB workers at the START of a live handoff (see
+    /// `handoff_worker_idle_deadline`); `false` = one of them is still inside a unit of work past
+    /// the deadline.
+    #[cfg(unix)]
+    fn pause_db_workers_for_handoff(&mut self, deadline: Duration) -> bool {
+        let started = std::time::Instant::now();
+        let embedding_idle = self
+            .app
+            .zynk_embedding_worker
+            .as_ref()
+            .is_none_or(|worker| worker.pause(deadline));
+        let remaining = deadline.saturating_sub(started.elapsed());
+        embedding_idle
+            && self
+                .app
+                .zynk_receipt_worker
+                .as_ref()
+                .is_none_or(|worker| worker.pause(remaining))
+    }
+
+    /// Every pre-commit rollback: the paused workers own their jobs again.
+    #[cfg(unix)]
+    fn resume_db_workers(&mut self) {
+        if let Some(worker) = self.app.zynk_embedding_worker.as_ref() {
+            worker.resume();
+        }
+        if let Some(worker) = self.app.zynk_receipt_worker.as_ref() {
+            worker.resume();
+        }
+    }
+
+    /// Stop + join the App-owned DB workers before "committed". They are paused and idle by now
+    /// (`pause_db_workers_for_handoff`), and public sockets are already down, so the joins are
+    /// immediate: no coupling with the replacement's 30 s "committed" wait.
     #[cfg(unix)]
     fn quiesce_db_workers_for_handoff(&mut self) {
         let _ = self.app.zynk_receipt_worker.take();
@@ -1104,6 +1148,7 @@ impl HeadlessServer {
                 runtime.set_handoff_reader_paused(false);
             }
         }
+        self.resume_db_workers();
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
     }
@@ -3861,6 +3906,22 @@ fn preflight_native_db(recovery: DbPreflightRecovery) -> Result<(), crate::zynk:
 /// state. Installed on the primary path AND on the handoff-import path (Gate-3 round 2: a replacement
 /// server without them answered every receipt with `receipt_worker_unavailable`) — on the latter only
 /// after "committed", once the old server's workers are joined (Codex Gate-2 round 8).
+/// How long a live handoff waits for the DB workers to reach an idle point before it withdraws any
+/// service (override: `ZYNK_HANDOFF_WORKER_IDLE_MS`). Well under the replacement's 30 s "committed"
+/// wait, which only starts after this succeeded.
+#[cfg(unix)]
+const HANDOFF_WORKER_IDLE_DEADLINE: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+fn handoff_worker_idle_deadline() -> Duration {
+    std::env::var("ZYNK_HANDOFF_WORKER_IDLE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(HANDOFF_WORKER_IDLE_DEADLINE)
+}
+
 fn install_db_workers(app: &mut app::App) {
     app.zynk_receipt_worker = Some(crate::zynk::receipt_worker::spawn());
     app.zynk_embedding_worker = Some(crate::zynk::embedding_worker::spawn());
@@ -3870,7 +3931,15 @@ fn install_db_workers(app: &mut app::App) {
 #[cfg(unix)]
 fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
     let loaded_config = config::Config::load();
-    let mut received = crate::server::handoff::receive(socket_path, token)?;
+    let mut received = match crate::server::handoff::receive(socket_path, token) {
+        Ok(received) => received,
+        Err(err) => {
+            // Before "validated": the sender rolls back and keeps serving (`receive` logged the
+            // refusal itself, before answering — the sender kills this process right after).
+            error!(err = %err, "handoff import aborted before restore");
+            return Err(err);
+        }
+    };
     crate::server::handoff::log_import_result(received.manifest.panes.len());
     // Same fail-closed DB readiness as the primary path, before any public service: on failure the
     // replacement exits here and the old server rolls back and keeps serving (the handoff stream

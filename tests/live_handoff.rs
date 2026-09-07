@@ -1619,27 +1619,30 @@ fn wait_for_embedding_job(db: &Path, message_id: &str, wanted: (&str, i64), time
     }
 }
 
-/// The old server removes its API socket file after "restored" and the replacement binds the same
-/// path right before "ready" — often within a millisecond, so existence polling can miss it. The
-/// socket INODE changing is the robust external signal that the replacement is ready (and the old
-/// server is about to quiesce its workers).
-fn wait_for_socket_rebound(api_socket: &Path, timeout: Duration) {
+fn socket_ino(path: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
-    let ino = |path: &Path| fs::metadata(path).ok().map(|meta| meta.ino());
-    let before = ino(api_socket).expect("the old API socket exists before the handoff");
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(now) = ino(api_socket) {
-            if now != before {
-                return;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the replacement never bound the API socket at {}",
-            api_socket.display()
-        );
-        thread::sleep(Duration::from_millis(5));
+    fs::metadata(path).ok().map(|meta| meta.ino())
+}
+
+/// Send `server.live_handoff` on its own thread (the old server blocks inside it while it waits
+/// for its workers / the replacement); the response arrives on the returned channel.
+fn spawn_handoff_request(api_socket: &Path) -> std::sync::mpsc::Receiver<serde_json::Value> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let api_socket = api_socket.to_path_buf();
+    thread::spawn(move || {
+        let _ = tx.send(request(
+            &api_socket,
+            serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+        ));
+    });
+    rx
+}
+
+/// After a successful handoff: the replacement's pid, registered for unconditional cleanup.
+fn register_replacement(runtime_dir: &Path, old_pid: Option<u32>) {
+    if let Some(old_pid) = old_pid {
+        let pid = wait_for_replacement_server_pid(runtime_dir, old_pid, Duration::from_secs(10));
+        register_spawned_zynk_pid(Some(pid));
     }
 }
 
@@ -1720,6 +1723,7 @@ fn in_flight_send_is_not_failed_by_a_handoff(rollback: bool) {
         );
     } else {
         assert_ok(response);
+        register_replacement(&f.runtime_dir, f.spawned.child.process_id());
         drop(f.spawned);
     }
     wait_for_api(&f.api_socket, Duration::from_secs(10));
@@ -1760,11 +1764,11 @@ fn rolled_back_live_handoff_does_not_fail_an_in_flight_send() {
 }
 
 fn db_workers_hand_over_a_blocked_job(commit_fails: bool) {
-    // Codex Gate-2 round 8 (P2): a job blocked inside the old server's embedding worker must be
-    // finished by that worker before the replacement's workers start (old workers joined before
-    // "committed"); after a successful handoff the replacement owns working receipt + embedding
-    // workers, and after a failed commit the old server has its workers back. The job is attempted
-    // exactly once and has exactly one embedding row either way.
+    // Codex Gate-2 rounds 8/9: a job blocked inside the old server's embedding worker keeps the
+    // handoff from moving service at all until the worker is idle (bounded pause BEFORE any socket
+    // is withdrawn); once released within the deadline the old worker finishes it, the replacement
+    // starts its workers only after "committed", and a failed commit restores the old server's
+    // workers. The job is attempted exactly once with exactly one embedding row either way.
     let _lock = test_lock();
     let base_hint = unique_test_dir();
     let release = base_hint.join("release-embedding");
@@ -1788,34 +1792,42 @@ fn db_workers_hand_over_a_blocked_job(commit_fails: bool) {
         "before handoff",
     );
     let message_id = sent["message_id"].as_str().unwrap().to_string();
-    // The old worker picked the job up and is blocked inside the embedder.
     wait_for_embedding_job(&f.db, &message_id, ("running", 1), Duration::from_secs(10));
 
-    // The handoff request blocks inside the old server while it quiesces (joins) its workers, so it
-    // runs on its own thread; the replacement's readiness is observed from outside.
-    let api_socket = f.api_socket.clone();
-    let handoff = thread::spawn(move || {
-        request(
-            &api_socket,
-            serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
-        )
-    });
-    wait_for_socket_rebound(&f.api_socket, Duration::from_secs(15));
-    // Still blocked: the replacement is ready, the old server is waiting on its worker.
-    thread::sleep(Duration::from_millis(300));
+    let before_ino = socket_ino(&f.api_socket).expect("old API socket");
+    let old_pid = f.spawned.child.process_id();
+    let handoff = spawn_handoff_request(&f.api_socket);
+    // Blocked job: the handoff must neither complete nor withdraw service.
+    thread::sleep(Duration::from_millis(400));
+    assert!(
+        matches!(
+            handoff.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "the handoff completed while the old worker still owned a running job"
+    );
     assert_eq!(
         embedding_job(&f.db, &message_id),
         Some(("running".to_string(), 1))
     );
+    assert_eq!(
+        socket_ino(&f.api_socket),
+        Some(before_ino),
+        "service was withdrawn while blocked"
+    );
     fs::write(&release, b"go").unwrap();
-    let response = handoff.join().unwrap();
+    let response = handoff
+        .recv_timeout(Duration::from_secs(30))
+        .expect("handoff response within the bounded wait");
     if commit_fails {
-        assert!(
-            response.get("error").is_some(),
-            "commit failure must roll back: {response}"
+        assert_eq!(response["error"]["code"], "handoff_failed", "{response}");
+        assert_eq!(
+            response["error"]["message"], "test handoff commit failure",
+            "only the injected commit failure counts: {response}"
         );
     } else {
         assert_ok(response);
+        register_replacement(&f.runtime_dir, old_pid);
         drop(f.spawned);
     }
     wait_for_api(&f.api_socket, Duration::from_secs(10));
@@ -1857,6 +1869,148 @@ fn db_workers_hand_over_a_blocked_job(commit_fails: bool) {
     );
     cleanup_test_base(&f.base);
     let _ = fs::remove_dir_all(&base_hint);
+}
+
+#[test]
+fn busy_db_workers_reject_a_live_handoff_within_the_deadline() {
+    // Codex Gate-2 round 9 (P2): the worker quiescence is decided BEFORE service is withdrawn and
+    // is bounded — a job held past ZYNK_HANDOFF_WORKER_IDLE_MS fails the handoff quickly, the old
+    // server never removes a socket, keeps its workers (single owner), and a later handoff succeeds.
+    let _lock = test_lock();
+    let base_hint = unique_test_dir();
+    let release = base_hint.join("release-embedding");
+    let release_str = release.to_string_lossy().to_string();
+    let f = handoff_fixture(&[
+        ("ZYNK_EMBED_PROVIDER", "fake-blocking"),
+        ("ZYNK_TEST_EMBED_RELEASE_FILE", &release_str),
+        ("ZYNK_EMBED_POLL_MS", "50"),
+        ("ZYNK_HANDOFF_WORKER_IDLE_MS", "500"),
+    ]);
+    fs::create_dir_all(&base_hint).unwrap();
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let sent = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "held job",
+    );
+    let message_id = sent["message_id"].as_str().unwrap().to_string();
+    wait_for_embedding_job(&f.db, &message_id, ("running", 1), Duration::from_secs(10));
+
+    let before_ino = socket_ino(&f.api_socket).expect("old API socket");
+    let started = Instant::now();
+    let response = spawn_handoff_request(&f.api_socket)
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a busy handoff must fail within the bounded deadline");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(response["error"]["code"], "handoff_failed", "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("busy"),
+        "{response}"
+    );
+    assert_eq!(
+        socket_ino(&f.api_socket),
+        Some(before_ino),
+        "service was withdrawn"
+    );
+    assert_eq!(
+        embedding_job(&f.db, &message_id),
+        Some(("running".to_string(), 1))
+    );
+    wait_for_api(&f.api_socket, Duration::from_secs(5));
+
+    fs::write(&release, b"go").unwrap();
+    wait_for_embedding_job(&f.db, &message_id, ("done", 1), Duration::from_secs(10));
+    assert_eq!(embedding_rows(&f.db, &message_id), 1);
+    // Idle now: the same server hands off successfully and the replacement serves receipts.
+    let old_pid = f.spawned.child.process_id();
+    let response = spawn_handoff_request(&f.api_socket)
+        .recv_timeout(Duration::from_secs(30))
+        .expect("handoff response");
+    assert_ok(response);
+    register_replacement(&f.runtime_dir, old_pid);
+    drop(f.spawned);
+    wait_for_api(&f.api_socket, Duration::from_secs(10));
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let receipt = request(&f.api_socket, receipt_request(&sent, &f.pane_id));
+    assert!(receipt.get("error").is_none(), "receipt failed: {receipt}");
+    assert_eq!(
+        embedding_job(&f.db, &message_id),
+        Some(("done".to_string(), 1))
+    );
+
+    let _ = request(
+        &f.api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&f.base);
+    let _ = fs::remove_dir_all(&base_hint);
+}
+
+#[test]
+fn legacy_handoff_sender_is_rejected_before_service_moves() {
+    // Codex Gate-2 round 9 (P2): the ordered DB-worker handover is a protocol contract. A sender
+    // speaking handoff version 1 (zynk 3.0.x, which sends "committed" without quiescing its
+    // workers) is rejected by the replacement before "validated": the old server rolls back with
+    // its sockets and workers untouched, and the reason is in the durable server log.
+    let _lock = test_lock();
+    let f = handoff_fixture(&[("ZYNK_TEST_HANDOFF_MANIFEST_VERSION", "1")]);
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let sent = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "before",
+    );
+    let message_id = sent["message_id"].as_str().unwrap().to_string();
+    wait_for_embedding_job(&f.db, &message_id, ("done", 1), Duration::from_secs(10));
+    let before_ino = socket_ino(&f.api_socket).expect("old API socket");
+
+    let response = spawn_handoff_request(&f.api_socket)
+        .recv_timeout(Duration::from_secs(30))
+        .expect("handoff response");
+    assert_eq!(response["error"]["code"], "handoff_failed", "{response}");
+    let message = response["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("unsupported handoff version 1")
+            && message.contains("restart zynk normally"),
+        "the version mismatch and its remedy must reach the requester: {response}"
+    );
+    assert_eq!(
+        socket_ino(&f.api_socket),
+        Some(before_ino),
+        "service was withdrawn"
+    );
+    wait_for_api(&f.api_socket, Duration::from_secs(5));
+    let server_log = f.config_home.join("zynk-dev").join("zynk-server.log");
+    wait_for_file_contains(
+        &server_log,
+        "unsupported handoff version 1",
+        Duration::from_secs(5),
+    );
+    // Still serving with its own workers.
+    let later = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "after",
+    );
+    let later_id = later["message_id"].as_str().unwrap().to_string();
+    wait_for_embedding_job(&f.db, &later_id, ("done", 1), Duration::from_secs(10));
+    let receipt = request(&f.api_socket, receipt_request(&sent, &f.pane_id));
+    assert!(receipt.get("error").is_none(), "receipt failed: {receipt}");
+
+    let _ = request(
+        &f.api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&f.base);
 }
 
 #[test]

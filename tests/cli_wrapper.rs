@@ -1299,6 +1299,53 @@ fn cli_fails_closed_on_a_hot_rollback_journal() {
 }
 
 #[test]
+fn cli_fails_closed_on_a_hot_rollback_journal_behind_a_symlink() {
+    // Codex Gate-2 round 9 (P1), at the CLI boundary: `zynk.db -> foreign.db` whose TARGET carries a
+    // hot journal must be refused by `db status` and `query`, both files byte-identical.
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let sqlite_home = config_home.join("sqlite");
+    fs::create_dir_all(&sqlite_home).unwrap();
+    let foreign = sqlite_home.join("foreign.db");
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "hot_journal_crashing_writer",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("ZYNK_TEST_HOT_JOURNAL_DB", &foreign)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "crashing writer helper failed: {status}");
+    let journal = sqlite_home.join("foreign.db-journal");
+    assert!(
+        fs::read(&journal).unwrap()[0] != 0,
+        "fixture must leave a hot journal"
+    );
+    let before = (fs::read(&foreign).unwrap(), fs::read(&journal).unwrap());
+    std::os::unix::fs::symlink(&foreign, sqlite_home.join("zynk.db")).unwrap();
+
+    let status = run_named_cli(&config_home, &runtime_dir, &["db", "status"]);
+    assert!(
+        !status.status.success(),
+        "db status must fail closed: {status:?}"
+    );
+    assert!(String::from_utf8_lossy(&status.stderr).contains("db_hot_journal"));
+    let query = run_named_cli(&config_home, &runtime_dir, &["query", "customer", "--json"]);
+    assert!(!query.status.success(), "query must fail closed: {query:?}");
+    assert!(String::from_utf8_lossy(&query.stdout).contains("db_hot_journal"));
+    assert_eq!(
+        (fs::read(&foreign).unwrap(), fs::read(&journal).unwrap()),
+        before,
+        "target bytes changed"
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn cli_fails_closed_on_an_orphan_wal_beside_an_absent_db() {
     // Gate-3 round 2 (G3-R2-DB-002), at the CLI boundary: a nonempty `zynk.db-wal` with no
     // `zynk.db` is existing data (ADR 0011). `db status` and `query` must refuse, create no

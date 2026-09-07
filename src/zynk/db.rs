@@ -160,6 +160,13 @@ async fn open_migrated_at_with_hook(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // The name SQLite itself will open — and derive `-journal`/`-wal`/`-shm` from — is the configured
+    // path with its final-component symlink chain followed. Resolve it ONCE and use it for the guards,
+    // the init lock, the identity capture and the connection, so all of them agree on one file (Codex
+    // Gate-2 round 9: a stable `zynk.db -> foreign.db` link let the guards inspect `zynk.db-journal`
+    // while SQLite replayed `foreign.db-journal`).
+    let resolved = sqlite_effective_path(path)?;
+    let path = resolved.as_path();
     // Existing data beside an absent/zero-page main file is refused BEFORE any connection exists:
     // SQLite discards a stale `-wal` on the first read of a zero-page database (ADR 0011). A HOT
     // rollback journal is refused before any connection too: a read-write pager would play it back
@@ -271,6 +278,61 @@ async fn open_migrated_at_with_hook(
     Ok(conn)
 }
 
+/// SQLite follows at most this many links in a final-component chain (`SQLITE_MAX_SYMLINKS`).
+const MAX_SYMLINKS: usize = 100;
+
+/// The pathname SQLite opens and derives its sidecar names from (`unixFullPathname`): the path made
+/// absolute, with the FINAL component's symlink chain followed (a relative link target is joined
+/// with the link's directory; intermediate directory links are left alone, exactly like SQLite). An
+/// absent final target is returned as is — SQLite creates the database there. Windows' VFS does not
+/// follow links, so only the absolute form is taken there.
+fn sqlite_effective_path(path: &Path) -> Result<PathBuf, DbError> {
+    let io = |what: &str, err: std::io::Error| {
+        DbError::new(
+            "db_io_error",
+            format!(
+                "zynk: cannot resolve {} ({what}): {err}",
+                printable_path(path)
+            ),
+        )
+    };
+    let mut current = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| io("cwd", err))?
+            .join(path)
+    };
+    if !cfg!(unix) {
+        return Ok(current);
+    }
+    for _ in 0..MAX_SYMLINKS {
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = std::fs::read_link(&current).map_err(|err| io("readlink", err))?;
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    match current.parent() {
+                        Some(parent) => parent.join(target),
+                        None => target,
+                    }
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+            Err(err) => return Err(io("lstat", err)),
+        }
+    }
+    Err(DbError::new(
+        "db_io_error",
+        format!(
+            "zynk: cannot resolve {}: too many levels of symbolic links",
+            printable_path(path)
+        ),
+    ))
+}
+
 /// Whether a non-empty main file exists at `path`. Only NotFound means absent: any other metadata
 /// failure fails closed (`db_io_error`) instead of being mistaken for "nothing there".
 fn main_file_present(path: &Path) -> Result<bool, DbError> {
@@ -279,7 +341,7 @@ fn main_file_present(path: &Path) -> Result<bool, DbError> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(DbError::new(
             "db_io_error",
-            format!("zynk: cannot inspect {}: {err}", path.display()),
+            format!("zynk: cannot inspect {}: {err}", printable_path(path)),
         )),
     }
 }
@@ -291,7 +353,7 @@ fn sidecar_len(sidecar: &Path) -> Result<Option<u64>, DbError> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(DbError::new(
             "db_io_error",
-            format!("zynk: cannot inspect {}: {err}", sidecar.display()),
+            format!("zynk: cannot inspect {}: {err}", printable_path(sidecar)),
         )),
     }
 }
@@ -435,8 +497,8 @@ fn refuse_orphan_sidecars(path: &Path) -> Result<(), DbError> {
                      {} ({len} bytes) holds data that initialization would discard. Restore the \
                      matching database file beside it, or move the sidecar aside, then retry \
                      (`zynk db status` to inspect).",
-                    path.display(),
-                    sidecar.display()
+                    printable_path(path),
+                    printable_path(&sidecar)
                 ),
             ));
         }
@@ -479,15 +541,16 @@ fn refuse_hot_journal(path: &Path) -> Result<(), DbError> {
     Err(DbError::new(
         "db_hot_journal",
         format!(
-            "zynk: refusing to open the database at {}: its rollback journal {} ({len} bytes) is \
-             hot — a writer crashed before committing, and opening the file read-write would roll \
-             it back (rewriting the main file and deleting the journal). zynk will not do that to a \
-             database it has not recognized as its own. If this is another application's database, \
-             let that application recover it (back up both files first); if zynk was just creating \
-             this database (no data yet), remove both files and retry. `zynk db status` reports the \
-             same refusal.",
-            path.display(),
-            journal.display()
+            "zynk: refusing to open the database at {}: its rollback journal {} ({len} bytes) looks \
+             hot (non-zero header) — a writer may have crashed before committing, or the journal is \
+             unreadable — and opening the file read-write could roll it back (rewriting the main \
+             file and deleting the journal). zynk will not do that to a database it has not \
+             recognized as its own. If this is another application's database, let that \
+             application recover it (back up both files first); if zynk was just creating this \
+             database (no data yet), remove both files and retry. `zynk db status` reports the same \
+             refusal.",
+            printable_path(path),
+            printable_path(&journal)
         ),
     ))
 }
@@ -500,7 +563,7 @@ fn newer_lineage_error(path: &Path, versions: &[i64]) -> DbError {
             "zynk: the database at {} was migrated by a NEWER zynk (migration versions {} are \
              unknown to this build); refusing to open it. Upgrade zynk, or restore a database that \
              matches this build.",
-            path.display(),
+            printable_path(path),
             listed.join(", ")
         ),
     )
@@ -512,7 +575,7 @@ fn target_changed_error(path: &Path) -> DbError {
         format!(
             "zynk: the file at {} was replaced while the database was being initialized; nothing \
              was written to the new file. Retry once the path is stable (`zynk db status` to inspect).",
-            path.display()
+            printable_path(path)
         ),
     )
 }
@@ -566,7 +629,7 @@ impl InitLock {
                                 "zynk: another zynk process has held the database init lock at {} \
                                  for more than {deadline:?}; the lock is released when that process \
                                  finishes initializing or exits — retry afterwards",
-                                lock_path.display()
+                                printable_path(&lock_path)
                             ),
                         ));
                     }
@@ -1051,14 +1114,12 @@ pub async fn classify_db_at_with_state(
 /// for Absent/Empty; meaningful for Native). Read-only like `classify_db_at` (ADR 0011: existing data
 /// bytes are never modified).
 async fn inspect_db_at(path: &Path) -> Result<(DbClassification, MigrationState), DbError> {
+    let resolved = sqlite_effective_path(path)?;
+    let path = resolved.as_path();
     refuse_orphan_sidecars(path)?;
     refuse_hot_journal(path)?;
-    match std::fs::metadata(path) {
-        Err(_) => return Ok((DbClassification::Absent, MigrationState::Pending)),
-        Ok(meta) if meta.len() == 0 => {
-            return Ok((DbClassification::Absent, MigrationState::Pending))
-        }
-        Ok(_) => {}
+    if !main_file_present(path)? {
+        return Ok((DbClassification::Absent, MigrationState::Pending));
     }
     let options = SqliteConnectOptions::new()
         .filename(path)
@@ -2521,6 +2582,146 @@ mod tests {
                 "{mode}: main/-journal bytes changed"
             );
         }
+    }
+
+    /// Codex Gate-2 round 9 (P1): the guards, the init lock and the connection must agree on the
+    /// name SQLite actually opens. A STABLE `zynk.db -> foreign.db` link with the target's own hot
+    /// journal used to pass the guards (they looked at `zynk.db-journal`) while SQLite replayed
+    /// `foreign.db-journal`.
+    #[cfg(unix)]
+    #[test]
+    fn stable_symlink_to_a_foreign_db_with_a_hot_journal_is_refused_untouched() {
+        let foreign = tmp_db("g2r9-link-hot-foreign");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "zynk::db::tests::hot_journal_crashing_writer",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("ZYNK_TEST_HOT_JOURNAL_DB", &foreign)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "crashing writer helper failed: {status}");
+        let journal = sidecar(&foreign, "-journal");
+        assert!(
+            std::fs::read(&journal).unwrap()[0] != 0,
+            "fixture must leave a hot journal"
+        );
+        let before = (
+            std::fs::read(&foreign).unwrap(),
+            std::fs::read(&journal).unwrap(),
+        );
+        let link = tmp_db("g2r9-link-hot-link");
+        std::os::unix::fs::symlink(&foreign, &link).unwrap();
+        let err = block_on(classify_db_at(&link)).unwrap_err();
+        assert_eq!(err.code, "db_hot_journal", "{}", err.message);
+        let err = block_on(open_migrated_at_without_recovery(&link)).unwrap_err();
+        assert_eq!(err.code, "db_hot_journal", "{}", err.message);
+        assert_eq!(
+            (
+                std::fs::read(&foreign).unwrap(),
+                std::fs::read(&journal).unwrap()
+            ),
+            before,
+            "the link target's main/-journal bytes changed"
+        );
+    }
+
+    /// Relative and chained links resolve exactly like SQLite (`readlink` joined with the link's
+    /// directory, repeated): the target's hot journal is refused through both.
+    #[cfg(unix)]
+    #[test]
+    fn relative_and_chained_symlinks_resolve_to_the_target_hot_journal() {
+        let dir = std::env::temp_dir().join(format!(
+            "zynk-g2r9-chain-{}-{}",
+            std::process::id(),
+            crate::zynk::message::new_prefixed_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let foreign = dir.join("foreign.db");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "zynk::db::tests::hot_journal_crashing_writer",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("ZYNK_TEST_HOT_JOURNAL_DB", &foreign)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "crashing writer helper failed: {status}");
+        let journal = sidecar(&foreign, "-journal");
+        let before = (
+            std::fs::read(&foreign).unwrap(),
+            std::fs::read(&journal).unwrap(),
+        );
+        // relative link in the same directory, then a link to that link
+        std::os::unix::fs::symlink("foreign.db", dir.join("relative.db")).unwrap();
+        std::os::unix::fs::symlink("relative.db", dir.join("chained.db")).unwrap();
+        for name in ["relative.db", "chained.db"] {
+            let link = dir.join(name);
+            assert_eq!(sqlite_effective_path(&link).unwrap(), foreign, "{name}");
+            let err = block_on(classify_db_at(&link)).unwrap_err();
+            assert_eq!(err.code, "db_hot_journal", "{name}: {}", err.message);
+            let err = block_on(open_migrated_at_without_recovery(&link)).unwrap_err();
+            assert_eq!(err.code, "db_hot_journal", "{name}: {}", err.message);
+        }
+        assert_eq!(
+            (
+                std::fs::read(&foreign).unwrap(),
+                std::fs::read(&journal).unwrap()
+            ),
+            before,
+            "the target's main/-journal bytes changed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_symlink_to_an_absent_target_with_an_orphan_wal_is_refused() {
+        // Orphan sidecars live beside the TARGET: `zynk.db -> missing.db` with a nonempty
+        // `missing.db-wal` must be refused and nothing created at either name.
+        let target = tmp_db("g2r9-link-orphan-target");
+        let src = tmp_db("g2r9-link-orphan-src");
+        plant_foreign_wal_db(
+            &src,
+            "CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('wal-only')",
+        );
+        std::fs::copy(sidecar(&src, "-wal"), sidecar(&target, "-wal")).unwrap();
+        let before = std::fs::read(sidecar(&target, "-wal")).unwrap();
+        let link = tmp_db("g2r9-link-orphan-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = block_on(classify_db_at(&link)).unwrap_err();
+        assert_eq!(err.code, "db_orphan_sidecar", "{}", err.message);
+        let err = block_on(open_migrated_at_without_recovery(&link)).unwrap_err();
+        assert_eq!(err.code, "db_orphan_sidecar", "{}", err.message);
+        assert!(!target.exists(), "the target was created");
+        assert_eq!(std::fs::read(sidecar(&target, "-wal")).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_lock_at_the_link_target_blocks_a_symlinked_open() {
+        // The init lock is keyed by the resolved name too: a holder at `<target>.init-lock` blocks an
+        // open through `zynk.db -> target` (timeout, nothing created), as it would a direct open.
+        let target = tmp_db("g2r9-link-lock-target");
+        let link = tmp_db("g2r9-link-lock-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let holder = hold_init_lock(&target);
+        let err = block_on(open_migrated_at_without_recovery(&link)).unwrap_err();
+        assert_eq!(err.code, "db_init_lock_timeout", "{}", err.message);
+        assert!(!target.exists(), "the target was created under a held lock");
+        holder.unlock().unwrap();
+        // Released: the same symlinked open initializes the target.
+        block_on(open_migrated_at_without_recovery(&link)).unwrap();
+        assert_eq!(
+            block_on(classify_db_at(&target)).unwrap(),
+            DbClassification::Native
+        );
     }
 
     #[test]

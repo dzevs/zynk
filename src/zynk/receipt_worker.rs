@@ -46,6 +46,21 @@ enum WorkerMessage {
 pub struct ReceiptWorkerHandle {
     sender: Option<SyncSender<WorkerMessage>>,
     join: Option<JoinHandle<()>>,
+    control: std::sync::Arc<crate::zynk::worker_pause::PauseControl>,
+}
+
+// The live handoff (the only caller) is Unix-only.
+#[cfg_attr(not(unix), allow(dead_code))]
+impl ReceiptWorkerHandle {
+    /// Stop starting new receipt jobs and wait (bounded) for the in-flight one to finish; a queued
+    /// job stays queued, unstarted, until `resume`. Live-handoff quiescence (Codex Gate-2 round 9).
+    pub fn pause(&self, deadline: Duration) -> bool {
+        self.control.pause(deadline)
+    }
+
+    pub fn resume(&self) {
+        self.control.resume();
+    }
 }
 
 impl ReceiptWorkerHandle {
@@ -119,6 +134,7 @@ impl Drop for ReceiptWorkerHandle {
         // drains in-flight work — so `join` is bounded by the current job (SQLite
         // busy_timeout), never an indefinite block on a full queue. Never touches
         // live Zynk state.
+        self.control.stop();
         if let Some(sender) = self.sender.take() {
             let _ = sender.try_send(WorkerMessage::Shutdown);
             drop(sender);
@@ -133,17 +149,24 @@ impl Drop for ReceiptWorkerHandle {
 /// returned handle on `App`.
 pub fn spawn() -> ReceiptWorkerHandle {
     let (sender, receiver) = std::sync::mpsc::sync_channel::<WorkerMessage>(64);
+    let control = std::sync::Arc::new(crate::zynk::worker_pause::PauseControl::new());
+    let loop_control = std::sync::Arc::clone(&control);
     let join = std::thread::Builder::new()
         .name("zynk-receipt-worker".to_string())
-        .spawn(move || worker_loop(receiver))
+        .spawn(move || worker_loop(receiver, loop_control))
         .expect("spawn zynk receipt worker thread");
     ReceiptWorkerHandle {
         sender: Some(sender),
         join: Some(join),
+        control,
     }
 }
 
-fn worker_loop(receiver: Receiver<WorkerMessage>) {
+fn worker_loop(
+    receiver: Receiver<WorkerMessage>,
+    control: std::sync::Arc<crate::zynk::worker_pause::PauseControl>,
+) {
+    control.set_idle();
     // One current-thread runtime owns all DB work for this worker — safe because
     // this is a plain std::thread with no ambient Tokio runtime.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -179,6 +202,15 @@ fn worker_loop(receiver: Receiver<WorkerMessage>) {
         match message {
             WorkerMessage::Shutdown => break,
             WorkerMessage::Job(job) => {
+                // Paused (live handoff): the job waits here, unstarted, until resume — or is
+                // refused when the handle is being dropped.
+                if !control.begin_work() {
+                    let _ = job.respond_to.send(Err(DbError::new(
+                        "receipt_worker_unavailable",
+                        "receipt worker is shutting down",
+                    )));
+                    break;
+                }
                 if conn.is_none() {
                     conn = rt
                         .block_on(crate::zynk::db::open_migrated_for_append())
@@ -199,6 +231,7 @@ fn worker_loop(receiver: Receiver<WorkerMessage>) {
                     )),
                 };
                 let _ = job.respond_to.send(result);
+                control.end_work();
             }
         }
     }
@@ -207,6 +240,31 @@ fn worker_loop(receiver: Receiver<WorkerMessage>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipt_worker_pauses_when_idle_and_drops_promptly() {
+        // Live-handoff quiescence: an idle receipt worker acknowledges a pause immediately and a
+        // paused handle still joins promptly when dropped (bounded commit-time join).
+        let home = std::env::temp_dir().join(format!(
+            "zynk-receipt-pause-{}-{}",
+            std::process::id(),
+            crate::zynk::message::new_prefixed_id("t")
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("ZYNK_SQLITE_HOME", &home);
+        let worker = spawn();
+        assert!(
+            worker.pause(Duration::from_secs(5)),
+            "an idle worker is idle"
+        );
+        let started = std::time::Instant::now();
+        drop(worker);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "paused drop must not hang"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
     use std::time::Instant;
 
     fn dummy_request() -> ReceiptRequest {
@@ -242,6 +300,7 @@ mod tests {
         let handle = ReceiptWorkerHandle {
             sender: Some(sender),
             join: None,
+            control: std::sync::Arc::new(crate::zynk::worker_pause::PauseControl::new()),
         };
 
         let start = Instant::now();
@@ -270,6 +329,7 @@ mod tests {
         let handle = ReceiptWorkerHandle {
             sender: None,
             join: None,
+            control: std::sync::Arc::new(crate::zynk::worker_pause::PauseControl::new()),
         };
         let err = handle
             .submit(
@@ -293,6 +353,7 @@ mod tests {
         let handle = ReceiptWorkerHandle {
             sender: Some(sender),
             join: None,
+            control: std::sync::Arc::new(crate::zynk::worker_pause::PauseControl::new()),
         };
         let err = handle
             .submit(

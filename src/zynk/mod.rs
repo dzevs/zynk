@@ -13,3 +13,4 @@ pub mod receipt_worker;
 pub mod retrieval;
 pub mod runtime;
 pub mod skill;
+pub mod worker_pause;

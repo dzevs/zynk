@@ -27,6 +27,7 @@ use sqlx::{Executor, Row, SqliteConnection};
 use crate::zynk::db::DbError;
 use crate::zynk::embed::{embedder_from_env, Embedder};
 use crate::zynk::message::{body_hash, new_prefixed_id, now_rfc3339};
+use crate::zynk::worker_pause::PauseControl;
 
 /// Default poll cadence between `process_pending_batch` sweeps. Overridable via
 /// `ZYNK_EMBED_POLL_MS` (mirrors the receipt worker's env-tunable timeout pattern).
@@ -56,6 +57,24 @@ fn poll_interval() -> Duration {
 pub struct EmbeddingWorkerHandle {
     shutdown: Option<SyncSender<()>>,
     join: Option<JoinHandle<()>>,
+    control: std::sync::Arc<PauseControl>,
+}
+
+// The live handoff (the only caller) is Unix-only.
+#[cfg_attr(not(unix), allow(dead_code))]
+impl EmbeddingWorkerHandle {
+    /// Stop starting new batches and wait (bounded) for the loop to be between batches — the
+    /// in-flight `embed` call is never interrupted. `true` = idle now and staying idle until
+    /// `resume`; `false` = still busy past `deadline` (the worker keeps running; call `resume`).
+    /// Live-handoff quiescence (Codex Gate-2 round 9).
+    pub fn pause(&self, deadline: Duration) -> bool {
+        self.control.pause(deadline)
+    }
+
+    /// Let a paused loop process batches again.
+    pub fn resume(&self) {
+        self.control.resume();
+    }
 }
 
 impl Drop for EmbeddingWorkerHandle {
@@ -68,6 +87,7 @@ impl Drop for EmbeddingWorkerHandle {
         // so it always returns, never an indefinite block. (Mid-batch shutdown
         // responsiveness with a slow real embedder is future tuning; not redesigned
         // here.) Never touches live Zynk state.
+        self.control.stop();
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.try_send(());
             drop(shutdown);
@@ -82,17 +102,20 @@ impl Drop for EmbeddingWorkerHandle {
 /// returned handle on `App`. No args — it resolves the embedder + DB internally.
 pub fn spawn() -> EmbeddingWorkerHandle {
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let control = std::sync::Arc::new(PauseControl::new());
+    let loop_control = std::sync::Arc::clone(&control);
     let join = std::thread::Builder::new()
         .name("zynk-embed-worker".to_string())
-        .spawn(move || worker_loop(shutdown_rx))
+        .spawn(move || worker_loop(shutdown_rx, loop_control))
         .expect("spawn zynk embedding worker thread");
     EmbeddingWorkerHandle {
         shutdown: Some(shutdown_tx),
         join: Some(join),
+        control,
     }
 }
 
-fn worker_loop(shutdown_rx: Receiver<()>) {
+fn worker_loop(shutdown_rx: Receiver<()>, control: std::sync::Arc<PauseControl>) {
     // Register vec0 process-globally BEFORE opening any connection (so every conn
     // this worker opens — and reopens — sees `vec0`).
     crate::zynk::embed::vec::register_sqlite_vec();
@@ -107,6 +130,7 @@ fn worker_loop(shutdown_rx: Receiver<()>) {
         Err(_) => {
             // Cannot build a runtime: drain the shutdown signal so a Drop join is
             // bounded, then exit. Jobs simply stay `pending`.
+            control.set_idle();
             let _ = shutdown_rx.recv();
             return;
         }
@@ -119,6 +143,7 @@ fn worker_loop(shutdown_rx: Receiver<()>) {
     let mut embedder = match embedder_from_env() {
         Ok(embedder) => embedder,
         Err(_err) => {
+            control.set_idle();
             let _ = shutdown_rx.recv();
             return;
         }
@@ -134,11 +159,13 @@ fn worker_loop(shutdown_rx: Receiver<()>) {
         Some(c) => match rt.block_on(ensure_model_and_vec0(c, embedder.as_ref())) {
             Ok(triple) => triple,
             Err(_err) => {
+                control.set_idle();
                 let _ = shutdown_rx.recv();
                 return;
             }
         },
         None => {
+            control.set_idle();
             let _ = shutdown_rx.recv();
             return;
         }
@@ -162,22 +189,26 @@ fn worker_loop(shutdown_rx: Receiver<()>) {
     }
 
     let interval = poll_interval();
+    control.set_idle();
     loop {
-        // Reopen the connection if it was lost (mirror receipt_worker's resilience).
         if conn.is_none() {
             conn = rt
                 .block_on(crate::zynk::db::open_migrated_for_append())
                 .ok();
         }
-        if let Some(c) = conn.as_mut() {
-            let _ = rt.block_on(process_pending_batch(
-                c,
-                embedder.as_mut(),
-                &model_id,
-                &vec_table,
-                dim,
-                PROCESS_BATCH,
-            ));
+        // Paused (live handoff): keep the connection, start no batch until resumed.
+        if control.try_begin_work() {
+            if let Some(c) = conn.as_mut() {
+                let _ = rt.block_on(process_pending_batch(
+                    c,
+                    embedder.as_mut(),
+                    &model_id,
+                    &vec_table,
+                    dim,
+                    PROCESS_BATCH,
+                ));
+            }
+            control.end_work();
         }
         match shutdown_rx.recv_timeout(interval) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
@@ -695,6 +726,72 @@ mod tests {
             process_pending_batch(&mut conn, &mut embedder, &model_id, &vec_table, dim, 32).await
         })
         .unwrap()
+    }
+
+    #[test]
+    fn pause_waits_for_the_in_flight_batch_and_resume_continues() {
+        // Codex Gate-2 round 9 (P2): the REAL spawned worker (blocking provider) — `pause` reports
+        // busy while a batch is in flight, idle once it finished, and no batch starts until `resume`.
+        crate::zynk::embed::vec::register_sqlite_vec();
+        let home = std::env::temp_dir().join(format!(
+            "zynk-pause-{}-{}",
+            std::process::id(),
+            crate::zynk::message::new_prefixed_id("t")
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let release = home.join("release");
+        std::env::set_var("ZYNK_SQLITE_HOME", &home);
+        std::env::set_var(crate::zynk::embed::ZYNK_EMBED_PROVIDER_ENV, "fake-blocking");
+        std::env::set_var(
+            crate::zynk::embed::ZYNK_TEST_EMBED_RELEASE_FILE_ENV,
+            &release,
+        );
+        std::env::set_var(ZYNK_EMBED_POLL_MS_ENV, "20");
+        let path = home.join("zynk.db");
+        crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            seed_message(&mut conn, "msg_pause_1").await;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        let worker = spawn();
+        wait_for_job_state(&path, "msg_pause_1", ("running", 1));
+        assert!(
+            !worker.pause(Duration::from_millis(300)),
+            "a blocked batch is not idle"
+        );
+        std::fs::write(&release, b"go").unwrap();
+        assert!(
+            worker.pause(Duration::from_secs(10)),
+            "idle once the batch finished"
+        );
+        assert_eq!(
+            job_state(&path, "msg_pause_1"),
+            Some(("done".to_string(), 1))
+        );
+        // Paused: a new job is NOT picked up ...
+        crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            seed_message(&mut conn, "msg_pause_2").await;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            job_state(&path, "msg_pause_2"),
+            Some(("pending".to_string(), 0))
+        );
+        // ... until resumed.
+        worker.resume();
+        wait_for_job_state(&path, "msg_pause_2", ("done", 1));
+        assert!(worker.pause(Duration::from_secs(10)));
+        let started = std::time::Instant::now();
+        drop(worker);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a paused idle worker joins promptly"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

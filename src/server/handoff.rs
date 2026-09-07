@@ -16,10 +16,26 @@ use std::time::Duration;
 #[cfg(unix)]
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[cfg(unix)]
-const HANDOFF_VERSION: u32 = 1;
+/// The handoff protocol version. 2 (zynk 3.1.0) adds the ordered DB-worker handover contract: the
+/// sender pauses/joins its DB workers before "committed" and the replacement starts its own only
+/// after. A version-1 peer (zynk 3.0.x) sends "committed" with its workers still running, so mixing
+/// the two would run jobs twice — both directions are refused before "validated" (the sender rolls
+/// back and keeps serving; cross that line with a normal restart).
+const HANDOFF_VERSION: u32 = 2;
+
+/// Test hook: the version a SENDER puts in its manifest (models a legacy peer).
+fn sender_handoff_version() -> u32 {
+    std::env::var("ZYNK_TEST_HANDOFF_MANIFEST_VERSION")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(HANDOFF_VERSION)
+}
+
+/// The replacement's answer when it refuses the manifest: the sender surfaces the reason.
+const REJECTED_PREFIX: &str = "rejected: ";
 #[cfg(unix)]
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(unix)]
@@ -155,8 +171,19 @@ pub(crate) fn accept_and_validate_on(
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let validated = read_line_unbuffered(&mut stream)?;
-    if validated.trim_end() != "validated" {
-        return Err(io::Error::other("handoff import did not validate manifest"));
+    let validated = validated.trim_end();
+    if let Some(reason) = validated.strip_prefix(REJECTED_PREFIX) {
+        return Err(io::Error::other(format!(
+            "handoff replacement server rejected the manifest: {reason}"
+        )));
+    }
+    if validated != "validated" {
+        // A replacement that answers nothing intelligible is most likely a zynk older than the
+        // handoff-version fence (it closes on a version it does not know).
+        return Err(io::Error::other(
+            "handoff import did not validate manifest (a zynk older than 3.1.0 cannot be a \
+             live-update peer: restart zynk normally)",
+        ));
     }
     let _ = std::fs::remove_file(socket_path);
     Ok(stream)
@@ -228,32 +255,13 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
     let manifest_line = read_line_unbuffered(&mut stream)?;
     let manifest: HandoffManifest =
         serde_json::from_str(&manifest_line).map_err(io::Error::other)?;
-    if manifest.version != HANDOFF_VERSION {
-        return Err(io::Error::other(format!(
-            "unsupported handoff version {}",
-            manifest.version
-        )));
-    }
-    if manifest
-        .expected_protocol
-        .is_some_and(|protocol| protocol != crate::protocol::PROTOCOL_VERSION)
-    {
-        return Err(io::Error::other(format!(
-            "handoff expected protocol {}, but this server speaks protocol {}",
-            manifest.expected_protocol.unwrap_or_default(),
-            crate::protocol::PROTOCOL_VERSION
-        )));
-    }
-    if manifest
-        .expected_version
-        .as_deref()
-        .is_some_and(|version| version != crate::build_info::version())
-    {
-        return Err(io::Error::other(format!(
-            "handoff expected zynk v{}, but this server is v{}",
-            manifest.expected_version.as_deref().unwrap_or("unknown"),
-            crate::build_info::version()
-        )));
+    if let Err(reason) = validate_manifest(&manifest) {
+        // Log FIRST (this process has no stderr and the sender kills it as soon as it reads the
+        // refusal), then tell the sender why — it rolls back and keeps serving.
+        error!(reason = %reason, "handoff import rejected before restore");
+        let _ = stream.write_all(format!("{REJECTED_PREFIX}{reason}\n").as_bytes());
+        let _ = stream.flush();
+        return Err(io::Error::other(reason));
     }
     stream.write_all(b"validated\n")?;
     stream.flush()?;
@@ -263,6 +271,39 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
         fds,
         stream,
     })
+}
+
+fn validate_manifest(manifest: &HandoffManifest) -> Result<(), String> {
+    if manifest.version != HANDOFF_VERSION {
+        return Err(format!(
+            "unsupported handoff version {} (this zynk speaks handoff version {HANDOFF_VERSION}: a \
+             live update requires both servers to hand the DB workers over in order); restart zynk \
+             normally instead",
+            manifest.version
+        ));
+    }
+    if manifest
+        .expected_protocol
+        .is_some_and(|protocol| protocol != crate::protocol::PROTOCOL_VERSION)
+    {
+        return Err(format!(
+            "handoff expected protocol {}, but this server speaks protocol {}",
+            manifest.expected_protocol.unwrap_or_default(),
+            crate::protocol::PROTOCOL_VERSION
+        ));
+    }
+    if manifest
+        .expected_version
+        .as_deref()
+        .is_some_and(|version| version != crate::build_info::version())
+    {
+        return Err(format!(
+            "handoff expected zynk v{}, but this server is v{}",
+            manifest.expected_version.as_deref().unwrap_or("unknown"),
+            crate::build_info::version()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -301,7 +342,7 @@ pub(crate) fn manifest_for(
     expected_version: Option<String>,
 ) -> HandoffManifest {
     HandoffManifest {
-        version: HANDOFF_VERSION,
+        version: sender_handoff_version(),
         source_version: crate::build_info::version(),
         source_protocol: crate::protocol::PROTOCOL_VERSION,
         expected_version,
