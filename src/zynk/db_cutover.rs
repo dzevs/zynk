@@ -794,6 +794,18 @@ mod tests {
 
     #[test]
     fn adopt_moves_the_complete_bundle_including_an_inactive_persist_journal() {
+        adopt_moves_the_complete_bundle_including_an_inactive_persist_journal_body();
+    }
+
+    /// Windows CI runs only `windows_`-prefixed tests: the real `MoveFileExW` path must be
+    /// exercised there, not merely compiled (Gate-3 round 4, WARDEN-R4-WIN-001).
+    #[cfg(windows)]
+    #[test]
+    fn windows_adopt_moves_the_complete_bundle_including_an_inactive_persist_journal() {
+        adopt_moves_the_complete_bundle_including_an_inactive_persist_journal_body();
+    }
+
+    fn adopt_moves_the_complete_bundle_including_an_inactive_persist_journal_body() {
         // Gate-3 round 3 (AUD-310-CUTOVER-001): a PERSIST-mode foreign database keeps a nonempty
         // (zeroed-header) `-journal`. Relocation must move the COMPLETE SQLite bundle — otherwise the
         // orphan-sidecar guard correctly refuses to initialize the native path afterwards, and the
@@ -962,6 +974,18 @@ mod tests {
 
     #[test]
     fn relocation_refuses_a_target_that_appears_after_preflight() {
+        relocation_refuses_a_target_that_appears_after_preflight_body();
+    }
+
+    /// Windows CI runs only `windows_`-prefixed tests: the real `MoveFileExW` path must be
+    /// exercised there, not merely compiled (Gate-3 round 4, WARDEN-R4-WIN-001).
+    #[cfg(windows)]
+    #[test]
+    fn windows_relocation_refuses_a_target_that_appears_after_preflight() {
+        relocation_refuses_a_target_that_appears_after_preflight_body();
+    }
+
+    fn relocation_refuses_a_target_that_appears_after_preflight_body() {
         // Gate-3 round 3 pre-read (arbiter, Codex r15_rename_collision): a competing file created
         // between the preflight and the move must not be replaced — the move is no-replace, the
         // failure rolls back, and the source bundle stays where it was.
@@ -1045,6 +1069,18 @@ mod tests {
 
     #[test]
     fn a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback() {
+        a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback_body();
+    }
+
+    /// Windows CI runs only `windows_`-prefixed tests: the real `MoveFileExW` path must be
+    /// exercised there, not merely compiled (Gate-3 round 4, WARDEN-R4-WIN-001).
+    #[cfg(windows)]
+    #[test]
+    fn windows_a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback() {
+        a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback_body();
+    }
+
+    fn a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback_body() {
         // Gate-3 round 3 (arbiter G3-PRE-B135-002, Codex R13): a two-step link/copy + unlink of
         // the source name deleted a file another writer placed there in between. Without the
         // platform's atomic no-replace rename the member is refused; nothing is moved or created.
@@ -1084,6 +1120,19 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted() {
+        a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted_body();
+    }
+
+    /// Windows CI runs only `windows_`-prefixed tests: the real `MoveFileExW` path must be
+    /// exercised there, not merely compiled (Gate-3 round 4, WARDEN-R4-WIN-001).
+    #[cfg(windows)]
+    #[test]
+    fn windows_a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted() {
+        a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted_body();
+    }
+
+    #[cfg(any(any(target_os = "linux", target_os = "macos"), windows))]
+    fn a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted_body() {
         // The boundary the atomic move guarantees: whatever sits at the source name at the instant
         // of the move is moved intact; a writer that replaced the source just before discarded its
         // own predecessor, and zynk deletes nothing beyond that single rename.
