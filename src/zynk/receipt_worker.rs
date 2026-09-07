@@ -161,9 +161,10 @@ impl Drop for ReceiptWorkerHandle {
     fn drop(&mut self) {
         // NON-blocking shutdown: `try_send` can't hang on a full queue. Then drop
         // the sender so the worker's `recv()` disconnects and the loop exits once it
-        // drains in-flight work — so `join` is bounded by the current job (SQLite
-        // busy_timeout), never an indefinite block on a full queue. Never touches
-        // live Zynk state.
+        // has drained what was already queued (ordinary shutdown may drain several
+        // jobs, each bounded by its DB timeouts). A live handoff never reaches this
+        // drop with a non-empty queue: its pause was acknowledged only once nothing
+        // was in flight or queued, so that join is prompt. Never touches live Zynk state.
         self.control.stop();
         if let Some(sender) = self.sender.take() {
             let _ = sender.try_send(WorkerMessage::Shutdown);
@@ -238,9 +239,6 @@ fn worker_loop(
         match message {
             WorkerMessage::Shutdown => break,
             WorkerMessage::Job(job) => {
-                // Paused (live handoff): the job waits here, unstarted, until resume. A dropped
-                // handle releases the wait so queued jobs DRAIN before the join (drop policy:
-                // drain, never cancel — the submitter is still waiting for this answer).
                 // Test hook: hold the job here — taken from the queue but not yet in flight (the
                 // state a live-handoff pause must still count as outstanding work).
                 if let Some(block_file) = std::env::var_os(ZYNK_TEST_RECEIPT_BLOCK_FILE_ENV) {
@@ -517,11 +515,17 @@ mod tests {
             )
             .unwrap_err();
         let elapsed = start.elapsed();
-
         assert_eq!(err.code, "receipt_worker_busy");
         assert!(
             elapsed < Duration::from_secs(1),
             "submit blocked on a full queue instead of returning fast: {elapsed:?}"
+        );
+        // The rejected job must not leave a reservation behind: with the (imaginary) loop idle,
+        // a pause is acknowledged at once.
+        handle.control.set_idle();
+        assert!(
+            handle.pause(Duration::from_millis(10)),
+            "a Full rejection leaked a queued reservation"
         );
         drop(_receiver);
     }
@@ -568,5 +572,10 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.code, "receipt_worker_unavailable");
+        handle.control.set_idle();
+        assert!(
+            handle.pause(Duration::from_millis(10)),
+            "a Disconnected rejection leaked a queued reservation"
+        );
     }
 }
