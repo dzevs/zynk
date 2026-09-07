@@ -3678,6 +3678,13 @@ pub fn run_server() -> io::Result<()> {
         // Every other startup DB failure (init-lock timeout, migration failure, I/O) is fatal too:
         // a server that binds its API socket without working persistence would run degraded for the
         // whole session, so abort with the branded error and a non-zero exit instead.
+        // The daemon launcher discards stderr, so the cause must also reach the durable server log
+        // (the file writer is synchronous; this line is on disk before `exit`).
+        error!(
+            code = %err.code,
+            message = %err.message,
+            "server startup aborted: the database could not be opened or migrated"
+        );
         eprintln!("{}", err.message);
         if err.code != "db_foreign_conflict" {
             eprintln!(
