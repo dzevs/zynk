@@ -1441,50 +1441,432 @@ fn live_handoff_fails_closed_on_a_foreign_db_and_rolls_back_old_server() {
     cleanup_test_base(&base);
 }
 
-#[test]
-fn live_handoff_installs_the_db_workers_in_the_replacement() {
-    // Gate-3 round 2 (G3-R2-SRV-001): the replacement must own the receipt/embedding DB workers
-    // like a primary start — without them every receipt failed with `receipt_worker_unavailable`.
-    let _lock = test_lock();
+// ---- Codex Gate-2 round 8: DB workers and in-flight sends across a live handoff ----
+
+/// Run the `zynk` CLI against the spawned server (same isolation as the server env).
+fn run_zynk_cli(
+    config_home: &Path,
+    runtime_dir: &Path,
+    api_socket: &Path,
+    args: &[&str],
+) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zynk"))
+        .args(args)
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("ZYNK_SOCKET_PATH", api_socket)
+        .env("ZYNK_SQLITE_HOME", config_home.join("sqlite"))
+        .env_remove("ZYNK_HOME")
+        .env_remove("ZYNK_CLIENT_SOCKET_PATH")
+        .env_remove("ZYNK_ENV")
+        .env_remove("ZYNK_PANE_ID")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "zynk {} failed ({:?}): {}
+{}",
+        args.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// `zynk send <pane> -- <body>` → the F4 outcome JSON (message_id, conversation_id, ...).
+fn zynk_send(
+    config_home: &Path,
+    runtime_dir: &Path,
+    api_socket: &Path,
+    pane_id: &str,
+    body: &str,
+) -> serde_json::Value {
+    let stdout = run_zynk_cli(
+        config_home,
+        runtime_dir,
+        api_socket,
+        &["send", pane_id, "--", body],
+    );
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .unwrap_or_else(|| panic!("no JSON outcome in: {stdout}"));
+    let outcome: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert!(outcome.get("error").is_none(), "send failed: {outcome}");
+    outcome
+}
+
+/// Hook-authoritative agent identity for `pane_id` (what the agent hooks report), so the pane is
+/// receipt-capable.
+fn report_agent(api_socket: &Path, pane_id: &str, label: &str) {
+    assert_ok(request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:report-agent",
+            "method": "pane.report_agent",
+            "params": {"pane_id": pane_id, "source": "hook", "agent": label, "state": "idle"}
+        }),
+    ));
+}
+
+/// The receipt request an agent hook sends for a delivered message.
+fn receipt_request(sent: &serde_json::Value, receiver_pane: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "test:receipt",
+        "method": "zynk.message_received",
+        "params": {
+            "pane_id": receiver_pane,
+            "message_id": sent["message_id"],
+            "conversation_id": sent["conversation_id"],
+            "conversation_seq": sent["conversation_seq"],
+            "runtime_session_id": sent["runtime_session_id"],
+            "socket_namespace": sent["socket_namespace"]
+        }
+    })
+}
+
+fn db_block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
+async fn open_db(db: &Path) -> sqlx::SqliteConnection {
+    use sqlx::Connection;
+    sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(db)
+            .create_if_missing(false),
+    )
+    .await
+    .unwrap()
+}
+
+fn delivery_event_types(db: &Path, message_id: &str) -> Vec<String> {
+    use sqlx::Row;
+    db_block_on(async {
+        let mut conn = open_db(db).await;
+        sqlx::query("SELECT event_type FROM delivery_events WHERE message_id = ? ORDER BY seq")
+            .bind(message_id)
+            .fetch_all(&mut conn)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get::<String, _>("event_type"))
+            .collect()
+    })
+}
+
+/// Model the sender's legitimate in-flight window: its message row is committed, but its first
+/// transport event is not recorded yet (`pane send` persists, then dispatches, then records).
+fn erase_delivery_events(db: &Path, message_id: &str) {
+    db_block_on(async {
+        let mut conn = open_db(db).await;
+        sqlx::query("DELETE FROM delivery_events WHERE message_id = ?")
+            .bind(message_id)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+    });
+}
+
+fn embedding_job(db: &Path, message_id: &str) -> Option<(String, i64)> {
+    use sqlx::Row;
+    db_block_on(async {
+        let mut conn = open_db(db).await;
+        sqlx::query("SELECT status, attempts FROM embedding_jobs WHERE message_id = ?")
+            .bind(message_id)
+            .fetch_optional(&mut conn)
+            .await
+            .unwrap()
+            .map(|row| {
+                (
+                    row.get::<String, _>("status"),
+                    row.get::<i64, _>("attempts"),
+                )
+            })
+    })
+}
+
+fn embedding_rows(db: &Path, message_id: &str) -> i64 {
+    use sqlx::Row;
+    db_block_on(async {
+        let mut conn = open_db(db).await;
+        sqlx::query("SELECT count(*) AS c FROM message_embeddings WHERE message_id = ?")
+            .bind(message_id)
+            .fetch_one(&mut conn)
+            .await
+            .unwrap()
+            .get::<i64, _>("c")
+    })
+}
+
+fn wait_for_embedding_job(db: &Path, message_id: &str, wanted: (&str, i64), timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = embedding_job(db, message_id);
+        if state.as_ref().map(|(s, a)| (s.as_str(), *a)) == Some(wanted) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "embedding job for {message_id} never reached {wanted:?} (now {state:?})"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// The old server removes its API socket file after "restored" and the replacement binds the same
+/// path right before "ready" — often within a millisecond, so existence polling can miss it. The
+/// socket INODE changing is the robust external signal that the replacement is ready (and the old
+/// server is about to quiesce its workers).
+fn wait_for_socket_rebound(api_socket: &Path, timeout: Duration) {
+    use std::os::unix::fs::MetadataExt;
+    let ino = |path: &Path| fs::metadata(path).ok().map(|meta| meta.ino());
+    let before = ino(api_socket).expect("the old API socket exists before the handoff");
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(now) = ino(api_socket) {
+            if now != before {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the replacement never bound the API socket at {}",
+            api_socket.display()
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+struct HandoffFixture {
+    base: PathBuf,
+    config_home: PathBuf,
+    runtime_dir: PathBuf,
+    api_socket: PathBuf,
+    db: PathBuf,
+    pane_id: String,
+    spawned: SpawnedZynk,
+}
+
+/// A server with one root pane; `extra_env` customizes the server process (test hooks).
+fn handoff_fixture(extra_env: &[(&str, &str)]) -> HandoffFixture {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let api_socket = runtime_dir.join("zynk.sock");
-    let client_socket = runtime_dir.join("zynk-client.sock");
-    let server_log = config_home.join("zynk-dev").join("zynk-server.log");
-
-    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    let spawned = spawn_server_with_env(&config_home, &runtime_dir, &api_socket, extra_env);
     wait_for_socket(&api_socket, Duration::from_secs(10));
     register_runtime_dir(&runtime_dir);
-    wait_for_file_contains(
-        &server_log,
-        "zynk db workers installed",
-        Duration::from_secs(5),
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
     );
-    assert_eq!(count_in_file(&server_log, "zynk db workers installed"), 1);
-
-    assert_ok(request(
-        &api_socket,
-        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
-    ));
-    drop(spawned);
-    wait_for_api(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(5));
-    let started_at = Instant::now();
-    while count_in_file(&server_log, "zynk db workers installed") < 2 {
-        assert!(
-            started_at.elapsed() < Duration::from_secs(5),
-            "the replacement never installed its DB workers:\n{}",
-            fs::read_to_string(&server_log).unwrap_or_default()
-        );
-        thread::sleep(Duration::from_millis(50));
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    HandoffFixture {
+        db: config_home.join("sqlite").join("zynk.db"),
+        base,
+        config_home,
+        runtime_dir,
+        api_socket,
+        pane_id,
+        spawned,
     }
+}
 
+fn in_flight_send_is_not_failed_by_a_handoff(rollback: bool) {
+    // Codex Gate-2 round 8 (P1): the replacement's DB pre-flight must not run orphan-message
+    // recovery — the old server is alive and a sender may be between persisting its message and its
+    // first transport event. A synthesized `failed` would make the sender's later `submitted`
+    // invalid (`invalid_delivery_transition`) and the message could never be receipted.
+    let _lock = test_lock();
+    let env: &[(&str, &str)] = if rollback {
+        &[("ZYNK_TEST_HANDOFF_IMPORT_FAIL", "after_restored")]
+    } else {
+        &[]
+    };
+    let f = handoff_fixture(env);
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let sent = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "in flight",
+    );
+    let message_id = sent["message_id"].as_str().unwrap().to_string();
+    assert_eq!(delivery_event_types(&f.db, &message_id), vec!["submitted"]);
+    erase_delivery_events(&f.db, &message_id);
+
+    let response = request(
+        &f.api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    );
+    if rollback {
+        assert!(
+            response.get("error").is_some(),
+            "handoff should roll back: {response}"
+        );
+    } else {
+        assert_ok(response);
+        drop(f.spawned);
+    }
+    wait_for_api(&f.api_socket, Duration::from_secs(10));
+    assert_eq!(
+        delivery_event_types(&f.db, &message_id),
+        Vec::<String>::new(),
+        "the handoff synthesized a delivery event for an in-flight send"
+    );
+    // A later send on the same server still works end to end (the sender records `submitted`);
+    // the receiver's hook re-reports its identity as agent hooks do on every event.
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let later = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "after handoff",
+    );
+    assert_eq!(
+        delivery_event_types(&f.db, later["message_id"].as_str().unwrap()),
+        vec!["submitted"]
+    );
     let _ = request(
-        &api_socket,
+        &f.api_socket,
         serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
     );
-    cleanup_test_base(&base);
+    cleanup_test_base(&f.base);
+}
+
+#[test]
+fn live_handoff_does_not_fail_an_in_flight_send() {
+    in_flight_send_is_not_failed_by_a_handoff(false);
+}
+
+#[test]
+fn rolled_back_live_handoff_does_not_fail_an_in_flight_send() {
+    in_flight_send_is_not_failed_by_a_handoff(true);
+}
+
+fn db_workers_hand_over_a_blocked_job(commit_fails: bool) {
+    // Codex Gate-2 round 8 (P2): a job blocked inside the old server's embedding worker must be
+    // finished by that worker before the replacement's workers start (old workers joined before
+    // "committed"); after a successful handoff the replacement owns working receipt + embedding
+    // workers, and after a failed commit the old server has its workers back. The job is attempted
+    // exactly once and has exactly one embedding row either way.
+    let _lock = test_lock();
+    let base_hint = unique_test_dir();
+    let release = base_hint.join("release-embedding");
+    let release_str = release.to_string_lossy().to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("ZYNK_EMBED_PROVIDER", "fake-blocking"),
+        ("ZYNK_TEST_EMBED_RELEASE_FILE", &release_str),
+        ("ZYNK_EMBED_POLL_MS", "50"),
+    ];
+    if commit_fails {
+        env.push(("ZYNK_TEST_HANDOFF_COMMIT_FAIL", "1"));
+    }
+    let f = handoff_fixture(&env);
+    fs::create_dir_all(&base_hint).unwrap();
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let sent = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "before handoff",
+    );
+    let message_id = sent["message_id"].as_str().unwrap().to_string();
+    // The old worker picked the job up and is blocked inside the embedder.
+    wait_for_embedding_job(&f.db, &message_id, ("running", 1), Duration::from_secs(10));
+
+    // The handoff request blocks inside the old server while it quiesces (joins) its workers, so it
+    // runs on its own thread; the replacement's readiness is observed from outside.
+    let api_socket = f.api_socket.clone();
+    let handoff = thread::spawn(move || {
+        request(
+            &api_socket,
+            serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+        )
+    });
+    wait_for_socket_rebound(&f.api_socket, Duration::from_secs(15));
+    // Still blocked: the replacement is ready, the old server is waiting on its worker.
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        embedding_job(&f.db, &message_id),
+        Some(("running".to_string(), 1))
+    );
+    fs::write(&release, b"go").unwrap();
+    let response = handoff.join().unwrap();
+    if commit_fails {
+        assert!(
+            response.get("error").is_some(),
+            "commit failure must roll back: {response}"
+        );
+    } else {
+        assert_ok(response);
+        drop(f.spawned);
+    }
+    wait_for_api(&f.api_socket, Duration::from_secs(10));
+
+    wait_for_embedding_job(&f.db, &message_id, ("done", 1), Duration::from_secs(10));
+    assert_eq!(
+        embedding_rows(&f.db, &message_id),
+        1,
+        "exactly one embedding row"
+    );
+
+    // The serving server (replacement, or the restored old one) owns a working receipt worker ...
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let receipt = request(&f.api_socket, receipt_request(&sent, &f.pane_id));
+    assert!(receipt.get("error").is_none(), "receipt failed: {receipt}");
+    assert_eq!(
+        receipt["result"]["delivery_status"], "received",
+        "{receipt}"
+    );
+    // ... and a working embedding worker.
+    let later = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "after handoff",
+    );
+    let later_id = later["message_id"].as_str().unwrap().to_string();
+    wait_for_embedding_job(&f.db, &later_id, ("done", 1), Duration::from_secs(10));
+    assert_eq!(
+        embedding_job(&f.db, &message_id),
+        Some(("done".to_string(), 1)),
+        "no stale overwrite"
+    );
+
+    let _ = request(
+        &f.api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&f.base);
+    let _ = fs::remove_dir_all(&base_hint);
+}
+
+#[test]
+fn live_handoff_hands_the_db_workers_over_without_duplicate_processing() {
+    db_workers_hand_over_a_blocked_job(false);
+}
+
+#[test]
+fn failed_live_handoff_commit_restores_the_db_workers() {
+    db_workers_hand_over_a_blocked_job(true);
 }
 
 #[test]

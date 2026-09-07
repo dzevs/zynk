@@ -556,6 +556,7 @@ mod tests {
     use crate::zynk::embed::FakeEmbedder;
     use crate::zynk::message::{Party, SendCommand};
     use crate::zynk::persistence::{begin_send_attempt_async, SendAttempt};
+    use sqlx::Connection;
 
     fn temp_db_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -603,6 +604,158 @@ mod tests {
             .await
             .unwrap();
         row.try_get::<i64, _>("rowid").unwrap()
+    }
+
+    /// A `FakeEmbedder` that blocks inside `embed` until released: models an in-flight job.
+    struct BlockingEmbedder {
+        inner: FakeEmbedder,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Embedder for BlockingEmbedder {
+        fn dim(&self) -> usize {
+            self.inner.dim()
+        }
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+        fn embed(
+            &mut self,
+            texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, crate::zynk::embed::EmbedError> {
+            let _ = self.release.recv();
+            self.inner.embed(texts)
+        }
+    }
+
+    /// `(status, attempts)` of the message's job — `None` while the database or the job row does not
+    /// exist yet (the old worker creates both).
+    fn job_state(path: &std::path::Path, message_id: &str) -> Option<(String, i64)> {
+        crate::zynk::db::block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(path)
+                    .create_if_missing(false),
+            )
+            .await?;
+            let row = sqlx::query("SELECT status, attempts FROM embedding_jobs WHERE message_id=?")
+                .bind(message_id)
+                .fetch_one(&mut conn)
+                .await?;
+            Ok::<(String, i64), DbError>((row.try_get("status")?, row.try_get("attempts")?))
+        })
+        .ok()
+    }
+
+    fn wait_for_job_state(path: &std::path::Path, message_id: &str, wanted: (&str, i64)) {
+        let started = std::time::Instant::now();
+        loop {
+            let state = job_state(path, message_id);
+            if state.as_ref().map(|(s, a)| (s.as_str(), *a)) == Some(wanted) {
+                return;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "job never reached {wanted:?} (now {state:?})"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// An "old worker" thread: seeds a message and processes the batch with a blocking embedder,
+    /// returning how many jobs it attempted.
+    fn spawn_blocked_old_worker(
+        path: std::path::PathBuf,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> std::thread::JoinHandle<u32> {
+        std::thread::spawn(move || {
+            crate::zynk::db::block_on(async {
+                let mut conn = open_migrated_at_without_recovery(&path).await?;
+                seed_message(&mut conn, "msg_handover").await;
+                let mut embedder = BlockingEmbedder {
+                    inner: FakeEmbedder::with_dim(8),
+                    release,
+                };
+                let (model_id, vec_table, dim) =
+                    ensure_model_and_vec0(&mut conn, &embedder).await?;
+                process_pending_batch(&mut conn, &mut embedder, &model_id, &vec_table, dim, 32)
+                    .await
+            })
+            .unwrap()
+        })
+    }
+
+    /// The replacement worker's startup: recovery of `running` jobs, then one poll sweep.
+    fn replacement_startup_sweep(path: &std::path::Path) -> u32 {
+        crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(path).await?;
+            let mut embedder = FakeEmbedder::with_dim(8);
+            let (model_id, vec_table, dim) = ensure_model_and_vec0(&mut conn, &embedder).await?;
+            recover_running_jobs(&mut conn, &model_id).await?;
+            process_pending_batch(&mut conn, &mut embedder, &model_id, &vec_table, dim, 32).await
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_joined_old_worker_hands_a_blocked_job_over_exactly_once() {
+        // Codex Gate-2 round 8 (P2): the live-handoff ORDER — old workers joined BEFORE the
+        // replacement recovers/polls — is what keeps a job single-owner. The old worker is blocked
+        // inside its job; it is released and joined first; the replacement's startup then finds
+        // nothing to recover or process: one attempt, one embedding row.
+        crate::zynk::embed::vec::register_sqlite_vec();
+        std::env::remove_var(crate::zynk::embed::ZYNK_EMBED_PROVIDER_ENV);
+        let path = temp_db_path();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let old = spawn_blocked_old_worker(path.clone(), release_rx);
+        wait_for_job_state(&path, "msg_handover", ("running", 1));
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            old.join().unwrap(),
+            1,
+            "the old worker attempted its one job"
+        );
+        assert_eq!(
+            job_state(&path, "msg_handover"),
+            Some(("done".to_string(), 1))
+        );
+        assert_eq!(
+            replacement_startup_sweep(&path),
+            0,
+            "nothing left for the replacement"
+        );
+        assert_eq!(
+            job_state(&path, "msg_handover"),
+            Some(("done".to_string(), 1))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unjoined_old_worker_double_processes_a_blocked_job() {
+        // The hazard the protocol ordering prevents (negative control): a replacement that starts
+        // while the old worker still owns a `running` job resets and re-runs it — two attempts for
+        // one job, and the old worker's late completion lands on top of the new result.
+        crate::zynk::embed::vec::register_sqlite_vec();
+        std::env::remove_var(crate::zynk::embed::ZYNK_EMBED_PROVIDER_ENV);
+        let path = temp_db_path();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let old = spawn_blocked_old_worker(path.clone(), release_rx);
+        wait_for_job_state(&path, "msg_handover", ("running", 1));
+        assert_eq!(
+            replacement_startup_sweep(&path),
+            1,
+            "the replacement re-ran the owned job"
+        );
+        assert_eq!(
+            job_state(&path, "msg_handover").unwrap().1,
+            2,
+            "two attempts for one job"
+        );
+        release_tx.send(()).unwrap();
+        let _ = old.join().unwrap();
+        assert_eq!(job_state(&path, "msg_handover").unwrap().1, 2);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

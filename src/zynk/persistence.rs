@@ -858,6 +858,48 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_event_freezes_the_message() {
+        // Why a synthesized `failed` is destructive (Codex Gate-2 round 8): once `failed` is the
+        // latest event nothing may follow — the sender's own `submitted` and any later `received`
+        // are rejected. Orphan recovery must therefore never run beside a live sender.
+        crate::zynk::db::block_on(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let message =
+                create_test_message(&mut conn, "msg_in_flight", SendCommand::PaneRun).await;
+            append_delivery_event_async(
+                &mut conn,
+                DeliveryEventInput {
+                    message_id: &message.message_id,
+                    event_type: DeliveryEventType::Failed,
+                    proof_source: "system.recovery",
+                    timestamp: "2026-06-14T00:00:01Z",
+                    payload: serde_json::json!({}),
+                },
+            )
+            .await?;
+            for next in [DeliveryEventType::Submitted, DeliveryEventType::Received] {
+                let rejected = append_delivery_event_async(
+                    &mut conn,
+                    DeliveryEventInput {
+                        message_id: &message.message_id,
+                        event_type: next,
+                        proof_source: "pane.send_input",
+                        timestamp: "2026-06-14T00:00:02Z",
+                        payload: serde_json::json!({}),
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(rejected.code, "invalid_delivery_transition");
+            }
+            let _ = std::fs::remove_file(&path);
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn delivery_transition_validation_covers_m3a_received_matrix() {
         crate::zynk::db::block_on(async {
             let path = temp_db_path();

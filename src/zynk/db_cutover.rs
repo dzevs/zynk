@@ -289,7 +289,10 @@ fn classify_db_leaf_args(rest: &[String]) -> DbLeafArgs {
 fn cmd_status(path: &Path, out: &mut dyn Sink, err: &mut dyn Sink) -> i32 {
     match classify_with_state(path) {
         Ok((class, state)) => {
-            out.line(&format!("zynk db path: {}", path.display()));
+            out.line(&format!(
+                "zynk db path: {}",
+                crate::zynk::db::printable_path(path)
+            ));
             out.line(&format!("status:       {}", describe(&class, &state)));
             if let DbClassification::Foreign { .. } = class {
                 out.line(

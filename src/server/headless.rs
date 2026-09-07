@@ -981,8 +981,20 @@ impl HeadlessServer {
                 "handoff replacement server did not become ready: {err}"
             )));
         }
-        if let Err(err) = crate::server::handoff::report_committed(&mut stream) {
+        // DB-worker handover (Codex Gate-2 round 8): the replacement activates its receipt/embedding
+        // workers only after "committed", and this server sends "committed" only after its own workers
+        // have stopped — their in-flight job finished, their queue drained — so no job is ever owned
+        // by two workers (the replacement's startup recovery resets `running` jobs, and two pollers
+        // would select the same pending batch). A commit failure restores them before rolling back.
+        self.quiesce_db_workers_for_handoff();
+        let committed = if std::env::var("ZYNK_TEST_HANDOFF_COMMIT_FAIL").as_deref() == Ok("1") {
+            Err(io::Error::other("test handoff commit failure"))
+        } else {
+            crate::server::handoff::report_committed(&mut stream)
+        };
+        if let Err(err) = committed {
             crate::server::handoff::cleanup_failed_import_child(&mut import_child);
+            self.restore_db_workers_after_failed_handoff();
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
                 Ok(()) => {
                     self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
@@ -1061,6 +1073,24 @@ impl HeadlessServer {
         let timeout = crate::server::handoff::COMMIT_TIMEOUT + Duration::from_secs(2);
         wait_for_old_public_sockets_to_close(timeout)?;
         self.restore_public_sockets_after_failed_handoff()
+    }
+
+    /// Stop + join the App-owned DB workers before "committed" (bounded by the in-flight job: the
+    /// receipt queue drains, the embedding batch finishes). Public sockets are already down at this
+    /// point, so nothing new can be enqueued.
+    #[cfg(unix)]
+    fn quiesce_db_workers_for_handoff(&mut self) {
+        let _ = self.app.zynk_receipt_worker.take();
+        let _ = self.app.zynk_embedding_worker.take();
+        info!("zynk db workers quiesced for handoff");
+    }
+
+    /// Rollback restoration after a failed commit: this server keeps serving, so it needs its
+    /// workers back (fresh threads; startup recovery finds nothing running).
+    #[cfg(unix)]
+    fn restore_db_workers_after_failed_handoff(&mut self) {
+        install_db_workers(&mut self.app);
+        info!("zynk db workers restored after failed handoff");
     }
 
     #[cfg(unix)]
@@ -3671,7 +3701,7 @@ pub fn run_server() -> io::Result<()> {
 
     let loaded_config = config::Config::load();
     let runtime_session_id = crate::zynk::runtime::ensure_runtime_id_file()?;
-    if preflight_native_db().is_err() {
+    if preflight_native_db(DbPreflightRecovery::ColdStart).is_err() {
         std::process::exit(1);
     }
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3776,6 +3806,19 @@ fn take_startup_cwd() -> Option<PathBuf> {
     (!cwd.is_empty()).then(|| PathBuf::from(cwd))
 }
 
+/// Whether the startup DB pre-flight may run orphan-message recovery (`recover_orphan_messages`
+/// fails every message that has no delivery event yet). Only a COLD start may: nothing else can be
+/// mid-send. During a live handoff the old server is still alive and a sender legitimately commits
+/// its message before its first transport event (`pane send` persists, then dispatches), so the
+/// replacement must not synthesize a terminal `failed` for that in-flight send (Codex Gate-2 round 8).
+#[derive(Clone, Copy)]
+enum DbPreflightRecovery {
+    ColdStart,
+    /// Only the Unix live-handoff replacement validates without recovery.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    None,
+}
+
 /// Fail-closed startup DB pre-flight (ADR 0008/0011), shared by the primary server and the
 /// handoff-import replacement (Gate-3 round 2: the replacement used to bind public service without
 /// it). A FOREIGN database at the resolved native path is a safety-critical conflict — zynk must
@@ -3785,8 +3828,16 @@ fn take_startup_cwd() -> Option<PathBuf> {
 /// that binds its API socket without working persistence would run degraded for the whole session.
 /// The daemon launcher discards stderr, so the cause also reaches the durable server log (the file
 /// writer is synchronous; the line is on disk before the caller exits).
-fn preflight_native_db() -> Result<(), crate::zynk::db::DbError> {
-    let Err(err) = crate::zynk::db::block_on(crate::zynk::db::open_migrated()) else {
+fn preflight_native_db(recovery: DbPreflightRecovery) -> Result<(), crate::zynk::db::DbError> {
+    let opened = match recovery {
+        DbPreflightRecovery::ColdStart => {
+            crate::zynk::db::block_on(crate::zynk::db::open_migrated())
+        }
+        DbPreflightRecovery::None => {
+            crate::zynk::db::block_on(crate::zynk::db::open_migrated_without_recovery())
+        }
+    };
+    let Err(err) = opened else {
         return Ok(());
     };
     error!(
@@ -3808,7 +3859,8 @@ fn preflight_native_db() -> Result<(), crate::zynk::db::DbError> {
 /// zynk fork (M3a): the App-owned DB workers, spawned before the server takes ownership of `app`.
 /// Each owns its own current-thread Tokio runtime + native DB connection and never touches live
 /// state. Installed on the primary path AND on the handoff-import path (Gate-3 round 2: a replacement
-/// server without them answered every receipt with `receipt_worker_unavailable`).
+/// server without them answered every receipt with `receipt_worker_unavailable`) — on the latter only
+/// after "committed", once the old server's workers are joined (Codex Gate-2 round 8).
 fn install_db_workers(app: &mut app::App) {
     app.zynk_receipt_worker = Some(crate::zynk::receipt_worker::spawn());
     app.zynk_embedding_worker = Some(crate::zynk::embedding_worker::spawn());
@@ -3822,8 +3874,9 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     crate::server::handoff::log_import_result(received.manifest.panes.len());
     // Same fail-closed DB readiness as the primary path, before any public service: on failure the
     // replacement exits here and the old server rolls back and keeps serving (the handoff stream
-    // closes before "restored").
-    if let Err(err) = preflight_native_db() {
+    // closes before "restored"). NO orphan recovery: the old server is alive and senders may be
+    // between persisting a message and its first transport event.
+    if let Err(err) = preflight_native_db(DbPreflightRecovery::None) {
         return Err(io::Error::other(err.message));
     }
 
@@ -3858,7 +3911,6 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         )?;
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
-        install_db_workers(&mut app);
         crate::server::handoff::report_restored(&mut received.stream)?;
         if std::env::var("ZYNK_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(
@@ -3876,6 +3928,10 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         )?;
         crate::server::handoff::report_ready(&mut received.stream)?;
         crate::server::handoff::wait_committed(&mut received.stream)?;
+        // Only now: the old server quiesced its workers before "committed" (see
+        // `quiesce_db_workers_for_handoff`), so the replacement's startup recovery/polling cannot
+        // overlap a job the old worker still owns.
+        install_db_workers(&mut server.app);
         server.app.assume_handoff_ownership();
         server.app.unpause_handoff_readers();
         server.pending_handoff_repaint_nudge = true;

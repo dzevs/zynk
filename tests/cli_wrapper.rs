@@ -1214,6 +1214,90 @@ fn plant_orphan_wal(wal_path: &Path, sql: &str) {
     let _ = fs::remove_file(src.with_file_name("wal-source.db-shm"));
 }
 
+/// Child-process half of `cli_fails_closed_on_a_hot_rollback_journal`: a rollback-mode writer that
+/// spills past its page cache inside an open transaction and dies without committing.
+#[test]
+#[ignore = "helper: run only by its parent test"]
+fn hot_journal_crashing_writer() {
+    use sqlx::{Connection, Executor};
+    let Ok(path) = std::env::var("ZYNK_TEST_HOT_JOURNAL_DB") else {
+        return;
+    };
+    sqlite_block_on(async {
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "PRAGMA journal_mode = DELETE; PRAGMA cache_size = 8; \
+             CREATE TABLE customer_data (id INTEGER PRIMARY KEY, payload BLOB); \
+             INSERT INTO customer_data VALUES (0, zeroblob(1024))",
+        )
+        .await
+        .unwrap();
+        conn.execute("BEGIN IMMEDIATE").await.unwrap();
+        for id in 1..400 {
+            sqlx::query("INSERT INTO customer_data VALUES (?, randomblob(1024))")
+                .bind(id)
+                .execute(&mut conn)
+                .await
+                .unwrap();
+        }
+        std::mem::forget(conn);
+    });
+    std::process::exit(0);
+}
+
+#[test]
+fn cli_fails_closed_on_a_hot_rollback_journal() {
+    // Codex Gate-2 round 8 (P1), at the CLI boundary: a foreign database left by a crashed writer
+    // (hot -journal) must be refused by `db status` and `query` before any connection exists — a
+    // read-write open would roll the journal back (main file rewritten, journal deleted).
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let db = config_home.join("sqlite").join("zynk.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "hot_journal_crashing_writer",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("ZYNK_TEST_HOT_JOURNAL_DB", &db)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "crashing writer helper failed: {status}");
+    let journal = db.with_file_name("zynk.db-journal");
+    let journal_bytes = fs::read(&journal).unwrap();
+    assert!(
+        journal_bytes.len() > 512 && journal_bytes[0] != 0,
+        "fixture must leave a hot journal"
+    );
+    let before = (fs::read(&db).unwrap(), journal_bytes);
+
+    let status = run_named_cli(&config_home, &runtime_dir, &["db", "status"]);
+    assert!(
+        !status.status.success(),
+        "db status must fail closed: {status:?}"
+    );
+    assert!(String::from_utf8_lossy(&status.stderr).contains("db_hot_journal"));
+    let query = run_named_cli(&config_home, &runtime_dir, &["query", "customer", "--json"]);
+    assert!(!query.status.success(), "query must fail closed: {query:?}");
+    assert!(String::from_utf8_lossy(&query.stdout).contains("db_hot_journal"));
+    assert_eq!(
+        (fs::read(&db).unwrap(), fs::read(&journal).unwrap()),
+        before,
+        "main/-journal bytes changed"
+    );
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn cli_fails_closed_on_an_orphan_wal_beside_an_absent_db() {
     // Gate-3 round 2 (G3-R2-DB-002), at the CLI boundary: a nonempty `zynk.db-wal` with no

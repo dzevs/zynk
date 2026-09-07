@@ -110,6 +110,39 @@ impl Embedder for FakeEmbedder {
     }
 }
 
+/// A [`FakeEmbedder`] whose every `embed` call blocks until `release` exists (see
+/// `ZYNK_TEST_EMBED_RELEASE_FILE`): a test-only provider that keeps a job `running` on demand.
+pub struct BlockingFakeEmbedder {
+    inner: FakeEmbedder,
+    release: std::path::PathBuf,
+}
+
+impl BlockingFakeEmbedder {
+    pub fn new(release: std::path::PathBuf) -> Self {
+        Self {
+            inner: FakeEmbedder::new(),
+            release,
+        }
+    }
+}
+
+impl Embedder for BlockingFakeEmbedder {
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+
+    fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        while !self.release.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.inner.embed(texts)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

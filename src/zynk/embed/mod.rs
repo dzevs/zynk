@@ -62,6 +62,11 @@ impl std::error::Error for EmbedError {}
 /// deterministic, network-free provider; `"fastembed"` is the real model arm (B5).
 pub const ZYNK_EMBED_PROVIDER_ENV: &str = "ZYNK_EMBED_PROVIDER";
 
+/// Test hook (with `ZYNK_EMBED_PROVIDER=fake-blocking`): every `embed` call blocks until the file at
+/// this path exists, so a test can hold an embedding job `running` inside one server across a live
+/// handoff. Never a production provider.
+pub const ZYNK_TEST_EMBED_RELEASE_FILE_ENV: &str = "ZYNK_TEST_EMBED_RELEASE_FILE";
+
 /// Build an [`Embedder`] from `ZYNK_EMBED_PROVIDER` (default `"fake"` when unset/empty).
 ///
 /// - `"fake"` → a deterministic [`FakeEmbedder`] (default dim 384).
@@ -75,6 +80,16 @@ pub fn embedder_from_env() -> Result<Box<dyn Embedder>, EmbedError> {
     let provider = provider.trim();
     match provider {
         "" | "fake" => Ok(Box::new(FakeEmbedder::new())),
+        "fake-blocking" => {
+            let release = std::env::var_os(ZYNK_TEST_EMBED_RELEASE_FILE_ENV)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| {
+                    EmbedError::ModelUnavailable(format!(
+                        "fake-blocking requires {ZYNK_TEST_EMBED_RELEASE_FILE_ENV}"
+                    ))
+                })?;
+            Ok(Box::new(fake::BlockingFakeEmbedder::new(release)))
+        }
         "fastembed" => {
             #[cfg(feature = "fastembed")]
             {

@@ -102,6 +102,12 @@ pub async fn open_migrated() -> Result<SqliteConnection, DbError> {
     open_migrated_at(&path).await
 }
 
+/// `open_migrated` without orphan-message recovery: readiness/migration validation only.
+pub async fn open_migrated_without_recovery() -> Result<SqliteConnection, DbError> {
+    let path = crate::zynk::db_path::db_path();
+    open_migrated_at_without_recovery(&path).await
+}
+
 pub async fn open_migrated_for_append() -> Result<SqliteConnection, DbError> {
     let path = crate::zynk::db_path::db_path();
     open_migrated_at_without_recovery(&path).await
@@ -155,8 +161,23 @@ async fn open_migrated_at_with_hook(
         std::fs::create_dir_all(parent)?;
     }
     // Existing data beside an absent/zero-page main file is refused BEFORE any connection exists:
-    // SQLite discards a stale `-wal` on the first read of a zero-page database (ADR 0011).
+    // SQLite discards a stale `-wal` on the first read of a zero-page database (ADR 0011). A HOT
+    // rollback journal is refused before any connection too: a read-write pager would play it back
+    // on its first shared lock — before any verdict (Codex Gate-2 round 8).
     refuse_orphan_sidecars(path)?;
+    // A journal that looks hot may belong to a zynk initializer mid journal-mode switch (it holds the
+    // init lock for that): wait for the lock, then re-check; a journal that is still hot afterwards
+    // was left by a crashed or foreign writer and is refused for good.
+    let mut early_lock = None;
+    if let Err(err) = refuse_hot_journal(path) {
+        if err.code != "db_hot_journal" {
+            return Err(err);
+        }
+        let lock = InitLock::acquire(path).await?;
+        refuse_orphan_sidecars(path)?;
+        refuse_hot_journal(path)?;
+        early_lock = Some(lock);
+    }
     // ONE connection for inspection AND writing (Gate-3 round 2): the open pins the target file, so a
     // symlink flip or a rename between the verdict and the writable use cannot redirect the writes to
     // a different file — classification authority is never reused for a swapped target. Connecting
@@ -170,11 +191,11 @@ async fn open_migrated_at_with_hook(
     // existing database is inspected first and, when new or native with PENDING migrations, inspected
     // again on the SAME connection under the lock (sqlx's SQLite migrator has no cross-process lock of
     // its own). Only a fully CURRENT native database opens without waiting on any lock holder.
-    let (mut conn, identity, _init_lock, verdict) = if existing_nonempty_file(path) {
+    let (mut conn, identity, _init_lock, verdict) = if main_file_present(path)? {
         let (mut conn, identity) = connect_pinned(path, false).await?;
         match classify_open_conn(&mut conn).await? {
             (DbClassification::Native, MigrationState::Current) => {
-                (conn, identity, None, DbClassification::Native)
+                (conn, identity, early_lock.take(), DbClassification::Native)
             }
             (DbClassification::Foreign { tables }, _) => {
                 return refuse(conn, foreign_db_error(path, &tables)).await;
@@ -184,7 +205,10 @@ async fn open_migrated_at_with_hook(
             }
             // Empty (ledger-only init in progress/aborted) or native with pending migrations.
             (_, _) => {
-                let lock = InitLock::acquire(path).await?;
+                let lock = match early_lock.take() {
+                    Some(lock) => lock,
+                    None => InitLock::acquire(path).await?,
+                };
                 match classify_open_conn(&mut conn).await? {
                     (DbClassification::Foreign { tables }, _) => {
                         return refuse(conn, foreign_db_error(path, &tables)).await;
@@ -197,9 +221,14 @@ async fn open_migrated_at_with_hook(
             }
         }
     } else {
-        let lock = InitLock::acquire(path).await?;
-        // Another opener may have initialized (or a sidecar appeared) while we waited.
+        let lock = match early_lock.take() {
+            Some(lock) => lock,
+            None => InitLock::acquire(path).await?,
+        };
+        // Another opener may have initialized, or a sidecar/journal appeared, while we waited: the
+        // guards run again before this second connect path.
         refuse_orphan_sidecars(path)?;
+        refuse_hot_journal(path)?;
         let (mut conn, identity) = connect_pinned(path, true).await?;
         match classify_open_conn(&mut conn).await? {
             (DbClassification::Foreign { tables }, _) => {
@@ -242,8 +271,29 @@ async fn open_migrated_at_with_hook(
     Ok(conn)
 }
 
-fn existing_nonempty_file(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
+/// Whether a non-empty main file exists at `path`. Only NotFound means absent: any other metadata
+/// failure fails closed (`db_io_error`) instead of being mistaken for "nothing there".
+fn main_file_present(path: &Path) -> Result<bool, DbError> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.len() > 0),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(DbError::new(
+            "db_io_error",
+            format!("zynk: cannot inspect {}: {err}", path.display()),
+        )),
+    }
+}
+
+/// Size of a sidecar (`None` when it does not exist); any other metadata failure fails closed.
+fn sidecar_len(sidecar: &Path) -> Result<Option<u64>, DbError> {
+    match std::fs::metadata(sidecar) {
+        Ok(meta) => Ok(Some(meta.len())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(DbError::new(
+            "db_io_error",
+            format!("zynk: cannot inspect {}: {err}", sidecar.display()),
+        )),
+    }
 }
 
 /// `(dev, inode)` of whatever `path` currently refers to — the identity the pinned connection is
@@ -288,8 +338,9 @@ async fn connect_pinned(
 
 /// `SQLITE_FCNTL_PERSIST_WAL`: after its close-time checkpoint SQLite normally removes `<db>-wal`
 /// BY NAME — the one sidecar operation the pinned connection could not bind. With a persistent WAL
-/// the log is truncated through the connection's own descriptor instead, so a file moved to that
-/// name in the meantime is never deleted (ADR 0011 already allows an empty `-wal`/`-shm` to remain).
+/// the file is simply left in place (SQLite truncates it only under `journal_size_limit`; the next
+/// writer resets it through its own descriptor), so a file moved to that name in the meantime is never
+/// deleted. ADR 0011 already allows a `-wal`/`-shm` to remain beside a zynk database.
 async fn set_persist_wal(conn: &mut SqliteConnection) -> Result<(), DbError> {
     let mut handle = conn.lock_handle().await?;
     let mut persist: c_int = 1;
@@ -370,14 +421,12 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 /// ADR 0011: a nonempty `-wal`/`-journal` beside an absent or zero-byte main file is existing data —
 /// initialization would let SQLite discard or replay it, so fail closed before any connection.
 fn refuse_orphan_sidecars(path: &Path) -> Result<(), DbError> {
-    if existing_nonempty_file(path) {
+    if main_file_present(path)? {
         return Ok(());
     }
     for suffix in ORPHAN_SIDECAR_SUFFIXES {
         let sidecar = sidecar_path(path, suffix);
-        let len = std::fs::metadata(&sidecar)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let len = sidecar_len(&sidecar)?.unwrap_or(0);
         if len > 0 {
             return Err(DbError::new(
                 "db_orphan_sidecar",
@@ -393,6 +442,54 @@ fn refuse_orphan_sidecars(path: &Path) -> Result<(), DbError> {
         }
     }
     Ok(())
+}
+
+/// Conservative rollback-journal policy (Codex Gate-2 round 8): a nonempty `<db>-journal` whose first
+/// byte is non-zero, beside a non-empty main file, is REFUSED before any connection exists. SQLite's
+/// own hot-journal test (`hasHotJournal`) additionally consults lock state — a journal whose writer
+/// still holds RESERVED is not hot — but zynk cannot observe that without a pager, and a read-write
+/// pager plays a hot journal back on its FIRST shared lock (rewriting the main file and deleting the
+/// journal) before any classification could run; a read-only pager cannot read such a database at all
+/// (`SQLITE_READONLY_ROLLBACK`). So zynk refuses every journal that LOOKS hot: an inactive PERSIST-mode
+/// journal (zeroed header) and a TRUNCATE-mode journal (empty file) pass; an unreadable journal fails
+/// closed. zynk's own databases are WAL-mode and never carry a rollback journal, except for the
+/// journal-mode switch of a brand-new file — which runs under the init lock, so the opener re-checks
+/// after acquiring that lock before giving up (see `open_migrated_at_with_hook`).
+fn refuse_hot_journal(path: &Path) -> Result<(), DbError> {
+    if !main_file_present(path)? {
+        return Ok(()); // absent/zero-byte main + nonempty journal is `refuse_orphan_sidecars`'s case
+    }
+    let journal = sidecar_path(path, "-journal");
+    let Some(len) = sidecar_len(&journal)? else {
+        return Ok(());
+    };
+    if len == 0 {
+        return Ok(());
+    }
+    let hot = std::fs::File::open(&journal)
+        .and_then(|mut file| {
+            use std::io::Read;
+            let mut first = [0u8; 1];
+            file.read_exact(&mut first).map(|()| first[0] != 0)
+        })
+        .unwrap_or(true);
+    if !hot {
+        return Ok(());
+    }
+    Err(DbError::new(
+        "db_hot_journal",
+        format!(
+            "zynk: refusing to open the database at {}: its rollback journal {} ({len} bytes) is \
+             hot — a writer crashed before committing, and opening the file read-write would roll \
+             it back (rewriting the main file and deleting the journal). zynk will not do that to a \
+             database it has not recognized as its own. If this is another application's database, \
+             let that application recover it (back up both files first); if zynk was just creating \
+             this database (no data yet), remove both files and retry. `zynk db status` reports the \
+             same refusal.",
+            path.display(),
+            journal.display()
+        ),
+    ))
 }
 
 fn newer_lineage_error(path: &Path, versions: &[i64]) -> DbError {
@@ -808,7 +905,9 @@ impl SchemaObject {
     /// An entry SQLite itself maintains, recognized by EXACT kind/name/shape — never by its
     /// `sqlite_` prefix alone, which a raw catalog edit can forge onto a readable user table
     /// (Gate-3 round 2): the implicit UNIQUE/PRIMARY KEY autoindex of a table that is present, and
-    /// the AUTOINCREMENT / ANALYZE bookkeeping tables with their fixed DDL.
+    /// the AUTOINCREMENT / ANALYZE bookkeeping tables with their fixed DDL. Catalog text is compared
+    /// as UTF-8 bytes: a database with another text encoding (UTF-16) cannot be zynk's, so its
+    /// bookkeeping entries count as foreign schema — conservative by design, never a write hole.
     fn is_sqlite_owned(&self, tables: &[&[u8]]) -> bool {
         match self.kind.as_str() {
             "index" => {
@@ -850,6 +949,11 @@ fn autoindex_name_matches(name: &[u8], table: &[u8]) -> bool {
         return false;
     };
     !digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
+}
+
+/// A path for terminals and logs: control characters escaped like `printable_name`.
+pub fn printable_path(path: &Path) -> String {
+    printable_name(path.display().to_string().as_bytes())
 }
 
 /// A schema name for terminals and logs: valid UTF-8 with every control character (LF, ESC, C1)
@@ -948,6 +1052,7 @@ pub async fn classify_db_at_with_state(
 /// bytes are never modified).
 async fn inspect_db_at(path: &Path) -> Result<(DbClassification, MigrationState), DbError> {
     refuse_orphan_sidecars(path)?;
+    refuse_hot_journal(path)?;
     match std::fs::metadata(path) {
         Err(_) => return Ok((DbClassification::Absent, MigrationState::Pending)),
         Ok(meta) if meta.len() == 0 => {
@@ -986,8 +1091,8 @@ pub fn foreign_db_error(path: &Path, tables: &[String]) -> DbError {
              run `zynk db status` to inspect, or `zynk db adopt`/`zynk db backup` \
              to move the existing file aside non-destructively (e.g. \
              {}.wrapper-backup-N).",
-            path.display(),
-            path.display()
+            printable_path(path),
+            printable_path(path)
         ),
     )
 }
@@ -2284,6 +2389,138 @@ mod tests {
             b"DECOY-WAL-BYTES",
             "closing deleted or rewrote the file at the -wal name"
         );
+    }
+
+    /// Child-process half of `foreign_db_with_a_hot_journal_is_refused_untouched`: a rollback-mode
+    /// writer that spills past its page cache inside an open transaction, then dies without
+    /// committing — the journal it leaves behind is HOT (real crash shape, no forged bytes).
+    #[test]
+    #[ignore = "helper: run only by its parent test"]
+    fn hot_journal_crashing_writer() {
+        let Ok(path) = std::env::var("ZYNK_TEST_HOT_JOURNAL_DB") else {
+            return;
+        };
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await?;
+            conn.execute(
+                "PRAGMA journal_mode = DELETE; PRAGMA cache_size = 8; \
+                 CREATE TABLE customer_data (id INTEGER PRIMARY KEY, payload BLOB); \
+                 INSERT INTO customer_data VALUES (0, zeroblob(1024))",
+            )
+            .await?;
+            conn.execute("BEGIN IMMEDIATE").await?;
+            for id in 1..400 {
+                sqlx::query("INSERT INTO customer_data VALUES (?, randomblob(1024))")
+                    .bind(id)
+                    .execute(&mut conn)
+                    .await?;
+            }
+            // Never dropped: a drop would let the worker thread close (and roll back) the
+            // connection before the process dies.
+            std::mem::forget(conn);
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        // No close, no rollback: the process dies with the transaction open.
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn foreign_db_with_a_hot_journal_is_refused_untouched() {
+        // Codex Gate-2 round 8 (P1): a crashed foreign writer leaves a HOT rollback journal; any
+        // read-write pager plays it back on its first shared lock, rewriting the main file and
+        // deleting the journal — before any verdict. The guard must refuse before a connection exists
+        // and leave main + journal byte-identical (a read-only inspection could not read it either).
+        let path = tmp_db("g2r8-hot-journal");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "zynk::db::tests::hot_journal_crashing_writer",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("ZYNK_TEST_HOT_JOURNAL_DB", &path)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "crashing writer helper failed: {status}");
+        let journal = sidecar(&path, "-journal");
+        let journal_bytes = std::fs::read(&journal).unwrap();
+        assert!(
+            journal_bytes.len() > 512 && journal_bytes[0] != 0,
+            "fixture must leave a hot journal ({} bytes)",
+            journal_bytes.len()
+        );
+        let before = (std::fs::read(&path).unwrap(), journal_bytes);
+        let err = block_on(classify_db_at(&path)).unwrap_err();
+        assert_eq!(err.code, "db_hot_journal", "{}", err.message);
+        let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+        assert_eq!(err.code, "db_hot_journal", "{}", err.message);
+        assert_eq!(
+            (
+                std::fs::read(&path).unwrap(),
+                std::fs::read(&journal).unwrap()
+            ),
+            before,
+            "main/-journal bytes changed"
+        );
+    }
+
+    #[test]
+    fn non_hot_rollback_journals_classify_normally() {
+        // Positive controls for the hot-journal rule: a PERSIST-mode journal (zeroed header) and a
+        // TRUNCATE-mode journal (empty file) are not hot — the database classifies as usual and both
+        // files stay identical.
+        for (mode, tag) in [
+            ("PERSIST", "g2r8-persist-journal"),
+            ("TRUNCATE", "g2r8-truncate-journal"),
+        ] {
+            let path = tmp_db(tag);
+            plant_foreign_db(
+                &path,
+                &format!(
+                    "PRAGMA journal_mode = {mode}; CREATE TABLE projects (id TEXT PRIMARY KEY); \
+                     INSERT INTO projects VALUES ('p')"
+                ),
+            );
+            let journal = sidecar(&path, "-journal");
+            assert!(
+                journal.exists(),
+                "{mode}: the fixture must leave a -journal behind"
+            );
+            if mode == "PERSIST" {
+                assert_eq!(
+                    std::fs::read(&journal).unwrap()[0],
+                    0,
+                    "PERSIST leaves a zeroed header"
+                );
+            }
+            let before = (
+                std::fs::read(&path).unwrap(),
+                std::fs::read(&journal).unwrap(),
+            );
+            match block_on(classify_db_at(&path)).unwrap() {
+                DbClassification::Foreign { tables } => {
+                    assert_eq!(tables, vec!["projects"], "{mode}")
+                }
+                other => panic!("{mode}: expected Foreign, got {other:?}"),
+            }
+            let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+            assert_eq!(err.code, "db_foreign_conflict", "{mode}: {}", err.message);
+            assert_eq!(
+                (
+                    std::fs::read(&path).unwrap(),
+                    std::fs::read(&journal).unwrap()
+                ),
+                before,
+                "{mode}: main/-journal bytes changed"
+            );
+        }
     }
 
     #[test]
