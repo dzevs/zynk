@@ -144,27 +144,28 @@ The decision above stands; the swarm's second round showed the guard could still
     (`receipt_worker_busy`, retryable) while already-queued jobs drain inside the deadline; if they cannot, the
     handoff is refused and admission reopens. So no DB work ever starts after a pause was acknowledged, and the
     commit-time join is immediate. Ordinary shutdown still drains queued receipts.
-18. **Cutover moves the complete SQLite bundle, all or nothing** (Gate-3 round 3). `zynk db adopt`/`backup`
-    relocate the main file together with every existing `-journal`, `-wal` and `-shm` to ONE backup slot
-    chosen so that neither the base nor any member target exists; every target is re-checked before the first
-    rename, sidecars move first and the main file last, and any failure moves the members already relocated
-    back and reports an error — never a "success" with a stranded member, never an overwritten backup. A slot
-    or target counts as occupied when ANY directory entry exists there (a dangling symlink included — `exists`
-    follows links), and the move itself is ONE atomic step that never replaces: the platform's no-replace
+18. **Cutover moves the complete SQLite bundle into one reserved backup directory** (Gate-3 rounds 3-4). `zynk
+    db adopt`/`backup` relocate the main file together with every existing `-journal`, `-wal` and `-shm` — every
+    directory ENTRY beside the path, a dangling sidecar link included (`exists` follows links and skipped it) —
+    into `<db>.wrapper-backup-<N>/`, a directory created with one atomic `mkdir` (owner-only; it fails when any
+    entry exists at that name), so the whole bundle namespace is reserved at once: flat per-file renames could
+    never reserve four names together, and a competitor's sidecar landing beside a moved main was reported as a
+    complete backup. Members keep their own names inside the slot (SQLite can open the backup in place).
+    Sidecars move first and the main file last, each in ONE atomic no-replace step — the platform's no-replace
     rename (Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows `MoveFileExW` without
-    the replace flag), which fails when the target name exists in any form, so a competitor that appears after
-    the preflight turns into a refusal and a rollback, never an overwrite. Where no such primitive exists the
-    member is refused with an actionable error (ordinary permission or I/O failures keep their own cause). No
-    two-step fallback is offered: a link or copy followed by an unlink of the source NAME cannot be made safe
-    against a writer that atomically replaces the source or the target between the two steps — it deletes the
-    newcomer or loses the original (Gate-3 round 3, confirmed with fault injection) — and an identity check
-    before the unlink only narrows that window. The boundary the atomic move guarantees: whatever sits at the
-    source name at the instant of the move is moved intact; a writer replacing the source afterwards keeps its
-    file at the source; zynk deletes nothing beyond that single rename. Relocation acts on the
-    SQLite-effective path — the final symlink chain resolved, exactly as inspection classifies — so what the
-    guards refuse through a link is what moves; the link stays. The commands also relocate what the guards
-    refuse to open (a journal that looks hot; orphan sidecars beside an absent main file), which is exactly
-    the remedy those refusals name.
+    the replace flag); where no such primitive exists the member is refused with an actionable error, never a
+    two-step link/copy + unlink of the source name (a writer that atomically replaces the source or the target
+    between two steps loses a file; an identity check before the unlink only narrows that window). After the
+    moves the slot must hold exactly the members that were moved; anything else means the backup is not this
+    bundle: the members move back and the command fails. The guaranteed contract is per-member atomicity, never
+    an overwrite and never a successful partial relocation — NOT a crash-atomic transaction over the bundle nor a
+    consistent snapshot of a database that is being written (quiesce writers first). A rollback can be blocked
+    by a writer that recreated an original name in the meantime; that state is reported explicitly, naming every
+    member that now lives under the slot. The commands also relocate what the guards refuse to open (a journal
+    that looks hot; orphan sidecars beside an absent main file; a sidecar that is a symbolic link), which is
+    exactly the remedy those refusals name. Relocation acts on the SQLite-effective path — the final symlink
+    chain resolved, exactly as inspection classifies — so what the guards refuse through a link is what moves;
+    the link stays.
 19. **Terminal-safe output covers Unicode format and bidi controls, and paths.** The hostile-character rule
     is C0/C1 controls plus the Unicode format (`Cf`), bidi/invisible characters and the line/paragraph
     separators (`Zl`/`Zp`) — a U+202E override can reorder displayed text as surely as ESC can recolor it —
@@ -197,11 +198,21 @@ The decision above stands; the swarm's second round showed the guard could still
     counts as a party's identity only when it was reported for the SAME agent the party is labeled as (owner
     coherence, applied when the participant is stored and when the receiver is resolved): a terminal can
     carry a session persisted for another owner, and that session anchors nothing — it is treated as absent
-    on both sides. When the participant carried none (a hook that reported no session id — a generic `hook` source cannot carry
+    on both sides. Self-receipt is decided by the same durable identity: a message whose sender and addressee
+    are the same participant is never receipted, from any pane — the stored pane id (the first one seen) is
+    audit metadata, not the guard. When the participant carried none (a hook that reported no session id — a generic `hook` source cannot carry
     one), the terminal id binds instead, within this server's lifetime; otherwise
     `receiver_identity_mismatch`. A second pane carrying the same label under another session (or,
     session-less, on another terminal) is not the addressee. Limit: a session-less target cannot be re-bound
     after a restart or handoff (its terminal id changed); every shipped integration reports a session id.
+23. **`adopt` is bounded to the resolved native path** (Gate-3 round 4). The ambient legacy database
+    (`$HOME/.zynk/zynk-v2/zynk.db`) is a candidate for relocation only when the native path is the default one;
+    a path selected by config, `ZYNK_SQLITE_HOME` or `ZYNK_HOME` that is absent is a no-op — a mutating command
+    never leaves the path the operator (or an isolated harness) chose.
+24. **A sidecar entry that is a symbolic link fails closed** (Gate-3 round 4), dangling or not: SQLite opens
+    `-journal`/`-wal`/`-shm` by name and would create or write the sidecar through the link — elsewhere, or
+    nowhere (a dangling link made the first native start fail after `metadata`, which follows links, had read it
+    as absent). The refusal names `zynk db adopt`, which moves the entry itself.
 
 Residual, documented limits (outside ADR 0008's accidental-data-loss threat model):
 

@@ -62,15 +62,17 @@ config key is removed (see **Changed**).
   only from the participant the message was addressed to (its full hook session — source, kind and value,
   reported for that same agent — which survives pane-id churn, restarts and live updates; its terminal when
   the hook reported no session of its own), never from another pane that merely carries the same agent label
-  or a session another agent persisted on it.
+  or a session another agent persisted on it, and never by the sender of a self-addressed message, whatever
+  pane it now occupies.
 - `zynk db adopt` / `zynk db backup` relocate the **complete SQLite bundle** (main file plus any `-journal`,
-  `-wal`, `-shm`) to one backup slot that is entirely free, all or nothing: a leftover journal no longer strands
-  the native path, an existing backup sidecar is never overwritten (a dangling symlink counts as occupied, and
-  each member moves in one atomic no-replace step — Linux, macOS and Windows each provide one — so an entry
-  that appears after the check is never replaced and a file another writer places at the source is never
-  deleted; where no atomic move exists the command refuses with an error instead of copying), a failed move
-  rolls back and reports an error, and a symlinked database path is relocated where SQLite would open it (the
-  link stays). They also move aside what the startup guards refuse to open (a rollback journal that looks hot, orphan
+  `-wal`, `-shm`, a dangling sidecar link included) into one backup **directory**, `<db>.wrapper-backup-N/`,
+  reserved with a single atomic `mkdir`; a leftover journal no longer strands the native path, nothing at an
+  existing slot name is ever touched, each member moves in one atomic no-replace step (Linux, macOS and
+  Windows each provide one — where none exists the command refuses instead of copying), a backup that gained
+  an entry that is not a bundle member is refused and rolled back, a blocked rollback is reported naming the
+  members left under the slot, a symlinked database path is relocated where SQLite would open it (the link
+  stays), and `adopt` never touches the ambient `~/.zynk/zynk-v2` database when the native path was selected
+  explicitly. A sidecar that is a symbolic link is refused at startup instead of being opened through. They also move aside what the startup guards refuse to open (a rollback journal that looks hot, orphan
   sidecars beside a missing database) — the remedy those refusals name. Output from every `zynk db` command
   escapes control and Unicode format/bidi characters in names and paths.
 - Sessions: OMP resumes in the same pane after a restart with root-only hook state; lifecycle hook generations
