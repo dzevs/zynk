@@ -127,8 +127,8 @@ The decision above stands; the swarm's second round showed the guard could still
 16. **The DB-worker handover is a protocol contract: handoff version 2.** A version-1 peer (zynk 3.0.x sends
     "committed" with its workers still running) is refused before "validated" in either direction; the sender
     rolls back and keeps serving. What the diagnostics can promise depends on which side is new: a 3.1.0
-    replacement refused by an old sender logs the reason and remedy durably (the immutable old sender reports
-    only its own generic error); a 3.1.0 sender whose old replacement closes without answering reports the
+    replacement that REFUSES an old sender's manifest logs the reason and remedy durably (the immutable old
+    sender reports only its own generic error); a 3.1.0 sender whose old replacement closes without answering reports the
     transport cause plus a *possible* incompatible-peer / restart-normally hint to the requester and logs it
     durably (the old replacement cannot); between two 3.1.0 servers the exact reason travels back as a
     `rejected: …` line.
@@ -138,9 +138,12 @@ The decision above stands; the swarm's second round showed the guard could still
     refused, the workers resume, ownership is retained. Idle: the handoff proceeds and the idle handles are
     joined at commit (immediate), so a slow or stuck provider never couples to the replacement's 30 s
     "committed" wait; every pre-commit rollback resumes the workers. A worker's startup (runtime + initial DB
-    open, which may wait on the init lock) counts as work — idle is acknowledged only once it completed or failed
-    — and a dropped handle releases a paused consumer so queued receipt jobs DRAIN before the join (never
-    cancelled: their submitters are still waiting for the answer).
+    open, which may wait on the init lock) counts as work — idle is acknowledged only once it completed or failed.
+    Quiescent means **nothing in flight AND nothing queued**: a receipt accepted by the API but not yet finished
+    (its caller may have timed out long ago) is outstanding work — a paused receipt worker accepts nothing new
+    (`receipt_worker_busy`, retryable) while already-queued jobs drain inside the deadline; if they cannot, the
+    handoff is refused and admission reopens. So no DB work ever starts after a pause was acknowledged, and the
+    commit-time join is immediate. Ordinary shutdown still drains queued receipts.
 
 Residual, documented limits (outside ADR 0008's accidental-data-loss threat model):
 
