@@ -162,4 +162,3 @@ Residual, documented limits (outside ADR 0008's accidental-data-loss threat mode
   adopt`/`backup` move the sidecars along).
 - The file-identity check is Unix-only (`std` exposes no stable file identity on Windows); the pinned
   connection and the post-switch re-inspection apply everywhere.
-
