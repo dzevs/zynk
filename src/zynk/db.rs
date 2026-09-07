@@ -130,21 +130,27 @@ pub async fn open_migrated_at_without_recovery(path: &Path) -> Result<SqliteConn
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Serialize classify + migrate across PROCESSES (see `InitLock`): two zynk processes opening a
-    // fresh shared DB at once (two named-session servers, or a CLI command racing a starting server)
-    // must not observe each other's half-initialized state.
-    let _init_lock = InitLock::acquire(path).await?;
-    // ADR 0008 foreign-DB guard: classify FIRST, with a READ-ONLY connection,
-    // BEFORE the writable open below. This matters for byte-immutability: the
-    // writable `connect_with` applies `journal_mode = WAL`, which rewrites the
-    // SQLite file header (bytes 18-19) on connect. Classifying read-only first
-    // means a FOREIGN database is never even touched — we fail closed before any
-    // mutation. The guard sits in this shared low-level opener, so every PRODUCT
-    // open (open_migrated_at, append, query-readonly, workers) is protected; a
-    // fresh dev/tmp DB classifies as Absent/Empty and proceeds unchanged.
+    // ADR 0008 foreign-DB guard: classify FIRST, with a READ-ONLY, sidecar-safe connection, BEFORE
+    // the writable open below. This matters for byte-immutability: the writable `connect_with`
+    // applies `journal_mode = WAL`, which rewrites the SQLite file header (bytes 18-19) on connect.
+    // Classifying read-only first means a FOREIGN database is never even touched — we fail closed
+    // before any mutation. The guard sits in this shared low-level opener, so every PRODUCT open
+    // (open_migrated_at, append, query-readonly, workers) is protected.
+    //
+    // The cross-process init lock (see `InitLock`) is taken ONLY when initialization is actually
+    // needed (Absent/Empty): two processes opening a fresh shared DB at once must not observe each
+    // other's half-initialized state, while a fully migrated Native DB opens without waiting on any
+    // lock holder. After acquiring, classify again — the other process may have finished.
+    let mut _init_lock = None;
     match classify_db_at(path).await? {
-        DbClassification::Absent | DbClassification::Empty | DbClassification::Native => {}
+        DbClassification::Native => {}
         DbClassification::Foreign { tables } => return Err(foreign_db_error(path, &tables)),
+        DbClassification::Absent | DbClassification::Empty => {
+            _init_lock = Some(InitLock::acquire(path).await?);
+            if let DbClassification::Foreign { tables } = classify_db_at(path).await? {
+                return Err(foreign_db_error(path, &tables));
+            }
+        }
     }
     let options = SqliteConnectOptions::new()
         .filename(path)
@@ -170,9 +176,10 @@ pub async fn open_migrated_at_without_recovery(path: &Path) -> Result<SqliteConn
 /// OS releases it if the holder dies. The lock file itself carries no data.
 struct InitLock(std::fs::File);
 
-/// Upper bound on waiting for another process's first-time initialization (a fresh DB migrates in
-/// well under a second; this only caps a pathological holder).
-const INIT_LOCK_DEADLINE: Duration = Duration::from_secs(30);
+/// Upper bound on waiting for another process's first-time initialization. A fresh DB migrates in
+/// well under a second even under load; this caps a pathological holder, and a server start that hits
+/// it is FATAL (never a degraded server), so keep it short enough for `session stop`'s contract.
+const INIT_LOCK_DEADLINE: Duration = Duration::from_secs(5);
 const INIT_LOCK_POLL: Duration = Duration::from_millis(10);
 
 fn init_lock_path(db_path: &Path) -> std::path::PathBuf {
@@ -231,10 +238,11 @@ impl Drop for InitLock {
 
 /// Read the user-table set of an OPEN connection (excludes sqlite/fts internals).
 async fn user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, DbError> {
+    // GLOB (literal `_`), not LIKE (`_` = any one character): this only shapes the DISPLAY list —
+    // classification uses `schema_objects` — but the patterns must not over-match. Names are read as
+    // bytes and labeled losslessly when they are not valid UTF-8.
     let rows = sqlx::query(
-        // GLOB (literal `_`), not LIKE (`_` = any one character): this only shapes the DISPLAY list
-        // — classification uses `all_user_table_names` — but the patterns must not over-match.
-        "SELECT name FROM sqlite_master \
+        "SELECT CAST(name AS BLOB) AS name FROM sqlite_master \
          WHERE type='table' \
            AND name NOT GLOB 'sqlite_*' \
            AND name NOT GLOB '*_fts' \
@@ -248,66 +256,127 @@ async fn user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, Db
     )
     .fetch_all(&mut *conn)
     .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| row.try_get::<String, _>("name").ok())
-        .collect())
+    let mut names = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name = row.try_get::<Vec<u8>, _>("name")?;
+        names.push(match String::from_utf8(name) {
+            Ok(name) => name,
+            Err(err) => format!("<non-utf8 0x{}>", hex(err.as_bytes())),
+        });
+    }
+    Ok(names)
 }
 
-/// Classify an OPEN connection (ADR 0008). `_sqlx_migrations` + all native
-/// lineage tables ⇒ Native; no user tables ⇒ Empty; otherwise Foreign.
+/// Classify an OPEN connection (ADR 0008) from the COMPLETE, LOSSLESS schema-object set; positive
+/// native recognition is by migration PROVENANCE (our ledger checksums), never by table names.
 async fn classify_open_conn(conn: &mut SqliteConnection) -> Result<DbClassification, DbError> {
-    // Decide on the COMPLETE table set. `user_table_names` is a DISPLAY view that hides FTS-shadow
-    // and similarly suffixed names (`*_data`, `*_config`, …); a foreign DB whose tables happen to carry
-    // those suffixes must still fail closed, so the display view never drives this decision.
-    let all_tables = all_user_table_names(conn).await?;
-    if all_tables.is_empty() {
+    // Every schema object counts — tables, views, indexes and triggers — with names read as bytes so
+    // a name that is not valid UTF-8 still counts (it is never dropped). `user_table_names` is a
+    // DISPLAY view that hides FTS-shadow/suffixed names; it never drives this decision.
+    let objects = schema_objects(conn).await?;
+    if objects.is_empty() {
         return Ok(DbClassification::Empty);
     }
-    // sqlx creates its `_sqlx_migrations` ledger BEFORE the first migration's transaction commits.
-    // A DB whose ONLY table is that ledger — with NO recorded migrations — is a native init in
-    // progress (another zynk process) or an aborted one: there is no foreign data to protect, so it is
-    // `Empty`, not `Foreign`. A ledger that already RECORDS migrations but lacks our tables stays
-    // Foreign (unknown lineage → fail closed, ADR 0008).
-    if all_tables.len() == 1 && all_tables[0] == "_sqlx_migrations" {
-        let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
-            .fetch_one(&mut *conn)
-            .await?;
-        if recorded == 0 {
+    let ledger_present = objects
+        .iter()
+        .any(|object| object.kind == "table" && object.name == b"_sqlx_migrations");
+    if objects.len() == 1 && ledger_present {
+        // sqlx creates its `_sqlx_migrations` ledger BEFORE the first migration's transaction commits.
+        // A DB whose ONLY object is that ledger with NO recorded migrations is a native init in
+        // progress (another zynk process) or an aborted one: nothing to protect → `Empty`. A ledger
+        // that already RECORDS migrations but nothing else is unknown lineage → Foreign.
+        if ledger_rows(conn).await?.is_empty() {
             return Ok(DbClassification::Empty);
         }
+        return Ok(DbClassification::Foreign {
+            tables: vec!["_sqlx_migrations".to_string()],
+        });
     }
-    let has_migrations = all_tables.iter().any(|name| name == "_sqlx_migrations");
-    let has_all_lineage = NATIVE_LINEAGE_TABLES
-        .iter()
-        .all(|t| all_tables.iter().any(|name| name == t));
-    if has_migrations && has_all_lineage {
-        return Ok(DbClassification::Native);
+    if ledger_present {
+        // Positive native recognition = PROVENANCE, never table names: every recorded migration whose
+        // version we know must carry OUR checksum (a mismatch is another lineage → Foreign), at least
+        // one must match (an empty or all-unknown ledger proves nothing), unknown NEWER versions are
+        // allowed (a DB migrated by a newer zynk stays ours; the migrator then reports the mismatch),
+        // and the lineage tables must exist.
+        let rows = ledger_rows(conn).await?;
+        let mut matched = 0usize;
+        let mut conflicting = false;
+        for (version, checksum) in &rows {
+            if let Some(ours) = MIGRATOR.iter().find(|m| m.version == *version) {
+                if ours.checksum.as_ref() == checksum.as_slice() {
+                    matched += 1;
+                } else {
+                    conflicting = true;
+                }
+            }
+        }
+        let lineage_tables = NATIVE_LINEAGE_TABLES.iter().all(|table| {
+            objects
+                .iter()
+                .any(|object| object.kind == "table" && object.name == table.as_bytes())
+        });
+        if matched > 0 && !conflicting && lineage_tables {
+            return Ok(DbClassification::Native);
+        }
     }
-    let tables = user_table_names(conn).await?;
-    Ok(DbClassification::Foreign {
-        tables: if tables.is_empty() {
-            all_tables
-        } else {
-            tables
-        },
-    })
+    let mut tables = user_table_names(conn).await?;
+    if tables.is_empty() {
+        tables = objects.iter().map(SchemaObject::display).collect();
+    }
+    Ok(DbClassification::Foreign { tables })
 }
 
-/// Every user table (only SQLite's own `sqlite_*` internals excluded) — the set classification must
-/// reason about, as opposed to the display view in `user_table_names`.
-async fn all_user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, DbError> {
+/// One `sqlite_master` row: `kind` is table/index/view/trigger; `name` is the raw byte string.
+struct SchemaObject {
+    kind: String,
+    name: Vec<u8>,
+}
+
+impl SchemaObject {
+    fn display(&self) -> String {
+        match std::str::from_utf8(&self.name) {
+            Ok(name) => format!("{}:{name}", self.kind),
+            Err(_) => format!("{}:<non-utf8 0x{}>", self.kind, hex(&self.name)),
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Every schema object of any type except SQLite's own `sqlite_*` internals, losslessly: a decode
+/// failure is an error, never a silently dropped row.
+async fn schema_objects(conn: &mut SqliteConnection) -> Result<Vec<SchemaObject>, DbError> {
     let rows = sqlx::query(
-        // GLOB, not LIKE: in LIKE `_` is a one-character wildcard, so 'sqlite_%' would also hide a
-        // user table such as `sqliteCustomer`. SQLite's reserved prefix is literally `sqlite_`.
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
+        "SELECT type, CAST(name AS BLOB) AS name FROM sqlite_master \
+         WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name",
     )
     .fetch_all(&mut *conn)
     .await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|row| row.try_get::<String, _>("name").ok())
-        .collect())
+    let mut objects = Vec::with_capacity(rows.len());
+    for row in rows {
+        objects.push(SchemaObject {
+            kind: row.try_get::<String, _>("type")?,
+            name: row.try_get::<Vec<u8>, _>("name")?,
+        });
+    }
+    Ok(objects)
+}
+
+/// `(version, checksum)` of every migration the ledger records.
+async fn ledger_rows(conn: &mut SqliteConnection) -> Result<Vec<(i64, Vec<u8>)>, DbError> {
+    let rows = sqlx::query("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push((
+            row.try_get::<i64, _>("version")?,
+            row.try_get::<Vec<u8>, _>("checksum")?,
+        ));
+    }
+    Ok(out)
 }
 
 /// Classify the DB at `path` WITHOUT mutating it (ADR 0008). Opens read-only
@@ -323,6 +392,10 @@ pub async fn classify_db_at(path: &Path) -> Result<DbClassification, DbError> {
         .filename(path)
         .create_if_missing(false)
         .read_only(true);
+    // Durable boundary (ADR 0011): a read-only inspection never modifies the main database file or
+    // its `-wal` journal — the bytes that hold data. SQLite may create or update the `-shm` wal-index
+    // (reconstructible coordination state, rebuilt from `-wal` on demand) to read a WAL-mode database;
+    // EXCLUSIVE locking mode would avoid that but cannot coexist with a running server's connection.
     let mut conn = SqliteConnection::connect_with(&options).await?;
     let class = classify_open_conn(&mut conn).await?;
     let _ = conn.close().await;
@@ -642,6 +715,264 @@ mod tests {
             assert_eq!(err.code, "db_foreign_conflict", "{tag}: {}", err.message);
             assert_eq!(std::fs::read(&path).unwrap(), before, "{tag}: bytes changed");
         }
+    }
+
+    /// Gate-3 G3-DB-001 fixtures: authority must come from PROVENANCE (our migration lineage), never
+    /// from table names, and every schema object (any type, any byte string as a name) counts.
+    fn assert_fails_closed_unchanged(tag: &str, path: &std::path::Path) {
+        let before = std::fs::read(path).unwrap();
+        match block_on(classify_db_at(path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("{tag}: expected Foreign, got {other:?}"),
+        }
+        let err = block_on(open_migrated_at(path)).unwrap_err();
+        assert_eq!(err.code, "db_foreign_conflict", "{tag}: {}", err.message);
+        assert_eq!(std::fs::read(path).unwrap(), before, "{tag}: bytes changed");
+    }
+
+    #[test]
+    fn foreign_tables_that_borrow_native_names_fail_closed() {
+        // Empty canonical ledger + row-bearing foreign tables NAMED like our lineage tables.
+        let path = tmp_db("g3-spoofed-lineage-names");
+        plant_foreign_db(
+            &path,
+            &format!(
+                "{SQLX_LEDGER_DDL}; \
+                 CREATE TABLE conversations (x TEXT); INSERT INTO conversations VALUES ('a'); \
+                 CREATE TABLE messages (x TEXT); INSERT INTO messages VALUES ('b'); \
+                 CREATE TABLE delivery_events (x TEXT); INSERT INTO delivery_events VALUES ('c')"
+            ),
+        );
+        assert_fails_closed_unchanged("spoofed-lineage-names", &path);
+    }
+
+    #[test]
+    fn foreign_non_table_objects_fail_closed() {
+        // Empty ledger + ONLY a foreign view, index and trigger (no other table): still foreign schema.
+        let path = tmp_db("g3-view-index-trigger");
+        plant_foreign_db(
+            &path,
+            &format!(
+                "{SQLX_LEDGER_DDL}; \
+                 CREATE VIEW ledger_view AS SELECT version FROM _sqlx_migrations; \
+                 CREATE INDEX ledger_idx ON _sqlx_migrations(description); \
+                 CREATE TRIGGER ledger_trg AFTER INSERT ON _sqlx_migrations BEGIN SELECT 1; END"
+            ),
+        );
+        assert_fails_closed_unchanged("view-index-trigger", &path);
+    }
+
+    #[test]
+    fn foreign_table_with_undecodable_name_fails_closed() {
+        // Empty ledger + a table whose name is not valid UTF-8 (0xFF + "_hidden"): a name that fails to
+        // decode must count as a foreign object, never be silently dropped.
+        let path = tmp_db("g3-undecodable-name");
+        plant_foreign_db(&path, SQLX_LEDGER_DDL);
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute("CREATE TABLE \"\u{FF}_hidden\" (secret TEXT)")
+                .await
+                .or_else(|_| Ok::<_, sqlx::Error>(Default::default()))?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        // Rewrite the name bytes to raw 0xFF (the SQL layer only lets us write valid UTF-8).
+        let mut bytes = std::fs::read(&path).unwrap();
+        let needle: Vec<u8> = "\u{FF}_hidden".as_bytes().to_vec(); // C3 BF 5F ...
+        let raw: Vec<u8> = [&[0xFFu8][..], b"_hidden"].concat();
+        let mut replaced = 0;
+        let mut i = 0;
+        while i + needle.len() <= bytes.len() {
+            if bytes[i..i + needle.len()] == needle[..] {
+                // keep length: pad with a trailing NUL-safe byte the parser tolerates inside quotes
+                bytes.splice(
+                    i..i + needle.len(),
+                    raw.iter().cloned().chain(std::iter::once(b' ')),
+                );
+                replaced += 1;
+                i += raw.len() + 1;
+            } else {
+                i += 1;
+            }
+        }
+        assert!(replaced > 0, "fixture: name bytes not found in file");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_fails_closed_unchanged("undecodable-name", &path);
+    }
+
+    #[test]
+    fn ledger_with_tampered_checksum_is_foreign() {
+        // A known version whose checksum is NOT ours is not our lineage.
+        let path = tmp_db("g3-tampered-checksum");
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute("UPDATE _sqlx_migrations SET checksum = x'00' WHERE version = 1")
+                .await?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_db_migrated_by_a_newer_zynk_is_still_native() {
+        // Our checksums prove provenance; an additional unknown (newer) version does not make it foreign.
+        let path = tmp_db("g3-newer-native");
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new().filename(&path).create_if_missing(false),
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+                 VALUES (9999, 'future', 1, x'00', 0)",
+            )
+            .await?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Native
+        );
+    }
+
+    #[test]
+    fn read_only_classification_leaves_wal_sidecars_untouched() {
+        // Gate-3 G3-DB-002 / ADR 0011: inspecting a foreign WAL database must not modify its data
+        // bytes (main file, -wal); the -shm wal-index is the documented, reconstructible exception.
+        let path = tmp_db("g3-wal-sidecars");
+        let holder = block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await?;
+            conn.execute(
+                "CREATE TABLE projects (id TEXT PRIMARY KEY); INSERT INTO projects VALUES ('p')",
+            )
+            .await?;
+            Ok::<SqliteConnection, DbError>(conn)
+        })
+        .unwrap();
+        let shm = path.with_file_name(format!(
+            "{}-shm",
+            path.file_name().unwrap().to_str().unwrap()
+        ));
+        let wal = path.with_file_name(format!(
+            "{}-wal",
+            path.file_name().unwrap().to_str().unwrap()
+        ));
+        assert!(
+            shm.exists() && wal.exists(),
+            "fixture needs live WAL sidecars"
+        );
+        let snapshot = |p: &std::path::Path| std::fs::read(p).unwrap();
+        let (db0, wal0) = (snapshot(&path), snapshot(&wal));
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+        assert_eq!(snapshot(&path), db0, "main db bytes changed");
+        assert_eq!(snapshot(&wal), wal0, "-wal bytes changed");
+        // ADR 0011 boundary: the data-bearing files are untouched; the `-shm` wal-index is
+        // reconstructible coordination state and may legitimately change.
+        assert!(shm.exists(), "the live -shm sidecar must still exist");
+        drop(holder);
+    }
+
+    #[test]
+    fn read_only_classification_does_not_create_shm_for_wal_db_without_one() {
+        // Gate-3 caveat / ADR 0011: a WAL database copied without its -shm (crash/copy) keeps its
+        // db/-wal bytes identical under a read-only inspection; SQLite may rebuild a -shm wal-index
+        // from the -wal to read it (the documented reconstructible exception).
+        let src = tmp_db("g3-wal-src");
+        let holder = block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&src)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await?;
+            conn.execute(
+                "CREATE TABLE projects (id TEXT PRIMARY KEY); INSERT INTO projects VALUES ('p')",
+            )
+            .await?;
+            Ok::<SqliteConnection, DbError>(conn)
+        })
+        .unwrap();
+        let sidecar = |p: &std::path::Path, suffix: &str| {
+            p.with_file_name(format!(
+                "{}{suffix}",
+                p.file_name().unwrap().to_str().unwrap()
+            ))
+        };
+        let copy = tmp_db("g3-wal-copy");
+        std::fs::copy(&src, &copy).unwrap();
+        std::fs::copy(sidecar(&src, "-wal"), sidecar(&copy, "-wal")).unwrap();
+        drop(holder);
+        assert!(!sidecar(&copy, "-shm").exists());
+        let (db0, wal0) = (
+            std::fs::read(&copy).unwrap(),
+            std::fs::read(sidecar(&copy, "-wal")).unwrap(),
+        );
+        match block_on(classify_db_at(&copy)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+        // ADR 0011: SQLite may rebuild a -shm wal-index from -wal to read the copy; the data bytes
+        // below are what must stay identical.
+        assert_eq!(std::fs::read(&copy).unwrap(), db0, "main db bytes changed");
+        assert_eq!(
+            std::fs::read(sidecar(&copy, "-wal")).unwrap(),
+            wal0,
+            "-wal bytes changed"
+        );
+    }
+
+    #[test]
+    fn native_db_opens_without_waiting_for_a_held_init_lock() {
+        // Gate-3 G3-STARTUP-001: the init lock is only for INITIALIZATION; a fully migrated native DB
+        // must open promptly even while another process holds the lock.
+        let path = tmp_db("g3-native-held-lock");
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(init_lock_path(&path))
+            .unwrap();
+        holder.lock().unwrap();
+        let started = std::time::Instant::now();
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "native open waited {:?} on the init lock",
+            started.elapsed()
+        );
+        holder.unlock().unwrap();
     }
 
     #[test]
