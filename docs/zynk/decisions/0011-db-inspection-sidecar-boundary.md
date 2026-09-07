@@ -147,8 +147,10 @@ The decision above stands; the swarm's second round showed the guard could still
 18. **Cutover moves the complete SQLite bundle into one reserved backup directory** (Gate-3 rounds 3-4). `zynk
     db adopt`/`backup` relocate the main file together with every existing `-journal`, `-wal` and `-shm` — every
     directory ENTRY beside the path, a dangling sidecar link included (`exists` follows links and skipped it) —
-    into `<db>.wrapper-backup-<N>/`, a directory created with one atomic `mkdir` (owner-only; it fails when any
-    entry exists at that name), so the whole bundle namespace is reserved at once: flat per-file renames could
+    into `<db>.wrapper-backup-<N>/`, a directory created with one atomic `mkdir` (it fails when any entry exists
+    at that name; owner-only where the platform supports a creation mode — Unix — and inheriting the parent
+    directory's permissions elsewhere, so the SQLite home is expected to be private to the operator), so the
+    whole bundle namespace is reserved at once: flat per-file renames could
     never reserve four names together, and a competitor's sidecar landing beside a moved main was reported as a
     complete backup. Members keep their own names inside the slot (SQLite can open the backup in place).
     Sidecars move first and the main file last, each in ONE atomic no-replace step — the platform's no-replace
@@ -156,8 +158,16 @@ The decision above stands; the swarm's second round showed the guard could still
     the replace flag); where no such primitive exists the member is refused with an actionable error, never a
     two-step link/copy + unlink of the source name (a writer that atomically replaces the source or the target
     between two steps loses a file; an identity check before the unlink only narrows that window). After the
-    moves the slot must hold exactly the members that were moved; anything else means the backup is not this
-    bundle: the members move back and the command fails. Every inspection these decisions rest on fails closed:
+    moves the slot must hold exactly the members that were moved, the source must hold no bundle member any more
+    (a sidecar a writer created beside the main after the plan was built would otherwise split the bundle behind
+    a "complete" backup), and each moved member must still be the very entry that left the source (Unix: device +
+    inode captured before the move); anything else means the backup
+    is not this bundle: the intact members move back and the command fails, while a member another writer
+    renamed over inside the slot is named as displaced and is not moved back over the source name (its original
+    bytes were displaced by that writer's own action; zynk deleted nothing). Where `std` exposes no stable file
+    identity (Windows) the name check and the per-member no-replace moves are what remains — a documented
+    residual, together with a writer that acts after the final check. Every inspection these decisions rest on
+    fails closed:
     only "not found" means a member is absent (an I/O error refuses the relocation before anything moves), and
     a slot that cannot be listed completely is a verification failure, never "clean". The guaranteed contract
     is per-member atomicity, never
@@ -197,7 +207,10 @@ The decision above stands; the swarm's second round showed the guard could still
     is the hook session value: it survives pane churn, a restart and a live handoff (the restored terminal
     keeps its persisted agent session, while terminal ids are allocated per server lifetime). When the stored
     participant carried a session, the authoritative receiver (hook authority only) must present the same
-    one — the full triple the participant key hashes (source, kind, value), never the value alone. A session
+    one — the full triple the participant key hashes (source, kind, value), never the value alone. The stored
+    anchor is canonicalized before authorization and fails closed: either a complete triple or no session and a
+    terminal id; a partial triple, or a row with neither anchor, is not receipt-capable — there is no
+    label-only fallback. A session
     counts as a party's identity only when it was reported for the SAME agent the party is labeled as (owner
     coherence, applied when the participant is stored and when the receiver is resolved): a terminal can
     carry a session persisted for another owner, and that session anchors nothing — it is treated as absent
@@ -220,6 +233,12 @@ The decision above stands; the swarm's second round showed the guard could still
     `-journal`/`-wal`/`-shm` by name and would create or write the sidecar through the link — elsewhere, or
     nowhere (a dangling link made the first native start fail after `metadata`, which follows links, had read it
     as absent). The refusal names `zynk db adopt`, which moves the entry itself.
+25. **A database path whose final component is a symbolic link is refused where zynk does not resolve links**
+    (Gate-3 round 5). On Unix the SQLite-effective path resolves the final link chain (item 17) and every guard,
+    the init lock, the connection and the cutover act on the target. Elsewhere (Windows) `std` offers no
+    equivalent of SQLite's own resolution: SQLite would open the main file through the link while the guards
+    inspected `<link>-wal`. Until reparse points are resolved consistently, such a path fails closed
+    (`db_path_link`, "point the configuration at the target file"); nothing is created through the link.
 
 Residual, documented limits (outside ADR 0008's accidental-data-loss threat model):
 
