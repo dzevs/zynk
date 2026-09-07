@@ -139,15 +139,19 @@ pub async fn open_migrated_at_without_recovery(path: &Path) -> Result<SqliteConn
     //
     // The cross-process init lock (see `InitLock`) is taken ONLY when initialization is actually
     // needed (Absent/Empty): two processes opening a fresh shared DB at once must not observe each
-    // other's half-initialized state, while a fully migrated Native DB opens without waiting on any
-    // lock holder. After acquiring, classify again — the other process may have finished.
+    // other's half-initialized state, and a native DB with PENDING migrations is upgraded under the
+    // same lock (sqlx's SQLite migrator has none of its own); only a fully CURRENT native DB opens
+    // without waiting on any lock holder. After acquiring, inspect again — the other process may have
+    // finished.
     let mut _init_lock = None;
-    match classify_db_at(path).await? {
-        DbClassification::Native => {}
-        DbClassification::Foreign { tables } => return Err(foreign_db_error(path, &tables)),
-        DbClassification::Absent | DbClassification::Empty => {
+    match inspect_db_at(path).await? {
+        // Fully CURRENT native DB: nothing to initialize or migrate, so never wait on a lock holder.
+        (DbClassification::Native, false) => {}
+        (DbClassification::Foreign { tables }, _) => return Err(foreign_db_error(path, &tables)),
+        // Absent, new, or native with PENDING migrations: serialize with every other opener.
+        (DbClassification::Absent | DbClassification::Empty | DbClassification::Native, _) => {
             _init_lock = Some(InitLock::acquire(path).await?);
-            if let DbClassification::Foreign { tables } = classify_db_at(path).await? {
+            if let (DbClassification::Foreign { tables }, _) = inspect_db_at(path).await? {
                 return Err(foreign_db_error(path, &tables));
             }
         }
@@ -269,13 +273,44 @@ async fn user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, Db
 
 /// Classify an OPEN connection (ADR 0008) from the COMPLETE, LOSSLESS schema-object set; positive
 /// native recognition is by migration PROVENANCE (our ledger checksums), never by table names.
-async fn classify_open_conn(conn: &mut SqliteConnection) -> Result<DbClassification, DbError> {
+///
+/// All reads happen inside ONE read transaction so the schema objects, the ledger rows and the
+/// currentness verdict come from a single SQLite snapshot: without that, a concurrent initializer's
+/// first migration could commit between two SELECTs and a genuine native initialization would look
+/// like a foreign ledger (Gate-2 round 4, item 2). The transaction is rolled back before returning,
+/// so a caller that goes on to wait for the init lock holds no snapshot while waiting.
+async fn classify_open_conn(
+    conn: &mut SqliteConnection,
+) -> Result<(DbClassification, bool), DbError> {
+    classify_open_conn_with_hook(conn, &mut || {}).await
+}
+
+/// The production wrapper with an interleaving hook that runs between the schema-object read and the
+/// ledger read — a no-op in production; tests use it to commit a concurrent initializer at exactly
+/// that point and prove the wrapper's read transaction pins ONE snapshot.
+async fn classify_open_conn_with_hook(
+    conn: &mut SqliteConnection,
+    after_schema_read: &mut dyn FnMut(),
+) -> Result<(DbClassification, bool), DbError> {
+    let mut tx = conn.begin().await?;
+    let inspection = classify_snapshot(&mut tx, after_schema_read).await;
+    tx.rollback().await?;
+    inspection
+}
+
+/// The classification proper, evaluated on whatever snapshot `conn` currently holds (a read
+/// transaction the caller began — `classify_open_conn` — or, in tests, one pinned deliberately).
+async fn classify_snapshot(
+    conn: &mut SqliteConnection,
+    after_schema_read: &mut dyn FnMut(),
+) -> Result<(DbClassification, bool), DbError> {
     // Every schema object counts — tables, views, indexes and triggers — with names read as bytes so
     // a name that is not valid UTF-8 still counts (it is never dropped). `user_table_names` is a
     // DISPLAY view that hides FTS-shadow/suffixed names; it never drives this decision.
     let objects = schema_objects(conn).await?;
+    after_schema_read();
     if objects.is_empty() {
-        return Ok(DbClassification::Empty);
+        return Ok((DbClassification::Empty, true));
     }
     let ledger_present = objects
         .iter()
@@ -286,44 +321,77 @@ async fn classify_open_conn(conn: &mut SqliteConnection) -> Result<DbClassificat
         // progress (another zynk process) or an aborted one: nothing to protect → `Empty`. A ledger
         // that already RECORDS migrations but nothing else is unknown lineage → Foreign.
         if ledger_rows(conn).await?.is_empty() {
-            return Ok(DbClassification::Empty);
+            return Ok((DbClassification::Empty, true));
         }
-        return Ok(DbClassification::Foreign {
-            tables: vec!["_sqlx_migrations".to_string()],
-        });
+        return Ok((
+            DbClassification::Foreign {
+                tables: vec!["_sqlx_migrations".to_string()],
+            },
+            false,
+        ));
     }
     if ledger_present {
-        // Positive native recognition = PROVENANCE, never table names: every recorded migration whose
-        // version we know must carry OUR checksum (a mismatch is another lineage → Foreign), at least
-        // one must match (an empty or all-unknown ledger proves nothing), unknown NEWER versions are
-        // allowed (a DB migrated by a newer zynk stays ours; the migrator then reports the mismatch),
-        // and the lineage tables must exist.
-        let rows = ledger_rows(conn).await?;
-        let mut matched = 0usize;
-        let mut conflicting = false;
-        for (version, checksum) in &rows {
-            if let Some(ours) = MIGRATOR.iter().find(|m| m.version == *version) {
-                if ours.checksum.as_ref() == checksum.as_slice() {
-                    matched += 1;
-                } else {
-                    conflicting = true;
-                }
-            }
-        }
-        let lineage_tables = NATIVE_LINEAGE_TABLES.iter().all(|table| {
-            objects
-                .iter()
-                .any(|object| object.kind == "table" && object.name == table.as_bytes())
-        });
-        if matched > 0 && !conflicting && lineage_tables {
-            return Ok(DbClassification::Native);
+        if let Some(needs_migration) = native_lineage(conn, &objects).await? {
+            return Ok((DbClassification::Native, needs_migration));
         }
     }
     let mut tables = user_table_names(conn).await?;
     if tables.is_empty() {
         tables = objects.iter().map(SchemaObject::display).collect();
     }
-    Ok(DbClassification::Foreign { tables })
+    Ok((DbClassification::Foreign { tables }, false))
+}
+
+/// Positive native recognition = migration PROVENANCE, never table names. Returns
+/// `Some(needs_migration)` when the ledger is ours, `None` otherwise.
+///
+/// The rule, in order:
+///
+/// 1. every recorded row must have `success = 1` — a failed/dirty row is an unknown state, not ours;
+/// 2. the recorded versions we know must be a valid PREFIX of the built-in migration list and carry OUR
+///    checksums — our migrator applies in order, so `{1, 3}` is not a state it can produce;
+/// 3. a recorded version we do not know is tolerated only when it is NEWER than everything built in
+///    (a database migrated by a newer zynk stays ours; the migrator then reports the mismatch);
+/// 4. the lineage tables must exist.
+///
+/// This recognizes accidental foreign lineage; it is not authentication against a deliberately
+/// fabricated ledger (checksums are public), and it does not need to be for ADR 0008's threat model.
+async fn native_lineage(
+    conn: &mut SqliteConnection,
+    objects: &[SchemaObject],
+) -> Result<Option<bool>, DbError> {
+    let rows = ledger_rows(conn).await?;
+    if rows.is_empty() || rows.iter().any(|(_, _, success)| !success) {
+        return Ok(None);
+    }
+    let ours: Vec<_> = MIGRATOR.iter().collect();
+    let newest_ours = ours.iter().map(|m| m.version).max().unwrap_or(0);
+    let mut known: Vec<i64> = Vec::new();
+    for (version, checksum, _) in &rows {
+        match ours.iter().find(|m| m.version == *version) {
+            Some(m) if m.checksum.as_ref() == checksum.as_slice() => known.push(*version),
+            Some(_) => return Ok(None), // known version, foreign checksum
+            None if *version > newest_ours => {} // newer zynk
+            None => return Ok(None),    // unknown older version interleaved
+        }
+    }
+    known.sort_unstable();
+    let expected_prefix: Vec<i64> = ours.iter().take(known.len()).map(|m| m.version).collect();
+    if known.is_empty() || known != expected_prefix {
+        return Ok(None);
+    }
+    let lineage_tables = NATIVE_LINEAGE_TABLES.iter().all(|table| {
+        objects
+            .iter()
+            .any(|object| object.kind == "table" && object.name == table.as_bytes())
+    });
+    if !lineage_tables {
+        return Ok(None);
+    }
+    // Current = every built-in migration is recorded. Only a CURRENT native DB may open without the
+    // init lock: sqlx's SQLite migrator has no cross-process lock of its own, so pending upgrades must
+    // be serialized exactly like first-time initialization.
+    Ok(Some(known.len() < ours.len()))
 }
 
 /// One `sqlite_master` row: `kind` is table/index/view/trigger; `name` is the raw byte string.
@@ -364,16 +432,18 @@ async fn schema_objects(conn: &mut SqliteConnection) -> Result<Vec<SchemaObject>
     Ok(objects)
 }
 
-/// `(version, checksum)` of every migration the ledger records.
-async fn ledger_rows(conn: &mut SqliteConnection) -> Result<Vec<(i64, Vec<u8>)>, DbError> {
-    let rows = sqlx::query("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
-        .fetch_all(&mut *conn)
-        .await?;
+/// `(version, checksum, success)` of every migration the ledger records.
+async fn ledger_rows(conn: &mut SqliteConnection) -> Result<Vec<(i64, Vec<u8>, bool)>, DbError> {
+    let rows =
+        sqlx::query("SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&mut *conn)
+            .await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         out.push((
             row.try_get::<i64, _>("version")?,
             row.try_get::<Vec<u8>, _>("checksum")?,
+            row.try_get::<bool, _>("success")?,
         ));
     }
     Ok(out)
@@ -383,23 +453,30 @@ async fn ledger_rows(conn: &mut SqliteConnection) -> Result<Vec<(i64, Vec<u8>)>,
 /// (never `create_if_missing`), so a missing/0-byte file is `Absent`. Used by
 /// `zynk db status` and as the basis for the open-time guard.
 pub async fn classify_db_at(path: &Path) -> Result<DbClassification, DbError> {
+    Ok(inspect_db_at(path).await?.0)
+}
+
+/// `classify_db_at` plus whether the built-in migrator still has work to do on it (always `true`
+/// for Absent/Empty; meaningful for Native). Read-only and sidecar-safe like `classify_db_at`.
+async fn inspect_db_at(path: &Path) -> Result<(DbClassification, bool), DbError> {
     match std::fs::metadata(path) {
-        Err(_) => return Ok(DbClassification::Absent),
-        Ok(meta) if meta.len() == 0 => return Ok(DbClassification::Absent),
+        Err(_) => return Ok((DbClassification::Absent, true)),
+        Ok(meta) if meta.len() == 0 => return Ok((DbClassification::Absent, true)),
         Ok(_) => {}
     }
     let options = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(false)
         .read_only(true);
-    // Durable boundary (ADR 0011): a read-only inspection never modifies the main database file or
-    // its `-wal` journal — the bytes that hold data. SQLite may create or update the `-shm` wal-index
-    // (reconstructible coordination state, rebuilt from `-wal` on demand) to read a WAL-mode database;
-    // EXCLUSIVE locking mode would avoid that but cannot coexist with a running server's connection.
+    // Durable boundary (ADR 0011): a read-only inspection never modifies EXISTING data bytes — the
+    // main database file and any existing `-wal` journal content. To read a WAL-mode database SQLite
+    // may create an empty `-wal` and create/update the `-shm` wal-index (reconstructible coordination
+    // state); EXCLUSIVE locking mode would avoid that but cannot coexist with a running server's
+    // connection, and `immutable=1` would ignore live WAL content.
     let mut conn = SqliteConnection::connect_with(&options).await?;
-    let class = classify_open_conn(&mut conn).await?;
+    let inspection = classify_open_conn(&mut conn).await?;
     let _ = conn.close().await;
-    Ok(class)
+    Ok(inspection)
 }
 
 /// The zynk-branded fail-closed error for a foreign DB at `path`.
@@ -856,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_classification_leaves_wal_sidecars_untouched() {
+    fn read_only_classification_leaves_existing_data_bytes_untouched_on_live_wal() {
         // Gate-3 G3-DB-002 / ADR 0011: inspecting a foreign WAL database must not modify its data
         // bytes (main file, -wal); the -shm wal-index is the documented, reconstructible exception.
         let path = tmp_db("g3-wal-sidecars");
@@ -902,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_classification_does_not_create_shm_for_wal_db_without_one() {
+    fn read_only_classification_leaves_existing_data_bytes_untouched_on_wal_copy_without_shm() {
         // Gate-3 caveat / ADR 0011: a WAL database copied without its -shm (crash/copy) keeps its
         // db/-wal bytes identical under a read-only inspection; SQLite may rebuild a -shm wal-index
         // from the -wal to read it (the documented reconstructible exception).
@@ -973,6 +1050,377 @@ mod tests {
             started.elapsed()
         );
         holder.unlock().unwrap();
+    }
+
+    /// A genuine but PARTIALLY migrated native DB: migration 0001 applied by hand from the built-in
+    /// migrator (same SQL, same SHA-384 checksum in the ledger), 0002/0003 pending.
+    fn plant_partial_native_db(tag: &str) -> std::path::PathBuf {
+        let path = tmp_db(tag);
+        let first = MIGRATOR
+            .iter()
+            .find(|m| m.version == 1)
+            .expect("migration 0001 exists");
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await?;
+            conn.execute(SQLX_LEDGER_DDL).await?;
+            conn.execute(first.sql.as_ref()).await?;
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+                 VALUES (?, ?, 1, ?, 0)",
+            )
+            .bind(first.version)
+            .bind(first.description.as_ref())
+            .bind(first.checksum.as_ref())
+            .execute(&mut conn)
+            .await?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        path
+    }
+
+    fn recorded_versions(path: &std::path::Path) -> Vec<i64> {
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(path)
+                    .create_if_missing(false)
+                    .read_only(true),
+            )
+            .await?;
+            let rows = ledger_rows(&mut conn).await?;
+            Ok::<Vec<i64>, DbError>(rows.into_iter().map(|(v, _, _)| v).collect())
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn concurrent_opens_of_a_partially_migrated_native_db_all_succeed() {
+        // Gate-2 round 4 (Codex): a native DB with PENDING migrations must not bypass the init lock —
+        // sqlx's SQLite migrator has no cross-process lock, so racing openers hit a UNIQUE ledger insert.
+        let path = plant_partial_native_db("partial-native-concurrent");
+        assert_eq!(recorded_versions(&path), vec![1]);
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Native
+        );
+        let openers = 6;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(openers));
+        let handles: Vec<_> = (0..openers)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    block_on(open_migrated_at_without_recovery(&path)).map(|_| ())
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        let all: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
+        assert_eq!(recorded_versions(&path), all);
+    }
+
+    #[test]
+    fn partially_migrated_native_db_does_not_migrate_while_the_init_lock_is_held() {
+        // Only a fully CURRENT native DB may bypass the lock; a pending upgrade must wait for the
+        // holder and fail closed on timeout, leaving the ledger untouched.
+        let path = plant_partial_native_db("partial-native-held-lock");
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(init_lock_path(&path))
+            .unwrap();
+        holder.lock().unwrap();
+        let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
+        assert_eq!(err.code, "db_init_lock_timeout", "{}", err.message);
+        assert_eq!(
+            recorded_versions(&path),
+            vec![1],
+            "pending migrations ran despite the held lock"
+        );
+        holder.unlock().unwrap();
+    }
+
+    /// Gate-2 round 4 (a): lineage policy — recorded known versions must be a valid PREFIX of the
+    /// built-in list, a `success = 0` row fails closed, and unknown versions are tolerated only when
+    /// NEWER than everything built in.
+    fn set_ledger_rows(path: &std::path::Path, sql: &str) {
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(path)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute(sql).await?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn ledger_with_a_version_gap_is_foreign() {
+        // Versions {1, 3} recorded (both with our checksums), 2 missing: not a state our migrator can
+        // produce, so it is not our lineage.
+        let path = tmp_db("g4-lineage-gap");
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        set_ledger_rows(&path, "DELETE FROM _sqlx_migrations WHERE version = 2");
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ledger_with_a_dirty_migration_row_is_foreign() {
+        let path = tmp_db("g4-lineage-dirty");
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        set_ledger_rows(
+            &path,
+            "UPDATE _sqlx_migrations SET success = 0 WHERE version = 1",
+        );
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ledger_with_an_unknown_older_version_is_foreign() {
+        // An unknown version BELOW our newest is another lineage interleaved with ours; only strictly
+        // newer unknown versions (a newer zynk) are tolerated.
+        let path = tmp_db("g4-lineage-unknown-older");
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        set_ledger_rows(
+            &path,
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+             VALUES (0, 'other app', 1, x'00', 0)",
+        );
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classification_uses_one_snapshot_across_schema_and_ledger_reads() {
+        // Gate-2 round 4 (item 2): the schema-object read and the ledger read must come from ONE
+        // snapshot. Choreography: the ledger table exists committed; a writer holds migration 0001 +
+        // its ledger row UNCOMMITTED; a reader pins a read snapshot; the writer commits; the reader
+        // classifies on the pinned snapshot — it must still see "empty ledger only" = Empty, never
+        // Foreign { tables: ["_sqlx_migrations"] } (objects from before the commit, rows from after).
+        let path = tmp_db("g4-single-snapshot");
+        let first = MIGRATOR
+            .iter()
+            .find(|m| m.version == 1)
+            .expect("migration 0001 exists");
+        block_on(async {
+            let mut setup = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await?;
+            setup.execute(SQLX_LEDGER_DDL).await?;
+            setup.close().await?;
+
+            let mut writer = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(false)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await?;
+            let mut pending = writer.begin().await?;
+            pending.execute(first.sql.as_ref()).await?;
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+                 VALUES (?, ?, 1, ?, 0)",
+            )
+            .bind(first.version)
+            .bind(first.description.as_ref())
+            .bind(first.checksum.as_ref())
+            .execute(&mut *pending)
+            .await?;
+
+            let mut reader = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(false)
+                    .read_only(true),
+            )
+            .await?;
+            let mut pinned = reader.begin().await?;
+            let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master")
+                .fetch_one(&mut *pinned)
+                .await?;
+
+            pending.commit().await?;
+
+            let (class, _) = classify_snapshot(&mut pinned, &mut || {}).await?;
+            assert_eq!(class, DbClassification::Empty, "pinned snapshot must predate the commit");
+            pinned.rollback().await?;
+            reader.close().await?;
+            writer.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        // A fresh inspection sees the committed 0001: native, with 0002/0003 pending.
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Native
+        );
+    }
+
+    #[test]
+    fn read_only_classification_leaves_existing_data_bytes_untouched_on_checkpointed_wal() {
+        // ADR 0011: a cleanly checkpointed WAL database with NO sidecars keeps its main-file bytes
+        // identical under inspection; SQLite may create an empty `-wal` and a `-shm` to read it.
+        let path = tmp_db("g4-checkpointed-wal");
+        plant_foreign_db(&path, "PRAGMA journal_mode = WAL; CREATE TABLE projects (id TEXT PRIMARY KEY); INSERT INTO projects VALUES ('p')");
+        let sidecar = |suffix: &str| {
+            path.with_file_name(format!(
+                "{}{suffix}",
+                path.file_name().unwrap().to_str().unwrap()
+            ))
+        };
+        assert!(
+            !sidecar("-wal").exists() && !sidecar("-shm").exists(),
+            "fixture must start clean"
+        );
+        let before = std::fs::read(&path).unwrap();
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "main db bytes changed"
+        );
+        if sidecar("-wal").exists() {
+            assert_eq!(
+                std::fs::metadata(sidecar("-wal")).unwrap().len(),
+                0,
+                "a created -wal must be empty"
+            );
+        }
+    }
+
+    /// Shared choreography for the snapshot regressions: the ledger exists committed; a writer thread
+    /// holds migration 0001 + its ledger row UNCOMMITTED and commits when told; the inspection under
+    /// test runs with a hook that triggers that commit between its schema read and its ledger read.
+    fn run_interleaved_inspection(
+        tag: &str,
+        inspect: impl FnOnce(&mut SqliteConnection, &mut dyn FnMut()) -> (DbClassification, bool),
+    ) -> DbClassification {
+        let path = tmp_db(tag);
+        block_on(async {
+            let mut setup = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await?;
+            setup.execute(SQLX_LEDGER_DDL).await?;
+            setup.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            block_on(async {
+                let first = MIGRATOR.iter().find(|m| m.version == 1).unwrap();
+                let mut conn = SqliteConnection::connect_with(
+                    &SqliteConnectOptions::new()
+                        .filename(&writer_path)
+                        .create_if_missing(false)
+                        .journal_mode(SqliteJournalMode::Wal),
+                )
+                .await?;
+                let mut pending = conn.begin().await?;
+                pending.execute(first.sql.as_ref()).await?;
+                sqlx::query(
+                    "INSERT INTO _sqlx_migrations \
+                     (version, description, success, checksum, execution_time) VALUES (?, ?, 1, ?, 0)",
+                )
+                .bind(first.version)
+                .bind(first.description.as_ref())
+                .bind(first.checksum.as_ref())
+                .execute(&mut *pending)
+                .await?;
+                let _ = done_tx.send(()); // ready: pending transaction open
+                go_rx.recv().expect("inspection signals the commit point");
+                pending.commit().await?;
+                let _ = done_tx.send(()); // committed
+                conn.close().await?;
+                Ok::<(), DbError>(())
+            })
+            .unwrap();
+        });
+        done_rx.recv().unwrap(); // writer's transaction is open
+
+        let mut reader = block_on(async {
+            SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(false)
+                    .read_only(true),
+            )
+            .await
+            .map_err(DbError::from)
+        })
+        .unwrap();
+        let mut commit_now = || {
+            go_tx.send(()).unwrap();
+            done_rx.recv().unwrap(); // the writer has COMMITTED between our two reads
+        };
+        let (class, _) = inspect(&mut reader, &mut commit_now);
+        writer.join().unwrap();
+        class
+    }
+
+    #[test]
+    fn production_inspection_pins_one_snapshot_under_controlled_interleaving() {
+        // Gate-2 round 4 (item 2) — the PRODUCTION wrapper: the writer's 0001 commits between the
+        // schema read and the ledger read, and the verdict must still be Empty (one snapshot).
+        let class = run_interleaved_inspection("g4-wrapper-snapshot", |reader, hook| {
+            block_on(classify_open_conn_with_hook(reader, hook)).unwrap()
+        });
+        assert_eq!(class, DbClassification::Empty);
+    }
+
+    #[test]
+    fn inspection_without_the_wrapper_transaction_mixes_snapshots() {
+        // Negative control (RED evidence): the same choreography WITHOUT the wrapper's transaction —
+        // each SELECT autocommits — sees the pre-commit objects and the post-commit ledger row and
+        // wrongly reports Foreign. This is exactly the failure the wrapper's BEGIN prevents.
+        let class = run_interleaved_inspection("g4-no-transaction", |reader, hook| {
+            block_on(classify_snapshot(reader, hook)).unwrap()
+        });
+        assert_eq!(
+            class,
+            DbClassification::Foreign {
+                tables: vec!["_sqlx_migrations".to_string()]
+            }
+        );
     }
 
     #[test]
