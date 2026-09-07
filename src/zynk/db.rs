@@ -130,10 +130,11 @@ pub async fn open_migrated_at_without_recovery(path: &Path) -> Result<SqliteConn
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // ADR 0008 foreign-DB guard: classify FIRST, with a READ-ONLY, sidecar-safe connection, BEFORE
+    // ADR 0008 foreign-DB guard: classify FIRST, with a READ-ONLY connection (existing data bytes
+    // are never modified — ADR 0011), BEFORE
     // the writable open below. This matters for byte-immutability: the writable `connect_with`
     // applies `journal_mode = WAL`, which rewrites the SQLite file header (bytes 18-19) on connect.
-    // Classifying read-only first means a FOREIGN database is never even touched — we fail closed
+    // Classifying read-only first means a FOREIGN database's data bytes are never modified — we fail closed
     // before any mutation. The guard sits in this shared low-level opener, so every PRODUCT open
     // (open_migrated_at, append, query-readonly, workers) is protected.
     //
@@ -315,6 +316,16 @@ async fn classify_snapshot(
     let ledger_present = objects
         .iter()
         .any(|object| object.kind == "table" && object.name == b"_sqlx_migrations");
+    if ledger_present && !ledger_structure_is_canonical(conn).await? {
+        // A table that merely BORROWS the ledger's name is foreign schema: neither the empty-ledger
+        // initialization exception nor native recognition applies, and the writable open (which
+        // rewrites the header for WAL) must never happen (Gate-2 round 5).
+        let mut tables = user_table_names(conn).await?;
+        if tables.is_empty() {
+            tables = objects.iter().map(SchemaObject::display).collect();
+        }
+        return Ok((DbClassification::Foreign { tables }, false));
+    }
     if objects.len() == 1 && ledger_present {
         // sqlx creates its `_sqlx_migrations` ledger BEFORE the first migration's transaction commits.
         // A DB whose ONLY object is that ledger with NO recorded migrations is a native init in
@@ -347,7 +358,8 @@ async fn classify_snapshot(
 ///
 /// The rule, in order:
 ///
-/// 1. every recorded row must have `success = 1` — a failed/dirty row is an unknown state, not ours;
+/// 1. every recorded row must have `success` equal to the literal integer `1` (what sqlx writes) — a
+///    failed/dirty row or any other value is an unknown state, not ours;
 /// 2. the recorded versions we know must be a valid PREFIX of the built-in migration list and carry OUR
 ///    checksums — our migrator applies in order, so `{1, 3}` is not a state it can produce;
 /// 3. a recorded version we do not know is tolerated only when it is NEWER than everything built in
@@ -361,7 +373,7 @@ async fn native_lineage(
     objects: &[SchemaObject],
 ) -> Result<Option<bool>, DbError> {
     let rows = ledger_rows(conn).await?;
-    if rows.is_empty() || rows.iter().any(|(_, _, success)| !success) {
+    if rows.is_empty() || rows.iter().any(|(_, _, success)| *success != 1) {
         return Ok(None);
     }
     let ours: Vec<_> = MIGRATOR.iter().collect();
@@ -392,6 +404,62 @@ async fn native_lineage(
     // init lock: sqlx's SQLite migrator has no cross-process lock of its own, so pending upgrades must
     // be serialized exactly like first-time initialization.
     Ok(Some(known.len() < ours.len()))
+}
+
+/// The canonical sqlx SQLite migration ledger (sqlx-sqlite 0.8.6 `migrate.rs`): `(name, declared type,
+/// NOT NULL, default expression, primary key)`. The empty-ledger initialization exception and native
+/// recognition apply ONLY to a table with exactly this structure.
+const CANONICAL_LEDGER_COLUMNS: &[(&str, &str, bool, Option<&str>, bool)] = &[
+    ("version", "BIGINT", false, None, true),
+    ("description", "TEXT", true, None, false),
+    (
+        "installed_on",
+        "TIMESTAMP",
+        true,
+        Some("CURRENT_TIMESTAMP"),
+        false,
+    ),
+    ("success", "BOOLEAN", true, None, false),
+    ("checksum", "BLOB", true, None, false),
+    ("execution_time", "BIGINT", true, None, false),
+];
+
+/// Validates `_sqlx_migrations` against `CANONICAL_LEDGER_COLUMNS` using SQLite's own schema
+/// metadata (`PRAGMA table_info`), on the caller's snapshot.
+async fn ledger_structure_is_canonical(conn: &mut SqliteConnection) -> Result<bool, DbError> {
+    let rows = sqlx::query("PRAGMA table_info(_sqlx_migrations)")
+        .fetch_all(&mut *conn)
+        .await?;
+    if rows.len() != CANONICAL_LEDGER_COLUMNS.len() {
+        return Ok(false);
+    }
+    for row in rows {
+        let name = row.try_get::<String, _>("name")?;
+        let declared = row.try_get::<String, _>("type")?;
+        let not_null = row.try_get::<i64, _>("notnull")? != 0;
+        let default = row.try_get::<Option<String>, _>("dflt_value")?;
+        let primary_key = row.try_get::<i64, _>("pk")? != 0;
+        let Some((_, expected_type, expected_not_null, expected_default, expected_pk)) =
+            CANONICAL_LEDGER_COLUMNS
+                .iter()
+                .find(|(expected_name, ..)| *expected_name == name)
+        else {
+            return Ok(false);
+        };
+        let default_matches = match (default.as_deref(), expected_default) {
+            (None, None) => true,
+            (Some(actual), Some(expected)) => actual.trim().eq_ignore_ascii_case(expected),
+            _ => false,
+        };
+        if !declared.eq_ignore_ascii_case(expected_type)
+            || not_null != *expected_not_null
+            || !default_matches
+            || primary_key != *expected_pk
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// One `sqlite_master` row: `kind` is table/index/view/trigger; `name` is the raw byte string.
@@ -432,8 +500,9 @@ async fn schema_objects(conn: &mut SqliteConnection) -> Result<Vec<SchemaObject>
     Ok(objects)
 }
 
-/// `(version, checksum, success)` of every migration the ledger records.
-async fn ledger_rows(conn: &mut SqliteConnection) -> Result<Vec<(i64, Vec<u8>, bool)>, DbError> {
+/// `(version, checksum, success)` of every migration the ledger records; `success` is read as the
+/// stored integer so the rule can require the literal `1` rather than any truthy value.
+async fn ledger_rows(conn: &mut SqliteConnection) -> Result<Vec<(i64, Vec<u8>, i64)>, DbError> {
     let rows =
         sqlx::query("SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version")
             .fetch_all(&mut *conn)
@@ -443,7 +512,7 @@ async fn ledger_rows(conn: &mut SqliteConnection) -> Result<Vec<(i64, Vec<u8>, b
         out.push((
             row.try_get::<i64, _>("version")?,
             row.try_get::<Vec<u8>, _>("checksum")?,
-            row.try_get::<bool, _>("success")?,
+            row.try_get::<i64, _>("success")?,
         ));
     }
     Ok(out)
@@ -457,7 +526,8 @@ pub async fn classify_db_at(path: &Path) -> Result<DbClassification, DbError> {
 }
 
 /// `classify_db_at` plus whether the built-in migrator still has work to do on it (always `true`
-/// for Absent/Empty; meaningful for Native). Read-only and sidecar-safe like `classify_db_at`.
+/// for Absent/Empty; meaningful for Native). Read-only like `classify_db_at` (ADR 0011: existing data
+/// bytes are never modified).
 async fn inspect_db_at(path: &Path) -> Result<(DbClassification, bool), DbError> {
     match std::fs::metadata(path) {
         Err(_) => return Ok((DbClassification::Absent, true)),
@@ -1421,6 +1491,60 @@ mod tests {
                 tables: vec!["_sqlx_migrations".to_string()]
             }
         );
+    }
+
+    /// Gate-2 round 5 (Codex): the empty-ledger initialization exception must only apply to the
+    /// CANONICAL sqlx ledger structure — a table that merely borrows the name is foreign schema.
+    #[test]
+    fn ledger_named_table_with_three_columns_is_foreign() {
+        let path = tmp_db("g5-ledger-three-cols");
+        plant_foreign_db(
+            &path,
+            "CREATE TABLE _sqlx_migrations (version, checksum, success)",
+        );
+        assert_fails_closed_unchanged("three-column-ledger", &path);
+    }
+
+    #[test]
+    fn ledger_named_table_with_all_columns_but_wrong_structure_is_foreign() {
+        // Same six names, but no primary key, no NOT NULL, no installed_on default.
+        let path = tmp_db("g5-ledger-loose-cols");
+        plant_foreign_db(
+            &path,
+            "CREATE TABLE _sqlx_migrations \
+             (version, description, installed_on, success, checksum, execution_time)",
+        );
+        assert_fails_closed_unchanged("loose-column-ledger", &path);
+    }
+
+    #[test]
+    fn canonical_empty_ledger_still_initializes() {
+        let path = tmp_db("g5-ledger-canonical");
+        plant_foreign_db(&path, SQLX_LEDGER_DDL);
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Empty
+        );
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Native
+        );
+    }
+
+    #[test]
+    fn ledger_row_with_a_non_one_success_value_is_foreign() {
+        // The stated rule is `success = 1` (what sqlx writes), not merely "truthy".
+        let path = tmp_db("g5-success-two");
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        set_ledger_rows(
+            &path,
+            "UPDATE _sqlx_migrations SET success = 2 WHERE version = 1",
+        );
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
     }
 
     #[test]

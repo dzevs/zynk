@@ -3674,7 +3674,8 @@ pub fn run_server() -> io::Result<()> {
     if let Err(err) = crate::zynk::db::block_on(crate::zynk::db::open_migrated()) {
         // Fail-closed startup (ADR 0008): a FOREIGN database at the resolved native path is a
         // safety-critical conflict — zynk must NEVER come up on foreign data (the foreign bytes are
-        // left byte-identical: the open path classifies read-only, sidecar-safe, and never mutates).
+        // left byte-identical: the open path classifies read-only and never modifies existing data
+        // bytes, ADR 0011).
         // Every other startup DB failure (init-lock timeout, migration failure, I/O) is fatal too:
         // a server that binds its API socket without working persistence would run degraded for the
         // whole session, so abort with the branded error and a non-zero exit instead.
