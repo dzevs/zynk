@@ -1,6 +1,6 @@
 [package]
 name = "zynk"
-version = "3.0.1"
+version = "3.1.0"
 edition = "2021"
 build = "build.rs"
 description = "Terminal-native command center for AI agents"
@@ -10,19 +10,19 @@ homepage = "https://github.com/dzevs/zynk"
 keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
 readme = "README.md"
-# crates.io: the `zynk` crate name is owner-controlled (owner `dzevs`, currently 2.x — the retired MIT ACP
-# protocol/helper CLI). The native app continues that lineage at 3.x (AGPL-3.0-or-later); crates.io is
-# monotonic, so a native publish must be >= 3.0.0. Packaging is crates.io-ready (P1, ZYNK_CRATES_IO_P1): the
-# `include` list below is ANCHORED (leading `/`, so bare `SKILL.md`/`README.md` no longer leak `.codex/`,
-# `docs/next/`, `website/`) and complete (build.rs, vendor source + provenance/patches, migrations, SKILL.md,
-# Cargo.lock, NOTICE). build.rs no-ops under `DOCS_RS` (docs.rs) and emits Zig output into `$OUT_DIR` (so
-# `cargo package --verify` does not see a build-modified source tree). `cargo install zynk` builds from source:
-# it needs Zig 0.15.2 AND network during the build — libghostty-vt's Zig deps (gobject/libxev/vaxis/z2d/zf/
-# zigimg/wayland/uucode) are fetched into Zig's global cache; `--offline` is unsupported, so the build is NOT
-# hermetic. `publish = ["crates-io"]` enables `cargo publish` (and `--dry-run`) to crates.io ONLY; the ACTUAL
-# `cargo publish` stays gated behind an explicit operator approval (HARD RULE) + a `v3.0.1` git tag. Binary
-# release / Homebrew / GitHub tag remain at 3.0.0 (this crate is 3.0.1 for provenance). See
-# docs/zynk/release-3.0.0-prep.md.
+# crates.io: the `zynk` crate name is owner-controlled (owner `dzevs`). 2.x was the retired MIT ACP helper
+# CLI; the native app continues that lineage at 3.x (AGPL-3.0-or-later), and crates.io versions are monotonic,
+# so native publishes are >= 3.0.0. Packaging is crates.io-ready: the `include` list below is ANCHORED (leading
+# `/`, so bare `SKILL.md`/`README.md` patterns cannot leak private dirs) and complete (build.rs, vendor source +
+# provenance/patches, migrations, SKILL.md, Cargo.lock, NOTICE). build.rs no-ops under `DOCS_RS` (docs.rs) and
+# emits Zig output into `$OUT_DIR` (so `cargo package --verify` never sees a build-modified source tree).
+# `cargo install zynk --locked` builds from source: it needs Zig 0.15.2 AND network during the build
+# (libghostty-vt's Zig deps are fetched into Zig's global cache; `--offline` is unsupported, so the build is not
+# hermetic). NOTE: `cargo package` strips `[patch.crates-io]` and excludes the nested `vendor/portable-pty`
+# source, so a crates.io-SOURCE build links the registry `portable-pty` — on Windows that means no ConPTY patch;
+# the Git-source build, the release binaries, Homebrew and Nix ship the vendored copy. `publish = ["crates-io"]`
+# enables `cargo publish` (and `--dry-run`) to crates.io ONLY; the actual publish, the GitHub release, and the
+# Homebrew tap bump are separate operator-gated steps run from the tagged release commit (WORKFLOW.md).
 publish = ["crates-io"]
 include = [
     "/src/**/*",

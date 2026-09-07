@@ -1,5 +1,63 @@
 # Changelog
 
+## [3.1.0] — 2026-09-07
+
+The **herdr v0.7.1 port** (36 upstream changes re-applied on top of the Zynk identity — see
+`docs/zynk/fork-patch-ledger.md`, *v0.7.1 PORT LEDGER*) plus a hardened single public repo. No wire/protocol
+change: socket method IDs, protocol-ID fields, and the delivery/receipt matrix are unchanged. One documented
+config key is removed (see **Changed**).
+
+**Added**
+
+- Agent-panel ordering: `ui.agent_panel_sort = "spaces"` (default) or `"priority"`. Priority keeps Zynk's
+  blocked > working > done ranking.
+- Optional host light/dark theme switching: `theme.auto_switch = true` (default **off**) with
+  `theme.dark_name` / `theme.light_name`.
+- `ui.pane_borders` / `ui.pane_gaps` for pane chrome.
+- `update.version_check` / `update.manifest_check` toggles. They only *disable* checks; self-update stays
+  unavailable (no update-manifest hosting yet).
+- Linux: `ZYNK_AGENT` environment hints identify agents running inside wrapped foreground processes.
+
+**Changed**
+
+- `ui.agent_panel_scope` is **no longer supported**; the agent panel shows all workspaces.
+  `ui.agent_panel_sort` controls ordering only and does not restore current-workspace filtering. An old
+  `agent_panel_scope` key is ignored and reported as a startup diagnostic. *Policy note:* Zynk may remove a
+  documented config key in a minor release when the changelog carries a migration note and startup reports the
+  removed key; this is a deliberate config change, not a backward-compatible one.
+- Custom keys and prefixes now **displace** conflicting default bindings instead of being rejected; a config
+  reload keeps the valid subset of bindings.
+- The raw image-paste shortcut is remote-only: `keys.remote_image_paste` (default `ctrl+v`; empty disables).
+
+**Fixed**
+
+- Windows: the terminal backend vendors `portable-pty` and forces the **system ConPTY** (`kernel32.dll`; no
+  `conpty.dll` sideload); multiline paste is preserved; npm-wrapped `pi` is detected.
+- Sessions: OMP resumes in the same pane after a restart with root-only hook state; lifecycle hook generations
+  re-anchor; root-agent restore ownership is protected; Pi/OMP agents are released on shutdown.
+- Plugins: workspace/tab/pane lifecycle events also fire for panes created from the UI.
+- Worktrees: `worktree.create` / `worktree.remove` run their Git work in the background — the UI and server
+  stay responsive and the requesting client still receives the final response; duplicate/stale operations are
+  guarded; forced removal recovers leftover checkouts; creating a worktree checks out an existing branch.
+- Terminal/render: wide-character cells in pane text, border intersections use the active pane color, Kitty
+  file/temp/shared-memory image media, split host-color replies, duplicate release-key input, focus after
+  temporary pane commands.
+- Agents/remote: Devin hook on Python 3.9; Copilot `ask_user` accept prompt detected; OpenCode hook scoped to
+  the root agent and adopting new sessions; the idle client writer blocks instead of busy-polling; remote
+  handshakes get a 60 s budget (local stays 5 s).
+- Self-update messages now say accurately that self-update is unavailable; the updater remains fail-closed.
+
+**Install notes**
+
+- A **Windows** `cargo install zynk` (crates.io source) build links the registry `portable-pty` and therefore
+  lacks only the ConPTY patch — Cargo strips `[patch.crates-io]` and excludes the nested vendored source.
+  Linux/macOS source builds are unaffected; Git-source builds, the GitHub Release binaries, Homebrew, and Nix
+  all ship the patched copy. Prefer `cargo install zynk --version 3.1.0 --locked` (without `--locked` Cargo
+  ignores the packaged lockfile).
+- Refresh installed integrations (`zynk integration install …`) after upgrading to receive the hook changes.
+- Contributors: Zynk is now one canonical public repo with public design docs (`docs/zynk/`) and
+  contributor/tooling guides; private content is kept out by fail-closed gates.
+
 ## [3.0.1] — 2026-06-23
 
 Source crate on crates.io: `cargo install zynk` now installs the native Zynk terminal app **from source**. It

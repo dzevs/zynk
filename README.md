@@ -73,11 +73,13 @@ Linuxbrew the binary is glibc-dynamic and needs **glibc ≥ 2.30**.
 **Prebuilt binary** (without Homebrew) — Linux x86_64 (glibc ≥ 2.30):
 
 ```bash
-curl -LO https://github.com/dzevs/zynk/releases/download/v3.0.0/zynk-v3.0.0-linux-x86_64.tar.gz
-curl -LO https://github.com/dzevs/zynk/releases/download/v3.0.0/SHA256SUMS
+TAG=v3.0.0   # one immutable release: the archive and SHA256SUMS below come from the same tag
+curl -LO "https://github.com/dzevs/zynk/releases/download/$TAG/zynk-$TAG-linux-x86_64.tar.gz"
+curl -LO "https://github.com/dzevs/zynk/releases/download/$TAG/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS
-tar -xzf zynk-v3.0.0-linux-x86_64.tar.gz && install -m 755 zynk ~/.local/bin/zynk
-zynk --version
+mkdir -p "$HOME/.local/bin"
+tar -xzf "zynk-$TAG-linux-x86_64.tar.gz" && install -m 755 zynk "$HOME/.local/bin/zynk"
+zynk --version   # if this fails, add "$HOME/.local/bin" to your PATH
 ```
 
 Targets: `linux-x86_64`, `linux-aarch64` (GNU/glibc dynamic, **glibc ≥ 2.30**), `macos-x86_64`,
@@ -95,8 +97,15 @@ nix run github:dzevs/zynk
 
 **Build from source** — needs Rust (stable), **Zig 0.15.2** (the bundled `libghostty-vt` is built with Zig),
 and **network access during the build** (the Zig build fetches libghostty-vt's package dependencies; offline
-builds aren't supported yet). `cargo install zynk` builds the same 3.x crate from source under the same
-requirements. See [`DEVELOPMENT.md`](DEVELOPMENT.md).
+builds aren't supported yet). `cargo install zynk --locked` builds the same 3.x crate from source under the
+same requirements (`--locked` keeps the crate's packaged lockfile; without it Cargo re-resolves dependencies).
+See [`DEVELOPMENT.md`](DEVELOPMENT.md).
+
+- **Windows, crates.io source only:** a `cargo install zynk` build links the registry `portable-pty` and lacks
+  the ConPTY patch (Cargo strips `[patch.crates-io]` from published crates). The Git-source build, the release
+  binaries, Homebrew and Nix all ship the patched copy; Linux/macOS source builds are unaffected.
+- **macOS source builds:** CI builds with Homebrew's `zig@0.15` (`brew install zig@0.15`), which is the tested
+  Zig on macOS.
 
 ```bash
 git clone https://github.com/dzevs/zynk && cd zynk
@@ -223,6 +232,30 @@ zynk separates **config** from **data**:
 ```bash
 zynk --default-config   # print the full default config
 ```
+
+Commonly tuned options (values shown are the defaults):
+
+```toml
+[ui]
+agent_panel_sort = "spaces"      # or "priority": blocked > working > done, most recent change first
+pane_borders = true              # draw borders around split panes
+pane_gaps = true                 # keep split panes visually separated
+
+[theme]
+auto_switch = false              # true: follow the host terminal's light/dark appearance
+dark_name = "catppuccin"         # theme used for a dark appearance when auto_switch is on
+light_name = "catppuccin-latte"  # theme used for a light appearance when auto_switch is on
+
+[update]
+version_check = true             # background checks only; self-update stays unavailable (see below)
+manifest_check = true            # background agent-detection manifest checks
+
+[keys]
+remote_image_paste = "ctrl+v"    # raw-key image paste, only in `zynk --remote`; "" disables it
+```
+
+`ui.agent_panel_scope` (3.0.x) is no longer supported: the agent panel shows all workspaces, and
+`ui.agent_panel_sort` controls ordering only. Custom keys and prefixes displace conflicting defaults.
 
 If a database from an earlier build already occupies `~/.zynk/zynk.db`, zynk **fails closed** rather than
 overwrite it, and points you at the explicit `zynk db` adopt/backup/import action.

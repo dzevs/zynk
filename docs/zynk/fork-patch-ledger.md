@@ -1940,3 +1940,19 @@ were not watched before the merge was declared done (a process miss; corrected g
    homebrew-zig switch** for the macOS jobs in `.github/workflows/{ci,release-dryrun,build-artifacts-manual}.yml`
    (gate `mlugg` to `runner.os != 'macOS'` + `brew install zig@0.15` on macOS). `mlugg/setup-zig@v2.2.1`
    with `version: 0.15.2` stays for linux + windows (still SHA-pinned + reproducible there).
+
+---
+
+# RELEASE 3.1.0 PREP (2026-09-07) — fork-owned changes on `release/3.1.0`
+
+Not an upstream port. Recorded because several touches land in upstream-inherited files (rule: log every
+touch). Branch base `main` @ `3d10a90`.
+
+| area | files | what / why |
+|---|---|---|
+| Rust 1.98 clippy | `src/ghostty/mod.rs`, `src/server/handoff.rs`, `src/terminal_theme.rs` | CI `stable` moved to 1.98 (2026-08-18): `chunks_exact_to_as_chunks` ×2, `byte_char_slices`, `some_filter`. The `some_filter` site is restructured to bind the parsed color BEFORE rejecting trailing components (the lint's mechanical rewrite would reorder the `parts.next()` calls). |
+| DB init race (product bug) | `src/zynk/db.rs` (fork-owned) | Two zynk processes opening a fresh shared DB at once (two named-session servers; a CLI racing a starting server): sqlx creates `_sqlx_migrations` before the first migration commits, the second opener classified the ledger-only DB as FOREIGN and exited (`db_foreign_conflict`). Fix: `InitLock` (exclusive advisory lock on `<db>.init-lock` around classify + migrate) + a ledger-only/empty DB classifies `Empty`. A ledger that records migrations without our tables stays Foreign (ADR 0008 boundary unchanged). Found via the `named_sessions_use_separate_servers_and_workspace_state` flake (2/40 under load, captured). |
+| test harness | `tests/cli_wrapper.rs` | `spawn_named_server` captured nothing (`Stdio::null`); now logs the server's stdout/stderr and `wait_for_named_server_socket` reports the child's exit status + output when the socket never appears. |
+| removed config key | `src/config/io.rs` | `ui.agent_panel_scope` was removed by the v0.7.1 port (dc83d1d); serde ignored it silently. Startup/live load now emit a diagnostic ("no longer supported … `ui.agent_panel_sort` controls ordering only"). Operator decision A (config-contract removal in a minor, documented). |
+| self-update messages | `src/update.rs`, `src/cli.rs`, `src/main.rs`, `src/remote/unix.rs` | User-facing text falsely said "Zynk has no published release"; releases exist (v3.0.0 binaries, crates.io 3.0.1, Homebrew). Reworded: self-update/remote fetch unavailable because there is no update-MANIFEST hosting; update manually via Homebrew / release binary / Nix / `cargo install zynk --locked`. Updater stays fail-closed; the remote-bootstrap test asserts the new phrasing. |
+| release metadata | `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `.github/workflows/release-dryrun.yml` | Version 3.0.1 → 3.1.0 (root package only; no dependency refresh); `Cargo.toml` packaging comment rewritten (was stale: "2.x", "tag stays 3.0.0", private doc pointer); CHANGELOG 3.1.0 entry (Added / Changed / Fixed / Install notes); README install snippet (single `TAG` var, `mkdir -p ~/.local/bin`, PATH hint), source-build notes (Windows crates.io-source ConPTY caveat, Homebrew `zig@0.15` on macOS, `--locked`), a config-options snippet (defaults taken from `zynk --default-config`) and the `agent_panel_scope` migration note; dry-run workflow default version 3.1.0. README keeps the v3.0.0 download pins until the 3.1.0 assets exist (G7). |

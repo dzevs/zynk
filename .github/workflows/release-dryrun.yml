@@ -15,9 +15,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: version string for artifact names (no leading v), e.g. 3.0.0
+        description: version string for artifact names (no leading v), e.g. 3.1.0
         required: true
-        default: "3.0.0"
+        default: "3.1.0"
         type: string
       libghostty_optimize:
         description: libghostty-vt optimize mode
