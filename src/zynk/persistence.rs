@@ -584,6 +584,17 @@ fn session_fields(party: &Party) -> (Option<String>, Option<String>, Option<Stri
     let Some(value) = party.agent_session.as_ref() else {
         return (None, None, None);
     };
+    // Owner coherence (Codex Gate-2 R13): a terminal can carry a persisted session reported for a
+    // DIFFERENT agent than the one it is labeled as (hook authority `pi`, session `zynk:codex`).
+    // That session is not this party's identity — it must never become the portable anchor a
+    // receipt binds to — so it is treated as absent. A session without an owner field (older
+    // reports) is kept as before.
+    let owner = value.get("agent").and_then(|v| v.as_str());
+    if let (Some(owner), Some(label)) = (owner, party.agent.as_deref()) {
+        if owner != label {
+            return (None, None, None);
+        }
+    }
     let source = value
         .get("source")
         .and_then(|v| v.as_str())
@@ -825,6 +836,40 @@ mod tests {
         assert_ne!(
             participant_fields(&a).participant_key,
             participant_fields(&b).participant_key
+        );
+    }
+
+    #[test]
+    fn a_session_owned_by_another_agent_is_not_participant_identity() {
+        // Codex Gate-2 R13 on da2dca7: a pane can carry a persisted session reported by a
+        // different owner (hook authority `pi`, session `zynk:codex`/codex). Such a session is not
+        // the party's identity — the participant key and stored session fields ignore it.
+        let mixed = Party {
+            agent: Some("pi".into()),
+            pane: Some("pane-1".into()),
+            terminal_id: Some("term-1".into()),
+            agent_session: Some(serde_json::json!({
+                "source": "zynk:codex", "agent": "codex", "kind": "id", "value": "S"
+            })),
+            ..Party::default()
+        };
+        let fields = participant_fields(&mixed);
+        assert_eq!(fields.agent_session_value, None);
+        assert_eq!(fields.agent_session_source, None);
+        assert_eq!(fields.agent_session_kind, None);
+        let coherent = Party {
+            agent_session: Some(serde_json::json!({
+                "source": "zynk:pi", "agent": "pi", "kind": "id", "value": "S"
+            })),
+            ..mixed.clone()
+        };
+        assert_eq!(
+            participant_fields(&coherent).agent_session_value.as_deref(),
+            Some("S")
+        );
+        assert_ne!(
+            fields.participant_key,
+            participant_fields(&coherent).participant_key
         );
     }
 

@@ -96,27 +96,164 @@ fn entry_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
-/// Move `from` to `to` WITHOUT replacing anything at `to`: a hard link fails with `AlreadyExists`
-/// when the target name exists in any form, so a competitor that appears between the preflight
-/// and the move turns into an error (and a rollback) rather than an overwrite; the source is
-/// unlinked only once the link exists. Filesystems without hard links fall back to
-/// `rename_or_copy` after an entry check — the residual race on such a filesystem is documented.
-fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::hard_link(from, to) {
-        Ok(()) => std::fs::remove_file(from),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(err),
-        Err(err) => {
-            if entry_exists(to) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!("{} exists", to.display()),
-                ));
-            }
-            rename_or_copy(from, to).map_err(|fallback| {
-                std::io::Error::other(format!("{fallback} (hard link failed: {err})"))
-            })
+/// The filesystem primitives one member move relies on. Injectable so tests can model what the
+/// build machine cannot produce: a filesystem without an atomic no-replace rename or hard links, a
+/// source that cannot be unlinked once the link exists, a cleanup that fails.
+struct MovePrimitives<'a> {
+    /// Atomic no-replace rename (Linux `renameat2(RENAME_NOREPLACE)`): `AlreadyExists` when the
+    /// target name exists in any form; any other error means "not available here".
+    rename_noreplace: &'a dyn Fn(&Path, &Path) -> std::io::Result<()>,
+    hard_link: &'a dyn Fn(&Path, &Path) -> std::io::Result<()>,
+    /// Exclusive create (`O_EXCL`) of the target plus a byte copy: `AlreadyExists` when the target
+    /// name exists; a partial target is removed on failure.
+    copy_new: &'a dyn Fn(&Path, &Path) -> std::io::Result<()>,
+    unlink: &'a dyn Fn(&Path) -> std::io::Result<()>,
+}
+
+impl MovePrimitives<'static> {
+    fn real() -> Self {
+        Self {
+            rename_noreplace: &rename_noreplace,
+            hard_link: &real_hard_link,
+            copy_new: &copy_new,
+            unlink: &real_unlink,
         }
     }
+}
+
+fn real_hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(from, to)
+}
+
+fn real_unlink(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
+#[cfg(target_os = "linux")]
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = |path: &Path| {
+        std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL byte")
+        })
+    };
+    let (from_c, to_c) = (c_path(from)?, c_path(to)?);
+    // SAFETY: both pointers are valid NUL-terminated strings that outlive the call; the kernel
+    // copies them. `AT_FDCWD` resolves relative paths against the working directory, as
+    // `std::fs::rename` does; `RENAME_NOREPLACE` makes the kernel fail with EEXIST instead of
+    // replacing whatever entry exists at `to`.
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from_c.as_ptr(),
+            libc::AT_FDCWD,
+            to_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_noreplace(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no atomic no-replace rename on this platform",
+    ))
+}
+
+/// Create `to` exclusively and copy `from` into it. Never replaces: `create_new` fails with
+/// `AlreadyExists` when any entry (a dangling symlink included) exists at `to`. A failure after
+/// the create removes the partial target again.
+fn copy_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut src = std::fs::File::open(from)?;
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let copied = std::io::copy(&mut src, &mut dst)
+        .and_then(|_| dst.sync_all())
+        .and_then(|_| dst.set_permissions(src.metadata()?.permissions()));
+    drop(dst);
+    if let Err(err) = copied {
+        let _ = std::fs::remove_file(to);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Move `from` to `to` WITHOUT replacing anything at `to` — on every path. Each primitive fails
+/// with `AlreadyExists` when the target name exists in any form, so a competitor that appears
+/// between the preflight and the move turns into an error (and a bundle rollback), never an
+/// overwrite; a plain rename, which replaces, is never used. When no primitive is available the
+/// member is refused with an actionable error. The source is unlinked only once the new entry
+/// exists; if that unlink fails the new entry is removed again (or named explicitly when even
+/// that fails), so a member is either moved or untouched.
+fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    move_no_replace_with(from, to, &MovePrimitives::real())
+}
+
+fn move_no_replace_with(from: &Path, to: &Path, fs: &MovePrimitives<'_>) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let rename_err = match (fs.rename_noreplace)(from, to) {
+        Ok(()) => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Err(err),
+        Err(err) => err,
+    };
+    let link_err = match (fs.hard_link)(from, to) {
+        Ok(()) => return unlink_source_after(from, to, fs, "hard link"),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Err(err),
+        Err(err) => err,
+    };
+    let copy_err = match (fs.copy_new)(from, to) {
+        Ok(()) => return unlink_source_after(from, to, fs, "copy"),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Err(err),
+        Err(err) => err,
+    };
+    Err(Error::new(
+        ErrorKind::Unsupported,
+        format!(
+            "no way to move the file without replacing an existing entry on this filesystem \
+             (no-replace rename: {rename_err}; hard link: {link_err}; exclusive copy: {copy_err}); \
+             move the bundle aside manually"
+        ),
+    ))
+}
+
+/// The new entry at `to` exists (linked or copied); unlink the source, and undo the new entry if
+/// the source cannot be unlinked — a hard link left behind would alias the untouched source
+/// (same inode), not preserve an independent backup.
+fn unlink_source_after(
+    from: &Path,
+    to: &Path,
+    fs: &MovePrimitives<'_>,
+    how: &str,
+) -> std::io::Result<()> {
+    let Err(unlink_err) = (fs.unlink)(from) else {
+        return Ok(());
+    };
+    let message = match (fs.unlink)(to) {
+        Ok(()) => format!(
+            "the source could not be unlinked after the {how} ({unlink_err}); the new entry at {} \
+             was removed again",
+            printable_path(to)
+        ),
+        Err(cleanup_err) => format!(
+            "the source could not be unlinked after the {how} ({unlink_err}) — WARNING: the new \
+             entry at {} could not be removed either ({cleanup_err}); it is {}",
+            printable_path(to),
+            if how == "hard link" {
+                "a hard link to the untouched source (same inode), not an independent backup"
+            } else {
+                "a copy of the untouched source"
+            }
+        ),
+    };
+    Err(std::io::Error::new(unlink_err.kind(), message))
 }
 
 fn relocate_bundle(
@@ -190,34 +327,6 @@ fn sidecar(path: &Path, ext: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(ext);
     PathBuf::from(s)
-}
-
-/// Rename, falling back to copy+remove across filesystems. The source is only
-/// removed AFTER a successful copy, so a failure never loses data.
-fn rename_or_copy(from: &Path, to: &Path) -> Result<(), String> {
-    if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("zynk: cannot create {}: {e}", printable_path(parent)))?;
-    }
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            std::fs::copy(from, to).map_err(|e| {
-                format!(
-                    "zynk: cannot copy {} -> {}: {e}",
-                    printable_path(from),
-                    printable_path(to)
-                )
-            })?;
-            std::fs::remove_file(from).map_err(|e| {
-                format!(
-                    "zynk: copied but could not remove {}: {e}",
-                    printable_path(from)
-                )
-            })?;
-            Ok(())
-        }
-    }
 }
 
 fn classify_raw(path: &Path) -> Result<DbClassification, crate::zynk::db::DbError> {
@@ -952,6 +1061,134 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    fn unsupported(_from: &Path, _to: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "not on this filesystem",
+        ))
+    }
+
+    #[test]
+    fn unsupported_links_fall_back_to_a_no_replace_copy_and_refuse_a_competitor() {
+        // Codex Gate-2 R13 on da2dca7 (P1): with hard links unavailable the old fallback was a
+        // replacing rename. Every fallback is now no-replace: a competitor that lands between the
+        // entry check and the move fails the move and survives intact.
+        let dir = tmp_home("move-copy-fallback");
+        std::fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("src");
+        let to = dir.join("dst");
+        std::fs::write(&from, b"SOURCE").unwrap();
+        let planting_copy = |from: &Path, to: &Path| {
+            std::fs::write(to, b"COMPETITOR").unwrap();
+            copy_new(from, to)
+        };
+        let fs = MovePrimitives {
+            rename_noreplace: &unsupported,
+            hard_link: &unsupported,
+            copy_new: &planting_copy,
+            unlink: &real_unlink,
+        };
+        let err = move_no_replace_with(&from, &to, &fs).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(std::fs::read(&to).unwrap(), b"COMPETITOR");
+        assert_eq!(std::fs::read(&from).unwrap(), b"SOURCE");
+        // Without a competitor the exclusive copy moves the file.
+        let to2 = dir.join("dst2");
+        let fs2 = MovePrimitives {
+            rename_noreplace: &unsupported,
+            hard_link: &unsupported,
+            copy_new: &copy_new,
+            unlink: &real_unlink,
+        };
+        move_no_replace_with(&from, &to2, &fs2).unwrap();
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(&to2).unwrap(), b"SOURCE");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn no_safe_move_primitive_is_an_actionable_refusal() {
+        let dir = tmp_home("move-no-primitive");
+        std::fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("src");
+        let to = dir.join("dst");
+        std::fs::write(&from, b"SOURCE").unwrap();
+        let fs = MovePrimitives {
+            rename_noreplace: &unsupported,
+            hard_link: &unsupported,
+            copy_new: &unsupported,
+            unlink: &real_unlink,
+        };
+        let err = move_no_replace_with(&from, &to, &fs).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("manually"), "{err}");
+        assert_eq!(std::fs::read(&from).unwrap(), b"SOURCE");
+        assert!(!entry_exists(&to));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_failed_source_unlink_after_linking_removes_the_link() {
+        // Codex Gate-2 R13 on da2dca7 (P2): the link exists when the source unlink fails; leaving it
+        // would alias the untouched source (same inode) outside rollback accounting.
+        let dir = tmp_home("move-unlink-fails");
+        std::fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("src");
+        let to = dir.join("dst");
+        std::fs::write(&from, b"SOURCE").unwrap();
+        let source = from.clone();
+        let refusing_unlink = move |path: &Path| {
+            if path == source {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "source is not yours to unlink",
+                ))
+            } else {
+                std::fs::remove_file(path)
+            }
+        };
+        let fs = MovePrimitives {
+            rename_noreplace: &unsupported,
+            hard_link: &real_hard_link,
+            copy_new: &copy_new,
+            unlink: &refusing_unlink,
+        };
+        let err = move_no_replace_with(&from, &to, &fs).unwrap_err();
+        assert!(err.to_string().contains("removed again"), "{err}");
+        assert!(!entry_exists(&to), "the aliasing link was left behind");
+        assert_eq!(std::fs::read(&from).unwrap(), b"SOURCE");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_failed_cleanup_after_a_failed_unlink_is_reported_through_the_bundle_error() {
+        let dir = tmp_home("move-cleanup-fails");
+        let db = dir.join("zynk.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        plant_foreign_wal_pair(&db);
+        let refusing_unlink = |_path: &Path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "nothing may be unlinked",
+            ))
+        };
+        let fs = MovePrimitives {
+            rename_noreplace: &unsupported,
+            hard_link: &real_hard_link,
+            copy_new: &copy_new,
+            unlink: &refusing_unlink,
+        };
+        let mut mover =
+            |from: &Path, to: &Path| move_no_replace_with(from, to, &fs).map_err(|e| e.to_string());
+        let err = relocate_bundle(&db, &mut mover).unwrap_err();
+        assert!(
+            err.contains("could not be removed either") && err.contains("same inode"),
+            "the leftover alias must be named: {err}"
+        );
+        assert!(db.exists() && bundle_member(&db, "-wal").exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn relocation_rolls_back_when_a_member_cannot_move() {
         // All-or-nothing: an injected failure on the last member (the main file) restores the
@@ -968,7 +1205,7 @@ mod tests {
             if from == db {
                 return Err("injected: main file cannot move".to_string());
             }
-            rename_or_copy(from, to)
+            move_no_replace(from, to).map_err(|err| err.to_string())
         };
         let err = relocate_bundle(&db, &mut mover).unwrap_err();
         assert!(

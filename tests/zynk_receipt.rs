@@ -209,6 +209,34 @@ fn report_agent(socket_path: &Path, pane_id: &str, label: &str) {
     );
 }
 
+/// State-only report (hook authority for `agent`, no session).
+fn report_state(socket_path: &Path, pane_id: &str, source: &str, agent: &str) {
+    let response = send_json(
+        socket_path,
+        &format!(
+            "{{\"id\":\"state\",\"method\":\"pane.report_agent\",\"params\":{{\"pane_id\":\"{pane_id}\",\"source\":\"{source}\",\"agent\":\"{agent}\",\"state\":\"idle\"}}}}"
+        ),
+    );
+    assert!(
+        response.get("error").is_none(),
+        "pane.report_agent: {response}"
+    );
+}
+
+/// Session-only report (`pane.report_agent_session`): persists a session for `agent`.
+fn report_session(socket_path: &Path, pane_id: &str, source: &str, agent: &str, session: &str) {
+    let response = send_json(
+        socket_path,
+        &format!(
+            "{{\"id\":\"sess\",\"method\":\"pane.report_agent_session\",\"params\":{{\"pane_id\":\"{pane_id}\",\"source\":\"{source}\",\"agent\":\"{agent}\",\"agent_session_id\":\"{session}\"}}}}"
+        ),
+    );
+    assert!(
+        response.get("error").is_none(),
+        "pane.report_agent_session: {response}"
+    );
+}
+
 /// Report a `pi` agent via `pane.report_agent` WITH a session ref (the production
 /// path: the pi asset reports state + `agent_session_id`). Because `pi` is NOT
 /// reserved-native, a stateful report routes to `set_hook_authority_with_session_ref`,
@@ -423,6 +451,63 @@ fn receipt_from_a_same_label_pane_that_is_not_the_target_is_rejected() {
         "the target pane's receipt failed: {right}"
     );
     assert_eq!(right["result"]["delivery_status"], "received", "{right}");
+    assert_eq!(latest_event(&fixture, &message_id).0, "received");
+}
+
+#[test]
+fn a_session_persisted_for_another_owner_is_not_a_receipt_anchor() {
+    // Codex Gate-2 R13 on da2dca7 (r16_identity_probe): panes A and B each hold hook authority for
+    // `pi` (state report, no session) AND a persisted session reported for `codex` with the SAME
+    // id. That session belongs to another owner: it must not make B the addressee of a message
+    // sent to A. A's own receipt (its terminal) is still accepted.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let a = create_root_pane(&fixture.socket_path, "owner-a");
+    let b = create_root_pane(&fixture.socket_path, "owner-b");
+    for pane in [&a, &b] {
+        report_state(&fixture.socket_path, pane, "zynk:pi", "pi");
+        report_session(
+            &fixture.socket_path,
+            pane,
+            "zynk:codex",
+            "codex",
+            "shared-codex-session",
+        );
+    }
+    let out = run_cli(&fixture, None, &["send", &a, "--", "to pane a"]);
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send must succeed: {}", out.stderr);
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let wrong = send_json(&fixture.socket_path, &receipt_request(&sent, &b));
+    assert_eq!(
+        wrong["error"]["code"], "receiver_identity_mismatch",
+        "another owner's persisted session anchored the receipt: {wrong}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
+    let right = send_json(&fixture.socket_path, &receipt_request(&sent, &a));
+    assert!(
+        right.get("error").is_none(),
+        "the addressee's own receipt failed: {right}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "received");
+}
+
+#[test]
+fn a_coherent_persisted_session_still_anchors_the_receipt() {
+    // Matching owner: hook authority `pi` + a persisted `zynk:pi` session (the restored-session
+    // shape) is the participant identity and receipts as before.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let a = create_root_pane(&fixture.socket_path, "coherent-a");
+    report_state(&fixture.socket_path, &a, "zynk:pi", "pi");
+    report_session(&fixture.socket_path, &a, "zynk:pi", "pi", "pi-session-a");
+    let out = run_cli(&fixture, None, &["send", &a, "--", "coherent"]);
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send must succeed: {}", out.stderr);
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+    let right = send_json(&fixture.socket_path, &receipt_request(&sent, &a));
+    assert!(right.get("error").is_none(), "receipt failed: {right}");
     assert_eq!(latest_event(&fixture, &message_id).0, "received");
 }
 

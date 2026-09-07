@@ -347,8 +347,12 @@ impl App {
         let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
         // Hook authority ONLY — never `effective_agent_label()`'s detection fallback.
         let authority = terminal.hook_authority.as_ref()?;
-        let agent_session =
-            terminal_agent_session_info(terminal).and_then(|info| serde_json::to_value(info).ok());
+        // Owner coherence: a persisted session is part of this receiver's identity only when it
+        // was reported for the SAME agent the hook authority names; a session another owner
+        // persisted on this terminal must not anchor a receipt (Codex Gate-2 R13).
+        let agent_session = terminal_agent_session_info(terminal)
+            .filter(|info| info.agent == authority.agent_label)
+            .and_then(|info| serde_json::to_value(info).ok());
         Some(crate::zynk::receipt::AuthoritativeReceiver {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             terminal_id: terminal.id.to_string(),
