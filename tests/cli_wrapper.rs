@@ -1087,6 +1087,54 @@ fn removed_show_changelog_flag_fails_before_nested_guard() {
 }
 
 #[test]
+fn server_startup_is_fatal_when_the_db_init_lock_is_held_elsewhere() {
+    // Gate-3 G3-STARTUP-001: a pathological external holder of the DB init lock must make the
+    // server EXIT within the bounded wait — never bind a degraded API socket that a later
+    // `session stop` cannot tear down within its contract.
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let sqlite_home = config_home.join("sqlite");
+    fs::create_dir_all(&sqlite_home).unwrap();
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(sqlite_home.join("zynk.db.init-lock"))
+        .unwrap();
+    holder.lock().unwrap();
+
+    let mut server = spawn_named_server(&config_home, &runtime_dir, "held");
+    let socket = named_session_socket(&config_home, "held");
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = server.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "server still running {:?} after startup with a held init lock",
+            started.elapsed()
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!status.success(), "server must exit non-zero, got {status}");
+    assert!(
+        !socket.exists(),
+        "no API socket may be bound by a server that failed to initialize"
+    );
+    let log = fs::read_to_string(&server.log_path).unwrap_or_default();
+    assert!(
+        log.contains("db_init_lock_timeout"),
+        "startup must report the init-lock timeout; log:\n{log}"
+    );
+    holder.unlock().unwrap();
+    drop(server);
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn named_sessions_use_separate_servers_and_workspace_state() {
     let base = unique_test_dir();
     let config_home = base.join("config");
