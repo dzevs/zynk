@@ -158,6 +158,24 @@ fn spawn_named_server(
     runtime_dir: &Path,
     session: &str,
 ) -> SpawnedServerProcess {
+    spawn_named_server_with(
+        config_home,
+        runtime_dir,
+        session,
+        &config_home.join("sqlite"),
+        false,
+    )
+}
+
+/// `daemon_stdio` mirrors the real launcher (`build_server_daemon_command`): stdin/stdout/stderr are
+/// all `/dev/null`, so the ONLY durable record is the server's own log file.
+fn spawn_named_server_with(
+    config_home: &Path,
+    runtime_dir: &Path,
+    session: &str,
+    sqlite_home: &Path,
+    daemon_stdio: bool,
+) -> SpawnedServerProcess {
     fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
@@ -172,15 +190,29 @@ fn spawn_named_server(
         .args(["--session", session, "server"])
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
-        .env("ZYNK_SQLITE_HOME", config_home.join("sqlite"))
+        .env("ZYNK_SQLITE_HOME", sqlite_home)
         .env_remove("ZYNK_HOME")
         .env_remove("ZYNK_SOCKET_PATH")
         .env_remove("ZYNK_CLIENT_SOCKET_PATH")
         .env_remove("ZYNK_ENV")
         .stdin(std::process::Stdio::null());
-    let log_path = config_home.join(format!("{session}.server.log"));
-    let log = fs::File::create(&log_path).unwrap();
-    command.stdout(log.try_clone().unwrap()).stderr(log);
+    let log_path = if daemon_stdio {
+        // Nothing is captured: assert on the server's durable log at
+        // <config_home>/<app>/sessions/<session>/zynk-server.log instead.
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        config_home
+            .join(app_dir_name())
+            .join("sessions")
+            .join(session)
+            .join("zynk-server.log")
+    } else {
+        let log_path = config_home.join(format!("{session}.server.log"));
+        let log = fs::File::create(&log_path).unwrap();
+        command.stdout(log.try_clone().unwrap()).stderr(log);
+        log_path
+    };
 
     let child = command.spawn().unwrap();
     register_spawned_zynk_pid(Some(child.id()));
@@ -1084,6 +1116,49 @@ fn removed_show_changelog_flag_fails_before_nested_guard() {
         !stderr.contains("nested zynk"),
         "unknown flag should be rejected before nested guard: {stderr}"
     );
+}
+
+#[test]
+fn daemon_style_server_writes_the_fatal_db_cause_to_its_log() {
+    // Gate-2 round 4 (item 3): the real launcher nulls stdio, so a fatal startup DB error must reach
+    // the server's own durable log with a structured code — not only stderr.
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    fs::create_dir_all(&config_home).unwrap();
+    // A regular FILE where the SQLite home directory should be: create_dir_all fails => db_io_error.
+    let blocker = config_home.join("not-a-dir");
+    fs::write(&blocker, b"").unwrap();
+    let sqlite_home = blocker.join("sqlite");
+
+    let mut server =
+        spawn_named_server_with(&config_home, &runtime_dir, "daemon", &sqlite_home, true);
+    let socket = named_session_socket(&config_home, "daemon");
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = server.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "server still running {:?} after a fatal DB error",
+            started.elapsed()
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!status.success(), "server must exit non-zero, got {status}");
+    assert!(
+        !socket.exists(),
+        "no API socket may be bound after a fatal DB error"
+    );
+    let log = fs::read_to_string(&server.log_path).unwrap_or_default();
+    assert!(
+        log.contains("db_io_error") && log.contains("server startup aborted"),
+        "durable server log must carry the structured cause; log at {}:\n{log}",
+        server.log_path.display()
+    );
+    drop(server);
+    cleanup_test_base(&base);
 }
 
 #[test]
