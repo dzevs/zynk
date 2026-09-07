@@ -107,6 +107,7 @@ impl Config {
                     Ok(config) => {
                         let mut diagnostics =
                             unknown_top_level_section_diagnostics_from_str(&content);
+                        diagnostics.extend(removed_config_key_diagnostics_from_str(&content));
                         diagnostics.extend(config.collect_diagnostics());
                         return LoadedConfig {
                             config,
@@ -208,6 +209,7 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
 
     let mut config = Config::default();
     let mut diagnostics = unknown_top_level_section_diagnostics(table);
+    diagnostics.extend(removed_config_key_diagnostics(table));
     let mut invalid_sections = Vec::new();
 
     if let Some(value) = table.get("onboarding") {
@@ -328,6 +330,38 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         diagnostics,
         invalid_sections,
     })
+}
+
+/// Removed config keys that are still likely to be present in older config files. Serde ignores
+/// unknown keys, so without this the removal would be silent; the diagnostic makes the migration
+/// visible (3.1.0 policy: documented keys may be removed in a minor with a changelog note + this).
+const REMOVED_CONFIG_KEYS: &[(&str, &str, &str)] = &[(
+    "ui",
+    "agent_panel_scope",
+    "ui.agent_panel_scope is no longer supported (removed in 3.1.0); the agent panel shows all \
+     workspaces. ui.agent_panel_sort controls ordering only and does not restore current-workspace \
+     filtering; ignoring key",
+)];
+
+fn removed_config_key_diagnostics_from_str(content: &str) -> Vec<String> {
+    content
+        .parse::<toml::Value>()
+        .ok()
+        .and_then(|value| value.as_table().map(removed_config_key_diagnostics))
+        .unwrap_or_default()
+}
+
+fn removed_config_key_diagnostics(table: &toml::map::Map<String, toml::Value>) -> Vec<String> {
+    REMOVED_CONFIG_KEYS
+        .iter()
+        .filter(|(section, key, _)| {
+            table
+                .get(*section)
+                .and_then(toml::Value::as_table)
+                .is_some_and(|section| section.contains_key(*key))
+        })
+        .map(|(_, _, message)| (*message).to_string())
+        .collect()
 }
 
 fn unknown_top_level_section_diagnostics_from_str(content: &str) -> Vec<String> {
@@ -715,6 +749,75 @@ delivery = "zynk"
             loaded.config.ui.toast.delivery,
             super::super::ToastDelivery::Zynk
         );
+    }
+
+    #[test]
+    fn load_live_config_warns_about_removed_agent_panel_scope_key() {
+        let loaded = load_live_config_from_str(
+            r#"
+[ui]
+agent_panel_scope = "current"
+agent_panel_sort = "priority"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            loaded.diagnostics,
+            vec![
+                "ui.agent_panel_scope is no longer supported (removed in 3.1.0); the agent panel \
+                 shows all workspaces. ui.agent_panel_sort controls ordering only and does not \
+                 restore current-workspace filtering; ignoring key"
+            ]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+        assert_eq!(
+            loaded.config.ui.agent_panel_sort,
+            super::super::AgentPanelSortConfig::Priority
+        );
+    }
+
+    #[test]
+    fn load_live_config_does_not_warn_without_removed_keys() {
+        let loaded = load_live_config_from_str(
+            r#"
+[ui]
+agent_panel_sort = "spaces"
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn startup_config_load_warns_about_removed_agent_panel_scope_key() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "zynk-config-removed-key-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+[ui]
+agent_panel_scope = "all"
+"#,
+        )
+        .unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+
+        assert_eq!(loaded.diagnostics.len(), 1);
+        assert!(
+            loaded.diagnostics[0].starts_with("ui.agent_panel_scope is no longer supported"),
+            "{:?}",
+            loaded.diagnostics
+        );
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
