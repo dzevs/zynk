@@ -527,7 +527,7 @@ fn main() -> io::Result<()> {
             ),
             (
                 "zynk update",
-                "(unavailable until the first Zynk release — build from source)",
+                "(unavailable: no update-manifest hosting yet — update via Homebrew, a release binary, Nix, or source)",
             ),
             (
                 "zynk server stop",
@@ -535,7 +535,7 @@ fn main() -> io::Result<()> {
             ),
             (
                 "zynk channel set <stable|preview>",
-                "(update channels unavailable until the first Zynk release)",
+                "(unavailable: no update-manifest hosting yet)",
             ),
             (
                 "zynk server reload-config",

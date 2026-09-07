@@ -134,11 +134,11 @@ fn channel_set(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    // M6/ADR 0007: update channels select a release manifest, but Zynk has no published release
-    // endpoint yet. Fail closed (refuse, no config write) until M8 release infra exists.
+    // ADR 0007: update channels select a release manifest, but there is no update-manifest hosting
+    // yet (releases are installed manually). Fail closed (refuse, no config write) until it exists.
     if !crate::update::release_infra_open() {
         eprintln!(
-            "update channels are unavailable until the first Zynk release (M8): Zynk has no published release. Build from source to update — git clone https://github.com/dzevs/zynk && cargo build --release --locked."
+            "update channels are unavailable: self-update needs release-manifest hosting, which is not set up. Update manually — Homebrew (brew upgrade dzevs/tap/zynk), a release binary from https://github.com/dzevs/zynk/releases, Nix, or cargo install zynk --locked."
         );
         return Ok(1);
     }

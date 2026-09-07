@@ -1107,11 +1107,11 @@ fn preview_assets_for_build<'a>(
 }
 
 fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
-    // Day-one fail-closed: no published Zynk release exists, so the remote bootstrap must NOT fetch
+    // Fail-closed: there is no release-manifest hosting yet, so the remote bootstrap must NOT fetch
     // zynk.dev release manifests/assets. Seed the remote explicitly instead.
     if !crate::update::release_infra_open() {
         return Err(io::Error::other(format!(
-            "no published Zynk release yet — cannot fetch a remote binary. Set {REMOTE_BINARY_ENV_VAR}=path/to/zynk (a matching-platform build) or install zynk on the remote host manually."
+            "remote binary fetch is unavailable (no release-manifest hosting yet) — cannot fetch a remote binary. Set {REMOTE_BINARY_ENV_VAR}=path/to/zynk (a matching-platform build) or install zynk on the remote host manually."
         )));
     }
     if crate::build_info::is_preview() {
@@ -1695,7 +1695,7 @@ mod tests {
 
     #[test]
     fn remote_release_asset_fails_closed_without_release_infra() {
-        // Day-one: no published release + no ZYNK_REMOTE_BINARY => the remote bootstrap must NOT
+        // No release-manifest hosting + no ZYNK_REMOTE_BINARY => the remote bootstrap must NOT
         // fetch zynk.dev manifests/assets. The gate returns before any network call.
         assert!(
             !crate::update::release_infra_open(),
@@ -1707,7 +1707,8 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(
-            msg.contains("no published Zynk release"),
+            msg.contains("cannot fetch a remote binary")
+                && msg.contains("no release-manifest hosting"),
             "expected fail-closed message, got: {msg}"
         );
         assert!(

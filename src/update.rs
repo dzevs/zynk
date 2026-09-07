@@ -23,9 +23,9 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
-// M6/ADR 0007: Zynk has no published release endpoint yet. Until M8 release infra exists, the
-// updater fails closed instead of consulting the upstream zynk.dev manifests. Flip to true +
-// repoint STABLE/PREVIEW_UPDATE_MANIFEST_URL at the zynk release endpoint at M8.
+// ADR 0007: releases ship on GitHub/Homebrew/crates.io/Nix, but there is no update-MANIFEST hosting
+// yet, so the updater fails closed instead of consulting the placeholder zynk.dev manifests. Flip to
+// true + repoint STABLE/PREVIEW_UPDATE_MANIFEST_URL once manifest hosting exists.
 pub(crate) const ZYNK_RELEASE_INFRA_AVAILABLE: bool = false;
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://zynk.dev/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://zynk.dev/preview.json";
@@ -1955,8 +1955,9 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 // M6/ADR 0007: release-infra gate
 // ---------------------------------------------------------------------------
 
-/// Zynk-branded message printed when the updater fails closed (no published release yet).
-pub(crate) const ZYNK_UPDATE_UNAVAILABLE_MESSAGE: &str = "zynk update is not available yet: Zynk has no published release. Build from source (requires Rust + Zig 0.15.2): git clone https://github.com/dzevs/zynk && cargo build --release --locked — or run nix run github:dzevs/zynk. See the README. Auto-update arrives with the first Zynk release.";
+/// Zynk-branded message printed when the updater fails closed (self-update needs release-manifest
+/// hosting, which is not set up; releases exist and are installed manually).
+pub(crate) const ZYNK_UPDATE_UNAVAILABLE_MESSAGE: &str = "zynk update is not available yet: self-update needs release-manifest hosting, which is not set up. Update manually — Homebrew: brew upgrade dzevs/tap/zynk; prebuilt binary: https://github.com/dzevs/zynk/releases; Nix: nix run github:dzevs/zynk; source: cargo install zynk --locked (Rust + Zig 0.15.2). Then run `zynk server stop` so the new binary takes effect.";
 
 /// True when a release-machinery test override is active. The update tests simulate a published
 /// release via `ZYNK_FAKE_UPDATE_VERSION` (`FAKE_UPDATE_VERSION_ENV`); when that env is set and
@@ -1969,7 +1970,7 @@ fn release_infra_test_override_active() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the updater may consult the (upstream) release manifests. Closed in production until M8.
+/// Whether the updater may consult the release manifests. Closed in production until manifest hosting exists.
 pub(crate) fn release_infra_open() -> bool {
     ZYNK_RELEASE_INFRA_AVAILABLE || release_infra_test_override_active()
 }
