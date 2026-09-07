@@ -133,7 +133,7 @@ pub async fn open_migrated_at_without_recovery(path: &Path) -> Result<SqliteConn
     // Serialize classify + migrate across PROCESSES (see `InitLock`): two zynk processes opening a
     // fresh shared DB at once (two named-session servers, or a CLI command racing a starting server)
     // must not observe each other's half-initialized state.
-    let _init_lock = InitLock::acquire(path)?;
+    let _init_lock = InitLock::acquire(path).await?;
     // ADR 0008 foreign-DB guard: classify FIRST, with a READ-ONLY connection,
     // BEFORE the writable open below. This matters for byte-immutability: the
     // writable `connect_with` applies `journal_mode = WAL`, which rewrites the
@@ -170,21 +170,56 @@ pub async fn open_migrated_at_without_recovery(path: &Path) -> Result<SqliteConn
 /// OS releases it if the holder dies. The lock file itself carries no data.
 struct InitLock(std::fs::File);
 
+/// Upper bound on waiting for another process's first-time initialization (a fresh DB migrates in
+/// well under a second; this only caps a pathological holder).
+const INIT_LOCK_DEADLINE: Duration = Duration::from_secs(30);
+const INIT_LOCK_POLL: Duration = Duration::from_millis(10);
+
+fn init_lock_path(db_path: &Path) -> std::path::PathBuf {
+    let file_name = db_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "zynk.db".to_string());
+    db_path.with_file_name(format!("{file_name}.init-lock"))
+}
+
 impl InitLock {
-    fn acquire(db_path: &Path) -> Result<Self, DbError> {
-        let file_name = db_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "zynk.db".to_string());
-        let lock_path = db_path.with_file_name(format!("{file_name}.init-lock"));
+    async fn acquire(db_path: &Path) -> Result<Self, DbError> {
+        Self::acquire_with_deadline(db_path, INIT_LOCK_DEADLINE).await
+    }
+
+    /// Cooperative acquisition: `try_lock` + an async sleep instead of a blocking `lock()`, so two
+    /// openers polled on ONE executor cannot deadlock (the holder must be able to resume and release)
+    /// and the wait is bounded by `deadline`.
+    async fn acquire_with_deadline(db_path: &Path, deadline: Duration) -> Result<Self, DbError> {
+        let lock_path = init_lock_path(db_path);
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&lock_path)?;
-        file.lock()?;
-        Ok(Self(file))
+        let started = std::time::Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self(file)),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if started.elapsed() >= deadline {
+                        return Err(DbError::new(
+                            "db_init_lock_timeout",
+                            format!(
+                                "zynk: another zynk process has held the database init lock at {} \
+                                 for more than {deadline:?}; the lock is released when that process \
+                                 finishes initializing or exits — retry afterwards",
+                                lock_path.display()
+                            ),
+                        ));
+                    }
+                    tokio::time::sleep(INIT_LOCK_POLL).await;
+                }
+                Err(std::fs::TryLockError::Error(err)) => return Err(err.into()),
+            }
+        }
     }
 }
 
@@ -220,16 +255,19 @@ async fn user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, Db
 /// Classify an OPEN connection (ADR 0008). `_sqlx_migrations` + all native
 /// lineage tables ⇒ Native; no user tables ⇒ Empty; otherwise Foreign.
 async fn classify_open_conn(conn: &mut SqliteConnection) -> Result<DbClassification, DbError> {
-    let tables = user_table_names(conn).await?;
-    if tables.is_empty() {
+    // Decide on the COMPLETE table set. `user_table_names` is a DISPLAY view that hides FTS-shadow
+    // and similarly suffixed names (`*_data`, `*_config`, …); a foreign DB whose tables happen to carry
+    // those suffixes must still fail closed, so the display view never drives this decision.
+    let all_tables = all_user_table_names(conn).await?;
+    if all_tables.is_empty() {
         return Ok(DbClassification::Empty);
     }
     // sqlx creates its `_sqlx_migrations` ledger BEFORE the first migration's transaction commits.
-    // A DB whose only user table is that ledger — with NO recorded migrations — is a native init in
+    // A DB whose ONLY table is that ledger — with NO recorded migrations — is a native init in
     // progress (another zynk process) or an aborted one: there is no foreign data to protect, so it is
     // `Empty`, not `Foreign`. A ledger that already RECORDS migrations but lacks our tables stays
     // Foreign (unknown lineage → fail closed, ADR 0008).
-    if tables.len() == 1 && tables[0] == "_sqlx_migrations" {
+    if all_tables.len() == 1 && all_tables[0] == "_sqlx_migrations" {
         let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(&mut *conn)
             .await?;
@@ -237,20 +275,35 @@ async fn classify_open_conn(conn: &mut SqliteConnection) -> Result<DbClassificat
             return Ok(DbClassification::Empty);
         }
     }
-    let has_migrations = sqlx::query(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations' LIMIT 1",
-    )
-    .fetch_optional(&mut *conn)
-    .await?
-    .is_some();
+    let has_migrations = all_tables.iter().any(|name| name == "_sqlx_migrations");
     let has_all_lineage = NATIVE_LINEAGE_TABLES
         .iter()
-        .all(|t| tables.iter().any(|name| name == t));
+        .all(|t| all_tables.iter().any(|name| name == t));
     if has_migrations && has_all_lineage {
-        Ok(DbClassification::Native)
-    } else {
-        Ok(DbClassification::Foreign { tables })
+        return Ok(DbClassification::Native);
     }
+    let tables = user_table_names(conn).await?;
+    Ok(DbClassification::Foreign {
+        tables: if tables.is_empty() {
+            all_tables
+        } else {
+            tables
+        },
+    })
+}
+
+/// Every user table (only SQLite's own `sqlite_*` internals excluded) — the set classification must
+/// reason about, as opposed to the display view in `user_table_names`.
+async fn all_user_table_names(conn: &mut SqliteConnection) -> Result<Vec<String>, DbError> {
+    let rows = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("name").ok())
+        .collect())
 }
 
 /// Classify the DB at `path` WITHOUT mutating it (ADR 0008). Opens read-only
@@ -440,6 +493,117 @@ mod tests {
             DbClassification::Foreign { tables } => assert_eq!(tables, vec!["_sqlx_migrations"]),
             other => panic!("expected Foreign, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn foreign_db_with_empty_ledger_and_suffix_filtered_tables_fails_closed() {
+        // ADR 0008 regression (Gate-2 P1): `user_table_names` hides `*_data` / `*_config` / FTS-shadow
+        // names for DISPLAY; classification must still see them. An empty sqlx ledger next to real
+        // foreign data is FOREIGN — never migrated — and the bytes stay identical.
+        let path = tmp_db("classify-ledger-plus-filtered");
+        plant_foreign_db(
+            &path,
+            &format!(
+                "{SQLX_LEDGER_DDL}; \
+                 CREATE TABLE customer_data (secret TEXT); INSERT INTO customer_data VALUES ('s'); \
+                 CREATE TABLE app_config (k TEXT, v TEXT); INSERT INTO app_config VALUES ('k', 'v')"
+            ),
+        );
+        let before = std::fs::read(&path).unwrap();
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+        let err = block_on(open_migrated_at(&path)).unwrap_err();
+        assert_eq!(err.code, "db_foreign_conflict", "{}", err.message);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "foreign DB must not be modified"
+        );
+    }
+
+    #[test]
+    fn foreign_db_with_only_suffix_filtered_table_fails_closed() {
+        // Same class, no ledger at all: a DB whose only table is hidden by the display filter used to
+        // classify as Empty and get migrated.
+        let path = tmp_db("classify-only-filtered");
+        plant_foreign_db(
+            &path,
+            "CREATE TABLE customer_data (secret TEXT); INSERT INTO customer_data VALUES ('s')",
+        );
+        let before = std::fs::read(&path).unwrap();
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { .. } => {}
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+        let err = block_on(open_migrated_at(&path)).unwrap_err();
+        assert_eq!(err.code, "db_foreign_conflict", "{}", err.message);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn concurrent_opens_on_one_runtime_do_not_deadlock() {
+        // Gate-2 P2: two opens of a fresh DB joined on ONE current-thread runtime. A blocking lock
+        // inside the async opener deadlocks this (the first future holds the lock across awaits, the
+        // second blocks the only thread). The init lock must be acquired cooperatively.
+        let path = tmp_db("init-same-runtime");
+        let _ = std::fs::remove_file(&path);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        std::thread::spawn(move || {
+            let result = block_on(async {
+                let (a, b) = tokio::join!(
+                    open_migrated_at_without_recovery(&worker_path),
+                    open_migrated_at_without_recovery(&worker_path)
+                );
+                a?;
+                b?;
+                Ok::<(), DbError>(())
+            });
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(result) => result.unwrap(),
+            Err(_) => {
+                panic!("two opens on one runtime deadlocked: the init lock must be cooperative")
+            }
+        }
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Native
+        );
+    }
+
+    #[test]
+    fn init_lock_contention_is_bounded() {
+        // Gate-2 P2: an init lock held by another process must not stall an opener forever.
+        let path = tmp_db("init-lock-contention");
+        let lock_path = init_lock_path(&path);
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        holder.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        std::thread::spawn(move || {
+            let result = block_on(InitLock::acquire_with_deadline(
+                &worker_path,
+                Duration::from_millis(300),
+            ))
+            .map(|_guard| ());
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Err(err)) => assert_eq!(err.code, "db_init_lock_timeout", "{}", err.message),
+            Ok(Ok(())) => panic!("acquired an init lock that another holder owns"),
+            Err(_) => panic!("init-lock wait is unbounded"),
+        }
+        holder.unlock().unwrap();
     }
 
     #[test]
