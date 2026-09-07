@@ -150,15 +150,17 @@ The decision above stands; the swarm's second round showed the guard could still
     rename, sidecars move first and the main file last, and any failure moves the members already relocated
     back and reports an error — never a "success" with a stranded member, never an overwritten backup. A slot
     or target counts as occupied when ANY directory entry exists there (a dangling symlink included — `exists`
-    follows links), and the move itself never replaces, on every path: an atomic no-replace rename where the
-    kernel offers one (Linux `renameat2(RENAME_NOREPLACE)`), else a hard link, else an exclusive-create
-    (`O_EXCL`) copy — each fails when the target name exists in any form, a plain rename (which replaces) is
-    never used, and when no primitive is available the member is refused with an actionable error. The source
-    is unlinked only once the new entry exists; if that unlink fails the new entry is removed again (or named
-    explicitly when even that fails — a hard link left behind would alias the untouched source, not preserve a
-    backup), so a member is either moved or untouched and the bundle rollback accounting stays exact. A
-    competitor that appears after the preflight therefore turns into a refusal and a rollback, never an
-    overwrite. Relocation acts on the
+    follows links), and the move itself is ONE atomic step that never replaces: the platform's no-replace
+    rename (Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows `MoveFileExW` without
+    the replace flag), which fails when the target name exists in any form, so a competitor that appears after
+    the preflight turns into a refusal and a rollback, never an overwrite. Where no such primitive exists the
+    member is refused with an actionable error (ordinary permission or I/O failures keep their own cause). No
+    two-step fallback is offered: a link or copy followed by an unlink of the source NAME cannot be made safe
+    against a writer that atomically replaces the source or the target between the two steps — it deletes the
+    newcomer or loses the original (Gate-3 round 3, confirmed with fault injection) — and an identity check
+    before the unlink only narrows that window. The boundary the atomic move guarantees: whatever sits at the
+    source name at the instant of the move is moved intact; a writer replacing the source afterwards keeps its
+    file at the source; zynk deletes nothing beyond that single rename. Relocation acts on the
     SQLite-effective path — the final symlink chain resolved, exactly as inspection classifies — so what the
     guards refuse through a link is what moves; the link stays. The commands also relocate what the guards
     refuse to open (a journal that looks hot; orphan sidecars beside an absent main file), which is exactly

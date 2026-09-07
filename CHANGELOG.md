@@ -65,10 +65,12 @@ config key is removed (see **Changed**).
   or a session another agent persisted on it.
 - `zynk db adopt` / `zynk db backup` relocate the **complete SQLite bundle** (main file plus any `-journal`,
   `-wal`, `-shm`) to one backup slot that is entirely free, all or nothing: a leftover journal no longer strands
-  the native path, an existing backup sidecar is never overwritten (a dangling symlink counts as occupied, the
-  move never replaces an entry that appears after the check — on any filesystem, refusing with an error when
-  no non-replacing move exists — and a member is either moved or left untouched), a failed move rolls back and
-  reports an error, and a symlinked database path is relocated where SQLite would open it (the link stays). They also move aside what the startup guards refuse to open (a rollback journal that looks hot, orphan
+  the native path, an existing backup sidecar is never overwritten (a dangling symlink counts as occupied, and
+  each member moves in one atomic no-replace step — Linux, macOS and Windows each provide one — so an entry
+  that appears after the check is never replaced and a file another writer places at the source is never
+  deleted; where no atomic move exists the command refuses with an error instead of copying), a failed move
+  rolls back and reports an error, and a symlinked database path is relocated where SQLite would open it (the
+  link stays). They also move aside what the startup guards refuse to open (a rollback journal that looks hot, orphan
   sidecars beside a missing database) — the remedy those refusals name. Output from every `zynk db` command
   escapes control and Unicode format/bidi characters in names and paths.
 - Sessions: OMP resumes in the same pane after a restart with root-only hook state; lifecycle hook generations
