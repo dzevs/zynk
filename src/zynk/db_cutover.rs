@@ -119,6 +119,28 @@ fn entry_present(path: &Path) -> std::io::Result<bool> {
     }
 }
 
+/// The identity of a directory entry (Unix: device + inode of the entry itself, links included).
+/// `None` where `std` exposes no stable identity (Windows) or when the entry cannot be read — the
+/// custody check is then skipped for that member and the name check is all that remains (documented
+/// residual).
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(unix))]
+type FileIdentity = ();
+
+#[cfg(unix)]
+fn entry_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn entry_identity(_path: &Path) -> Option<FileIdentity> {
+    None
+}
+
 fn list_dir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -338,8 +360,13 @@ fn relocate_bundle_with(
         ));
     }
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut identities: Vec<Option<FileIdentity>> = Vec::new();
     let mut failure = None;
     for (from, to, _) in &plan {
+        // The source entry's identity, captured before its move: custody is verified against it
+        // after the moves (a competitor renamed over the moved member inside the slot would
+        // otherwise pass a name-only check, Gate-3 round 5).
+        let identity = entry_identity(from);
         if let Err(err) = mover(from, to) {
             failure = Some(format!(
                 "could not move {} -> {}: {err}",
@@ -349,6 +376,7 @@ fn relocate_bundle_with(
             break;
         }
         moved.push((from.clone(), to.clone()));
+        identities.push(identity);
     }
     // The slot must hold exactly the members that were moved: an entry someone else created
     // inside it means the backup is not this bundle — refuse and roll back. A slot that cannot be
@@ -366,6 +394,52 @@ fn relocate_bundle_with(
             )),
         };
     }
+    // The source must hold no bundle member any more: a writer that created a sidecar beside the
+    // main after the plan was built (and before the main moved) would otherwise split the bundle
+    // — the main in the slot, a data-bearing WAL at the source — behind a "complete" backup
+    // (Gate-3 round 5, WARDEN-09F-CUSTODY-001). The rescan fails closed like the plan did.
+    if failure.is_none() {
+        for suffix in BUNDLE_SUFFIXES.iter().chain(std::iter::once(&"")) {
+            let member = sidecar(path, suffix);
+            match inspect.present(&member) {
+                Ok(false) => {}
+                Ok(true) => {
+                    failure = Some(format!(
+                        "a bundle member is present at the source after the move ({}); the bundle \
+                         is not complete in the backup",
+                        printable_path(&member)
+                    ));
+                    break;
+                }
+                Err(err) => {
+                    failure = Some(err);
+                    break;
+                }
+            }
+        }
+    }
+    // Custody: every moved member must still be the entry that left the source. A member replaced
+    // inside the slot after its move is not ours — success is never claimed for it, and it is not
+    // moved back over the source name either (the original bytes were displaced by the other
+    // writer's own action; zynk deleted nothing).
+    let mut displaced: Vec<PathBuf> = Vec::new();
+    if failure.is_none() {
+        for ((_, to), before) in moved.iter().zip(identities.iter()) {
+            if let Some(before) = before {
+                if entry_identity(to).as_ref() != Some(before) {
+                    displaced.push(to.clone());
+                }
+            }
+        }
+        if let Some(first) = displaced.first() {
+            failure = Some(format!(
+                "a member of the backup slot was replaced by another writer after it was moved ({}); \
+                 the original bytes of that member were displaced by that writer and are not in the \
+                 backup",
+                printable_path(first)
+            ));
+        }
+    }
     let Some(failure) = failure else {
         return Ok(RelocateOutcome {
             moved_from: path.to_path_buf(),
@@ -376,6 +450,13 @@ fn relocate_bundle_with(
     let mut message = format!("zynk: {failure}; nothing was relocated");
     let mut not_restored = Vec::new();
     for (from, to) in moved.iter().rev() {
+        if displaced.contains(to) {
+            not_restored.push(format!(
+                "{} (replaced by another writer; not moved back)",
+                printable_path(from)
+            ));
+            continue;
+        }
         if let Err(restore_err) = mover(to, from) {
             not_restored.push(format!("{} ({restore_err})", printable_path(from)));
         }
@@ -392,8 +473,10 @@ fn relocate_bundle_with(
     Err(message)
 }
 
-/// Create the backup slot directory atomically (fails when ANY entry exists at that name) and
-/// owner-only, so nobody else can add entries to the reserved bundle namespace.
+/// Create the backup slot directory atomically (fails when ANY entry exists at that name). On Unix
+/// it is created owner-only (mode 0700); elsewhere `DirBuilder` inherits the parent directory's
+/// permissions — the SQLite home is expected to be private to the operator, and the post-move
+/// member check is the guard against an entry someone else adds (Gate-3 round 5).
 fn create_private_dir(slot: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     let builder = {
@@ -1547,6 +1630,87 @@ mod tests {
             );
             std::fs::remove_dir_all(dir).ok();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_member_replaced_inside_the_slot_after_its_move_is_not_claimed() {
+        // Gate-3 round 5 (custody): after the real move, a competitor atomically renamed over the
+        // moved member inside the slot passed a name-only check and adopt claimed success with the
+        // competitor's bytes as the backup. Identity is verified per member: the relocation fails,
+        // the intact members move back, the displaced member is named and not moved back.
+        let dir = tmp_home("adopt-postmove-replace");
+        let db = dir.join("zynk.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        plant_foreign_wal_pair(&db);
+        let source_wal = std::fs::read(bundle_member(&db, "-wal")).unwrap();
+        let competitor = dir.join("competitor.db");
+        std::fs::write(&competitor, b"COMPETITOR RENAMED OVER THE MOVED MAIN").unwrap();
+        let mut mover = |from: &Path, to: &Path| -> Result<(), String> {
+            move_no_replace(from, to).map_err(|e| e.to_string())?;
+            if from == db {
+                std::fs::rename(&competitor, to).unwrap();
+            }
+            Ok(())
+        };
+        let err = relocate_bundle(&db, &mut mover).unwrap_err();
+        assert!(
+            err.contains("replaced by another writer") && err.contains("not moved back"),
+            "{err}"
+        );
+        let slot = db.with_file_name("zynk.db.wrapper-backup-0");
+        assert_eq!(
+            std::fs::read(slot.join("zynk.db")).unwrap(),
+            b"COMPETITOR RENAMED OVER THE MOVED MAIN",
+            "the competitor's file is left where it put it"
+        );
+        assert!(
+            !db.exists(),
+            "the displaced original is not resurrected from foreign bytes"
+        );
+        assert_eq!(
+            std::fs::read(bundle_member(&db, "-wal")).unwrap(),
+            source_wal,
+            "the intact WAL moved back"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_sidecar_created_at_the_source_after_the_scan_fails_the_relocation() {
+        // Gate-3 round 5 (WARDEN-09F-CUSTODY-001): a writer created a nonempty `-wal` at the source
+        // after the plan was built and before the main moved; the main moved, the new WAL stayed
+        // at the source, slot-only verification passed and adopt claimed a complete backup. The
+        // source names are rescanned after the moves: any member left there fails the relocation.
+        let dir = tmp_home("adopt-late-source-wal");
+        let db = dir.join("zynk.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&db, b"MAIN ONLY AT SCAN TIME").unwrap();
+        let wal = bundle_member(&db, "-wal");
+        let mut mover = |from: &Path, to: &Path| -> Result<(), String> {
+            if from == db {
+                // The writer lands a WAL beside the main right before the main moves.
+                std::fs::write(&wal, b"WAL CREATED AFTER THE PLAN").unwrap();
+            }
+            move_no_replace(from, to).map_err(|e| e.to_string())
+        };
+        let err = relocate_bundle(&db, &mut mover).unwrap_err();
+        assert!(
+            err.contains("at the source after") && err.contains("nothing was relocated"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            b"MAIN ONLY AT SCAN TIME",
+            "the main moved back"
+        );
+        assert_eq!(std::fs::read(&wal).unwrap(), b"WAL CREATED AFTER THE PLAN");
+        let slot = db.with_file_name("zynk.db.wrapper-backup-0");
+        assert!(
+            !entry_exists(&slot.join("zynk.db")),
+            "no main left in the slot"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

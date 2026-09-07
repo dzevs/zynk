@@ -511,6 +511,82 @@ fn a_coherent_persisted_session_still_anchors_the_receipt() {
     assert_eq!(latest_event(&fixture, &message_id).0, "received");
 }
 
+/// Rewrite the stored TARGET participant of `message_id` (isolated fixture DB only): models a
+/// legacy/sparse row that a current send never produces.
+fn mutate_target_participant(fixture: &Fixture, message_id: &str, set_clause: &str) {
+    sqlite_runtime().block_on(async {
+        let mut conn = open_test_db(fixture).await;
+        sqlx::query(&format!(
+            "UPDATE conversation_participants SET {set_clause} WHERE id = \
+             (SELECT to_participant_id FROM messages WHERE id = ?)"
+        ))
+        .bind(message_id)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    });
+}
+
+#[test]
+fn a_legacy_target_row_without_an_anchor_is_not_receipt_capable() {
+    // Gate-3 round 5 (ARCH-RECEIPT-ANCHOR-001 / AUD-310-RECEIPT-003): a stored target with neither
+    // a hook session nor a terminal used to bind by label alone, so any same-label pane could
+    // receipt it. Such a row is refused for everyone — the impostor and the original pane alike.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let target = create_root_pane(&fixture.socket_path, "legacy-target");
+    let impostor = create_root_pane(&fixture.socket_path, "legacy-impostor");
+    report_pi_agent_session(&fixture.socket_path, &target, "pi-session-target");
+    report_pi_agent_session(&fixture.socket_path, &impostor, "pi-session-impostor");
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &target, "--", "to a row that loses its anchor"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send must succeed: {}", out.stderr);
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+    mutate_target_participant(
+        &fixture,
+        &message_id,
+        "terminal_id = NULL, agent_session_source = NULL, agent_session_kind = NULL, \
+         agent_session_value = NULL",
+    );
+    for pane in [&impostor, &target] {
+        let response = send_json(&fixture.socket_path, &receipt_request(&sent, pane));
+        assert_eq!(
+            response["error"]["code"], "receiver_identity_mismatch",
+            "an unanchored stored target must not be receipted: {response}"
+        );
+    }
+    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
+}
+
+#[test]
+fn a_partial_stored_session_triple_is_not_receipt_capable() {
+    // A stored session missing its source is not an anchor: the impostor is refused, and so is the
+    // original pane (fail closed rather than degrading to a value-only or terminal check).
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let target = create_root_pane(&fixture.socket_path, "partial-target");
+    let impostor = create_root_pane(&fixture.socket_path, "partial-impostor");
+    report_pi_agent_session(&fixture.socket_path, &target, "pi-session-shared");
+    report_pi_agent_session(&fixture.socket_path, &impostor, "pi-session-shared");
+    let out = run_cli(&fixture, None, &["send", &target, "--", "to a partial row"]);
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send must succeed: {}", out.stderr);
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+    mutate_target_participant(&fixture, &message_id, "agent_session_source = NULL");
+    for pane in [&impostor, &target] {
+        let response = send_json(&fixture.socket_path, &receipt_request(&sent, pane));
+        assert_eq!(
+            response["error"]["code"], "receiver_identity_mismatch",
+            "a partial stored session must not bind: {response}"
+        );
+    }
+    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
+}
+
 #[test]
 fn receipt_records_received_via_raw_socket() {
     let _guard = test_lock();

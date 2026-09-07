@@ -124,12 +124,49 @@ pub async fn append_received_event(
     }
 }
 
-/// Does the receiver's live hook session equal a stored session triple? Every stored component
-/// must match (an absent stored source/kind constrains nothing); the value must always match.
+/// The durable identity a stored participant row offers, canonicalized: a COMPLETE hook session
+/// triple, else a terminal id, else nothing. A partial triple (a value without its source or kind)
+/// is treated as no session, so it never binds by value alone; combined with no terminal it is
+/// `None` and fails closed at the target.
+enum StoredAnchor<'a> {
+    Session {
+        source: &'a str,
+        kind: &'a str,
+        value: &'a str,
+    },
+    /// A session with a missing component: never an anchor (it must not bind by value alone).
+    Partial,
+    Terminal(&'a str),
+    None,
+}
+
+fn canonical_anchor<'a>(
+    source: &'a Option<String>,
+    kind: &'a Option<String>,
+    value: &'a Option<String>,
+    terminal: &'a Option<String>,
+) -> StoredAnchor<'a> {
+    let present = |field: &'a Option<String>| field.as_deref().filter(|s| !s.is_empty());
+    match (present(source), present(kind), present(value)) {
+        (Some(source), Some(kind), Some(value)) => StoredAnchor::Session {
+            source,
+            kind,
+            value,
+        },
+        (None, None, None) => match present(terminal) {
+            Some(terminal) => StoredAnchor::Terminal(terminal),
+            None => StoredAnchor::None,
+        },
+        _ => StoredAnchor::Partial,
+    }
+}
+
+/// Does the receiver's live hook session equal the stored complete triple? Every component must
+/// be present on the receiver and equal — no wildcards.
 fn receiver_matches_session(
     receiver: &AuthoritativeReceiver,
-    stored_source: &Option<String>,
-    stored_kind: &Option<String>,
+    stored_source: &str,
+    stored_kind: &str,
     stored_value: &str,
 ) -> bool {
     let live = |key: &str| {
@@ -139,16 +176,9 @@ fn receiver_matches_session(
             .and_then(|session| session.get(key))
             .and_then(|component| component.as_str())
     };
-    let component_matches = |stored: &Option<String>, key: &str| match stored
-        .as_deref()
-        .filter(|component| !component.is_empty())
-    {
-        Some(stored) => live(key) == Some(stored),
-        None => true,
-    };
-    live("value") == Some(stored_value)
-        && component_matches(stored_source, "source")
-        && component_matches(stored_kind, "kind")
+    live("source") == Some(stored_source)
+        && live("kind") == Some(stored_kind)
+        && live("value") == Some(stored_value)
 }
 
 async fn append_received_event_in_tx(
@@ -245,25 +275,23 @@ async fn append_received_event_in_tx(
     }
     // The stored target participant is keyed by label + terminal + hook session — never by the
     // pane id, which rotates. The receiver must be THAT participant, not merely a same-label pane.
-    // The hook session value is the durable anchor: it survives pane churn, a restart and a live
-    // handoff (the restored terminal keeps its persisted agent session, while terminal ids are
-    // allocated per server lifetime). When the stored participant carried a session, the receiver
-    // must present the same one; when it carried none (a hook that reported no session id), the
-    // terminal id binds instead — within this server's lifetime, which is all a session-less
-    // target can offer. Rows with neither anchor fall back to the label check above.
-    match to_session_value
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        Some(stored_value) => {
-            // The stored identity is the full session triple (source, kind, value) — the same
-            // components the participant key hashes — never the value alone.
-            if !receiver_matches_session(
-                receiver,
-                &to_session_source,
-                &to_session_kind,
-                stored_value,
-            ) {
+    // The stored anchor is canonicalized before authorization and fails closed (Gate-3 round 5,
+    // ARCH-RECEIPT-ANCHOR-001): either a COMPLETE hook session triple (source, kind, value — the
+    // durable anchor, which survives pane churn, a restart and a live handoff), or no session and
+    // a terminal id (all a session-less target can offer, within this server's lifetime). A partial
+    // triple, or a row with neither anchor, is not receipt-capable: no label-only fallback exists.
+    match canonical_anchor(
+        &to_session_source,
+        &to_session_kind,
+        &to_session_value,
+        &to_terminal_id,
+    ) {
+        StoredAnchor::Session {
+            source,
+            kind,
+            value,
+        } => {
+            if !receiver_matches_session(receiver, source, kind, value) {
                 return Err(DbError::new(
                     "receiver_identity_mismatch",
                     "receiver agent session (source, kind, value) is not the session the message \
@@ -271,18 +299,30 @@ async fn append_received_event_in_tx(
                 ));
             }
         }
-        None => {
-            if let Some(stored) = to_terminal_id.as_deref().filter(|id| !id.is_empty()) {
-                if receiver.terminal_id != stored {
-                    return Err(DbError::new(
-                        "receiver_identity_mismatch",
-                        format!(
-                            "receiver terminal {} is not the terminal the message was addressed to ({})",
-                            receiver.terminal_id, stored
-                        ),
-                    ));
-                }
+        StoredAnchor::Terminal(stored) => {
+            if receiver.terminal_id != stored {
+                return Err(DbError::new(
+                    "receiver_identity_mismatch",
+                    format!(
+                        "receiver terminal {} is not the terminal the message was addressed to ({})",
+                        receiver.terminal_id, stored
+                    ),
+                ));
             }
+        }
+        StoredAnchor::Partial => {
+            return Err(DbError::new(
+                "receiver_identity_mismatch",
+                "the stored target's hook session is incomplete (source, kind or value missing), so \
+                 no receipt can be attributed to it",
+            ));
+        }
+        StoredAnchor::None => {
+            return Err(DbError::new(
+                "receiver_identity_mismatch",
+                "the stored target carries no durable identity (no complete hook session and no \
+                 terminal), so no receipt can be attributed to it",
+            ));
         }
     }
     // Self-receipt is decided by the SAME session-first logical identity as the target binding
@@ -294,17 +334,26 @@ async fn append_received_event_in_tx(
     // pane). The pane id is otherwise audit metadata.
     let receiver_is_sender = from_participant_id == to_participant_id
         || (from_agent_label == receiver.agent_label
-            && match from_session_value.as_deref().filter(|v| !v.is_empty()) {
-                Some(stored) => receiver_matches_session(
-                    receiver,
-                    &from_session_source,
-                    &from_session_kind,
-                    stored,
-                ),
-                None => match from_terminal_id.as_deref().filter(|t| !t.is_empty()) {
-                    Some(stored) => receiver.terminal_id == stored,
-                    None => from_pane_id.as_deref() == Some(receiver.pane_id.as_str()),
-                },
+            && match canonical_anchor(
+                &from_session_source,
+                &from_session_kind,
+                &from_session_value,
+                &from_terminal_id,
+            ) {
+                StoredAnchor::Session {
+                    source,
+                    kind,
+                    value,
+                } => receiver_matches_session(receiver, source, kind, value),
+                StoredAnchor::Terminal(stored) => receiver.terminal_id == stored,
+                // A malformed sender row decides by its terminal, else its stored pane.
+                StoredAnchor::Partial => {
+                    match from_terminal_id.as_deref().filter(|t| !t.is_empty()) {
+                        Some(stored) => receiver.terminal_id == stored,
+                        None => from_pane_id.as_deref() == Some(receiver.pane_id.as_str()),
+                    }
+                }
+                StoredAnchor::None => from_pane_id.as_deref() == Some(receiver.pane_id.as_str()),
             });
     if receiver_is_sender {
         return Err(DbError::new(
@@ -418,13 +467,24 @@ mod tests {
         ))
     }
 
+    /// A hook-less party on its own terminal (`term-<pane>`): the terminal is the durable anchor a
+    /// receipt binds to when no session was stored (a stored target with neither anchor is refused).
     fn party(agent: &str, pane: &str) -> Party {
         Party {
             agent: Some(agent.into()),
             pane: Some(pane.into()),
+            terminal_id: Some(format!("term-{pane}")),
             workspace: Some("ws".into()),
             tab: Some("tab".into()),
             ..Party::default()
+        }
+    }
+
+    /// A party with NO durable anchor at all (no terminal, no session): a legacy/sparse row.
+    fn unanchored_party(agent: &str, pane: &str) -> Party {
+        Party {
+            terminal_id: None,
+            ..party(agent, pane)
         }
     }
 
@@ -552,7 +612,7 @@ mod tests {
     fn receiver(agent: &str, pane: &str) -> AuthoritativeReceiver {
         AuthoritativeReceiver {
             pane_id: pane.into(),
-            terminal_id: String::new(),
+            terminal_id: format!("term-{pane}"),
             agent_label: agent.into(),
             agent_session: None,
         }
@@ -1152,6 +1212,66 @@ mod tests {
             .await?;
             assert!(matches!(accepted.status, ReceiptStatus::Received));
             assert_eq!(latest_event(&mut conn, "msg_old_pane").await.0, "received");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_stored_target_with_no_durable_anchor_is_refused() {
+        // Gate-3 round 5 (ARCH-RECEIPT-ANCHOR-001): a stored target with neither a session nor a
+        // terminal used to degrade to a label-only check, so any same-label hook-authoritative pane
+        // could receipt it. Such a row is not receipt-capable: fail closed.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let from = party("claude", "w-1");
+            let to = unanchored_party("codex", "w-2");
+            let rec = setup_submitted_between(&mut conn, &from, &to, "msg_unanchored").await;
+            let err = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_unanchored"),
+                &receiver("codex", "w-2"),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "receiver_identity_mismatch", "{}", err.message);
+            assert_eq!(
+                latest_event(&mut conn, "msg_unanchored").await.0,
+                "submitted"
+            );
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_partial_stored_session_triple_is_refused() {
+        // A stored session missing its source or kind is not an anchor (absent components were
+        // wildcards): the row fails closed even when the receiver presents the same value.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let from = party("claude", "w-1");
+            let to = Party {
+                agent_session: Some(serde_json::json!({"value": "sess-1"})),
+                ..party("codex", "w-2")
+            };
+            let rec = setup_submitted_between(&mut conn, &from, &to, "msg_partial").await;
+            let err = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_partial"),
+                &receiver_on("codex", "w-2", "term-w-2", Some("sess-1")),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "receiver_identity_mismatch", "{}", err.message);
             let _ = std::fs::remove_file(path);
             Ok(())
         });

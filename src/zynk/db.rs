@@ -309,6 +309,26 @@ pub(crate) fn sqlite_effective_path(path: &Path) -> Result<PathBuf, DbError> {
             .join(path)
     };
     if !cfg!(unix) {
+        // No link resolution on this platform: the guards would inspect `<link>-wal` while SQLite
+        // (`CreateFileW` without FILE_FLAG_OPEN_REPARSE_POINT, WAL names built from the unresolved
+        // path) follows the link — so a final-component link fails closed instead (Gate-3 round 5,
+        // WARDEN-09F-WINPATH-001). Resolving reparse points consistently is a documented follow-up.
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(DbError::new(
+                    "db_path_link",
+                    format!(
+                        "zynk: refusing to use the database path {}: it is a symbolic link, and zynk \
+                         does not resolve links on this platform. Point the configuration at the \
+                         target file instead.",
+                        printable_path(&current)
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(io("inspect", err)),
+        }
         return Ok(current);
     }
     for _ in 0..MAX_SYMLINKS {
@@ -2462,6 +2482,42 @@ mod tests {
             "the entry is left in place"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Windows CI runs only `windows_`-prefixed tests: a final-component link is refused there
+    /// (no link resolution on this platform), nothing is created through it, and the target's
+    /// sidecar is left alone (Gate-3 round 5, WARDEN-09F-WINPATH-001). Skips explicitly when the
+    /// runner cannot create symbolic links.
+    #[cfg(windows)]
+    #[test]
+    fn windows_a_symlinked_database_path_is_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "zynk-win-link-{}-{}",
+            std::process::id(),
+            crate::zynk::message::new_prefixed_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("zynk.db");
+        let target = dir.join("target.db");
+        match std::os::windows::fs::symlink_file(&target, &link) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping: this runner cannot create symbolic links ({err})");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            Err(err) => panic!("symlink_file: {err}"),
+        }
+        std::fs::write(sidecar(&target, "-wal"), vec![0x5au8; 4096]).unwrap();
+        let err = block_on(open_migrated_at(&link)).unwrap_err();
+        assert_eq!(err.code, "db_path_link", "{}", err.message);
+        assert!(!target.exists(), "nothing may be created through the link");
+        assert_eq!(
+            std::fs::metadata(sidecar(&target, "-wal")).unwrap().len(),
+            4096,
+            "the target's WAL is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
