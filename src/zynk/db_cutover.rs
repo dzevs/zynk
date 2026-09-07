@@ -7,7 +7,7 @@
 //!
 //! - `status` — classify the DB at the resolved native path and report it.
 //! - `adopt` / `backup` / `import` — NON-DESTRUCTIVELY relocate a foreign/legacy
-//!   DB out of the native path (to `<path>.wrapper-backup-<N>`) so zynk can then
+//!   DB out of the native path (into the directory `<path>.wrapper-backup-<N>/`) so zynk can then
 //!   create a fresh native DB. Nothing here is automatic, silent, or
 //!   destructive: the original bytes are MOVED (renamed/copied), never deleted
 //!   in place, and the chosen backup target never clobbers an existing file
@@ -48,20 +48,19 @@ pub struct RelocateOutcome {
     pub members: Vec<&'static str>,
 }
 
-/// Compute the first free `<path>.wrapper-backup-<N>` target (deterministic). A slot is free only
-/// when the base AND every bundle member target (`-journal`/`-wal`/`-shm`) are absent — an
-/// existing `<slot>-wal` must never be overwritten by the source WAL (Gate-3 round 3).
+/// Compute the first free `<path>.wrapper-backup-<N>` slot (deterministic). A slot is a DIRECTORY
+/// that holds the whole bundle under the members' own names (`<slot>/zynk.db`, `<slot>/zynk.db-wal`
+/// …), so SQLite can open the backup in place; it is free only when NO entry of any kind exists at
+/// that name (a dangling symlink included). Reserving the slot is one atomic `mkdir`, which claims
+/// every member name at once — flat per-file renames could never reserve four names together
+/// (Gate-3 round 4, SENT-R4-CUTOVER-002).
 pub fn next_backup_path(path: &Path) -> PathBuf {
     let base = path.as_os_str().to_owned();
     for n in 0..MAX_BACKUP_SLOTS {
         let mut candidate = base.clone();
         candidate.push(format!(".{BACKUP_SUFFIX}-{n}"));
         let candidate = PathBuf::from(candidate);
-        let free = !entry_exists(&candidate)
-            && BUNDLE_SUFFIXES
-                .iter()
-                .all(|suffix| !entry_exists(&sidecar(&candidate, suffix)));
-        if free {
+        if !entry_exists(&candidate) {
             return candidate;
         }
     }
@@ -235,20 +234,31 @@ fn relocate_bundle(
     path: &Path,
     mover: &mut dyn FnMut(&Path, &Path) -> Result<(), String>,
 ) -> Result<RelocateOutcome, String> {
-    // A main file is not required: orphan sidecars beside an absent path are relocated too (the
-    // guard's stated remedy); only an entirely empty bundle is an error.
-    let target = next_backup_path(path);
-    // Plan: sidecars first, the main file last (a failure part-way strands nothing that SQLite
-    // would need to interpret the main file at either location).
+    let slot = next_backup_path(path);
+    let Some(file_name) = path.file_name() else {
+        return Err(format!(
+            "zynk: cannot relocate {}: not a file path",
+            printable_path(path)
+        ));
+    };
+    let member_name = |suffix: &str| {
+        let mut name = file_name.to_os_string();
+        name.push(suffix);
+        name
+    };
+    // Plan: every bundle ENTRY beside the path (a dangling sidecar link is an entry SQLite would
+    // open by name, so it moves too — `exists` follows links and skipped it, Gate-3 round 4);
+    // sidecars first, the main file last. A main file is not required: orphan sidecars beside an
+    // absent path are relocated too; only an entirely empty bundle is an error.
     let mut plan: Vec<(PathBuf, PathBuf, &'static str)> = Vec::new();
     for suffix in BUNDLE_SUFFIXES {
         let member = sidecar(path, suffix);
-        if member.exists() {
-            plan.push((member, sidecar(&target, suffix), suffix));
+        if entry_exists(&member) {
+            plan.push((member, slot.join(member_name(suffix)), suffix));
         }
     }
-    if path.exists() {
-        plan.push((path.to_path_buf(), target.clone(), ""));
+    if entry_exists(path) {
+        plan.push((path.to_path_buf(), slot.join(member_name("")), ""));
     }
     if plan.is_empty() {
         return Err(format!(
@@ -256,46 +266,88 @@ fn relocate_bundle(
             printable_path(path)
         ));
     }
-    // Preflight: no target member may exist (the slot reservation already guarantees it; a re-check
-    // here costs nothing and turns a race into a refusal rather than an overwrite).
-    for (_, to, _) in &plan {
-        if entry_exists(to) {
-            return Err(format!(
-                "zynk: refusing to overwrite an existing backup member at {}; nothing was relocated",
-                printable_path(to)
-            ));
-        }
+    // Reserve the slot: one atomic mkdir claims every member name; an entry that appeared since
+    // the scan (a competitor, a dangling link) makes it fail — refuse, never replace.
+    if let Err(err) = create_private_dir(&slot) {
+        return Err(format!(
+            "zynk: refusing to use backup slot {}: {err}; nothing was relocated",
+            printable_path(&slot)
+        ));
     }
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut failure = None;
     for (from, to, _) in &plan {
         if let Err(err) = mover(from, to) {
-            let mut message = format!(
-                "zynk: could not move {} -> {}: {err}; nothing was relocated",
+            failure = Some(format!(
+                "could not move {} -> {}: {err}",
                 printable_path(from),
                 printable_path(to)
-            );
-            let mut not_restored = Vec::new();
-            for (from, to) in moved.iter().rev() {
-                if let Err(restore_err) = mover(to, from) {
-                    not_restored.push(format!("{} ({restore_err})", printable_path(from)));
-                }
-            }
-            if !not_restored.is_empty() {
-                message.push_str(&format!(
-                    " — WARNING: these members could not be moved back and now live under {}: {}",
-                    printable_path(&target),
-                    not_restored.join(", ")
-                ));
-            }
-            return Err(message);
+            ));
+            break;
         }
         moved.push((from.clone(), to.clone()));
     }
-    Ok(RelocateOutcome {
-        moved_from: path.to_path_buf(),
-        moved_to: target,
-        members: plan.iter().map(|(_, _, suffix)| *suffix).collect(),
-    })
+    // The slot must hold exactly the members that were moved: an entry someone else created
+    // inside it means the backup is not this bundle — refuse and roll back.
+    if failure.is_none() {
+        if let Some(unexpected) = unexpected_slot_entry(&slot, &moved) {
+            failure = Some(format!(
+                "an entry that is not a bundle member appeared in the backup slot: {}",
+                printable_path(&unexpected)
+            ));
+        }
+    }
+    let Some(failure) = failure else {
+        return Ok(RelocateOutcome {
+            moved_from: path.to_path_buf(),
+            moved_to: slot,
+            members: plan.iter().map(|(_, _, suffix)| *suffix).collect(),
+        });
+    };
+    let mut message = format!("zynk: {failure}; nothing was relocated");
+    let mut not_restored = Vec::new();
+    for (from, to) in moved.iter().rev() {
+        if let Err(restore_err) = mover(to, from) {
+            not_restored.push(format!("{} ({restore_err})", printable_path(from)));
+        }
+    }
+    if not_restored.is_empty() {
+        let _ = std::fs::remove_dir(&slot);
+    } else {
+        message.push_str(&format!(
+            " — WARNING: these members could not be moved back and now live under {}: {}",
+            printable_path(&slot),
+            not_restored.join(", ")
+        ));
+    }
+    Err(message)
+}
+
+/// Create the backup slot directory atomically (fails when ANY entry exists at that name) and
+/// owner-only, so nobody else can add entries to the reserved bundle namespace.
+fn create_private_dir(slot: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
+    builder.create(slot)
+}
+
+/// An entry in the slot that is not one of the members just moved there.
+fn unexpected_slot_entry(slot: &Path, moved: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(slot).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !moved.iter().any(|(_, to)| *to == path) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn sidecar(path: &Path, ext: &str) -> PathBuf {
@@ -357,7 +409,7 @@ fn usage() -> String {
      status   show the classification of the database at the resolved native path\n\
      adopt    move a foreign/legacy database aside (non-destructive) so zynk can\n\
               create a fresh native database at the native path\n\
-     backup   alias of adopt: relocate the existing database to <path>.wrapper-backup-N\n\
+     backup   alias of adopt: relocate the existing bundle into <path>.wrapper-backup-N/\n\
      import   relocate the existing (foreign/legacy) database aside; native starts clean\n\
               (full foreign-content import is not supported in this release)"
         .into()
@@ -375,8 +427,18 @@ pub fn run_db_command(args: &[String]) -> ExitCode {
 /// (`"db" => return Ok(CommandOutcome::Handled(run_db_command_code(&args[2..])))`).
 /// Returns the raw i32 exit code the positional dispatcher expects.
 pub fn run_db_command_code(args: &[String]) -> i32 {
+    // The ambient legacy database (`$HOME/.zynk/zynk-v2/zynk.db`) is a candidate for `adopt`
+    // ONLY when the native path is the default one: a path selected by config, ZYNK_SQLITE_HOME
+    // or ZYNK_HOME bounds every mutation to that path (Gate-3 round 4, SENT-R4-CUTOVER-003).
     let resolution = db_path::resolve_db_path();
-    run_db_command_at_code(args, &resolution.db_path, &mut StdOut, &mut StdErr)
+    let probe_legacy = matches!(resolution.source, db_path::DbPathSource::DefaultHome);
+    run_db_command_at_code_with(
+        args,
+        &resolution.db_path,
+        probe_legacy,
+        &mut StdOut,
+        &mut StdErr,
+    )
 }
 
 /// Sink abstraction so unit tests can capture output deterministically.
@@ -417,6 +479,17 @@ pub fn run_db_command_at_code(
     out: &mut dyn Sink,
     err: &mut dyn Sink,
 ) -> i32 {
+    // An explicit path never probes the ambient legacy database.
+    run_db_command_at_code_with(args, path, false, out, err)
+}
+
+fn run_db_command_at_code_with(
+    args: &[String],
+    path: &Path,
+    probe_legacy: bool,
+    out: &mut dyn Sink,
+    err: &mut dyn Sink,
+) -> i32 {
     let sub = args.first().map(|s| s.as_str());
     let rest = args.get(1..).unwrap_or(&[]);
     match sub {
@@ -426,7 +499,7 @@ pub fn run_db_command_at_code(
             // mutating leaf never silently ignores them.
             match classify_db_leaf_args(rest) {
                 DbLeafArgs::Run if verb == "status" => cmd_status(path, out, err),
-                DbLeafArgs::Run => cmd_relocate(verb, path, out, err),
+                DbLeafArgs::Run => cmd_relocate(verb, path, probe_legacy, out, err),
                 DbLeafArgs::Help => {
                     out.line(&usage());
                     0
@@ -494,14 +567,25 @@ fn cmd_status(path: &Path, out: &mut dyn Sink, err: &mut dyn Sink) -> i32 {
     }
 }
 
-fn cmd_relocate(verb: &str, path: &Path, out: &mut dyn Sink, err: &mut dyn Sink) -> i32 {
+fn cmd_relocate(
+    verb: &str,
+    path: &Path,
+    probe_legacy: bool,
+    out: &mut dyn Sink,
+    err: &mut dyn Sink,
+) -> i32 {
     let class = match classify_raw(path) {
         Ok(class) => class,
         // Existing data the guards refuse to open — a rollback journal that looks hot, or orphan
         // sidecars beside an absent main file — is exactly what relocation is for: the complete
         // bundle moves aside intact (a crashed foreign writer can still recover it at the backup
         // location) and the native path becomes usable.
-        Err(refusal) if matches!(refusal.code, "db_hot_journal" | "db_orphan_sidecar") => {
+        Err(refusal)
+            if matches!(
+                refusal.code,
+                "db_hot_journal" | "db_orphan_sidecar" | "db_sidecar_link"
+            ) =>
+        {
             out.line(&format!(
                 "zynk: the path holds data zynk refuses to open ({}); relocating the complete \
                  SQLite bundle aside instead.",
@@ -530,7 +614,7 @@ fn cmd_relocate(verb: &str, path: &Path, out: &mut dyn Sink, err: &mut dyn Sink)
             // (`~/.zynk/zynk-v2/zynk.db`) DB if one exists, so `adopt` is useful
             // even when the wrapper used the old subdir.
             let legacy = db_path::legacy_native_db_path();
-            if legacy != path && legacy.exists() {
+            if probe_legacy && legacy != path && legacy.exists() {
                 relocate_and_report(verb, &legacy, out, err)
             } else {
                 out.line(&format!(
@@ -717,7 +801,9 @@ mod tests {
             joined(&out)
         );
         // ...and the data was moved aside intact (same bytes), not deleted.
-        let backup = db.with_file_name("zynk.db.wrapper-backup-0");
+        let backup = db
+            .with_file_name("zynk.db.wrapper-backup-0")
+            .join("zynk.db");
         assert!(backup.exists(), "backup must exist: {}", joined(&out));
         assert_eq!(
             std::fs::read(&backup).unwrap(),
@@ -847,7 +933,9 @@ mod tests {
                 "source member left behind: {suffix:?}"
             );
         }
-        let backup = db.with_file_name("zynk.db.wrapper-backup-0");
+        let backup = db
+            .with_file_name("zynk.db.wrapper-backup-0")
+            .join("zynk.db");
         assert_eq!(
             (
                 std::fs::read(&backup).unwrap(),
@@ -898,7 +986,9 @@ mod tests {
             !db.exists() && !journal.exists(),
             "the bundle must leave the native path"
         );
-        let backup = db.with_file_name("zynk.db.wrapper-backup-0");
+        let backup = db
+            .with_file_name("zynk.db.wrapper-backup-0")
+            .join("zynk.db");
         assert_eq!(
             (
                 std::fs::read(&backup).unwrap(),
@@ -918,26 +1008,31 @@ mod tests {
         let db = dir.join("zynk.db");
         std::fs::create_dir_all(&dir).unwrap();
         plant_foreign_wal_pair(&db);
-        let sentinel = db.with_file_name("zynk.db.wrapper-backup-0-wal");
-        std::fs::write(&sentinel, b"SENTINEL: an earlier backup's WAL").unwrap();
+        let sentinel = db.with_file_name("zynk.db.wrapper-backup-0");
+        std::fs::write(&sentinel, b"SENTINEL: an earlier backup").unwrap();
         let source_wal = std::fs::read(bundle_member(&db, "-wal")).unwrap();
 
         let (code, out, err) = run(&["adopt"], &db);
         assert_success(code, &out, &err);
         assert_eq!(
             std::fs::read(&sentinel).unwrap(),
-            b"SENTINEL: an earlier backup's WAL"
+            b"SENTINEL: an earlier backup"
         );
-        let slot1 = db.with_file_name("zynk.db.wrapper-backup-1");
+        let slot1 = db
+            .with_file_name("zynk.db.wrapper-backup-1")
+            .join("zynk.db");
         assert!(
             slot1.exists(),
-            "slot 0 was occupied by a sidecar: slot 1 must be used\n{out}"
+            "slot 0 is occupied: slot 1 must be used\n{out}"
         );
         assert_eq!(
             std::fs::read(bundle_member(&slot1, "-wal")).unwrap(),
             source_wal
         );
-        assert!(!db.with_file_name("zynk.db.wrapper-backup-0").exists());
+        assert!(
+            std::fs::metadata(&sentinel).unwrap().is_file(),
+            "the occupant at the slot name is untouched"
+        );
         assert!(!db.exists() && !bundle_member(&db, "-wal").exists());
         std::fs::remove_dir_all(dir).ok();
     }
@@ -951,7 +1046,7 @@ mod tests {
         let db = dir.join("zynk.db");
         std::fs::create_dir_all(&dir).unwrap();
         plant_foreign_wal_pair(&db);
-        let sentinel = db.with_file_name("zynk.db.wrapper-backup-0-wal");
+        let sentinel = db.with_file_name("zynk.db.wrapper-backup-0");
         std::os::unix::fs::symlink("nowhere-at-all", &sentinel).unwrap();
         let source_wal = std::fs::read(bundle_member(&db, "-wal")).unwrap();
 
@@ -962,7 +1057,9 @@ mod tests {
             meta.file_type().is_symlink(),
             "the dangling slot symlink was replaced\n{out}"
         );
-        let slot1 = db.with_file_name("zynk.db.wrapper-backup-1");
+        let slot1 = db
+            .with_file_name("zynk.db.wrapper-backup-1")
+            .join("zynk.db");
         assert_eq!(
             std::fs::read(bundle_member(&slot1, "-wal")).unwrap(),
             source_wal,
@@ -1043,7 +1140,9 @@ mod tests {
             !orphan_wal.exists(),
             "the target's orphan WAL stayed put\n{out}"
         );
-        let slot0 = target.with_file_name("target.db.wrapper-backup-0");
+        let slot0 = target
+            .with_file_name("target.db.wrapper-backup-0")
+            .join("target.db");
         assert_eq!(
             std::fs::read(bundle_member(&slot0, "-wal")).unwrap(),
             vec![0x5au8; 4096]
@@ -1154,6 +1253,148 @@ mod tests {
             std::fs::read_dir(&dir).unwrap().count(),
             1,
             "nothing else touched"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adopt_moves_a_dangling_source_sidecar_link_and_native_startup_follows() {
+        // Gate-3 round 4 (SENT-R4-CUTOVER-001): a dangling sidecar link beside the database was
+        // skipped by the source plan (`exists` follows links), left at the native path, and the next
+        // native start failed to open the database through it. The link entry itself must move.
+        for suffix in BUNDLE_SUFFIXES {
+            let dir = tmp_home(&format!("adopt-dangling-source{suffix}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = dir.join("zynk.db");
+            std::fs::write(&db, b"not a database, but present").unwrap();
+            let link = bundle_member(&db, suffix);
+            let escaped = dir.join("external").join("escaped-sidecar");
+            std::os::unix::fs::symlink(&escaped, &link).unwrap();
+
+            let (code, out, err) = run(&["adopt"], &db);
+            assert_success(code, &out, &err);
+            assert!(
+                !entry_exists(&link),
+                "the dangling {suffix} link stayed at the native path\n{out}"
+            );
+            assert!(!entry_exists(&db));
+            assert!(!escaped.exists(), "the link target must never be touched");
+            block_on(async {
+                let conn = crate::zynk::db::open_migrated_at(&db).await?;
+                drop(conn);
+                Ok::<(), crate::zynk::db::DbError>(())
+            })
+            .unwrap_or_else(|e| panic!("native startup after adopt failed for {suffix}: {e}"));
+            assert!(
+                !escaped.exists(),
+                "startup must not create the old link target"
+            );
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    #[test]
+    fn an_explicit_db_path_never_relocates_the_ambient_legacy_database() {
+        // Gate-3 round 4 (SENT-R4-CUTOVER-003): with the native path absent, adopt fell back to the
+        // ambient `$HOME/.zynk/zynk-v2/zynk.db` even when ZYNK_SQLITE_HOME selected another
+        // directory — a mutation outside the path the operator chose.
+        let home = tmp_home("adopt-legacy-home");
+        let selected = tmp_home("adopt-legacy-selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let legacy = db_path::legacy_native_db_path_with_home(&home);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"LEGACY DATABASE BYTES").unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(crate::zynk::db_path::ZYNK_SQLITE_HOME_ENV, &selected);
+        std::env::remove_var(crate::zynk::db_path::ZYNK_HOME_ENV);
+        let code = run_db_command_code(&["adopt".to_string()]);
+        assert_eq!(code, 0, "an absent selected path is a no-op");
+        assert!(
+            entry_exists(&legacy),
+            "the ambient legacy database was relocated"
+        );
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"LEGACY DATABASE BYTES");
+        assert!(!entry_exists(
+            &legacy.with_file_name("zynk.db.wrapper-backup-0")
+        ));
+        assert!(!entry_exists(&selected.join("zynk.db")));
+        std::fs::remove_dir_all(home).ok();
+        std::fs::remove_dir_all(selected).ok();
+    }
+
+    #[test]
+    fn a_member_planted_in_the_reserved_slot_is_refused_and_rolled_back() {
+        // Gate-3 round 4 (SENT-R4-CUTOVER-002): with a main-only source, a competitor created the
+        // unplanned `<backup>-wal` beside the moved main and adopt reported a complete backup that
+        // was a mixed bundle. The slot is a reserved directory now; an entry that is not a moved
+        // member is detected after the moves, the bundle rolls back and the command fails.
+        let dir = tmp_home("adopt-planted-member");
+        let db = dir.join("zynk.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&db, b"MAIN ONLY").unwrap();
+        let slot = next_backup_path(&db);
+        let mut mover = |from: &Path, to: &Path| -> Result<(), String> {
+            // The competitor lands inside the reserved slot right before the main move.
+            std::fs::write(
+                slot.join("zynk.db-wal"),
+                b"FOREIGN WAL CREATED AFTER PREFLIGHT",
+            )
+            .unwrap();
+            move_no_replace(from, to).map_err(|err| err.to_string())
+        };
+        let err = relocate_bundle(&db, &mut mover).unwrap_err();
+        assert!(
+            err.contains("not a bundle member") && err.contains("nothing was relocated"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            b"MAIN ONLY",
+            "the source is back"
+        );
+        assert!(
+            !entry_exists(&slot.join("zynk.db")),
+            "no main left in the slot"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_source_name_recreated_during_rollback_is_reported_not_replaced() {
+        // Gate-3 round 4 (ARCH-CUTOVER-ATOMICITY-001): after a sidecar moved, a writer recreated
+        // its original name; a later failure rolls back, the restore refuses to replace that file,
+        // and the error names the member that now lives under the slot.
+        let dir = tmp_home("adopt-rollback-collision");
+        let db = dir.join("zynk.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        plant_foreign_wal_pair(&db);
+        let wal = bundle_member(&db, "-wal");
+        let mut mover = |from: &Path, to: &Path| -> Result<(), String> {
+            if from == db {
+                // Sidecars already moved; a writer recreates the WAL name, then the main fails.
+                std::fs::write(&wal, b"WRITER RECREATED THE WAL NAME").unwrap();
+                return Err("injected: main file cannot move".to_string());
+            }
+            move_no_replace(from, to).map_err(|err| err.to_string())
+        };
+        let err = relocate_bundle(&db, &mut mover).unwrap_err();
+        assert!(
+            err.contains("WARNING")
+                && err.contains("could not be moved back")
+                && err.contains("-wal"),
+            "the blocked restore must be reported: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&wal).unwrap(),
+            b"WRITER RECREATED THE WAL NAME",
+            "the writer's file was replaced"
+        );
+        assert!(db.exists(), "the main file never moved");
+        let slot = db.with_file_name("zynk.db.wrapper-backup-0");
+        assert!(
+            entry_exists(&slot.join("zynk.db-wal")),
+            "the original WAL stays under the slot"
         );
         std::fs::remove_dir_all(dir).ok();
     }

@@ -351,6 +351,40 @@ fn main_file_present(path: &Path) -> Result<bool, DbError> {
     }
 }
 
+/// A sidecar entry that is a symbolic link fails closed, dangling or not (Gate-3 round 4,
+/// SENT-R4-CUTOVER-001): SQLite opens `-journal`/`-wal`/`-shm` by name and would create or write
+/// the sidecar THROUGH the link — into a location that is not the database's, or nowhere at all
+/// (a dangling link made the first native start fail with "unable to open database file" after
+/// `metadata`, which follows links, had read it as absent). `zynk db adopt` moves the entry itself.
+fn refuse_sidecar_links(path: &Path) -> Result<(), DbError> {
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let sidecar = sidecar_path(path, suffix);
+        match std::fs::symlink_metadata(&sidecar) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(DbError::new(
+                    "db_sidecar_link",
+                    format!(
+                        "zynk: refusing to open a database at {}: {} is a symbolic link, and SQLite \
+                         opens sidecars by name (it would follow it). Move the bundle aside with \
+                         `zynk db adopt`, or remove the link, then retry (`zynk db status` to inspect).",
+                        printable_path(path),
+                        printable_path(&sidecar)
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(DbError::new(
+                    "db_io_error",
+                    format!("zynk: cannot inspect {}: {err}", printable_path(&sidecar)),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Size of a sidecar (`None` when it does not exist); any other metadata failure fails closed.
 fn sidecar_len(sidecar: &Path) -> Result<Option<u64>, DbError> {
     match std::fs::metadata(sidecar) {
@@ -488,6 +522,7 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 /// ADR 0011: a nonempty `-wal`/`-journal` beside an absent or zero-byte main file is existing data —
 /// initialization would let SQLite discard or replay it, so fail closed before any connection.
 fn refuse_orphan_sidecars(path: &Path) -> Result<(), DbError> {
+    refuse_sidecar_links(path)?;
     if main_file_present(path)? {
         return Ok(());
     }
@@ -1493,6 +1528,18 @@ mod tests {
 
     #[test]
     fn init_lock_contention_is_bounded() {
+        init_lock_contention_is_bounded_body();
+    }
+
+    /// Windows CI runs only `windows_`-prefixed tests: the portable init-lock deadline contract
+    /// must be exercised there too (Gate-3 round 4, INSPECTOR-BA765-002).
+    #[cfg(windows)]
+    #[test]
+    fn windows_init_lock_contention_is_bounded() {
+        init_lock_contention_is_bounded_body();
+    }
+
+    fn init_lock_contention_is_bounded_body() {
         // Gate-2 P2: an init lock held by another process must not stall an opener forever.
         let path = tmp_db("init-lock-contention");
         let lock_path = init_lock_path(&path);
@@ -2382,6 +2429,39 @@ mod tests {
         let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
         assert_eq!(err.code, "db_foreign_conflict", "{}", err.message);
         assert_eq!(data_bytes(&path), before, "foreign main/-wal bytes changed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_sidecar_entry_is_refused_before_initialization() {
+        // Gate-3 round 4 (SENT-R4-CUTOVER-001): a dangling `-wal` link beside an absent database
+        // read as "no sidecar" (metadata follows the link), initialization went ahead, and SQLite
+        // then failed to open the sidecar through the link. A sidecar entry that is not a plain
+        // file fails closed before anything is created.
+        // A dedicated directory: `tmp_db` names a file directly under the temp root, and the cleanup
+        // below must never touch anything but this test's own tree.
+        let dir = std::env::temp_dir().join(format!(
+            "zynk-dangling-sidecar-{}-{}",
+            std::process::id(),
+            crate::zynk::message::new_prefixed_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("zynk.db");
+        let link = sidecar(&path, "-wal");
+        let escaped = dir.join("external").join("escaped-wal");
+        std::os::unix::fs::symlink(&escaped, &link).unwrap();
+        let err = block_on(open_migrated_at(&path)).unwrap_err();
+        assert_eq!(err.code, "db_sidecar_link", "{}", err.message);
+        assert!(
+            !path.exists(),
+            "no database may be created beside a refused sidecar"
+        );
+        assert!(!escaped.exists(), "the link target must never be touched");
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "the entry is left in place"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

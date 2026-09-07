@@ -137,6 +137,8 @@ async fn append_received_event_in_tx(
                 m.runtime_session_id AS runtime_session_id, \
                 m.socket_namespace AS socket_namespace, \
                 fp.pane_id AS from_pane_id, \
+                m.from_participant_id AS from_participant_id, \
+                m.to_participant_id AS to_participant_id, \
                 tp.agent_label AS to_agent_label, \
                 tp.terminal_id AS to_terminal_id, \
                 tp.agent_session_value AS to_session_value, \
@@ -163,6 +165,8 @@ async fn append_received_event_in_tx(
     let stored_runtime = row.try_get::<String, _>("runtime_session_id")?;
     let stored_socket = row.try_get::<String, _>("socket_namespace")?;
     let from_pane_id = row.try_get::<Option<String>, _>("from_pane_id")?;
+    let from_participant_id = row.try_get::<String, _>("from_participant_id")?;
+    let to_participant_id = row.try_get::<String, _>("to_participant_id")?;
     let to_agent_label = row.try_get::<String, _>("to_agent_label")?;
     let to_terminal_id = row.try_get::<Option<String>, _>("to_terminal_id")?;
     let to_session_value = row.try_get::<Option<String>, _>("to_session_value")?;
@@ -255,6 +259,17 @@ async fn append_received_event_in_tx(
                 }
             }
         }
+    }
+    // Self-receipt is decided by DURABLE identity: a message whose sender and addressee are the
+    // same participant (label + terminal + session — the participant key never includes the pane
+    // id, which rotates and whose stored snapshot is the first one seen) can never be receipted by
+    // that participant, from any pane. The pane comparison below is only a secondary check for
+    // rows without durable identity (Gate-3 round 4, ARCH-RECEIPT-SELF-001).
+    if from_participant_id == to_participant_id {
+        return Err(DbError::new(
+            "self_receipt_rejected",
+            "the sender is the addressee of its own message and cannot report its receipt",
+        ));
     }
     if from_pane_id.as_deref() == Some(receiver.pane_id.as_str()) {
         return Err(DbError::new(
@@ -968,6 +983,69 @@ mod tests {
                 &mut conn,
                 &request_for(&rec, "msg_self"),
                 &receiver("codex", "w-1"),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "self_receipt_rejected");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_self_addressed_message_is_rejected_after_pane_churn() {
+        // Gate-3 round 4 (ARCH-RECEIPT-SELF-001): the self-receipt guard compared pane ids, which
+        // rotate and are not identity. The sender is the addressee here (same label, terminal and
+        // session); a receipt from its new pane id is still a self-receipt.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let me = party_on("codex", "w-1", "term-1", Some("sess-1"));
+            let rec = setup_submitted_between(&mut conn, &me, &me, "msg_self_churn").await;
+            let err = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_self_churn"),
+                &receiver_on("codex", "w-9", "term-1", Some("sess-1")),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "self_receipt_rejected");
+            assert_eq!(
+                latest_event(&mut conn, "msg_self_churn").await.0,
+                "submitted"
+            );
+            let seq: i64 = sqlx::query("SELECT delivery_seq FROM messages WHERE id = ?")
+                .bind("msg_self_churn")
+                .fetch_one(&mut conn)
+                .await?
+                .try_get("delivery_seq")?;
+            assert_eq!(seq, 1, "delivery_seq and the event history are unchanged");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_stale_participant_pane_snapshot_does_not_enable_self_receipt() {
+        // The participant row keeps its FIRST pane snapshot (INSERT OR IGNORE); a later message
+        // from the same participant at another pane must still be a rejected self-receipt.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let first = party_on("codex", "w-1", "term-1", Some("sess-1"));
+            let _ = setup_submitted_between(&mut conn, &first, &first, "msg_self_first").await;
+            let later = party_on("codex", "w-5", "term-1", Some("sess-1"));
+            let rec = setup_submitted_between(&mut conn, &later, &later, "msg_self_later").await;
+            let err = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_self_later"),
+                &receiver_on("codex", "w-5", "term-1", Some("sess-1")),
                 "socket_test",
                 "rt",
                 "t",

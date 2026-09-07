@@ -1920,7 +1920,13 @@ fn busy_db_workers_reject_a_live_handoff_within_the_deadline() {
     let response = spawn_handoff_request(&f.api_socket)
         .recv_timeout(Duration::from_secs(5))
         .expect("a busy handoff must fail within the bounded deadline");
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // ZYNK_HANDOFF_WORKER_IDLE_MS=500: the refusal must land well inside the deadline's order of
+    // magnitude, with scheduling margin for saturated hosted runners (Gate-3 round 4).
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a 500 ms worker deadline took {:?}",
+        started.elapsed()
+    );
     assert_eq!(response["error"]["code"], "handoff_failed", "{response}");
     assert!(
         response["error"]["message"]
@@ -2011,7 +2017,13 @@ fn receipt_backlog_rejects_a_live_handoff_then_drains_and_hands_over() {
     let response = spawn_handoff_request(&f.api_socket)
         .recv_timeout(Duration::from_secs(5))
         .expect("a handoff with a receipt backlog must fail within the bounded deadline");
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // ZYNK_HANDOFF_WORKER_IDLE_MS=500: the refusal must land well inside the deadline's order of
+    // magnitude, with scheduling margin for saturated hosted runners (Gate-3 round 4).
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a 500 ms worker deadline took {:?}",
+        started.elapsed()
+    );
     assert_eq!(response["error"]["code"], "handoff_failed", "{response}");
     assert!(
         response["error"]["message"]

@@ -11,7 +11,9 @@ on:
       - "Cargo.toml"
       - "flake.lock"
       - "flake.nix"
+      - "migrations/**"
       - "nix/**"
+      - "src/**"
       - "vendor/**"
   push:
     branches: [master, main]
@@ -23,8 +25,12 @@ on:
       - "Cargo.toml"
       - "flake.lock"
       - "flake.nix"
+      - "migrations/**"
       - "nix/**"
+      - "src/**"
       - "vendor/**"
+  # An exact release SHA can be re-checked on demand (Gate-3 round 4, INSPECTOR-BA765-003).
+  workflow_dispatch:
 
 permissions:
   contents: read

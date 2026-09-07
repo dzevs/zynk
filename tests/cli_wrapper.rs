@@ -1957,7 +1957,7 @@ fn server_startup_is_fatal_when_the_db_init_lock_is_held_elsewhere() {
             break status;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(15),
+            started.elapsed() < Duration::from_secs(8),
             "server still running {:?} after startup with a held init lock",
             started.elapsed()
         );
