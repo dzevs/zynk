@@ -160,14 +160,15 @@ The decision above stands; the swarm's second round showed the guard could still
     between two steps loses a file; an identity check before the unlink only narrows that window). After the
     moves the slot must hold exactly the members that were moved, the source must hold no bundle member any more
     (a sidecar a writer created beside the main after the plan was built would otherwise split the bundle behind
-    a "complete" backup), and each moved member must still be the very entry that left the source (Unix: device +
-    inode captured before the move); anything else means the backup
+    a "complete" backup), and each moved member must still be the very entry that left the source (device + inode on
+    Unix, volume serial + file index on Windows, captured before the move; an identity that cannot be read is
+    treated as displaced); anything else means the backup
     is not this bundle: the intact members move back and the command fails, while a member another writer
     renamed over inside the slot is named as displaced and is not moved back over the source name (its original
-    bytes were displaced by that writer's own action; zynk deleted nothing). Where `std` exposes no stable file
-    identity (Windows) the name check and the per-member no-replace moves are what remains — a documented
-    residual, together with a writer that acts after the final check. Every inspection these decisions rest on
-    fails closed:
+    bytes were displaced by that writer's own action; zynk deleted nothing). The owner-only slot narrows who can act
+    inside it but is not actor-proof — a process of the same user can still race — so the identity check is what
+    detects such a writer, and one that acts after the final check is the stated residual. Every inspection these
+    decisions rest on fails closed:
     only "not found" means a member is absent (an I/O error refuses the relocation before anything moves), and
     a slot that cannot be listed completely is a verification failure, never "clean". The guaranteed contract
     is per-member atomicity, never
@@ -210,7 +211,8 @@ The decision above stands; the swarm's second round showed the guard could still
     one — the full triple the participant key hashes (source, kind, value), never the value alone. The stored
     anchor is canonicalized before authorization and fails closed: either a complete triple or no session and a
     terminal id; a partial triple, or a row with neither anchor, is not receipt-capable — there is no
-    label-only fallback. A session
+    label-only fallback — and a partial triple is never persisted as identity in the first place (the
+    participant then binds by its terminal). A session
     counts as a party's identity only when it was reported for the SAME agent the party is labeled as (owner
     coherence, applied when the participant is stored and when the receiver is resolved): a terminal can
     carry a session persisted for another owner, and that session anchors nothing — it is treated as absent
