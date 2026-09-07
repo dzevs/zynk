@@ -530,15 +530,33 @@ async fn run_job_inner(
     // Success path: write the vec0 row + message_embeddings row + mark done, all in
     // ONE transaction so a crash never leaves a half-written embedding. `vec_table`
     // was validated as a safe identifier by `ensure_model_and_vec0`.
-    write_embedding_txn(
+    match write_embedding_txn(
         conn, vec_table, rowid, &embedded, message_id, model_id, &body, claim,
     )
-    .await?;
+    .await?
+    {
+        WriteOutcome::Written => {}
+        WriteOutcome::Stale => tracing::info!(
+            message_id,
+            "embedding job changed hands during the provider call; this claim's result is discarded"
+        ),
+    }
     Ok(())
 }
 
-/// Write the embedding (one transaction): vec0 row + message_embeddings row + mark
-/// the job done. Any error rolls back; the caller records the job `failed`.
+/// Outcome of the fenced embedding write.
+enum WriteOutcome {
+    /// This claim still owned the job: vector + `message_embeddings` written, job marked `done`.
+    Written,
+    /// The job was recovered as stale and re-claimed while the provider call ran: nothing was
+    /// written (the transaction is rolled back) and nothing is recorded — the job is its new
+    /// owner's.
+    Stale,
+}
+
+/// Write the embedding (one transaction): fence the claim's ownership, then vec0 row +
+/// message_embeddings row, with the job marked done in the same transaction. Any error rolls
+/// back; the caller records the job `failed`. A stale claim rolls back and reports `Stale`.
 #[allow(clippy::too_many_arguments)]
 async fn write_embedding_txn(
     conn: &mut SqliteConnection,
@@ -549,15 +567,19 @@ async fn write_embedding_txn(
     model_id: &str,
     body: &str,
     claim: &JobClaim<'_>,
-) -> Result<(), DbError> {
+) -> Result<WriteOutcome, DbError> {
     conn.execute("BEGIN IMMEDIATE").await?;
     let result = write_embedding_in_transaction(
         conn, vec_table, rowid, embedded, message_id, model_id, body, claim,
     )
     .await;
     match result {
-        Ok(()) => match conn.execute("COMMIT").await {
-            Ok(_) => Ok(()),
+        Ok(WriteOutcome::Stale) => {
+            let _ = conn.execute("ROLLBACK").await;
+            Ok(WriteOutcome::Stale)
+        }
+        Ok(WriteOutcome::Written) => match conn.execute("COMMIT").await {
+            Ok(_) => Ok(WriteOutcome::Written),
             // In WAL, COMMIT can return SQLITE_BUSY and does NOT auto-rollback — the
             // reused long-lived conn would be left mid-transaction, folding the
             // caller's `mark_job_failed` and the next job's running-mark into a stale
@@ -584,8 +606,26 @@ async fn write_embedding_in_transaction(
     model_id: &str,
     body: &str,
     claim: &JobClaim<'_>,
-) -> Result<(), DbError> {
+) -> Result<WriteOutcome, DbError> {
     let now = now_rfc3339();
+    // Ownership fence FIRST, inside the transaction: BEGIN IMMEDIATE holds the write lock, so no
+    // claim can interleave between this check and the writes below. Only THIS claim completes
+    // the job; zero rows means it was recovered as stale and re-claimed while the provider call
+    // ran, and a late success must leave no trace — the caller rolls back before any side effect
+    // (a vector committed under the new owner would make its own completion fail on the vec0
+    // UNIQUE and strand the job `failed` beside a live vector).
+    let fenced = sqlx::query(
+        "UPDATE embedding_jobs SET status='done', last_error=NULL, finished_at=? \
+         WHERE id=? AND status='running' AND attempts=?",
+    )
+    .bind(&now)
+    .bind(claim.job_id)
+    .bind(claim.attempt)
+    .execute(&mut *conn)
+    .await?;
+    if fenced.rows_affected() == 0 {
+        return Ok(WriteOutcome::Stale);
+    }
     // Format the embedding as a JSON array string — vec0's bind form.
     let json = format!(
         "[{}]",
@@ -616,18 +656,7 @@ async fn write_embedding_in_transaction(
     .execute(&mut *conn)
     .await?;
 
-    // Only THIS claim completes the job: a claim recovered as stale and re-taken by another
-    // worker carries a newer `attempts`, so this late completion matches nothing.
-    sqlx::query(
-        "UPDATE embedding_jobs SET status='done', last_error=NULL, finished_at=? \
-         WHERE id=? AND status='running' AND attempts=?",
-    )
-    .bind(&now)
-    .bind(claim.job_id)
-    .bind(claim.attempt)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
+    Ok(WriteOutcome::Written)
 }
 
 /// Best-effort: mark a job `failed` with `last_error` + `finished_at`. Swallows any
@@ -778,6 +807,25 @@ mod tests {
             })
             .unwrap()
         })
+    }
+
+    /// Rows in `message_embeddings` for the message (0 or 1: the table is keyed by message + model).
+    fn embedding_rows(path: &std::path::Path, message_id: &str) -> i64 {
+        crate::zynk::db::block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(path)
+                    .create_if_missing(false),
+            )
+            .await?;
+            let row =
+                sqlx::query("SELECT COUNT(*) AS n FROM message_embeddings WHERE message_id=?")
+                    .bind(message_id)
+                    .fetch_one(&mut conn)
+                    .await?;
+            Ok::<i64, DbError>(row.try_get("n")?)
+        })
+        .unwrap()
     }
 
     /// `(status, attempts)` of the message's job — `None` while the database or the job row does not
@@ -1063,6 +1111,91 @@ mod tests {
         })
         .unwrap();
         assert_eq!(last_error, None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_stale_worker_success_never_writes_a_vector_under_the_new_owner() {
+        // Gate-3 round 3 pre-read on 79ec55c (arbiter, artifact r79-stale-iMLXNn): the token-guarded
+        // `done` UPDATE came AFTER the vector writes, so a stale claim's late SUCCESS committed a
+        // vector under the new owner, which then failed on the vec0 UNIQUE. Ownership must be
+        // fenced inside the write transaction BEFORE any side effect: a stale success is a no-op.
+        crate::zynk::embed::vec::register_sqlite_vec();
+        std::env::remove_var(crate::zynk::embed::ZYNK_EMBED_PROVIDER_ENV);
+        let path = temp_db_path();
+        let job = crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            seed_message(&mut conn, "msg_stale_success").await;
+            let embedder = FakeEmbedder::with_dim(8);
+            let (model_id, vec_table, dim) = ensure_model_and_vec0(&mut conn, &embedder).await?;
+            let job_id: String = sqlx::query("SELECT id FROM embedding_jobs WHERE message_id=?")
+                .bind("msg_stale_success")
+                .fetch_one(&mut conn)
+                .await?
+                .try_get("id")?;
+            Ok::<_, DbError>((
+                job_id,
+                "msg_stale_success".to_string(),
+                model_id,
+                vec_table,
+                dim,
+            ))
+        })
+        .unwrap();
+        let model_id = job.2.clone();
+
+        let (release_a, gate_a) = std::sync::mpsc::channel();
+        let worker_a = spawn_job_worker(
+            path.clone(),
+            job.clone(),
+            Box::new(BlockingEmbedder {
+                inner: FakeEmbedder::with_dim(8),
+                release: gate_a,
+            }),
+        );
+        wait_for_job_state(&path, "msg_stale_success", ("running", 1));
+        crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            sqlx::query("UPDATE embedding_jobs SET started_at='1970-01-01T00:00:00Z' WHERE message_id='msg_stale_success'")
+                .execute(&mut conn)
+                .await?;
+            assert_eq!(recover_running_jobs(&mut conn, &model_id).await?, 1);
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        let (release_b, gate_b) = std::sync::mpsc::channel();
+        let worker_b = spawn_job_worker(
+            path.clone(),
+            job.clone(),
+            Box::new(BlockingEmbedder {
+                inner: FakeEmbedder::with_dim(8),
+                release: gate_b,
+            }),
+        );
+        wait_for_job_state(&path, "msg_stale_success", ("running", 2));
+
+        // The stale claim succeeds first: nothing may land.
+        release_a.send(()).unwrap();
+        worker_a.join().unwrap();
+        assert_eq!(
+            job_state(&path, "msg_stale_success"),
+            Some(("running".into(), 2)),
+            "a stale success touched the job under the current owner"
+        );
+        assert_eq!(
+            embedding_rows(&path, "msg_stale_success"),
+            0,
+            "a stale success wrote a vector under the current owner"
+        );
+
+        // The current owner completes normally.
+        release_b.send(()).unwrap();
+        worker_b.join().unwrap();
+        assert_eq!(
+            job_state(&path, "msg_stale_success"),
+            Some(("done".into(), 2))
+        );
+        assert_eq!(embedding_rows(&path, "msg_stale_success"), 1);
         let _ = std::fs::remove_file(&path);
     }
 

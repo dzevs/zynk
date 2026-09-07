@@ -1367,6 +1367,169 @@ fn cli_fails_closed_on_a_hot_rollback_journal_behind_a_symlink() {
 }
 
 #[test]
+fn concurrent_named_server_cold_starts_fail_each_old_orphan_exactly_once() {
+    // Gate-3 round 3 pre-read (arbiter r79-orphanrace): two named servers starting together both
+    // ran orphan recovery over the same old event-less messages and each recorded a `failed`
+    // event (delivery_seq bumped twice). Recovery must claim each orphan atomically.
+    const ORPHANS: i64 = 300;
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let sqlite_home = config_home.join("sqlite");
+    let mut seed =
+        spawn_named_server_with_env(&config_home, &runtime_dir, "seed", &sqlite_home, false, &[]);
+    let socket_seed = named_session_socket(&config_home, "seed");
+    wait_for_named_server_socket(&mut seed, "seed", &socket_seed, Duration::from_secs(15));
+    let created = send_request(
+        &socket_seed,
+        r#"{"id":"test:workspace:create","method":"workspace.create","params":{"cwd":"/tmp","focus":true}}"#,
+    );
+    let pane = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let report = send_request(
+        &socket_seed,
+        &format!(
+            r#"{{"id":"test:report","method":"pane.report_agent","params":{{"pane_id":"{pane}","source":"hook","agent":"codex","state":"idle"}}}}"#
+        ),
+    );
+    assert!(report.get("error").is_none(), "{report}");
+    let db = sqlite_home.join("zynk.db");
+    let template = run_cli_json_with_env(
+        &config_home,
+        &runtime_dir,
+        &socket_seed,
+        &["send", &pane, "--", "template"],
+    );
+    let template_id = template["message_id"].as_str().unwrap().to_string();
+    let _ = send_request(
+        &socket_seed,
+        r#"{"id":"test:stop","method":"server.stop","params":{}}"#,
+    );
+    if !wait_for_pid_exit(seed.child.id(), Duration::from_secs(10)) {
+        let _ = seed.child.kill();
+    }
+    let _ = seed.child.wait();
+
+    // Clone the template into ORPHANS old, event-less messages (a sender that died long ago).
+    let columns = message_columns(&db);
+    let exprs: Vec<String> = columns
+        .iter()
+        .map(|c| match c.as_str() {
+            "id" => "'msg_orphan_' || printf('%04d', n.x)".to_string(),
+            "conversation_seq" => "m.conversation_seq + n.x".to_string(),
+            "delivery_seq" => "0".to_string(),
+            "created_at" => "'2020-01-01T00:00:00Z'".to_string(),
+            other => format!("m.{other}"),
+        })
+        .collect();
+    sqlite_exec(
+        &db,
+        &format!(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < {ORPHANS}) \
+             INSERT INTO messages ({}) SELECT {} FROM messages m, n WHERE m.id = '{template_id}'",
+            columns.join(", "),
+            exprs.join(", ")
+        ),
+    );
+
+    let mut alpha = spawn_named_server_with_env(
+        &config_home,
+        &runtime_dir,
+        "alpha",
+        &sqlite_home,
+        false,
+        &[],
+    );
+    let mut beta =
+        spawn_named_server_with_env(&config_home, &runtime_dir, "beta", &sqlite_home, false, &[]);
+    let socket_a = named_session_socket(&config_home, "alpha");
+    let socket_b = named_session_socket(&config_home, "beta");
+    wait_for_named_server_socket(&mut alpha, "alpha", &socket_a, Duration::from_secs(30));
+    wait_for_named_server_socket(&mut beta, "beta", &socket_b, Duration::from_secs(30));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let counts = orphan_event_counts(&db);
+        let recovered = counts.iter().filter(|(_, n)| *n >= 1).count() as i64;
+        if recovered == ORPHANS || Instant::now() > deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    let counts = orphan_event_counts(&db);
+    let doubled: Vec<&(String, i64)> = counts.iter().filter(|(_, n)| *n != 1).collect();
+    for socket in [&socket_b, &socket_a] {
+        let _ = send_request(
+            socket,
+            r#"{"id":"test:stop","method":"server.stop","params":{}}"#,
+        );
+    }
+    for server in [&mut alpha, &mut beta] {
+        if !wait_for_pid_exit(server.child.id(), Duration::from_secs(10)) {
+            let _ = server.child.kill();
+        }
+        let _ = server.child.wait();
+    }
+    assert_eq!(
+        counts.len() as i64,
+        ORPHANS,
+        "every old orphan is recovered exactly once"
+    );
+    assert!(
+        doubled.is_empty(),
+        "{} orphans got a wrong number of failed events, e.g. {:?}",
+        doubled.len(),
+        doubled.first()
+    );
+    cleanup_test_base(&base);
+}
+
+fn message_columns(db: &Path) -> Vec<String> {
+    use sqlx::{Connection, Row};
+    sqlite_block_on(async {
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .create_if_missing(false),
+        )
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA table_info(messages)")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect()
+    })
+}
+
+/// `(message_id, failed-event count)` for every cloned orphan that has at least one event.
+fn orphan_event_counts(db: &Path) -> Vec<(String, i64)> {
+    use sqlx::{Connection, Row};
+    sqlite_block_on(async {
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .create_if_missing(false),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "SELECT message_id, COUNT(*) AS n FROM delivery_events \
+             WHERE message_id LIKE 'msg_orphan_%' AND event_type = 'failed' GROUP BY message_id",
+        )
+        .fetch_all(&mut conn)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get::<String, _>("message_id"), row.get::<i64, _>("n")))
+        .collect()
+    })
+}
+
+#[test]
 fn a_second_named_session_does_not_fail_a_peers_in_flight_send() {
     // Gate-3 round 3: every ordinary named server runs cold-start orphan recovery on the shared
     // database. A live peer's freshly persisted message (no delivery event yet) must be left alone;

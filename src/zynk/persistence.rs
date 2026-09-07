@@ -873,6 +873,34 @@ mod tests {
     }
 
     #[test]
+    fn failing_an_orphan_is_recorded_exactly_once_across_callers() {
+        // Gate-3 round 3 pre-read (arbiter r79-orphanrace): two servers recovering the same old
+        // orphan must record ONE failed event; the second claimant sees zero rows.
+        crate::zynk::db::block_on(async {
+            let path = temp_db_path();
+            let mut a = crate::zynk::db::open_migrated_at_without_recovery(&path).await?;
+            let mut b = crate::zynk::db::open_migrated_at_without_recovery(&path).await?;
+            let orphan = create_test_message(&mut a, "msg_race", SendCommand::PaneRun).await;
+            assert!(crate::zynk::db::fail_orphan_message(&mut a, &orphan.message_id).await?);
+            assert!(!crate::zynk::db::fail_orphan_message(&mut b, &orphan.message_id).await?);
+            assert!(!crate::zynk::db::fail_orphan_message(&mut a, &orphan.message_id).await?);
+            assert_eq!(
+                event_types(&mut a, &orphan.message_id).await?,
+                vec!["failed"]
+            );
+            let seq: i64 = sqlx::query("SELECT delivery_seq FROM messages WHERE id = ?")
+                .bind(&orphan.message_id)
+                .fetch_one(&mut a)
+                .await?
+                .get("delivery_seq");
+            assert_eq!(seq, 1, "delivery_seq bumped once");
+            let _ = std::fs::remove_file(&path);
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn orphan_recovery_spares_messages_inside_the_grace_window() {
         // Gate-3 round 3: a message with no delivery event is IN FLIGHT until it is older than
         // ORPHAN_GRACE (a sender persists before its first transport event; concurrent named

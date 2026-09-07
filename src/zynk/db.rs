@@ -291,7 +291,7 @@ const MAX_SYMLINKS: usize = 100;
 /// FINAL component moves the sidecars away from the configured name — that is what is resolved.
 /// An absent final target is returned as is (SQLite creates the database there). Windows' VFS does
 /// not follow links, so only the absolute form is taken there.
-fn sqlite_effective_path(path: &Path) -> Result<PathBuf, DbError> {
+pub(crate) fn sqlite_effective_path(path: &Path) -> Result<PathBuf, DbError> {
     let io = |what: &str, err: std::io::Error| {
         DbError::new(
             "db_io_error",
@@ -1216,6 +1216,67 @@ pub async fn recover_orphan_messages(conn: &mut SqliteConnection) -> Result<(), 
     recover_orphan_messages_older_than(conn, ORPHAN_GRACE).await
 }
 
+/// Record `failed`/`system.recovery` for an event-less message EXACTLY ONCE across every server
+/// that recovers it (Gate-3 round 3: concurrent named-server cold starts each recorded a failure).
+/// The claim — bumping `delivery_seq` — is conditioned on the message STILL having no delivery
+/// event, inside one immediate transaction, so a peer that already failed it (or a sender that
+/// meanwhile recorded its first event) leaves zero rows and this call records nothing. Returns
+/// whether this call recorded the failure.
+pub(crate) async fn fail_orphan_message(
+    conn: &mut SqliteConnection,
+    message_id: &str,
+) -> Result<bool, DbError> {
+    use sqlx::Executor as _;
+    conn.execute("BEGIN IMMEDIATE").await?;
+    let result = fail_orphan_in_transaction(conn, message_id).await;
+    match result {
+        Ok(true) => match conn.execute("COMMIT").await {
+            Ok(_) => Ok(true),
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK").await;
+                Err(err.into())
+            }
+        },
+        Ok(false) => {
+            let _ = conn.execute("ROLLBACK").await;
+            Ok(false)
+        }
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK").await;
+            Err(err)
+        }
+    }
+}
+
+async fn fail_orphan_in_transaction(
+    conn: &mut SqliteConnection,
+    message_id: &str,
+) -> Result<bool, DbError> {
+    let claimed = sqlx::query(
+        "UPDATE messages SET delivery_seq = delivery_seq + 1 WHERE id = ? AND NOT EXISTS \
+         (SELECT 1 FROM delivery_events WHERE delivery_events.message_id = messages.id) \
+         RETURNING delivery_seq",
+    )
+    .bind(message_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(row) = claimed else {
+        return Ok(false);
+    };
+    let seq = row.try_get::<i64, _>("delivery_seq")?;
+    sqlx::query(
+        "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp, payload_json) VALUES (?, ?, 'failed', 'system.recovery', ?, ?, ?)",
+    )
+    .bind(crate::zynk::message::new_prefixed_id("evt"))
+    .bind(message_id)
+    .bind(seq)
+    .bind(crate::zynk::message::now_rfc3339())
+    .bind(r#"{"recovery":"orphaned_message_without_event"}"#)
+    .execute(&mut *conn)
+    .await?;
+    Ok(true)
+}
+
 /// Fail every message with no delivery event whose `created_at` is older than `grace`.
 pub async fn recover_orphan_messages_older_than(
     conn: &mut SqliteConnection,
@@ -1240,27 +1301,8 @@ pub async fn recover_orphan_messages_older_than(
     .collect();
 
     for message_id in orphan_ids {
-        let mut tx = conn.begin().await?;
-        let seq_row = sqlx::query(
-            "UPDATE messages SET delivery_seq = delivery_seq + 1 WHERE id = ? RETURNING delivery_seq",
-        )
-        .bind(&message_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let seq = seq_row.try_get::<i64, _>("delivery_seq")?;
-        sqlx::query(
-            "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp, payload_json) VALUES (?, ?, 'failed', 'system.recovery', ?, ?, ?)",
-        )
-        .bind(crate::zynk::message::new_prefixed_id("evt"))
-        .bind(&message_id)
-        .bind(seq)
-        .bind(crate::zynk::message::now_rfc3339())
-        .bind(r#"{"recovery":"orphaned_message_without_event"}"#)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
+        fail_orphan_message(conn, &message_id).await?;
     }
-
     Ok(())
 }
 

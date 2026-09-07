@@ -139,7 +139,9 @@ async fn append_received_event_in_tx(
                 fp.pane_id AS from_pane_id, \
                 tp.agent_label AS to_agent_label, \
                 tp.terminal_id AS to_terminal_id, \
-                tp.agent_session_value AS to_session_value \
+                tp.agent_session_value AS to_session_value, \
+                tp.agent_session_source AS to_session_source, \
+                tp.agent_session_kind AS to_session_kind \
          FROM messages m \
          JOIN conversation_participants fp ON fp.id = m.from_participant_id \
          JOIN conversation_participants tp ON tp.id = m.to_participant_id \
@@ -164,6 +166,8 @@ async fn append_received_event_in_tx(
     let to_agent_label = row.try_get::<String, _>("to_agent_label")?;
     let to_terminal_id = row.try_get::<Option<String>, _>("to_terminal_id")?;
     let to_session_value = row.try_get::<Option<String>, _>("to_session_value")?;
+    let to_session_source = row.try_get::<Option<String>, _>("to_session_source")?;
+    let to_session_kind = row.try_get::<Option<String>, _>("to_session_kind")?;
 
     // 1. Message identity + stored runtime namespace.
     if stored_conversation_id != request.conversation_id
@@ -210,16 +214,31 @@ async fn append_received_event_in_tx(
         .as_deref()
         .filter(|value| !value.is_empty())
     {
-        Some(stored) => {
-            let live = receiver
-                .agent_session
-                .as_ref()
-                .and_then(|session| session.get("value"))
-                .and_then(|value| value.as_str());
-            if live != Some(stored) {
+        Some(stored_value) => {
+            // The stored identity is the full session triple (source, kind, value) — the same
+            // components the participant key hashes — never the value alone.
+            let live = |key: &str| {
+                receiver
+                    .agent_session
+                    .as_ref()
+                    .and_then(|session| session.get(key))
+                    .and_then(|component| component.as_str())
+            };
+            let component_matches = |stored: &Option<String>, key: &str| match stored
+                .as_deref()
+                .filter(|component| !component.is_empty())
+            {
+                Some(stored) => live(key) == Some(stored),
+                None => true,
+            };
+            if live("value") != Some(stored_value)
+                || !component_matches(&to_session_source, "source")
+                || !component_matches(&to_session_kind, "kind")
+            {
                 return Err(DbError::new(
                     "receiver_identity_mismatch",
-                    "receiver agent session is not the session the message was addressed to",
+                    "receiver agent session (source, kind, value) is not the session the message \
+                     was addressed to",
                 ));
             }
         }
@@ -367,6 +386,34 @@ mod tests {
             agent_session: session
                 .map(|value| serde_json::json!({"source": "hook", "kind": "id", "value": value})),
             ..party(agent, pane)
+        }
+    }
+
+    /// A party whose hook session is given as the full triple the participant identity stores.
+    fn party_with_session(agent: &str, pane: &str, source: &str, kind: &str, value: &str) -> Party {
+        Party {
+            terminal_id: Some("term-2".into()),
+            agent_session: Some(
+                serde_json::json!({"source": source, "kind": kind, "value": value}),
+            ),
+            ..party(agent, pane)
+        }
+    }
+
+    fn receiver_with_session(
+        agent: &str,
+        pane: &str,
+        source: &str,
+        kind: &str,
+        value: &str,
+    ) -> AuthoritativeReceiver {
+        AuthoritativeReceiver {
+            pane_id: pane.into(),
+            terminal_id: "term-2".into(),
+            agent_label: agent.into(),
+            agent_session: Some(serde_json::json!({
+                "source": source, "agent": agent, "kind": kind, "value": value
+            })),
         }
     }
 
@@ -826,6 +873,79 @@ mod tests {
                 &mut conn,
                 &request_for(&rec, "msg_restore"),
                 &receiver_on("codex", "w-2", "term-7", Some("sess-1")),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await?;
+            assert!(matches!(accepted.status, ReceiptStatus::Received));
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn receipt_with_the_stored_session_value_but_another_source_is_rejected() {
+        // Gate-3 round 3 pre-read (arbiter): the stored participant identity is the full session
+        // triple (source, kind, value), not the value alone.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let from = party("claude", "w-1");
+            let to = party_with_session("pi", "w-2", "zynk:pi", "id", "sess-1");
+            let rec = setup_submitted_between(&mut conn, &from, &to, "msg_src").await;
+            let err = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_src"),
+                &receiver_with_session("pi", "w-2", "hook", "id", "sess-1"),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "receiver_identity_mismatch");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn receipt_with_the_stored_session_value_but_another_kind_is_rejected() {
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let from = party("claude", "w-1");
+            let to = party_with_session("pi", "w-2", "zynk:pi", "id", "sess-1");
+            let rec = setup_submitted_between(&mut conn, &from, &to, "msg_kind").await;
+            let err = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_kind"),
+                &receiver_with_session("pi", "w-2", "zynk:pi", "path", "sess-1"),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "receiver_identity_mismatch");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn receipt_with_the_full_stored_session_triple_is_accepted() {
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let from = party("claude", "w-1");
+            let to = party_with_session("pi", "w-2", "zynk:pi", "id", "sess-1");
+            let rec = setup_submitted_between(&mut conn, &from, &to, "msg_triple").await;
+            let accepted = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_triple"),
+                &receiver_with_session("pi", "w-2", "zynk:pi", "id", "sess-1"),
                 "socket_test",
                 "rt",
                 "t",

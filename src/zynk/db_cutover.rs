@@ -57,10 +57,10 @@ pub fn next_backup_path(path: &Path) -> PathBuf {
         let mut candidate = base.clone();
         candidate.push(format!(".{BACKUP_SUFFIX}-{n}"));
         let candidate = PathBuf::from(candidate);
-        let free = !candidate.exists()
+        let free = !entry_exists(&candidate)
             && BUNDLE_SUFFIXES
                 .iter()
-                .all(|suffix| !sidecar(&candidate, suffix).exists());
+                .all(|suffix| !entry_exists(&sidecar(&candidate, suffix)));
         if free {
             return candidate;
         }
@@ -80,7 +80,43 @@ pub fn next_backup_path(path: &Path) -> PathBuf {
 /// already relocated back and reports an error — never a "success" with a stranded member, never an
 /// overwritten backup.
 pub fn relocate_aside(path: &Path) -> Result<RelocateOutcome, String> {
-    relocate_bundle(path, &mut rename_or_copy)
+    // Operate on the SQLite-effective path — the final symlink chain resolved, exactly as
+    // inspection classifies it — so what the guards refuse (e.g. a nonempty `-wal` beside a link's
+    // absent target) is what relocation moves; the link itself stays in place.
+    let effective = crate::zynk::db::sqlite_effective_path(path)
+        .map_err(|e| format!("zynk: cannot resolve {}: {e}", printable_path(path)))?;
+    relocate_bundle(&effective, &mut |from, to| {
+        move_no_replace(from, to).map_err(|err| err.to_string())
+    })
+}
+
+/// Does a directory entry exist at `path` in ANY form (a dangling symlink included)? `Path::exists`
+/// follows symlinks, so a dangling destination read as free while POSIX rename would replace it.
+fn entry_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Move `from` to `to` WITHOUT replacing anything at `to`: a hard link fails with `AlreadyExists`
+/// when the target name exists in any form, so a competitor that appears between the preflight
+/// and the move turns into an error (and a rollback) rather than an overwrite; the source is
+/// unlinked only once the link exists. Filesystems without hard links fall back to
+/// `rename_or_copy` after an entry check — the residual race on such a filesystem is documented.
+fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => std::fs::remove_file(from),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(err),
+        Err(err) => {
+            if entry_exists(to) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("{} exists", to.display()),
+                ));
+            }
+            rename_or_copy(from, to).map_err(|fallback| {
+                std::io::Error::other(format!("{fallback} (hard link failed: {err})"))
+            })
+        }
+    }
 }
 
 fn relocate_bundle(
@@ -111,7 +147,7 @@ fn relocate_bundle(
     // Preflight: no target member may exist (the slot reservation already guarantees it; a re-check
     // here costs nothing and turns a race into a refusal rather than an overwrite).
     for (_, to, _) in &plan {
-        if to.exists() {
+        if entry_exists(to) {
             return Err(format!(
                 "zynk: refusing to overwrite an existing backup member at {}; nothing was relocated",
                 printable_path(to)
@@ -807,6 +843,112 @@ mod tests {
         );
         assert!(!db.with_file_name("zynk.db.wrapper-backup-0").exists());
         assert!(!db.exists() && !bundle_member(&db, "-wal").exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_slot_treats_a_dangling_symlink_as_occupied() {
+        // Gate-3 round 3 pre-read (arbiter r79-dangle, Codex): `Path::exists()` follows symlinks, so a
+        // dangling `<slot>-wal` symlink read as a free slot and POSIX rename replaced it.
+        let dir = tmp_home("adopt-dangling-slot");
+        let db = dir.join("zynk.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        plant_foreign_wal_pair(&db);
+        let sentinel = db.with_file_name("zynk.db.wrapper-backup-0-wal");
+        std::os::unix::fs::symlink("nowhere-at-all", &sentinel).unwrap();
+        let source_wal = std::fs::read(bundle_member(&db, "-wal")).unwrap();
+
+        let (code, out, err) = run(&["adopt"], &db);
+        assert_success(code, &out, &err);
+        let meta = std::fs::symlink_metadata(&sentinel).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "the dangling slot symlink was replaced\n{out}"
+        );
+        let slot1 = db.with_file_name("zynk.db.wrapper-backup-1");
+        assert_eq!(
+            std::fs::read(bundle_member(&slot1, "-wal")).unwrap(),
+            source_wal,
+            "slot 0 is occupied by the symlink: slot 1 must be used\n{out}"
+        );
+        assert!(!db.exists() && !bundle_member(&db, "-wal").exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn relocation_refuses_a_target_that_appears_after_preflight() {
+        // Gate-3 round 3 pre-read (arbiter, Codex r15_rename_collision): a competing file created
+        // between the preflight and the move must not be replaced — the move is no-replace, the
+        // failure rolls back, and the source bundle stays where it was.
+        let dir = tmp_home("adopt-post-preflight-race");
+        let db = dir.join("zynk.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        plant_foreign_wal_pair(&db);
+        let source_db = std::fs::read(&db).unwrap();
+        let source_wal = std::fs::read(bundle_member(&db, "-wal")).unwrap();
+        let mut planted: Option<PathBuf> = None;
+        let mut mover = |from: &Path, to: &Path| {
+            if planted.is_none() {
+                std::fs::write(to, b"PLANTED between preflight and move").unwrap();
+                planted = Some(to.to_path_buf());
+            }
+            move_no_replace(from, to).map_err(|err| err.to_string())
+        };
+        let err = relocate_bundle(&db, &mut mover).unwrap_err();
+        assert!(
+            err.contains("nothing was relocated"),
+            "must refuse and roll back: {err}"
+        );
+        let planted = planted.expect("the mover ran");
+        assert_eq!(
+            std::fs::read(&planted).unwrap(),
+            b"PLANTED between preflight and move",
+            "the competing file was replaced"
+        );
+        assert_eq!(std::fs::read(&db).unwrap(), source_db);
+        assert_eq!(
+            std::fs::read(bundle_member(&db, "-wal")).unwrap(),
+            source_wal
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adopt_through_a_final_symlink_relocates_the_target_bundle() {
+        // Gate-3 round 3 pre-read (Codex finding 2; arbiter r79-symlinkorphan): inspection resolves
+        // the final symlink (`sqlite_effective_path`), so `zynk.db -> target.db` with a nonempty
+        // `target.db-wal` is refused as `db_orphan_sidecar`; relocation must act on the SAME
+        // effective path — the target's bundle moves, the link stays, and status clears.
+        let dir = tmp_home("adopt-through-symlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("zynk.db");
+        let target = dir.join("target.db");
+        std::os::unix::fs::symlink("target.db", &link).unwrap();
+        let orphan_wal = bundle_member(&target, "-wal");
+        std::fs::write(&orphan_wal, vec![0x5au8; 4096]).unwrap();
+
+        let (code, out, err) = run(&["adopt"], &link);
+        assert_success(code, &out, &err);
+        assert!(
+            !orphan_wal.exists(),
+            "the target's orphan WAL stayed put\n{out}"
+        );
+        let slot0 = target.with_file_name("target.db.wrapper-backup-0");
+        assert_eq!(
+            std::fs::read(bundle_member(&slot0, "-wal")).unwrap(),
+            vec![0x5au8; 4096]
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let (_, status_out, status_err) = run(&["status"], &link);
+        assert!(
+            !status_out.contains("db_orphan_sidecar") && !status_err.contains("db_orphan_sidecar"),
+            "status still refuses after adopt:\n{status_out}\n{status_err}"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
