@@ -410,6 +410,17 @@ fn relocate_bundle_with(
         moved.push((from.clone(), to.clone()));
         identities.push(identity);
     }
+    // Custody FIRST, for every member that moved, before any other verification and before any
+    // rollback: a member replaced or removed inside the slot after its move is not ours. It is
+    // never claimed and never moved back over the source name (its original bytes were displaced
+    // by the other writer's own action; zynk deleted nothing) — whichever check fails first
+    // (Gate-3 round 5, ARB-DA4-CUSTODY-ROLLBACK-001).
+    let displaced: Vec<PathBuf> = moved
+        .iter()
+        .zip(identities.iter())
+        .filter(|((_, to), before)| entry_identity(to).as_ref() != Some(*before))
+        .map(|((_, to), _)| to.clone())
+        .collect();
     // The slot must hold exactly the members that were moved: an entry someone else created
     // inside it means the backup is not this bundle — refuse and roll back. A slot that cannot be
     // listed completely is not known to be clean: that is a failure too, never "clean".
@@ -450,25 +461,21 @@ fn relocate_bundle_with(
             }
         }
     }
-    // Custody: every moved member must still be the entry that left the source. A member replaced
-    // inside the slot after its move is not ours — success is never claimed for it, and it is not
-    // moved back over the source name either (the original bytes were displaced by the other
-    // writer's own action; zynk deleted nothing).
-    let mut displaced: Vec<PathBuf> = Vec::new();
-    if failure.is_none() {
-        for ((_, to), before) in moved.iter().zip(identities.iter()) {
-            if entry_identity(to).as_ref() != Some(before) {
-                displaced.push(to.clone());
-            }
-        }
-        if let Some(first) = displaced.first() {
-            failure = Some(format!(
-                "a member of the backup slot is missing or was replaced by another writer after it \
-                 was moved ({}); the original bytes of that member were displaced by that writer and \
-                 are not in the backup",
-                printable_path(first)
-            ));
-        }
+    if !displaced.is_empty() {
+        let custody = format!(
+            "a member of the backup slot is missing or was replaced by another writer after it was \
+             moved ({}); the original bytes of that member were displaced by that writer and are not \
+             in the backup",
+            displaced
+                .iter()
+                .map(|p| printable_path(p))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        failure = Some(match failure {
+            Some(other) => format!("{other}; {custody}"),
+            None => custody,
+        });
     }
     let Some(failure) = failure else {
         return Ok(RelocateOutcome {
@@ -1774,6 +1781,58 @@ mod tests {
             "the intact WAL moved back"
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_replaced_member_is_never_rolled_back_when_another_check_fails_first() {
+        // Gate-3 round 5 (ARB-DA4-CUSTODY-ROLLBACK-001): the displacement check ran only when no
+        // earlier verification had failed, so a competitor's replacement could be moved back over
+        // the source name during rollback. Two compound races: replacement + an unexpected slot
+        // entry, and replacement + a sidecar created at the source after the plan.
+        for variant in ["unexpected-slot-entry", "late-source-sidecar"] {
+            let dir = tmp_home(&format!("adopt-compound-{variant}"));
+            let db = dir.join("zynk.db");
+            std::fs::create_dir_all(&dir).unwrap();
+            plant_foreign_wal_pair(&db);
+            let source_wal = std::fs::read(bundle_member(&db, "-wal")).unwrap();
+            let competitor = dir.join("competitor.db");
+            std::fs::write(&competitor, b"COMPETITOR").unwrap();
+            let slot = next_backup_path(&db).unwrap();
+            let mut mover = |from: &Path, to: &Path| -> Result<(), String> {
+                move_no_replace(from, to).map_err(|e| e.to_string())?;
+                if from == db {
+                    std::fs::rename(&competitor, to).unwrap();
+                    if variant == "unexpected-slot-entry" {
+                        std::fs::write(slot.join("unexpected"), b"x").unwrap();
+                    } else {
+                        std::fs::write(bundle_member(&db, "-wal"), b"LATE WAL").unwrap();
+                    }
+                }
+                Ok(())
+            };
+            let err = relocate_bundle(&db, &mut mover).unwrap_err();
+            assert!(
+                err.contains("missing or was replaced by another writer")
+                    && err.contains("not moved back"),
+                "{variant}: the displaced member must be named: {err}"
+            );
+            assert!(
+                !db.exists(),
+                "{variant}: the competitor must not land at the source name"
+            );
+            assert_eq!(
+                std::fs::read(slot.join("zynk.db")).unwrap(),
+                b"COMPETITOR",
+                "{variant}: the competitor stays where it put itself"
+            );
+            if variant == "unexpected-slot-entry" {
+                assert_eq!(
+                    std::fs::read(bundle_member(&db, "-wal")).unwrap(),
+                    source_wal
+                );
+            }
+            std::fs::remove_dir_all(dir).ok();
+        }
     }
 
     #[test]

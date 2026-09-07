@@ -418,8 +418,9 @@ fn sidecar_len(sidecar: &Path) -> Result<Option<u64>, DbError> {
 }
 
 /// `(dev, inode)` of whatever `path` currently refers to — the identity the pinned connection is
-/// compared against while a by-name sidecar open is still ahead. Unsupported (always `None`, so the
-/// check is skipped) where `std` exposes no stable file identity.
+/// compared against while a by-name sidecar open is still ahead: device + inode on Unix, volume
+/// serial + file index on Windows (`GetFileInformationByHandle`; links are refused on Windows before
+/// this point, item 25). `None` — the check is skipped — only where neither is available.
 #[cfg(unix)]
 fn file_identity(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
@@ -428,7 +429,26 @@ fn file_identity(path: &Path) -> Option<(u64, u64)> {
         .map(|meta| (meta.dev(), meta.ino()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    let file = std::fs::File::open(path).ok()?;
+    // SAFETY: `info` is a properly sized, writable out-parameter and the handle stays valid for
+    // the duration of the call (the `File` outlives it).
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    (ok != 0).then(|| {
+        (
+            u64::from(info.dwVolumeSerialNumber),
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        )
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn file_identity(_path: &Path) -> Option<(u64, u64)> {
     None
 }
