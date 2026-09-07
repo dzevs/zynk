@@ -157,7 +157,10 @@ The decision above stands; the swarm's second round showed the guard could still
     two-step link/copy + unlink of the source name (a writer that atomically replaces the source or the target
     between two steps loses a file; an identity check before the unlink only narrows that window). After the
     moves the slot must hold exactly the members that were moved; anything else means the backup is not this
-    bundle: the members move back and the command fails. The guaranteed contract is per-member atomicity, never
+    bundle: the members move back and the command fails. Every inspection these decisions rest on fails closed:
+    only "not found" means a member is absent (an I/O error refuses the relocation before anything moves), and
+    a slot that cannot be listed completely is a verification failure, never "clean". The guaranteed contract
+    is per-member atomicity, never
     an overwrite and never a successful partial relocation — NOT a crash-atomic transaction over the bundle nor a
     consistent snapshot of a database that is being written (quiesce writers first). A rollback can be blocked
     by a writer that recreated an original name in the meantime; that state is reported explicitly, naming every
@@ -198,9 +201,13 @@ The decision above stands; the swarm's second round showed the guard could still
     counts as a party's identity only when it was reported for the SAME agent the party is labeled as (owner
     coherence, applied when the participant is stored and when the receiver is resolved): a terminal can
     carry a session persisted for another owner, and that session anchors nothing — it is treated as absent
-    on both sides. Self-receipt is decided by the same durable identity: a message whose sender and addressee
-    are the same participant is never receipted, from any pane — the stored pane id (the first one seen) is
-    audit metadata, not the guard. When the participant carried none (a hook that reported no session id — a generic `hook` source cannot carry
+    on both sides. Self-receipt is decided by the same session-first logical identity as the target binding:
+    the receiver is the sender when it presents the sender's label and stored hook session triple (or, for a
+    sender that carried no session, its terminal; or, for a row with no durable anchor at all, its stored pane
+    id), and such a receipt is refused from any pane. Participant-row equality alone is too narrow (the same
+    session across a restore lives in two rows) and the stored pane id alone is both too narrow (pane ids
+    rotate) and too wide (another participant may later resume at that pane): the pane id is audit metadata.
+    When the participant carried none (a hook that reported no session id — a generic `hook` source cannot carry
     one), the terminal id binds instead, within this server's lifetime; otherwise
     `receiver_identity_mismatch`. A second pane carrying the same label under another session (or,
     session-less, on another terminal) is not the addressee. Limit: a session-less target cannot be re-bound
