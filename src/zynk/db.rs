@@ -19,7 +19,8 @@ const NATIVE_LINEAGE_TABLES: &[&str] = &["conversations", "messages", "delivery_
 /// Foreign-DB classification at a resolved native path (ADR 0008).
 ///
 /// - `Absent`  — no file (or empty/0-byte): native init may create it.
-/// - `Empty`   — a valid SQLite file with no user tables: native init migrates.
+/// - `Empty`   — a valid SQLite file with no user tables (or only an EMPTY `_sqlx_migrations`
+///   ledger, i.e. a native init in progress/aborted): native init migrates.
 /// - `Native`  — recognized native lineage (`_sqlx_migrations` + our tables): open.
 /// - `Foreign` — non-empty but NOT recognized native (wrapper-era OR any unknown
 ///   schema): FAIL CLOSED. Never auto-migrate/overwrite.
@@ -129,6 +130,10 @@ pub async fn open_migrated_at_without_recovery(path: &Path) -> Result<SqliteConn
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Serialize classify + migrate across PROCESSES (see `InitLock`): two zynk processes opening a
+    // fresh shared DB at once (two named-session servers, or a CLI command racing a starting server)
+    // must not observe each other's half-initialized state.
+    let _init_lock = InitLock::acquire(path)?;
     // ADR 0008 foreign-DB guard: classify FIRST, with a READ-ONLY connection,
     // BEFORE the writable open below. This matters for byte-immutability: the
     // writable `connect_with` applies `journal_mode = WAL`, which rewrites the
@@ -156,6 +161,37 @@ pub async fn open_migrated_at_without_recovery(path: &Path) -> Result<SqliteConn
         .await
         .map_err(|err| DbError::new("migration_failed", err.to_string()))?;
     Ok(conn)
+}
+
+/// Exclusive advisory lock beside the DB (`<db>.init-lock`) that serializes first-time initialization
+/// across processes. sqlx creates its `_sqlx_migrations` ledger before the first migration commits, so
+/// without this a second opener could see a ledger-only DB, classify it as FOREIGN (ADR 0008) and exit —
+/// the named-session startup race. The lock spans only the open (milliseconds once the DB exists) and the
+/// OS releases it if the holder dies. The lock file itself carries no data.
+struct InitLock(std::fs::File);
+
+impl InitLock {
+    fn acquire(db_path: &Path) -> Result<Self, DbError> {
+        let file_name = db_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "zynk.db".to_string());
+        let lock_path = db_path.with_file_name(format!("{file_name}.init-lock"));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for InitLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 /// Read the user-table set of an OPEN connection (excludes sqlite/fts internals).
@@ -187,6 +223,19 @@ async fn classify_open_conn(conn: &mut SqliteConnection) -> Result<DbClassificat
     let tables = user_table_names(conn).await?;
     if tables.is_empty() {
         return Ok(DbClassification::Empty);
+    }
+    // sqlx creates its `_sqlx_migrations` ledger BEFORE the first migration's transaction commits.
+    // A DB whose only user table is that ledger — with NO recorded migrations — is a native init in
+    // progress (another zynk process) or an aborted one: there is no foreign data to protect, so it is
+    // `Empty`, not `Foreign`. A ledger that already RECORDS migrations but lacks our tables stays
+    // Foreign (unknown lineage → fail closed, ADR 0008).
+    if tables.len() == 1 && tables[0] == "_sqlx_migrations" {
+        let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&mut *conn)
+            .await?;
+        if recorded == 0 {
+            return Ok(DbClassification::Empty);
+        }
     }
     let has_migrations = sqlx::query(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations' LIMIT 1",
@@ -349,6 +398,76 @@ mod tests {
         let err = block_on(open_migrated_at(&path)).unwrap_err();
         assert_eq!(err.code, "db_foreign_conflict");
         let _ = std::fs::remove_file(path);
+    }
+
+    /// sqlx creates its `_sqlx_migrations` ledger BEFORE the first migration's transaction commits.
+    /// A DB whose only user table is that (empty) ledger is a native init in progress or an aborted
+    /// init — there is no foreign data to protect, so it must classify as Empty, not Foreign.
+    const SQLX_LEDGER_DDL: &str = "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, \
+         description TEXT NOT NULL, installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+         success BOOLEAN NOT NULL, checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)";
+
+    #[test]
+    fn classify_empty_sqlx_ledger_only_db_as_empty() {
+        let path = tmp_db("classify-ledger-only");
+        plant_foreign_db(&path, SQLX_LEDGER_DDL);
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Empty
+        );
+        // ...and opening it completes the native init instead of failing closed.
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Native
+        );
+    }
+
+    #[test]
+    fn classify_sqlx_ledger_with_rows_but_no_native_tables_as_foreign() {
+        // ADR 0008 boundary: a ledger that already RECORDS migrations but has none of our tables is
+        // an unknown/corrupted lineage — keep failing closed.
+        let path = tmp_db("classify-ledger-rows");
+        plant_foreign_db(
+            &path,
+            &format!(
+                "{SQLX_LEDGER_DDL}; INSERT INTO _sqlx_migrations \
+                 (version, description, success, checksum, execution_time) \
+                 VALUES (1, 'other app', 1, x'00', 0)"
+            ),
+        );
+        match block_on(classify_db_at(&path)).unwrap() {
+            DbClassification::Foreign { tables } => assert_eq!(tables, vec!["_sqlx_migrations"]),
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_first_opens_of_a_fresh_db_all_succeed() {
+        // Regression for the named-session startup race: two zynk servers sharing a data home and
+        // starting at once used to make the second one see the half-initialized DB (ledger only)
+        // as FOREIGN and exit. Init is now serialized by an advisory lock beside the DB.
+        let path = tmp_db("classify-concurrent-init");
+        let _ = std::fs::remove_file(&path);
+        let openers = 6;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(openers));
+        let handles: Vec<_> = (0..openers)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    block_on(open_migrated_at_without_recovery(&path)).map(|_| ())
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Native
+        );
     }
 
     #[test]
