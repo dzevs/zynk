@@ -59,14 +59,16 @@ config key is removed (see **Changed**).
   job its successor owns (nor write a vector under it); start-up recovery of messages that never got a delivery
   event fails only those older than five minutes, exactly once even when several servers start together, so a
   peer server's in-flight send is never marked failed by another server starting; and a receipt is accepted
-  only from the participant the message was addressed to (its full hook session — source, kind and value —
-  which survives pane-id churn, restarts and live updates; its terminal when the hook reported no session),
-  never from another pane that merely carries the same agent label.
+  only from the participant the message was addressed to (its full hook session — source, kind and value,
+  reported for that same agent — which survives pane-id churn, restarts and live updates; its terminal when
+  the hook reported no session of its own), never from another pane that merely carries the same agent label
+  or a session another agent persisted on it.
 - `zynk db adopt` / `zynk db backup` relocate the **complete SQLite bundle** (main file plus any `-journal`,
   `-wal`, `-shm`) to one backup slot that is entirely free, all or nothing: a leftover journal no longer strands
-  the native path, an existing backup sidecar is never overwritten (a dangling symlink counts as occupied, and
-  the move never replaces an entry that appears after the check), a failed move rolls back and reports an
-  error, and a symlinked database path is relocated where SQLite would open it (the link stays). They also move aside what the startup guards refuse to open (a rollback journal that looks hot, orphan
+  the native path, an existing backup sidecar is never overwritten (a dangling symlink counts as occupied, the
+  move never replaces an entry that appears after the check — on any filesystem, refusing with an error when
+  no non-replacing move exists — and a member is either moved or left untouched), a failed move rolls back and
+  reports an error, and a symlinked database path is relocated where SQLite would open it (the link stays). They also move aside what the startup guards refuse to open (a rollback journal that looks hot, orphan
   sidecars beside a missing database) — the remedy those refusals name. Output from every `zynk db` command
   escapes control and Unicode format/bidi characters in names and paths.
 - Sessions: OMP resumes in the same pane after a restart with root-only hook state; lifecycle hook generations

@@ -150,10 +150,15 @@ The decision above stands; the swarm's second round showed the guard could still
     rename, sidecars move first and the main file last, and any failure moves the members already relocated
     back and reports an error — never a "success" with a stranded member, never an overwritten backup. A slot
     or target counts as occupied when ANY directory entry exists there (a dangling symlink included — `exists`
-    follows links), and the move itself never replaces: it hard-links the member to its target (which fails
-    when the name exists in any form) and unlinks the source only then, so a competitor that appears after the
-    preflight turns into a refusal and a rollback rather than an overwrite (filesystems without hard links
-    fall back to rename after the entry check; that residual race is documented). Relocation acts on the
+    follows links), and the move itself never replaces, on every path: an atomic no-replace rename where the
+    kernel offers one (Linux `renameat2(RENAME_NOREPLACE)`), else a hard link, else an exclusive-create
+    (`O_EXCL`) copy — each fails when the target name exists in any form, a plain rename (which replaces) is
+    never used, and when no primitive is available the member is refused with an actionable error. The source
+    is unlinked only once the new entry exists; if that unlink fails the new entry is removed again (or named
+    explicitly when even that fails — a hard link left behind would alias the untouched source, not preserve a
+    backup), so a member is either moved or untouched and the bundle rollback accounting stays exact. A
+    competitor that appears after the preflight therefore turns into a refusal and a rollback, never an
+    overwrite. Relocation acts on the
     SQLite-effective path — the final symlink chain resolved, exactly as inspection classifies — so what the
     guards refuse through a link is what moves; the link stays. The commands also relocate what the guards
     refuse to open (a journal that looks hot; orphan sidecars beside an absent main file), which is exactly
@@ -186,8 +191,11 @@ The decision above stands; the swarm's second round showed the guard could still
     is the hook session value: it survives pane churn, a restart and a live handoff (the restored terminal
     keeps its persisted agent session, while terminal ids are allocated per server lifetime). When the stored
     participant carried a session, the authoritative receiver (hook authority only) must present the same
-    one — the full triple the participant key hashes (source, kind, value), never the value alone; when it
-    carried none (a hook that reported no session id — a generic `hook` source cannot carry
+    one — the full triple the participant key hashes (source, kind, value), never the value alone. A session
+    counts as a party's identity only when it was reported for the SAME agent the party is labeled as (owner
+    coherence, applied when the participant is stored and when the receiver is resolved): a terminal can
+    carry a session persisted for another owner, and that session anchors nothing — it is treated as absent
+    on both sides. When the participant carried none (a hook that reported no session id — a generic `hook` source cannot carry
     one), the terminal id binds instead, within this server's lifetime; otherwise
     `receiver_identity_mismatch`. A second pane carrying the same label under another session (or,
     session-less, on another terminal) is not the addressee. Limit: a session-less target cannot be re-bound
@@ -210,3 +218,7 @@ Residual, documented limits (outside ADR 0008's accidental-data-loss threat mode
   adopt`/`backup` move the sidecars along).
 - The file-identity check is Unix-only (`std` exposes no stable file identity on Windows); the pinned
   connection and the post-switch re-inspection apply everywhere.
+- The orphan-recovery grace window (5 min) is a recovery policy, not a provable upper bound on the gap between
+  persisting a message and its first transport event: a sender suspended for longer is recovered as failed by
+  a peer's start (exactly once). The embedding attempt cap bounds retries after a recorded failure, not the
+  lifetime claim count — a stale claim recovered past the lease is claimed again with a higher token.
