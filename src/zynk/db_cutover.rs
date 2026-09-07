@@ -119,13 +119,14 @@ fn entry_present(path: &Path) -> std::io::Result<bool> {
     }
 }
 
-/// The identity of a directory entry (Unix: device + inode of the entry itself, links included).
-/// `None` where `std` exposes no stable identity (Windows) or when the entry cannot be read — the
-/// custody check is then skipped for that member and the name check is all that remains (documented
-/// residual).
+/// The identity of a directory entry — the entry itself, links included: device + inode on Unix,
+/// volume serial + file index on Windows. `None` when it cannot be read; the custody check treats
+/// that as "not the member that left the source" (fail closed), never as a pass.
 #[cfg(unix)]
 type FileIdentity = (u64, u64);
-#[cfg(not(unix))]
+#[cfg(windows)]
+type FileIdentity = (u32, u64);
+#[cfg(not(any(unix, windows)))]
 type FileIdentity = ();
 
 #[cfg(unix)]
@@ -136,7 +137,32 @@ fn entry_identity(path: &Path) -> Option<FileIdentity> {
         .map(|meta| (meta.dev(), meta.ino()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn entry_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    // Open the entry itself (a reparse point is not followed) without requiring data access.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+    // SAFETY: `info` is a properly sized, writable out-parameter and the handle is valid for the
+    // duration of the call (the `File` outlives it).
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    (ok != 0).then(|| {
+        (
+            info.dwVolumeSerialNumber,
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        )
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn entry_identity(_path: &Path) -> Option<FileIdentity> {
     None
 }
@@ -360,13 +386,19 @@ fn relocate_bundle_with(
         ));
     }
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut identities: Vec<Option<FileIdentity>> = Vec::new();
+    let mut identities: Vec<FileIdentity> = Vec::new();
     let mut failure = None;
     for (from, to, _) in &plan {
         // The source entry's identity, captured before its move: custody is verified against it
         // after the moves (a competitor renamed over the moved member inside the slot would
-        // otherwise pass a name-only check, Gate-3 round 5).
-        let identity = entry_identity(from);
+        // otherwise pass a name-only check, Gate-3 round 5). No identity, no move: fail closed.
+        let Some(identity) = entry_identity(from) else {
+            failure = Some(format!(
+                "could not read the identity of {} before moving it",
+                printable_path(from)
+            ));
+            break;
+        };
         if let Err(err) = mover(from, to) {
             failure = Some(format!(
                 "could not move {} -> {}: {err}",
@@ -425,17 +457,15 @@ fn relocate_bundle_with(
     let mut displaced: Vec<PathBuf> = Vec::new();
     if failure.is_none() {
         for ((_, to), before) in moved.iter().zip(identities.iter()) {
-            if let Some(before) = before {
-                if entry_identity(to).as_ref() != Some(before) {
-                    displaced.push(to.clone());
-                }
+            if entry_identity(to).as_ref() != Some(before) {
+                displaced.push(to.clone());
             }
         }
         if let Some(first) = displaced.first() {
             failure = Some(format!(
-                "a member of the backup slot was replaced by another writer after it was moved ({}); \
-                 the original bytes of that member were displaced by that writer and are not in the \
-                 backup",
+                "a member of the backup slot is missing or was replaced by another writer after it \
+                 was moved ({}); the original bytes of that member were displaced by that writer and \
+                 are not in the backup",
                 printable_path(first)
             ));
         }
@@ -452,7 +482,7 @@ fn relocate_bundle_with(
     for (from, to) in moved.iter().rev() {
         if displaced.contains(to) {
             not_restored.push(format!(
-                "{} (replaced by another writer; not moved back)",
+                "{} (missing or replaced by another writer; not moved back)",
                 printable_path(from)
             ));
             continue;
@@ -1655,7 +1685,8 @@ mod tests {
         };
         let err = relocate_bundle(&db, &mut mover).unwrap_err();
         assert!(
-            err.contains("replaced by another writer") && err.contains("not moved back"),
+            err.contains("missing or was replaced by another writer")
+                && err.contains("not moved back"),
             "{err}"
         );
         let slot = db.with_file_name("zynk.db.wrapper-backup-0");
@@ -1709,6 +1740,38 @@ mod tests {
         assert!(
             !entry_exists(&slot.join("zynk.db")),
             "no main left in the slot"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_member_deleted_from_the_slot_after_its_move_is_not_claimed() {
+        // Gate-3 round 5 (SENT-R5-CUTOVER-001): verification is exact, not only "no extra": a moved
+        // member that is gone by the time the slot is verified fails the relocation, is named, and
+        // the intact members move back.
+        let dir = tmp_home("adopt-postmove-delete");
+        let db = dir.join("zynk.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        plant_foreign_wal_pair(&db);
+        let source_wal = std::fs::read(bundle_member(&db, "-wal")).unwrap();
+        let mut mover = |from: &Path, to: &Path| -> Result<(), String> {
+            move_no_replace(from, to).map_err(|e| e.to_string())?;
+            if from == db {
+                std::fs::remove_file(to).unwrap();
+            }
+            Ok(())
+        };
+        let err = relocate_bundle(&db, &mut mover).unwrap_err();
+        assert!(
+            err.contains("missing or was replaced by another writer")
+                && err.contains("not moved back"),
+            "{err}"
+        );
+        assert!(!db.exists(), "the deleted member cannot be resurrected");
+        assert_eq!(
+            std::fs::read(bundle_member(&db, "-wal")).unwrap(),
+            source_wal,
+            "the intact WAL moved back"
         );
         std::fs::remove_dir_all(dir).ok();
     }

@@ -1251,16 +1251,21 @@ mod tests {
     #[test]
     fn a_partial_stored_session_triple_is_refused() {
         // A stored session missing its source or kind is not an anchor (absent components were
-        // wildcards): the row fails closed even when the receiver presents the same value.
+        // wildcards): the row fails closed even when the receiver presents the same value. Persist
+        // never writes such a row any more (a partial triple is stored as no session), so the
+        // legacy shape is planted directly on the stored participant.
         run(async {
             let path = temp_db_path();
             let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
             let from = party("claude", "w-1");
-            let to = Party {
-                agent_session: Some(serde_json::json!({"value": "sess-1"})),
-                ..party("codex", "w-2")
-            };
+            let to = party_on("codex", "w-2", "term-w-2", Some("sess-1"));
             let rec = setup_submitted_between(&mut conn, &from, &to, "msg_partial").await;
+            sqlx::query(
+                "UPDATE conversation_participants SET agent_session_source = NULL \
+                 WHERE id = (SELECT to_participant_id FROM messages WHERE id = 'msg_partial')",
+            )
+            .execute(&mut conn)
+            .await?;
             let err = append_received_event(
                 &mut conn,
                 &request_for(&rec, "msg_partial"),

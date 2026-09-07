@@ -607,6 +607,15 @@ fn session_fields(party: &Party) -> (Option<String>, Option<String>, Option<Stri
         .get("value")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    // Canonical at persist time as well as at receipt time (Gate-3 round 5): a session is identity
+    // only as a complete (source, kind, value) triple; a partial one is stored as no session at all,
+    // so the participant binds by its terminal instead of by a value fragment.
+    let complete = [&source, &kind, &session_value]
+        .iter()
+        .all(|field| field.as_deref().is_some_and(|s| !s.trim().is_empty()));
+    if !complete {
+        return (None, None, None);
+    }
     (source, kind, session_value)
 }
 
@@ -871,6 +880,24 @@ mod tests {
             fields.participant_key,
             participant_fields(&coherent).participant_key
         );
+    }
+
+    #[test]
+    fn a_partial_session_is_not_persisted_as_identity() {
+        // Gate-3 round 5: a session missing its source or kind never reaches the participant row
+        // (it would otherwise be a value-only fragment); the terminal remains the anchor.
+        let partial = Party {
+            agent: Some("pi".into()),
+            pane: Some("pane-1".into()),
+            terminal_id: Some("term-1".into()),
+            agent_session: Some(serde_json::json!({"agent": "pi", "value": "S"})),
+            ..Party::default()
+        };
+        let fields = participant_fields(&partial);
+        assert_eq!(fields.agent_session_value, None);
+        assert_eq!(fields.agent_session_source, None);
+        assert_eq!(fields.agent_session_kind, None);
+        assert_eq!(fields.terminal_id.as_deref(), Some("term-1"));
     }
 
     #[test]
