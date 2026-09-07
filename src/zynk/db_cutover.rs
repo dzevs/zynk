@@ -96,47 +96,68 @@ fn entry_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
-/// The filesystem primitives one member move relies on. Injectable so tests can model what the
-/// build machine cannot produce: a filesystem without an atomic no-replace rename or hard links, a
-/// source that cannot be unlinked once the link exists, a cleanup that fails.
-struct MovePrimitives<'a> {
-    /// Atomic no-replace rename (Linux `renameat2(RENAME_NOREPLACE)`): `AlreadyExists` when the
-    /// target name exists in any form; any other error means "not available here".
-    rename_noreplace: &'a dyn Fn(&Path, &Path) -> std::io::Result<()>,
-    hard_link: &'a dyn Fn(&Path, &Path) -> std::io::Result<()>,
-    /// Exclusive create (`O_EXCL`) of the target plus a byte copy: `AlreadyExists` when the target
-    /// name exists; a partial target is removed on failure.
-    copy_new: &'a dyn Fn(&Path, &Path) -> std::io::Result<()>,
-    unlink: &'a dyn Fn(&Path) -> std::io::Result<()>,
+/// Move `from` to `to` in ONE atomic step that never replaces an existing entry at `to` (a
+/// dangling symlink included): Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`,
+/// Windows `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`. A competitor that appears between the
+/// preflight and the move fails the move with `AlreadyExists` (the bundle rolls back), never an
+/// overwrite. Where no such primitive exists the member is refused with an actionable error: a
+/// two-step move (link or copy, then unlink of the source NAME) cannot be made safe against a
+/// writer that atomically replaces the source or the target between the steps — it deletes the
+/// newcomer or loses the original — so it is not offered at all (Gate-3 round 3). What is at the
+/// source name at the instant of the move is what moves; a writer replacing the source afterwards
+/// keeps its file at the source, and nothing else is ever deleted.
+fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    move_no_replace_with(from, to, &atomic_rename_noreplace)
 }
 
-impl MovePrimitives<'static> {
-    fn real() -> Self {
-        Self {
-            rename_noreplace: &rename_noreplace,
-            hard_link: &real_hard_link,
-            copy_new: &copy_new,
-            unlink: &real_unlink,
-        }
+fn move_no_replace_with(
+    from: &Path,
+    to: &Path,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(err),
+        Err(err) if primitive_unavailable(&err) => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "no atomic no-replace move is available on this filesystem ({err}); move the \
+                 bundle aside manually"
+            ),
+        )),
+        Err(err) => Err(err),
     }
 }
 
-fn real_hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::hard_link(from, to)
-}
-
-fn real_unlink(path: &Path) -> std::io::Result<()> {
-    std::fs::remove_file(path)
+/// The platform primitive exists but this filesystem or kernel does not provide it (as opposed
+/// to an ordinary permission or I/O failure, which keeps its own cause).
+fn primitive_unavailable(err: &std::io::Error) -> bool {
+    if matches!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // ENOTSUP and EOPNOTSUPP share a value on Linux and differ on macOS: compare, don't match.
+        err.raw_os_error().is_some_and(|code| {
+            [libc::ENOSYS, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EXDEV].contains(&code)
+        })
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_NOT_SAME_DEVICE: the move would need a copy.
+        err.raw_os_error() == Some(17)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
 }
 
 #[cfg(target_os = "linux")]
-fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = |path: &Path| {
-        std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL byte")
-        })
-    };
+fn atomic_rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
     let (from_c, to_c) = (c_path(from)?, c_path(to)?);
     // SAFETY: both pointers are valid NUL-terminated strings that outlive the call; the kernel
     // copies them. `AT_FDCWD` resolves relative paths against the working directory, as
@@ -158,102 +179,56 @@ fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn rename_noreplace(_from: &Path, _to: &Path) -> std::io::Result<()> {
+#[cfg(target_os = "macos")]
+fn atomic_rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let (from_c, to_c) = (c_path(from)?, c_path(to)?);
+    // SAFETY: both pointers are valid NUL-terminated strings that outlive the call; the kernel
+    // copies them. `RENAME_EXCL` fails with EEXIST instead of replacing an existing `to`.
+    let rc = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn c_path(path: &Path) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL byte")
+    })
+}
+
+#[cfg(windows)]
+fn atomic_rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    let (from_w, to_w) = (wide(from), wide(to));
+    // SAFETY: both buffers are valid NUL-terminated UTF-16 strings that outlive the call. Flags 0:
+    // without `MOVEFILE_REPLACE_EXISTING` an existing target fails with ERROR_ALREADY_EXISTS, and
+    // without `MOVEFILE_COPY_ALLOWED` the move is a single directory operation on one volume.
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), 0)
+    };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn atomic_rename_noreplace(_from: &Path, _to: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "no atomic no-replace rename on this platform",
     ))
-}
-
-/// Create `to` exclusively and copy `from` into it. Never replaces: `create_new` fails with
-/// `AlreadyExists` when any entry (a dangling symlink included) exists at `to`. A failure after
-/// the create removes the partial target again.
-fn copy_new(from: &Path, to: &Path) -> std::io::Result<()> {
-    let mut src = std::fs::File::open(from)?;
-    let mut dst = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(to)?;
-    let copied = std::io::copy(&mut src, &mut dst)
-        .and_then(|_| dst.sync_all())
-        .and_then(|_| dst.set_permissions(src.metadata()?.permissions()));
-    drop(dst);
-    if let Err(err) = copied {
-        let _ = std::fs::remove_file(to);
-        return Err(err);
-    }
-    Ok(())
-}
-
-/// Move `from` to `to` WITHOUT replacing anything at `to` — on every path. Each primitive fails
-/// with `AlreadyExists` when the target name exists in any form, so a competitor that appears
-/// between the preflight and the move turns into an error (and a bundle rollback), never an
-/// overwrite; a plain rename, which replaces, is never used. When no primitive is available the
-/// member is refused with an actionable error. The source is unlinked only once the new entry
-/// exists; if that unlink fails the new entry is removed again (or named explicitly when even
-/// that fails), so a member is either moved or untouched.
-fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    move_no_replace_with(from, to, &MovePrimitives::real())
-}
-
-fn move_no_replace_with(from: &Path, to: &Path, fs: &MovePrimitives<'_>) -> std::io::Result<()> {
-    use std::io::{Error, ErrorKind};
-    let rename_err = match (fs.rename_noreplace)(from, to) {
-        Ok(()) => return Ok(()),
-        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Err(err),
-        Err(err) => err,
-    };
-    let link_err = match (fs.hard_link)(from, to) {
-        Ok(()) => return unlink_source_after(from, to, fs, "hard link"),
-        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Err(err),
-        Err(err) => err,
-    };
-    let copy_err = match (fs.copy_new)(from, to) {
-        Ok(()) => return unlink_source_after(from, to, fs, "copy"),
-        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Err(err),
-        Err(err) => err,
-    };
-    Err(Error::new(
-        ErrorKind::Unsupported,
-        format!(
-            "no way to move the file without replacing an existing entry on this filesystem \
-             (no-replace rename: {rename_err}; hard link: {link_err}; exclusive copy: {copy_err}); \
-             move the bundle aside manually"
-        ),
-    ))
-}
-
-/// The new entry at `to` exists (linked or copied); unlink the source, and undo the new entry if
-/// the source cannot be unlinked — a hard link left behind would alias the untouched source
-/// (same inode), not preserve an independent backup.
-fn unlink_source_after(
-    from: &Path,
-    to: &Path,
-    fs: &MovePrimitives<'_>,
-    how: &str,
-) -> std::io::Result<()> {
-    let Err(unlink_err) = (fs.unlink)(from) else {
-        return Ok(());
-    };
-    let message = match (fs.unlink)(to) {
-        Ok(()) => format!(
-            "the source could not be unlinked after the {how} ({unlink_err}); the new entry at {} \
-             was removed again",
-            printable_path(to)
-        ),
-        Err(cleanup_err) => format!(
-            "the source could not be unlinked after the {how} ({unlink_err}) — WARNING: the new \
-             entry at {} could not be removed either ({cleanup_err}); it is {}",
-            printable_path(to),
-            if how == "hard link" {
-                "a hard link to the untouched source (same inode), not an independent backup"
-            } else {
-                "a copy of the untouched source"
-            }
-        ),
-    };
-    Err(std::io::Error::new(unlink_err.kind(), message))
 }
 
 fn relocate_bundle(
@@ -1069,57 +1044,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_links_fall_back_to_a_no_replace_copy_and_refuse_a_competitor() {
-        // Codex Gate-2 R13 on da2dca7 (P1): with hard links unavailable the old fallback was a
-        // replacing rename. Every fallback is now no-replace: a competitor that lands between the
-        // entry check and the move fails the move and survives intact.
-        let dir = tmp_home("move-copy-fallback");
+    fn a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback() {
+        // Gate-3 round 3 (arbiter G3-PRE-B135-002, Codex R13): a two-step link/copy + unlink of
+        // the source name deleted a file another writer placed there in between. Without the
+        // platform's atomic no-replace rename the member is refused; nothing is moved or created.
+        let dir = tmp_home("move-no-atomic");
         std::fs::create_dir_all(&dir).unwrap();
         let from = dir.join("src");
         let to = dir.join("dst");
         std::fs::write(&from, b"SOURCE").unwrap();
-        let planting_copy = |from: &Path, to: &Path| {
-            std::fs::write(to, b"COMPETITOR").unwrap();
-            copy_new(from, to)
-        };
-        let fs = MovePrimitives {
-            rename_noreplace: &unsupported,
-            hard_link: &unsupported,
-            copy_new: &planting_copy,
-            unlink: &real_unlink,
-        };
-        let err = move_no_replace_with(&from, &to, &fs).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
-        assert_eq!(std::fs::read(&to).unwrap(), b"COMPETITOR");
-        assert_eq!(std::fs::read(&from).unwrap(), b"SOURCE");
-        // Without a competitor the exclusive copy moves the file.
-        let to2 = dir.join("dst2");
-        let fs2 = MovePrimitives {
-            rename_noreplace: &unsupported,
-            hard_link: &unsupported,
-            copy_new: &copy_new,
-            unlink: &real_unlink,
-        };
-        move_no_replace_with(&from, &to2, &fs2).unwrap();
-        assert!(!from.exists());
-        assert_eq!(std::fs::read(&to2).unwrap(), b"SOURCE");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn no_safe_move_primitive_is_an_actionable_refusal() {
-        let dir = tmp_home("move-no-primitive");
-        std::fs::create_dir_all(&dir).unwrap();
-        let from = dir.join("src");
-        let to = dir.join("dst");
-        std::fs::write(&from, b"SOURCE").unwrap();
-        let fs = MovePrimitives {
-            rename_noreplace: &unsupported,
-            hard_link: &unsupported,
-            copy_new: &unsupported,
-            unlink: &real_unlink,
-        };
-        let err = move_no_replace_with(&from, &to, &fs).unwrap_err();
+        let err = move_no_replace_with(&from, &to, &unsupported).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         assert!(err.to_string().contains("manually"), "{err}");
         assert_eq!(std::fs::read(&from).unwrap(), b"SOURCE");
@@ -1128,64 +1062,50 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_source_unlink_after_linking_removes_the_link() {
-        // Codex Gate-2 R13 on da2dca7 (P2): the link exists when the source unlink fails; leaving it
-        // would alias the untouched source (same inode) outside rollback accounting.
-        let dir = tmp_home("move-unlink-fails");
+    fn an_ordinary_move_failure_keeps_its_cause() {
+        let dir = tmp_home("move-denied");
         std::fs::create_dir_all(&dir).unwrap();
         let from = dir.join("src");
         let to = dir.join("dst");
         std::fs::write(&from, b"SOURCE").unwrap();
-        let source = from.clone();
-        let refusing_unlink = move |path: &Path| {
-            if path == source {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "source is not yours to unlink",
-                ))
-            } else {
-                std::fs::remove_file(path)
-            }
+        let denied = |_from: &Path, _to: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "rename denied",
+            ))
         };
-        let fs = MovePrimitives {
-            rename_noreplace: &unsupported,
-            hard_link: &real_hard_link,
-            copy_new: &copy_new,
-            unlink: &refusing_unlink,
-        };
-        let err = move_no_replace_with(&from, &to, &fs).unwrap_err();
-        assert!(err.to_string().contains("removed again"), "{err}");
-        assert!(!entry_exists(&to), "the aliasing link was left behind");
+        let err = move_no_replace_with(&from, &to, &denied).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!err.to_string().contains("manually"), "{err}");
         assert_eq!(std::fs::read(&from).unwrap(), b"SOURCE");
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn a_failed_cleanup_after_a_failed_unlink_is_reported_through_the_bundle_error() {
-        let dir = tmp_home("move-cleanup-fails");
-        let db = dir.join("zynk.db");
+    fn a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted() {
+        // The boundary the atomic move guarantees: whatever sits at the source name at the instant
+        // of the move is moved intact; a writer that replaced the source just before discarded its
+        // own predecessor, and zynk deletes nothing beyond that single rename.
+        let dir = tmp_home("move-source-swap");
         std::fs::create_dir_all(&dir).unwrap();
-        plant_foreign_wal_pair(&db);
-        let refusing_unlink = |_path: &Path| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "nothing may be unlinked",
-            ))
+        let from = dir.join("src");
+        let to = dir.join("dst");
+        let replacement = dir.join("replacement");
+        std::fs::write(&from, b"ORIGINAL").unwrap();
+        std::fs::write(&replacement, b"REPLACEMENT").unwrap();
+        let swapping = |from: &Path, to: &Path| {
+            std::fs::rename(&replacement, from).unwrap();
+            atomic_rename_noreplace(from, to)
         };
-        let fs = MovePrimitives {
-            rename_noreplace: &unsupported,
-            hard_link: &real_hard_link,
-            copy_new: &copy_new,
-            unlink: &refusing_unlink,
-        };
-        let mut mover =
-            |from: &Path, to: &Path| move_no_replace_with(from, to, &fs).map_err(|e| e.to_string());
-        let err = relocate_bundle(&db, &mut mover).unwrap_err();
-        assert!(
-            err.contains("could not be removed either") && err.contains("same inode"),
-            "the leftover alias must be named: {err}"
+        move_no_replace_with(&from, &to, &swapping).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"REPLACEMENT");
+        assert!(!entry_exists(&from) && !entry_exists(&replacement));
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "nothing else touched"
         );
-        assert!(db.exists() && bundle_member(&db, "-wal").exists());
         std::fs::remove_dir_all(dir).ok();
     }
 
