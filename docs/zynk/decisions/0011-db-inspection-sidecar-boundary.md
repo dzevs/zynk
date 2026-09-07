@@ -114,22 +114,33 @@ The decision above stands; the swarm's second round showed the guard could still
     only AFTER "committed"; a failed commit restores the old server's workers before it rolls back. A job is
     therefore never owned by two workers (the replacement's startup recovery resets `running` jobs, and two
     pollers would select the same pending batch).
-15. **One SQLite-effective pathname** (Codex Gate-2 round 9). The opener and `db status` resolve the configured
-    path the way SQLite's `unixFullPathname` does — made absolute, the FINAL component's symlink chain followed
-    (a relative target joined with the link's directory, bounded), no lexical `..`/`.` normalization,
-    intermediate directory links left alone; Windows: absolute form only — and use that one name for the
-    sidecar guards, the init lock, the identity capture and the connection. A stable `zynk.db -> foreign.db`
-    link used to let the guards inspect `zynk.db-journal` while SQLite replayed `foreign.db-journal`.
+15. **One SQLite-effective pathname** (Codex Gate-2 rounds 9-10). SQLite's `unixFullPathname` (bundled 3.46.0:
+    `appendAllPathElements`) walks every component — it folds `.`/`..` and follows a symlink in any component,
+    directories included. The opener and `db status` resolve the configured path made absolute plus the FINAL
+    component's symlink chain (a relative target joined with the link's directory, bounded), with no lexical
+    normalization added: a directory link maps a whole directory, so the main file, its sidecars and the init
+    lock already coincide through it and the kernel applies the same resolution to the unresolved prefix on
+    every open; only a linked FINAL component moves the sidecars away from the configured name, and that is
+    what is resolved. That one name is used for the sidecar guards, the init lock, the identity capture and the
+    connection. A stable `zynk.db -> foreign.db` link used to let the guards inspect `zynk.db-journal` while
+    SQLite replayed `foreign.db-journal`.
 16. **The DB-worker handover is a protocol contract: handoff version 2.** A version-1 peer (zynk 3.0.x sends
-    "committed" with its workers still running) is refused before "validated" in either direction, with the
-    remedy (restart zynk normally) returned to the requester and written to the replacement's durable log; the
-    sender rolls back and keeps serving.
+    "committed" with its workers still running) is refused before "validated" in either direction; the sender
+    rolls back and keeps serving. What the diagnostics can promise depends on which side is new: a 3.1.0
+    replacement refused by an old sender logs the reason and remedy durably (the immutable old sender reports
+    only its own generic error); a 3.1.0 sender whose old replacement closes without answering reports the
+    transport cause plus a *possible* incompatible-peer / restart-normally hint to the requester and logs it
+    durably (the old replacement cannot); between two 3.1.0 servers the exact reason travels back as a
+    `rejected: …` line.
 17. **Worker quiescence is bounded and decided before service moves.** Both DB workers are paused — a bounded
     wait for an idle point between units of work (`ZYNK_HANDOFF_WORKER_IDLE_MS`, default 10 s), after which no
     new unit starts until resume — BEFORE any socket is withdrawn. Busy past the deadline: the handoff is
     refused, the workers resume, ownership is retained. Idle: the handoff proceeds and the idle handles are
     joined at commit (immediate), so a slow or stuck provider never couples to the replacement's 30 s
-    "committed" wait; every pre-commit rollback resumes the workers.
+    "committed" wait; every pre-commit rollback resumes the workers. A worker's startup (runtime + initial DB
+    open, which may wait on the init lock) counts as work — idle is acknowledged only once it completed or failed
+    — and a dropped handle releases a paused consumer so queued receipt jobs DRAIN before the join (never
+    cancelled: their submitters are still waiting for the answer).
 
 Residual, documented limits (outside ADR 0008's accidental-data-loss threat model):
 
