@@ -55,6 +55,9 @@ struct SpawnedZynk {
 
 struct SpawnedServerProcess {
     child: std::process::Child,
+    /// Captured stdout+stderr of the server (was `Stdio::null()`): a server that dies during
+    /// startup used to vanish silently and the socket wait would time out with no cause.
+    log_path: PathBuf,
 }
 
 impl Drop for SpawnedServerProcess {
@@ -174,13 +177,51 @@ fn spawn_named_server(
         .env_remove("ZYNK_SOCKET_PATH")
         .env_remove("ZYNK_CLIENT_SOCKET_PATH")
         .env_remove("ZYNK_ENV")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null());
+    let log_path = config_home.join(format!("{session}.server.log"));
+    let log = fs::File::create(&log_path).unwrap();
+    command.stdout(log.try_clone().unwrap()).stderr(log);
 
     let child = command.spawn().unwrap();
     register_spawned_zynk_pid(Some(child.id()));
-    SpawnedServerProcess { child }
+    SpawnedServerProcess { child, log_path }
+}
+
+/// Like `wait_for_socket`, but when the socket never appears it reports WHY: whether the server
+/// process already exited (and with what status) plus the tail of its captured output.
+fn wait_for_named_server_socket(
+    server: &mut SpawnedServerProcess,
+    session: &str,
+    path: &Path,
+    timeout: Duration,
+) {
+    let timeout = timeout.max(Duration::from_secs(30));
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() && std::os::unix::net::UnixStream::connect(path).is_ok() {
+            return;
+        }
+        if let Ok(Some(status)) = server.child.try_wait() {
+            let output = fs::read_to_string(&server.log_path).unwrap_or_default();
+            panic!(
+                "named session `{session}` server exited during startup with {status} before \
+                 binding {}; captured output:\n{output}",
+                path.display()
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let status = match server.child.try_wait() {
+        Ok(Some(status)) => format!("exited with {status}"),
+        Ok(None) => "still running".to_string(),
+        Err(err) => format!("status unknown: {err}"),
+    };
+    let output = fs::read_to_string(&server.log_path).unwrap_or_default();
+    panic!(
+        "socket did not appear at {} within {timeout:?}; named session `{session}` server {status}; \
+         captured output:\n{output}",
+        path.display()
+    );
 }
 
 fn run_named_cli(config_home: &Path, runtime_dir: &Path, args: &[&str]) -> std::process::Output {
@@ -1051,14 +1092,18 @@ fn named_sessions_use_separate_servers_and_workspace_state() {
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
 
-    let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
-    let beta = spawn_named_server(&config_home, &runtime_dir, "beta");
+    let mut alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
+    let mut beta = spawn_named_server(&config_home, &runtime_dir, "beta");
 
-    wait_for_socket(
+    wait_for_named_server_socket(
+        &mut alpha,
+        "alpha",
         &named_session_socket(&config_home, "alpha"),
         Duration::from_secs(5),
     );
-    wait_for_socket(
+    wait_for_named_server_socket(
+        &mut beta,
+        "beta",
         &named_session_socket(&config_home, "beta"),
         Duration::from_secs(5),
     );
