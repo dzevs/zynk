@@ -33,6 +33,10 @@ config key is removed (see **Changed**).
 
 - Windows: the terminal backend vendors `portable-pty` and forces the **system ConPTY** (`kernel32.dll`; no
   `conpty.dll` sideload); multiline paste is preserved; npm-wrapped `pi` is detected.
+- Startup: two zynk processes opening a fresh shared database at the same time (for example two named-session
+  servers) no longer make the second one fail closed with a false "foreign database" error — first-time
+  initialization is serialized across processes, and a database that holds only an empty migration ledger is
+  treated as new. Databases holding any foreign tables still fail closed and are never modified.
 - Sessions: OMP resumes in the same pane after a restart with root-only hook state; lifecycle hook generations
   re-anchor; root-agent restore ownership is protected; Pi/OMP agents are released on shutdown.
 - Plugins: workspace/tab/pane lifecycle events also fire for panes created from the UI.
@@ -51,8 +55,8 @@ config key is removed (see **Changed**).
 
 - A **Windows** `cargo install zynk` (crates.io source) build links the registry `portable-pty` and therefore
   lacks only the ConPTY patch — Cargo strips `[patch.crates-io]` and excludes the nested vendored source.
-  Linux/macOS source builds are unaffected; Git-source builds, the GitHub Release binaries, Homebrew, and Nix
-  all ship the patched copy. Prefer `cargo install zynk --version 3.1.0 --locked` (without `--locked` Cargo
+  Linux/macOS source builds are unaffected; Git-source builds and the 3.1.0 release binaries, Homebrew formula,
+  and Nix package ship the patched copy. Prefer `cargo install zynk --version 3.1.0 --locked` (without `--locked` Cargo
   ignores the packaged lockfile).
 - Refresh installed integrations (`zynk integration install …`) after upgrading to receive the hook changes.
 - Contributors: Zynk is now one canonical public repo with public design docs (`docs/zynk/`) and

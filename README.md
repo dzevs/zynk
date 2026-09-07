@@ -102,8 +102,9 @@ same requirements (`--locked` keeps the crate's packaged lockfile; without it Ca
 See [`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 - **Windows, crates.io source only:** a `cargo install zynk` build links the registry `portable-pty` and lacks
-  the ConPTY patch (Cargo strips `[patch.crates-io]` from published crates). The Git-source build, the release
-  binaries, Homebrew and Nix all ship the patched copy; Linux/macOS source builds are unaffected.
+  the ConPTY patch (Cargo strips `[patch.crates-io]` from published crates). Binaries built from this source
+  tree — Git-source builds, and the 3.1.0 release onward on GitHub Releases, Homebrew and Nix — ship the patched
+  copy; the v3.0.0 downloads above predate it. Linux/macOS source builds are unaffected.
 - **macOS source builds:** CI builds with Homebrew's `zig@0.15` (`brew install zig@0.15`), which is the tested
   Zig on macOS.
 
