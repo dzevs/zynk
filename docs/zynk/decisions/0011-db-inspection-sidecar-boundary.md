@@ -144,6 +144,40 @@ The decision above stands; the swarm's second round showed the guard could still
     (`receipt_worker_busy`, retryable) while already-queued jobs drain inside the deadline; if they cannot, the
     handoff is refused and admission reopens. So no DB work ever starts after a pause was acknowledged, and the
     commit-time join is immediate. Ordinary shutdown still drains queued receipts.
+18. **Cutover moves the complete SQLite bundle, all or nothing** (Gate-3 round 3). `zynk db adopt`/`backup`
+    relocate the main file together with every existing `-journal`, `-wal` and `-shm` to ONE backup slot
+    chosen so that neither the base nor any member target exists; every target is re-checked before the first
+    rename, sidecars move first and the main file last, and any failure moves the members already relocated
+    back and reports an error — never a "success" with a stranded member, never an overwritten backup. The
+    commands also relocate what the guards refuse to open (a journal that looks hot; orphan sidecars beside an
+    absent main file), which is exactly the remedy those refusals name.
+19. **Terminal-safe output covers Unicode format and bidi controls, and paths.** The hostile-character rule
+    is C0/C1 controls plus the Unicode format (`Cf`), bidi/invisible characters and the line/paragraph
+    separators (`Zl`/`Zp`) — a U+202E override can reorder displayed text as surely as ESC can recolor it —
+    escaped as `\u{…}`; it applies to schema names AND to every printed database path, in `db status`, the
+    cutover commands and every error the guards raise.
+
+20. **An embedding job is owned by its claim, across processes** (Gate-3 round 3). Several zynk servers share one
+    database (named sessions; a live handoff). A worker takes a job with ONE atomic status-guarded update that
+    returns the job's incremented `attempts` — nothing else ever changes that counter — and that value is the
+    claim token: the job's `done`/`failed` updates match the id, `status = 'running'` AND the token, so a worker
+    that stalled past the running lease (10 min; recovery hands such jobs back to the queue) can neither
+    complete nor fail the job its successor owns. Zero rows affected on the claim means another worker owns
+    the job and it is skipped, never run twice.
+21. **Orphan-message recovery has a grace window.** Every ordinary server start runs cold-start recovery over
+    the shared database, but a message with no delivery event is IN FLIGHT until it is older than the grace
+    window (5 min): a sender persists the message before its first transport event, and a peer server's
+    start must not fail it. Only older event-less messages are failed (`system.recovery`).
+22. **A receipt binds to the stored target participant, never to an agent label.** The participant key is
+    label + terminal + hook session — pane ids rotate and are deliberately not part of it. The durable anchor
+    is the hook session value: it survives pane churn, a restart and a live handoff (the restored terminal
+    keeps its persisted agent session, while terminal ids are allocated per server lifetime). When the stored
+    participant carried a session, the authoritative receiver (hook authority only) must present the same
+    one; when it carried none (a hook that reported no session id — a generic `hook` source cannot carry
+    one), the terminal id binds instead, within this server's lifetime; otherwise
+    `receiver_identity_mismatch`. A second pane carrying the same label under another session (or,
+    session-less, on another terminal) is not the addressee. Limit: a session-less target cannot be re-bound
+    after a restart or handoff (its terminal id changed); every shipped integration reports a session id.
 
 Residual, documented limits (outside ADR 0008's accidental-data-loss threat model):
 

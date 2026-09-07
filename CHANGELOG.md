@@ -53,6 +53,20 @@ config key is removed (see **Changed**).
   `ZYNK_HANDOFF_WORKER_IDLE_MS`, default 10 s, fails the update quickly and cleanly) and the replacement
   takes the workers over only after "committed" — so receipts keep working after a handoff, an in-flight send
   is never marked failed by it, and no embedding job runs twice.
+- Several zynk servers sharing one database (named sessions, a live update) no longer trip over each other:
+  an embedding job is claimed atomically and owned by that claim — a job another server is running inside its
+  10-minute lease is not re-run, and a worker that stalled past the lease can neither complete nor fail the
+  job its successor owns; start-up recovery of messages that never got a delivery event fails only those older
+  than five minutes, so a peer server's in-flight send is never marked failed by another server starting; and a
+  receipt is accepted only from the participant the message was addressed to (its hook session, which survives
+  pane-id churn, restarts and live updates; its terminal when the hook reported no session), never from another
+  pane that merely carries the same agent label.
+- `zynk db adopt` / `zynk db backup` relocate the **complete SQLite bundle** (main file plus any `-journal`,
+  `-wal`, `-shm`) to one backup slot that is entirely free, all or nothing: a leftover journal no longer strands
+  the native path, an existing backup sidecar is never overwritten, and a failed move rolls back and reports an
+  error. They also move aside what the startup guards refuse to open (a rollback journal that looks hot, orphan
+  sidecars beside a missing database) — the remedy those refusals name. Output from every `zynk db` command
+  escapes control and Unicode format/bidi characters in names and paths.
 - Sessions: OMP resumes in the same pane after a restart with root-only hook state; lifecycle hook generations
   re-anchor; root-agent restore ownership is protected; Pi/OMP agents are released on shutdown.
 - Plugins: workspace/tab/pane lifecycle events also fire for panes created from the UI.

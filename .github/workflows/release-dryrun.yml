@@ -6,7 +6,8 @@ name: Release dry-run
 # secrets, no ogulcancelik/* repos, no push-to-master, no release-docs or website gates). Cutting an actual
 # release is a separate, explicitly operator-gated step.
 #
-# KNOWN GAP (tracked in docs/zynk/release-3.0.0-prep.md): the vendored libghostty-vt Zig build eagerly
+# KNOWN GAP (tracked publicly in docs/zynk/fork-patch-ledger.md, row "release build known gaps"): the
+# vendored libghostty-vt Zig build eagerly
 # fetches the `uucode` dep over the network (deps.files.ghostty.org) on a cold cache, which makes builds
 # (esp. macOS) network-dependent and occasionally flaky. Pre-warming/vendoring that Zig cache for
 # determinism is a follow-up.
@@ -67,7 +68,7 @@ jobs:
       # uses BSD `u_int8_t/u_int16_t/u_int64_t` typedefs that musl does not define, so the musl target fails
       # to compile (with both musl-gcc AND zig cc). Restoring a static musl build is a SEPARATE gated change
       # (patch sqlite-vec's typedefs, or upgrade to a fixed release after a musl + vector/retrieval test
-      # pass) — not a release-tooling hack. See docs/zynk/release-3.0.0-prep.md.
+      # pass) — not a release-tooling hack. See docs/zynk/fork-patch-ledger.md, row "release build known gaps".
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
         with:

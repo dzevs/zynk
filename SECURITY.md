@@ -10,5 +10,8 @@ acknowledgement as soon as possible and a fix or mitigation timeline once the re
 
 ## Supported versions
 
-zynk has no published binary release yet; security fixes land on `main`. Build from source (or via Nix)
-to get the latest fixes — see the [README](./README.md).
+Security fixes land on `main` first and ship in the **next release**. Only the **latest published
+release** is supported — the current GitHub Release (binaries), the matching crates.io version and the
+Homebrew formula; see the [CHANGELOG](./CHANGELOG.md) for what each release contains. Earlier releases
+receive no backports: upgrade to the latest release, or build from source / Nix to run `main` with
+unreleased fixes (see the [README](./README.md)). This section is updated whenever a release is cut.
