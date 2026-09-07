@@ -424,10 +424,26 @@ const CANONICAL_LEDGER_COLUMNS: &[(&str, &str, bool, Option<&str>, bool)] = &[
     ("execution_time", "BIGINT", true, None, false),
 ];
 
-/// Validates `_sqlx_migrations` against `CANONICAL_LEDGER_COLUMNS` using SQLite's own schema
-/// metadata (`PRAGMA table_info`), on the caller's snapshot.
+/// The exact column definitions of the supported sqlx ledger, in declaration order, as they appear in
+/// `sqlite_master.sql` after whitespace normalization. This is a deliberately NARROW supported-DDL
+/// policy (Gate-2 round 6), not a SQL parser: anything the pinned sqlx initializer cannot produce is
+/// foreign — including CHECK / FOREIGN KEY constraints and generated columns, which
+/// `PRAGMA table_info` cannot see.
+const CANONICAL_LEDGER_DDL_COLUMNS: &[&str] = &[
+    "version BIGINT PRIMARY KEY",
+    "description TEXT NOT NULL",
+    "installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    "success BOOLEAN NOT NULL",
+    "checksum BLOB NOT NULL",
+    "execution_time BIGINT NOT NULL",
+];
+
+/// Validates `_sqlx_migrations` on the caller's snapshot, two ways: (1) `PRAGMA table_xinfo`
+/// (which, unlike `table_info`, lists hidden/generated columns) must report exactly the canonical
+/// columns and nothing hidden; (2) the stored `CREATE TABLE` text must normalize to exactly the
+/// canonical column list — no table constraints, no generated columns, no trailing table options.
 async fn ledger_structure_is_canonical(conn: &mut SqliteConnection) -> Result<bool, DbError> {
-    let rows = sqlx::query("PRAGMA table_info(_sqlx_migrations)")
+    let rows = sqlx::query("PRAGMA table_xinfo(_sqlx_migrations)")
         .fetch_all(&mut *conn)
         .await?;
     if rows.len() != CANONICAL_LEDGER_COLUMNS.len() {
@@ -439,6 +455,7 @@ async fn ledger_structure_is_canonical(conn: &mut SqliteConnection) -> Result<bo
         let not_null = row.try_get::<i64, _>("notnull")? != 0;
         let default = row.try_get::<Option<String>, _>("dflt_value")?;
         let primary_key = row.try_get::<i64, _>("pk")? != 0;
+        let hidden = row.try_get::<i64, _>("hidden")?;
         let Some((_, expected_type, expected_not_null, expected_default, expected_pk)) =
             CANONICAL_LEDGER_COLUMNS
                 .iter()
@@ -451,7 +468,8 @@ async fn ledger_structure_is_canonical(conn: &mut SqliteConnection) -> Result<bo
             (Some(actual), Some(expected)) => actual.trim().eq_ignore_ascii_case(expected),
             _ => false,
         };
-        if !declared.eq_ignore_ascii_case(expected_type)
+        if hidden != 0
+            || !declared.eq_ignore_ascii_case(expected_type)
             || not_null != *expected_not_null
             || !default_matches
             || primary_key != *expected_pk
@@ -459,7 +477,49 @@ async fn ledger_structure_is_canonical(conn: &mut SqliteConnection) -> Result<bo
             return Ok(false);
         }
     }
-    Ok(true)
+    let ddl: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .flatten();
+    Ok(ddl.as_deref().is_some_and(ledger_ddl_is_canonical))
+}
+
+/// Narrow supported-DDL check on the stored `CREATE TABLE` text: whitespace-normalized head must be
+/// `CREATE TABLE [IF NOT EXISTS] _sqlx_migrations`, the parenthesized body must contain NO nested
+/// parentheses (which rules out CHECK / FOREIGN KEY / GENERATED ALWAYS AS), split at commas into
+/// exactly the canonical definitions in order, and nothing may follow the closing parenthesis.
+fn ledger_ddl_is_canonical(sql: &str) -> bool {
+    let collapsed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(open) = collapsed.find('(') else {
+        return false;
+    };
+    let Some(close) = collapsed.rfind(')') else {
+        return false;
+    };
+    if close < open || !collapsed[close + 1..].trim().is_empty() {
+        return false;
+    }
+    let head = collapsed[..open].trim().to_ascii_lowercase();
+    if head != "create table _sqlx_migrations"
+        && head != "create table if not exists _sqlx_migrations"
+    {
+        return false;
+    }
+    let body = &collapsed[open + 1..close];
+    if body.contains('(') || body.contains(')') {
+        return false;
+    }
+    let definitions: Vec<String> = body
+        .split(',')
+        .map(|definition| definition.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    definitions.len() == CANONICAL_LEDGER_DDL_COLUMNS.len()
+        && definitions
+            .iter()
+            .zip(CANONICAL_LEDGER_DDL_COLUMNS)
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
 }
 
 /// One `sqlite_master` row: `kind` is table/index/view/trigger; `name` is the raw byte string.
@@ -1125,7 +1185,7 @@ mod tests {
     /// A genuine but PARTIALLY migrated native DB: migration 0001 applied by hand from the built-in
     /// migrator (same SQL, same SHA-384 checksum in the ledger), 0002/0003 pending.
     fn plant_partial_native_db(tag: &str) -> std::path::PathBuf {
-        let path = tmp_db(tag);
+        let path = plant_real_sqlx_ledger(tag);
         let first = MIGRATOR
             .iter()
             .find(|m| m.version == 1)
@@ -1137,7 +1197,6 @@ mod tests {
                     .create_if_missing(true),
             )
             .await?;
-            conn.execute(SQLX_LEDGER_DDL).await?;
             conn.execute(first.sql.as_ref()).await?;
             sqlx::query(
                 "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
@@ -1545,6 +1604,73 @@ mod tests {
             DbClassification::Foreign { .. } => {}
             other => panic!("expected Foreign, got {other:?}"),
         }
+    }
+
+    /// Gate-2 round 6 (Codex): `PRAGMA table_info` is lossy — generated/hidden columns are omitted
+    /// and CHECK / FOREIGN KEY constraints are invisible — so a canonical-looking six-column ledger
+    /// with one of these extras is NOT the sqlx ledger and must fail closed before writable connect.
+    #[test]
+    fn ledger_with_a_generated_or_constrained_extra_is_foreign() {
+        let canonical_columns = "version BIGINT PRIMARY KEY, description TEXT NOT NULL, \
+             installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, success BOOLEAN NOT NULL, \
+             checksum BLOB NOT NULL, execution_time BIGINT NOT NULL";
+        for (tag, extra) in [
+            (
+                "generated-virtual",
+                ", foreign_marker TEXT GENERATED ALWAYS AS ('foreign schema') VIRTUAL",
+            ),
+            (
+                "generated-stored",
+                ", foreign_marker TEXT GENERATED ALWAYS AS ('foreign schema') STORED",
+            ),
+            ("check-constraint", ", CHECK(version > 1000)"),
+            (
+                "foreign-key",
+                ", FOREIGN KEY(version) REFERENCES external_schema(id)",
+            ),
+        ] {
+            let path = tmp_db(&format!("g6-ledger-{tag}"));
+            plant_foreign_db(
+                &path,
+                &format!("CREATE TABLE _sqlx_migrations ({canonical_columns}{extra})"),
+            );
+            assert_fails_closed_unchanged(tag, &path);
+        }
+    }
+
+    /// Positive compatibility with the REAL sqlx initializer, not only a handwritten copy of its DDL.
+    fn plant_real_sqlx_ledger(tag: &str) -> std::path::PathBuf {
+        use sqlx::migrate::Migrate;
+        let path = tmp_db(tag);
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await?;
+            conn.ensure_migrations_table()
+                .await
+                .map_err(|err| DbError::new("migrate", err.to_string()))?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn real_sqlx_empty_ledger_is_empty_and_initializes() {
+        let path = plant_real_sqlx_ledger("g6-real-sqlx-empty");
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Empty
+        );
+        block_on(open_migrated_at_without_recovery(&path)).unwrap();
+        assert_eq!(
+            block_on(classify_db_at(&path)).unwrap(),
+            DbClassification::Native
+        );
     }
 
     #[test]
