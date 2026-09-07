@@ -96,14 +96,36 @@ The decision above stands; the swarm's second round showed the guard could still
 11. **The handoff-import server is covered.** The Unix live-handoff replacement runs the same fail-closed
     DB pre-flight before any public service (on failure it exits before "restored" and the old server rolls
     back and keeps serving) and installs the receipt/embedding DB workers like a primary start.
+12. **Hot rollback journals are refused, conservatively** (Codex Gate-2 round 8). A nonempty `<db>-journal`
+    with a non-zero first byte beside a non-empty main file is refused (`db_hot_journal`) BEFORE any
+    connection exists, at every connect path — a read-write pager plays a hot journal back on its first
+    shared lock (rewriting the main file and deleting the journal) before any verdict could run. SQLite's own
+    test also consults lock state (a live writer's journal is not hot); zynk cannot observe that without a
+    pager, so it refuses every journal that looks hot, re-checking once after acquiring the init lock (a zynk
+    initializer's own brief journal during its journal-mode switch is held under that lock). Inactive
+    PERSIST-mode (zeroed header) and TRUNCATE-mode (empty) journals pass; an unreadable journal fails closed;
+    metadata failures are never read as absence (`db_io_error`). `zynk db status` reports the same refusal.
+13. **No orphan-message recovery beside a live server.** The replacement's pre-flight validates readiness
+    and migrations WITHOUT `recover_orphan_messages`; only a cold start recovers. A synthesized `failed`
+    freezes a message (no `submitted`/`received` may follow), and during a handoff a sender may legitimately
+    be between persisting its message and its first transport event.
+14. **The DB-worker handover is ordered.** The old server stops and joins its receipt/embedding workers
+    BEFORE it sends "committed" (its public sockets are already down); the replacement starts its workers
+    only AFTER "committed"; a failed commit restores the old server's workers before it rolls back. A job is
+    therefore never owned by two workers (the replacement's startup recovery resets `running` jobs, and two
+    pollers would select the same pending batch).
 
 Residual, documented limits (outside ADR 0008's accidental-data-loss threat model):
 
 - During first-time initialization SQLite itself deletes a `-wal` that appears beside the zero-page database
   and creates the new `-wal`/`-shm` by name; the orphan-sidecar guard therefore runs before the database is
   created, and a sidecar renamed into place DURING initialization is SQLite's to discard.
-- A hot `-journal` belonging to another database but carrying the inspected database's name is replayed by
-  SQLite on the first read, as for any SQLite client.
+- A rollback journal that becomes hot, or is renamed into place, between the pre-connect check and the
+  connection's first read is played back by SQLite as for any client; the guard closes the case that
+  matters (a crashed database found at the path), not that race.
+- Catalog text is compared as UTF-8 bytes: a database whose text encoding is not UTF-8 cannot be zynk's and
+  classifies as foreign, including its SQLite bookkeeping tables (conservative; never a write hole).
+- Diagnostics escape control characters in schema names AND in the printed database path.
 - A WAL-mode database separated from its `-wal` is, to SQLite and therefore to zynk, whatever its main file
   holds — a main file whose schema still lives in un-checkpointed WAL frames reads as **empty** and is
   initialized. Never move or copy a WAL database without its `-wal` (standard SQLite guidance; `zynk db
