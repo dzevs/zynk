@@ -845,8 +845,9 @@ impl HeadlessServer {
         }
 
         // DB-worker quiescence is decided BEFORE any service is withdrawn and is bounded (Codex
-        // Gate-2 round 9): both workers stop starting units of work and we wait for each to be
-        // between units; past the deadline the handoff is rejected with this server untouched
+        // Gate-2 rounds 9-11): the embedding poller starts no new batch; the receipt worker accepts
+        // no new job and drains what is already queued; we wait for each to have nothing in flight
+        // and nothing queued. Past the deadline the handoff is rejected with this server untouched
         // (workers resumed, ownership retained).
         let idle_deadline = handoff_worker_idle_deadline();
         info!(

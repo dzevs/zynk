@@ -27,6 +27,24 @@ use crate::zynk::receipt::{
 /// the worst case (a wedged worker) without blocking the server loop indefinitely.
 pub const DEFAULT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Env override (milliseconds, > 0) for how long the API handler waits for a receipt result
+/// (mirrors the other env-tunable worker knobs).
+pub const ZYNK_RECEIPT_TIMEOUT_MS_ENV: &str = "ZYNK_RECEIPT_TIMEOUT_MS";
+
+/// Test hook: when set, the worker blocks before EVERY job until the file at this path exists —
+/// lets a test build a receipt backlog deterministically. Never used in production.
+pub const ZYNK_TEST_RECEIPT_BLOCK_FILE_ENV: &str = "ZYNK_TEST_RECEIPT_BLOCK_FILE";
+
+/// The API handler's receipt wait: `ZYNK_RECEIPT_TIMEOUT_MS` or `DEFAULT_RECEIPT_TIMEOUT`.
+pub fn receipt_timeout() -> Duration {
+    std::env::var(ZYNK_RECEIPT_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_RECEIPT_TIMEOUT)
+}
+
 struct ReceiptJob {
     request: ReceiptRequest,
     receiver: AuthoritativeReceiver,
@@ -52,8 +70,9 @@ pub struct ReceiptWorkerHandle {
 // The live handoff (the only caller) is Unix-only.
 #[cfg_attr(not(unix), allow(dead_code))]
 impl ReceiptWorkerHandle {
-    /// Stop starting new receipt jobs and wait (bounded) for the in-flight one to finish; a queued
-    /// job stays queued, unstarted, until `resume`. Live-handoff quiescence (Codex Gate-2 round 9).
+    /// Stop ACCEPTING receipt jobs and wait (bounded) until the in-flight one and every job already
+    /// queued have finished. `false` = still draining past `deadline` (the worker keeps running;
+    /// call `resume` to accept jobs again). Live-handoff quiescence (Codex Gate-2 rounds 9-11).
     pub fn pause(&self, deadline: Duration) -> bool {
         self.control.pause(deadline)
     }
@@ -82,6 +101,16 @@ impl ReceiptWorkerHandle {
                 "receipt worker is not running",
             ));
         };
+        // A paused worker (live handoff quiescing) accepts nothing new: the receipt is NOT enqueued
+        // and thus NOT written — a transient, retryable `receipt_worker_busy`. Admission is counted
+        // under the pause mutex BEFORE the channel hand-off, so a pause sees this job as outstanding
+        // from this point until the worker takes it into flight.
+        if !self.control.try_enqueue() {
+            return Err(DbError::new(
+                "receipt_worker_busy",
+                "a live handoff is quiescing the receipt worker; the receipt was not enqueued — retry to resolve the true state",
+            ));
+        }
         let (respond_to, response) = std::sync::mpsc::sync_channel(1);
         let job = ReceiptJob {
             request,
@@ -100,19 +129,20 @@ impl ReceiptWorkerHandle {
         match sender.try_send(WorkerMessage::Job(Box::new(job))) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
+                self.control.unenqueue();
                 return Err(DbError::new(
                     "receipt_worker_busy",
                     "receipt worker queue is full; the receipt was not enqueued — retry to resolve the true state",
                 ));
             }
             Err(TrySendError::Disconnected(_)) => {
+                self.control.unenqueue();
                 return Err(DbError::new(
                     "receipt_worker_unavailable",
                     "receipt worker is not running",
                 ));
             }
         }
-
         match response.recv_timeout(timeout) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => Err(DbError::new(
@@ -183,10 +213,12 @@ fn worker_loop(
                 match message {
                     WorkerMessage::Shutdown => break,
                     WorkerMessage::Job(job) => {
+                        control.begin_work();
                         let _ = job.respond_to.send(Err(DbError::new(
                             "tokio_runtime_failed",
                             "receipt worker could not build its Tokio runtime",
                         )));
+                        control.end_work();
                     }
                 }
             }
@@ -209,6 +241,17 @@ fn worker_loop(
                 // Paused (live handoff): the job waits here, unstarted, until resume. A dropped
                 // handle releases the wait so queued jobs DRAIN before the join (drop policy:
                 // drain, never cancel — the submitter is still waiting for this answer).
+                // Test hook: hold the job here — taken from the queue but not yet in flight (the
+                // state a live-handoff pause must still count as outstanding work).
+                if let Some(block_file) = std::env::var_os(ZYNK_TEST_RECEIPT_BLOCK_FILE_ENV) {
+                    while !std::path::Path::new(&block_file).exists() {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                // Take the job into flight (the pause accounting drops it from "queued" here).
+                // Already-accepted jobs DRAIN even while paused: a live-handoff pause is
+                // acknowledged only once nothing is in flight and nothing is queued, and a paused
+                // handle accepts nothing new (`submit` → receipt_worker_busy).
                 control.begin_work();
                 if conn.is_none() {
                     conn = rt
@@ -327,56 +370,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    fn submit_in_background(
+        worker: &std::sync::Arc<ReceiptWorkerHandle>,
+        timeout: Duration,
+    ) -> std::thread::JoinHandle<Result<ReceiptAccepted, DbError>> {
+        let worker = std::sync::Arc::clone(worker);
+        std::thread::spawn(move || {
+            worker.submit(
+                dummy_request(),
+                dummy_receiver(),
+                "s".into(),
+                "rt".into(),
+                "now".into(),
+                timeout,
+            )
+        })
+    }
+
     #[test]
-    fn receipt_worker_drains_a_job_queued_while_paused_on_drop() {
-        // Drop policy: queued receipt jobs are DRAINED, not cancelled — a paused consumer is
-        // released to run them before the join. The (bogus) job below is processed by the DB path
-        // (any DB-level outcome), never answered with `receipt_worker_unavailable`, and the drop
-        // still returns promptly.
-        let home = temp_home("drain");
-        crate::zynk::db::block_on(crate::zynk::db::open_migrated_at_without_recovery(
-            &home.join("zynk.db"),
-        ))
-        .unwrap();
-        let worker = spawn();
-        assert!(worker.pause(Duration::from_secs(10)));
-        let sender = worker.sender.clone().expect("live sender");
-        let (respond_to, response) = std::sync::mpsc::sync_channel(1);
-        sender
-            .try_send(WorkerMessage::Job(Box::new(ReceiptJob {
-                request: dummy_request(),
-                receiver: dummy_receiver(),
-                current_socket_namespace: "s".into(),
-                current_runtime_id: "rt".into(),
-                now: "now".into(),
-                respond_to,
-            })))
-            .unwrap();
-        drop(sender);
-        std::thread::sleep(Duration::from_millis(200));
+    fn receipt_worker_pause_counts_queued_and_prefetched_jobs() {
+        // Codex Gate-2 round 11 (P2): receipts whose submitters already timed out can still sit in
+        // the queue (or be taken from it but not yet in flight) while the loop is idle. A pause
+        // must not be acknowledged until they drained (bounded), a paused worker accepts nothing
+        // new, and resume reopens admission — so the commit-time join never starts work after
+        // service was withdrawn. The block hook holds each job between "taken" and "in flight".
+        let home = temp_home("queue-drain");
+        let db = home.join("zynk.db");
+        crate::zynk::db::block_on(crate::zynk::db::open_migrated_at_without_recovery(&db)).unwrap();
+        let release = home.join("release-receipts");
+        std::env::set_var(ZYNK_TEST_RECEIPT_BLOCK_FILE_ENV, &release);
+        let worker = std::sync::Arc::new(spawn());
+        assert!(worker.pause(Duration::from_secs(10)), "idle after startup");
+        worker.resume();
+        // Three receipts whose submitters give up quickly: one is taken and held before it becomes
+        // in flight, two stay queued — all three are outstanding work.
+        let submitters: Vec<_> = (0..3)
+            .map(|_| submit_in_background(&worker, Duration::from_millis(300)))
+            .collect();
+        for submitter in submitters {
+            let err = submitter.join().unwrap().unwrap_err();
+            assert_eq!(err.code, "receipt_result_unknown", "{}", err.message);
+        }
         assert!(
-            matches!(
-                response.try_recv(),
-                Err(std::sync::mpsc::TryRecvError::Empty)
-            ),
-            "a paused worker must not start the queued job"
+            !worker.pause(Duration::from_millis(500)),
+            "queued/prefetched receipts are not quiescent"
         );
+        // Paused: nothing new is accepted ...
+        let refused = submit_in_background(&worker, Duration::from_secs(5))
+            .join()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refused.code, "receipt_worker_busy", "{}", refused.message);
+        assert!(refused.message.contains("quiescing"), "{}", refused.message);
+        // ... and once released the backlog drains within the bound.
+        std::fs::write(&release, b"go").unwrap();
+        assert!(worker.pause(Duration::from_secs(30)), "drained: quiescent");
+        worker.resume();
+        let after = submit_in_background(&worker, Duration::from_secs(10))
+            .join()
+            .unwrap()
+            .map(|_| "ok".to_string())
+            .unwrap_or_else(|err| err.code.to_string());
+        assert_ne!(after, "receipt_worker_busy", "accepting again after resume");
+        let worker = std::sync::Arc::try_unwrap(worker).ok().expect("sole owner");
         let started = std::time::Instant::now();
         drop(worker);
         assert!(
             started.elapsed() < Duration::from_secs(5),
-            "drain + join must be prompt"
+            "an idle worker joins promptly"
         );
-        let outcome = response
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the queued job was drained and answered");
-        let code = outcome
-            .map(|_| "ok".to_string())
-            .unwrap_or_else(|err| err.code.to_string());
-        assert_ne!(
-            code, "receipt_worker_unavailable",
-            "the job was cancelled, not drained"
-        );
+        std::env::remove_var(ZYNK_TEST_RECEIPT_BLOCK_FILE_ENV);
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -1959,6 +1959,117 @@ fn busy_db_workers_reject_a_live_handoff_within_the_deadline() {
 }
 
 #[test]
+fn receipt_backlog_rejects_a_live_handoff_then_drains_and_hands_over() {
+    // Codex Gate-2 round 11 (P2): receipts whose API callers already timed out still sit in the
+    // worker queue. Quiescence must account for them: while the backlog cannot drain within the
+    // idle deadline the handoff is refused with service untouched; once it drained (each receipt
+    // committed exactly once) the handoff succeeds. Deterministic via the receipt block-file hook
+    // (the worker blocks before each job until the file exists) and a short API receipt timeout.
+    let _lock = test_lock();
+    let base_hint = unique_test_dir();
+    let block = base_hint.join("release-receipts");
+    let block_str = block.to_string_lossy().to_string();
+    let f = handoff_fixture(&[
+        ("ZYNK_TEST_RECEIPT_BLOCK_FILE", &block_str),
+        ("ZYNK_RECEIPT_TIMEOUT_MS", "300"),
+        ("ZYNK_HANDOFF_WORKER_IDLE_MS", "500"),
+        ("ZYNK_EMBED_POLL_MS", "50"),
+    ]);
+    fs::create_dir_all(&base_hint).unwrap();
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let sent: Vec<serde_json::Value> = (0..3)
+        .map(|i| {
+            zynk_send(
+                &f.config_home,
+                &f.runtime_dir,
+                &f.api_socket,
+                &f.pane_id,
+                &format!("receipt {i}"),
+            )
+        })
+        .collect();
+    // Three real receipts: each API call times out (the worker is blocked), each job stays queued.
+    for message in &sent {
+        let response = request(&f.api_socket, receipt_request(message, &f.pane_id));
+        assert_eq!(
+            response["error"]["code"], "receipt_result_unknown",
+            "{response}"
+        );
+    }
+    let before_ino = socket_ino(&f.api_socket).expect("old API socket");
+    let started = Instant::now();
+    let response = spawn_handoff_request(&f.api_socket)
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a handoff with a receipt backlog must fail within the bounded deadline");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(response["error"]["code"], "handoff_failed", "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("busy"),
+        "{response}"
+    );
+    assert_eq!(
+        socket_ino(&f.api_socket),
+        Some(before_ino),
+        "service was withdrawn"
+    );
+    for message in &sent {
+        let id = message["message_id"].as_str().unwrap();
+        assert_eq!(
+            delivery_event_types(&f.db, id),
+            vec!["submitted"],
+            "no receipt may commit while blocked"
+        );
+    }
+    // Release: the backlog drains — every receipt commits exactly once — and the handoff succeeds.
+    fs::write(&block, b"go").unwrap();
+    for message in &sent {
+        let id = message["message_id"].as_str().unwrap().to_string();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while delivery_event_types(&f.db, &id) != vec!["submitted", "received"] {
+            assert!(Instant::now() < deadline, "receipt {id} never committed");
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+    let old_pid = f.spawned.child.process_id();
+    let response = spawn_handoff_request(&f.api_socket)
+        .recv_timeout(Duration::from_secs(30))
+        .expect("handoff response");
+    assert_ok(response);
+    register_replacement(&f.runtime_dir, old_pid);
+    drop(f.spawned);
+    wait_for_api(&f.api_socket, Duration::from_secs(10));
+    for message in &sent {
+        let id = message["message_id"].as_str().unwrap();
+        assert_eq!(
+            delivery_event_types(&f.db, id),
+            vec!["submitted", "received"],
+            "exactly once"
+        );
+    }
+    // The replacement serves a fresh receipt.
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let later = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "after handoff",
+    );
+    let receipt = request(&f.api_socket, receipt_request(&later, &f.pane_id));
+    assert!(receipt.get("error").is_none(), "receipt failed: {receipt}");
+
+    let _ = request(
+        &f.api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&f.base);
+    let _ = fs::remove_dir_all(&base_hint);
+}
+
+#[test]
 fn legacy_handoff_destination_eof_is_reported_with_the_restart_hint() {
     // Codex Gate-2 round 10 (P2): a replacement older than the handoff-version fence (zynk 3.0.x)
     // closes on a manifest it does not understand without answering. The sender must keep serving,
@@ -1984,8 +2095,9 @@ fn legacy_handoff_destination_eof_is_reported_with_the_restart_hint() {
     assert_eq!(response["error"]["code"], "handoff_failed", "{response}");
     let message = response["error"]["message"].as_str().unwrap_or("");
     assert!(
-        message.contains("closed") && message.contains("restart zynk normally"),
-        "transport cause and restart hint must both reach the requester: {response}"
+        message.contains("handoff stream closed while reading line")
+            && message.contains("restart zynk normally"),
+        "the original EOF cause and the restart hint must both reach the requester: {response}"
     );
     assert_eq!(
         socket_ino(&f.api_socket),

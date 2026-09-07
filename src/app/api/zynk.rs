@@ -8,7 +8,7 @@ use super::responses::{encode_error, encode_success};
 use crate::api::schema::{ResponseResult, ZynkMessageReceivedParams};
 use crate::app::App;
 use crate::zynk::receipt::ReceiptRequest;
-use crate::zynk::receipt_worker::DEFAULT_RECEIPT_TIMEOUT;
+use crate::zynk::receipt_worker::receipt_timeout;
 
 impl App {
     pub(crate) fn handle_zynk_message_received(
@@ -67,7 +67,7 @@ impl App {
             current_socket_namespace,
             current_runtime_id,
             now,
-            DEFAULT_RECEIPT_TIMEOUT,
+            receipt_timeout(),
         ) {
             Ok(accepted) => encode_success(
                 id,

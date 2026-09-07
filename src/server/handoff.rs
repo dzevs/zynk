@@ -173,18 +173,24 @@ pub(crate) fn accept_and_validate_on(
     let validated = match read_line_unbuffered(&mut stream) {
         Ok(line) => line,
         Err(err) => {
-            // EOF/reset while waiting for the verdict: a zynk older than the handoff-version fence
-            // closes on a manifest it does not understand without answering (an old replacement
-            // cannot log anything useful) — keep the transport cause, add the possible cause and
-            // the remedy, and log it durably on this side.
-            let err = io::Error::new(
+            // Failure while waiting for the verdict. An EOF/reset is what a zynk older than the
+            // handoff-version fence produces (it closes on a manifest it does not understand
+            // without answering, and cannot log anything useful) — keep the transport cause, add the
+            // possible cause and the remedy, and log it durably on this side. Other failures
+            // (timeout, invalid data) keep a neutral context.
+            let closed = matches!(
                 err.kind(),
-                format!(
-                    "{err} (the replacement closed before validating the manifest — possibly a \
-                     zynk older than 3.1.0, which cannot be a live-update peer: restart zynk \
-                     normally)"
-                ),
+                io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
             );
+            let context = if closed {
+                "the replacement closed before validating the manifest — possibly a zynk older \
+                 than 3.1.0, which cannot be a live-update peer: restart zynk normally"
+            } else {
+                "the replacement failed before validating the manifest"
+            };
+            let err = io::Error::new(err.kind(), format!("{err} ({context})"));
             error!(err = %err, "handoff replacement did not validate the manifest");
             return Err(err);
         }
