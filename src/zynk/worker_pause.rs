@@ -48,8 +48,9 @@ impl PauseControl {
         true
     }
 
-    /// Queue-consumer variant: block while paused; `false` = stopping (do not start the unit).
-    pub(crate) fn begin_work(&self) -> bool {
+    /// Queue-consumer variant: block while paused, then start the unit. A stopping owner releases
+    /// the wait (`stop`) so queued units DRAIN before the join instead of hanging.
+    pub(crate) fn begin_work(&self) {
         let mut state = self.lock();
         while state.paused && !state.stopping {
             state = self
@@ -57,11 +58,7 @@ impl PauseControl {
                 .wait(state)
                 .unwrap_or_else(PoisonError::into_inner);
         }
-        if state.stopping {
-            return false;
-        }
         state.idle = false;
-        true
     }
 
     pub(crate) fn end_work(&self) {
@@ -96,7 +93,8 @@ impl PauseControl {
         self.changed.notify_all();
     }
 
-    /// Owner is shutting the loop down: release any paused wait so the join is bounded.
+    /// Owner is shutting the loop down: release any paused wait so queued work drains and the join
+    /// is bounded (a poller starts no further units; a consumer runs what is already queued).
     pub(crate) fn stop(&self) {
         let mut state = self.lock();
         state.stopping = true;
@@ -126,7 +124,12 @@ mod tests {
         );
         control.end_work();
         assert!(control.pause(Duration::from_millis(50)));
+        assert!(control.pause(Duration::from_millis(10)));
         control.stop();
-        assert!(!control.begin_work(), "stopping releases a paused consumer");
+        control.begin_work(); // a paused consumer is released to drain, not blocked forever
+        assert!(
+            !control.try_begin_work(),
+            "a poller starts nothing once stopping"
+        );
     }
 }

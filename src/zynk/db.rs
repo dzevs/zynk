@@ -278,14 +278,19 @@ async fn open_migrated_at_with_hook(
     Ok(conn)
 }
 
-/// SQLite follows at most this many links in a final-component chain (`SQLITE_MAX_SYMLINKS`).
+/// SQLite follows at most this many links while resolving a path (`SQLITE_MAX_SYMLINK`).
 const MAX_SYMLINKS: usize = 100;
 
-/// The pathname SQLite opens and derives its sidecar names from (`unixFullPathname`): the path made
-/// absolute, with the FINAL component's symlink chain followed (a relative link target is joined
-/// with the link's directory; intermediate directory links are left alone, exactly like SQLite). An
-/// absent final target is returned as is — SQLite creates the database there. Windows' VFS does not
-/// follow links, so only the absolute form is taken there.
+/// The file SQLite opens and derives its sidecar names from. SQLite's `unixFullPathname`
+/// (`appendAllPathElements` in the bundled 3.46.0) walks EVERY component: it folds `.`/`..` and
+/// follows a symlink in any component, directories included. zynk resolves only the FINAL
+/// component's symlink chain (a relative target joined with the link's directory, bounded) on top
+/// of the absolute path, and adds no lexical normalization: a directory link maps a whole directory,
+/// so the main file, its `-journal`/`-wal`/`-shm` and the init lock already coincide through it, and
+/// the kernel applies the same resolution to the unresolved prefix on every open. Only a linked
+/// FINAL component moves the sidecars away from the configured name — that is what is resolved.
+/// An absent final target is returned as is (SQLite creates the database there). Windows' VFS does
+/// not follow links, so only the absolute form is taken there.
 fn sqlite_effective_path(path: &Path) -> Result<PathBuf, DbError> {
     let io = |what: &str, err: std::io::Error| {
         DbError::new(

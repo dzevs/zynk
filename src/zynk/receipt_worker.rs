@@ -166,7 +166,9 @@ fn worker_loop(
     receiver: Receiver<WorkerMessage>,
     control: std::sync::Arc<crate::zynk::worker_pause::PauseControl>,
 ) {
-    control.set_idle();
+    // Startup is WORK (Codex Gate-2 round 10): the loop reports idle only once its initial DB open
+    // completed or failed (a failed open is retried per job), so a live-handoff pause is never
+    // acknowledged while this worker still waits on the init lock or a busy database.
     // One current-thread runtime owns all DB work for this worker — safe because
     // this is a plain std::thread with no ambient Tokio runtime.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -175,6 +177,7 @@ fn worker_loop(
     {
         Ok(rt) => rt,
         Err(_) => {
+            control.set_idle();
             // Cannot build a runtime: drain and fail every job so callers don't hang.
             while let Ok(message) = receiver.recv() {
                 match message {
@@ -197,20 +200,16 @@ fn worker_loop(
     let mut conn = rt
         .block_on(crate::zynk::db::open_migrated_for_append())
         .ok();
+    control.set_idle();
 
     while let Ok(message) = receiver.recv() {
         match message {
             WorkerMessage::Shutdown => break,
             WorkerMessage::Job(job) => {
-                // Paused (live handoff): the job waits here, unstarted, until resume — or is
-                // refused when the handle is being dropped.
-                if !control.begin_work() {
-                    let _ = job.respond_to.send(Err(DbError::new(
-                        "receipt_worker_unavailable",
-                        "receipt worker is shutting down",
-                    )));
-                    break;
-                }
+                // Paused (live handoff): the job waits here, unstarted, until resume. A dropped
+                // handle releases the wait so queued jobs DRAIN before the join (drop policy:
+                // drain, never cancel — the submitter is still waiting for this answer).
+                control.begin_work();
                 if conn.is_none() {
                     conn = rt
                         .block_on(crate::zynk::db::open_migrated_for_append())
@@ -240,6 +239,146 @@ fn worker_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_home(tag: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "zynk-receipt-{tag}-{}-{}",
+            std::process::id(),
+            crate::zynk::message::new_prefixed_id("t")
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("ZYNK_SQLITE_HOME", &home);
+        home
+    }
+
+    #[test]
+    fn receipt_worker_startup_is_busy_until_its_db_open_completes() {
+        // Codex Gate-2 round 10 (P2): the startup DB open is work — a pause must not be acknowledged
+        // while the worker is still opening/migrating (here: waiting on a held init lock), or a
+        // "quiescent" drop would block on that startup. Once the lock is released the open completes,
+        // the worker idles, and the drop is prompt.
+        let home = temp_home("startup-busy");
+        let db = home.join("zynk.db");
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(home.join("zynk.db.init-lock"))
+            .unwrap();
+        holder.lock().unwrap();
+        let worker = spawn();
+        assert!(
+            !worker.pause(Duration::from_millis(300)),
+            "startup must count as busy while the DB open waits on the init lock"
+        );
+        holder.unlock().unwrap();
+        assert!(
+            worker.pause(Duration::from_secs(15)),
+            "idle once the open completed"
+        );
+        assert!(
+            db.exists(),
+            "the worker initialized its database after the lock was released"
+        );
+        let started = std::time::Instant::now();
+        drop(worker);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an idle worker joins promptly"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn receipt_worker_startup_error_path_reaches_idle() {
+        // Startup error path: a foreign database makes the initial open fail fast; the worker then
+        // idles (it will retry per job) and is pausable/droppable promptly.
+        let home = temp_home("startup-error");
+        let db = home.join("zynk.db");
+        crate::zynk::db::block_on(async {
+            use sqlx::{Connection, Executor};
+            let mut conn = sqlx::SqliteConnection::connect_with(
+                &sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&db)
+                    .create_if_missing(true),
+            )
+            .await?;
+            conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY)")
+                .await?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        let before = std::fs::read(&db).unwrap();
+        let worker = spawn();
+        assert!(
+            worker.pause(Duration::from_secs(10)),
+            "idle after the failed startup open"
+        );
+        let started = std::time::Instant::now();
+        drop(worker);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            before,
+            "the foreign database was touched"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn receipt_worker_drains_a_job_queued_while_paused_on_drop() {
+        // Drop policy: queued receipt jobs are DRAINED, not cancelled — a paused consumer is
+        // released to run them before the join. The (bogus) job below is processed by the DB path
+        // (any DB-level outcome), never answered with `receipt_worker_unavailable`, and the drop
+        // still returns promptly.
+        let home = temp_home("drain");
+        crate::zynk::db::block_on(crate::zynk::db::open_migrated_at_without_recovery(
+            &home.join("zynk.db"),
+        ))
+        .unwrap();
+        let worker = spawn();
+        assert!(worker.pause(Duration::from_secs(10)));
+        let sender = worker.sender.clone().expect("live sender");
+        let (respond_to, response) = std::sync::mpsc::sync_channel(1);
+        sender
+            .try_send(WorkerMessage::Job(Box::new(ReceiptJob {
+                request: dummy_request(),
+                receiver: dummy_receiver(),
+                current_socket_namespace: "s".into(),
+                current_runtime_id: "rt".into(),
+                now: "now".into(),
+                respond_to,
+            })))
+            .unwrap();
+        drop(sender);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            matches!(
+                response.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "a paused worker must not start the queued job"
+        );
+        let started = std::time::Instant::now();
+        drop(worker);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drain + join must be prompt"
+        );
+        let outcome = response
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the queued job was drained and answered");
+        let code = outcome
+            .map(|_| "ok".to_string())
+            .unwrap_or_else(|err| err.code.to_string());
+        assert_ne!(
+            code, "receipt_worker_unavailable",
+            "the job was cancelled, not drained"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn receipt_worker_pauses_when_idle_and_drops_promptly() {

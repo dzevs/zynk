@@ -849,6 +849,10 @@ impl HeadlessServer {
         // between units; past the deadline the handoff is rejected with this server untouched
         // (workers resumed, ownership retained).
         let idle_deadline = handoff_worker_idle_deadline();
+        info!(
+            deadline_ms = idle_deadline.as_millis() as u64,
+            "live handoff: pausing DB workers before withdrawing service"
+        );
         if !self.pause_db_workers_for_handoff(idle_deadline) {
             self.resume_db_workers();
             return Err(io::Error::other(format!(
@@ -1121,7 +1125,9 @@ impl HeadlessServer {
 
     /// Stop + join the App-owned DB workers before "committed". They are paused and idle by now
     /// (`pause_db_workers_for_handoff`), and public sockets are already down, so the joins are
-    /// immediate: no coupling with the replacement's 30 s "committed" wait.
+    /// immediate: no coupling with the replacement's 30 s "committed" wait. (A receipt job still
+    /// queued would DRAIN on drop — the handle releases the pause before joining — never be
+    /// cancelled.)
     #[cfg(unix)]
     fn quiesce_db_workers_for_handoff(&mut self) {
         let _ = self.app.zynk_receipt_worker.take();

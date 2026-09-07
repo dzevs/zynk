@@ -170,20 +170,40 @@ pub(crate) fn accept_and_validate_on(
     stream.flush()?;
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
-    let validated = read_line_unbuffered(&mut stream)?;
+    let validated = match read_line_unbuffered(&mut stream) {
+        Ok(line) => line,
+        Err(err) => {
+            // EOF/reset while waiting for the verdict: a zynk older than the handoff-version fence
+            // closes on a manifest it does not understand without answering (an old replacement
+            // cannot log anything useful) — keep the transport cause, add the possible cause and
+            // the remedy, and log it durably on this side.
+            let err = io::Error::new(
+                err.kind(),
+                format!(
+                    "{err} (the replacement closed before validating the manifest — possibly a \
+                     zynk older than 3.1.0, which cannot be a live-update peer: restart zynk \
+                     normally)"
+                ),
+            );
+            error!(err = %err, "handoff replacement did not validate the manifest");
+            return Err(err);
+        }
+    };
     let validated = validated.trim_end();
     if let Some(reason) = validated.strip_prefix(REJECTED_PREFIX) {
-        return Err(io::Error::other(format!(
+        let err = io::Error::other(format!(
             "handoff replacement server rejected the manifest: {reason}"
-        )));
+        ));
+        error!(err = %err, "handoff replacement did not validate the manifest");
+        return Err(err);
     }
     if validated != "validated" {
-        // A replacement that answers nothing intelligible is most likely a zynk older than the
-        // handoff-version fence (it closes on a version it does not know).
-        return Err(io::Error::other(
-            "handoff import did not validate manifest (a zynk older than 3.1.0 cannot be a \
-             live-update peer: restart zynk normally)",
-        ));
+        let err = io::Error::other(
+            "handoff import did not validate manifest (an unintelligible answer — possibly a zynk \
+             older than 3.1.0, which cannot be a live-update peer: restart zynk normally)",
+        );
+        error!(err = %err, "handoff replacement did not validate the manifest");
+        return Err(err);
     }
     let _ = std::fs::remove_file(socket_path);
     Ok(stream)
@@ -255,6 +275,13 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
     let manifest_line = read_line_unbuffered(&mut stream)?;
     let manifest: HandoffManifest =
         serde_json::from_str(&manifest_line).map_err(io::Error::other)?;
+    if std::env::var("ZYNK_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("close_before_validate") {
+        // Models a zynk older than the handoff-version fence: it closes on a manifest it does not
+        // understand without answering.
+        return Err(io::Error::other(
+            "test: legacy destination closes without validating",
+        ));
+    }
     if let Err(reason) = validate_manifest(&manifest) {
         // Log FIRST (this process has no stderr and the sender kills it as soon as it reads the
         // refusal), then tell the sender why — it rolls back and keeps serving.

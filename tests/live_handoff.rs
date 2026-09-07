@@ -1797,8 +1797,15 @@ fn db_workers_hand_over_a_blocked_job(commit_fails: bool) {
     let before_ino = socket_ino(&f.api_socket).expect("old API socket");
     let old_pid = f.spawned.child.process_id();
     let handoff = spawn_handoff_request(&f.api_socket);
-    // Blocked job: the handoff must neither complete nor withdraw service.
-    thread::sleep(Duration::from_millis(400));
+    // Phase acknowledgement: the request has entered the worker pause (durable log line), and the
+    // job is still held — the handoff must neither complete nor withdraw service.
+    let server_log = f.config_home.join("zynk-dev").join("zynk-server.log");
+    wait_for_file_contains(
+        &server_log,
+        "pausing DB workers before withdrawing service",
+        Duration::from_secs(10),
+    );
+    thread::sleep(Duration::from_millis(150));
     assert!(
         matches!(
             handoff.try_recv(),
@@ -1949,6 +1956,66 @@ fn busy_db_workers_reject_a_live_handoff_within_the_deadline() {
     );
     cleanup_test_base(&f.base);
     let _ = fs::remove_dir_all(&base_hint);
+}
+
+#[test]
+fn legacy_handoff_destination_eof_is_reported_with_the_restart_hint() {
+    // Codex Gate-2 round 10 (P2): a replacement older than the handoff-version fence (zynk 3.0.x)
+    // closes on a manifest it does not understand without answering. The sender must keep serving,
+    // and its requester + durable log must carry the transport cause AND the possible-incompatible-
+    // peer / restart hint (the old child cannot log anything useful).
+    let _lock = test_lock();
+    let f = handoff_fixture(&[("ZYNK_TEST_HANDOFF_IMPORT_FAIL", "close_before_validate")]);
+    report_agent(&f.api_socket, &f.pane_id, "codex");
+    let sent = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "before",
+    );
+    let message_id = sent["message_id"].as_str().unwrap().to_string();
+    wait_for_embedding_job(&f.db, &message_id, ("done", 1), Duration::from_secs(10));
+    let before_ino = socket_ino(&f.api_socket).expect("old API socket");
+
+    let response = spawn_handoff_request(&f.api_socket)
+        .recv_timeout(Duration::from_secs(30))
+        .expect("handoff response");
+    assert_eq!(response["error"]["code"], "handoff_failed", "{response}");
+    let message = response["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("closed") && message.contains("restart zynk normally"),
+        "transport cause and restart hint must both reach the requester: {response}"
+    );
+    assert_eq!(
+        socket_ino(&f.api_socket),
+        Some(before_ino),
+        "service was withdrawn"
+    );
+    wait_for_api(&f.api_socket, Duration::from_secs(5));
+    let server_log = f.config_home.join("zynk-dev").join("zynk-server.log");
+    let log = wait_for_file_contains(&server_log, "restart zynk normally", Duration::from_secs(5));
+    assert!(
+        log.contains("did not validate the manifest"),
+        "the sender must log the failed validation durably:\n{log}"
+    );
+    let later = zynk_send(
+        &f.config_home,
+        &f.runtime_dir,
+        &f.api_socket,
+        &f.pane_id,
+        "after",
+    );
+    let later_id = later["message_id"].as_str().unwrap().to_string();
+    wait_for_embedding_job(&f.db, &later_id, ("done", 1), Duration::from_secs(10));
+    let receipt = request(&f.api_socket, receipt_request(&sent, &f.pane_id));
+    assert!(receipt.get("error").is_none(), "receipt failed: {receipt}");
+
+    let _ = request(
+        &f.api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&f.base);
 }
 
 #[test]
