@@ -3672,21 +3672,21 @@ pub fn run_server() -> io::Result<()> {
     let loaded_config = config::Config::load();
     let runtime_session_id = crate::zynk::runtime::ensure_runtime_id_file()?;
     if let Err(err) = crate::zynk::db::block_on(crate::zynk::db::open_migrated()) {
-        // ADR 0008 (fail-closed): a FOREIGN database at the resolved native path is
-        // a safety-critical conflict. zynk must NEVER come up on foreign data — it
-        // could shadow/endanger legacy (wrapper-era) or unknown data. Abort startup
-        // with the branded error + a non-zero exit. The foreign bytes are left
-        // byte-identical (the open path classifies read-only and never mutates).
-        if err.code == "db_foreign_conflict" {
-            eprintln!("{}", err.message);
-            std::process::exit(1);
+        // Fail-closed startup (ADR 0008): a FOREIGN database at the resolved native path is a
+        // safety-critical conflict — zynk must NEVER come up on foreign data (the foreign bytes are
+        // left byte-identical: the open path classifies read-only, sidecar-safe, and never mutates).
+        // Every other startup DB failure (init-lock timeout, migration failure, I/O) is fatal too:
+        // a server that binds its API socket without working persistence would run degraded for the
+        // whole session, so abort with the branded error and a non-zero exit instead.
+        eprintln!("{}", err.message);
+        if err.code != "db_foreign_conflict" {
+            eprintln!(
+                "zynk: server startup aborted ({}): the database could not be opened or migrated; \
+                 run `zynk db status` to inspect it, then retry",
+                err.code
+            );
         }
-        // Other DB errors are non-fatal here (persistence may recover; send
-        // commands fail closed if it does not) — preserve existing behavior.
-        warn!(
-            error = %err,
-            "native zynk DB startup recovery skipped; send commands will fail closed if persistence remains unavailable"
-        );
+        std::process::exit(1);
     }
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
