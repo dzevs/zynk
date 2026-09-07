@@ -53,15 +53,21 @@ pub struct RelocateOutcome {
 /// …), so SQLite can open the backup in place; it is free only when NO entry of any kind exists at
 /// that name (a dangling symlink included). Reserving the slot is one atomic `mkdir`, which claims
 /// every member name at once — flat per-file renames could never reserve four names together
-/// (Gate-3 round 4, SENT-R4-CUTOVER-002).
-pub fn next_backup_path(path: &Path) -> PathBuf {
+/// (Gate-3 round 4, SENT-R4-CUTOVER-002). An inspection error is not "free": it fails closed.
+/// Production goes through [`relocate_bundle_with`]; this wrapper serves the tests.
+#[cfg(test)]
+fn next_backup_path(path: &Path) -> Result<PathBuf, String> {
+    next_backup_path_with(path, &BundleInspect::real())
+}
+
+fn next_backup_path_with(path: &Path, inspect: &BundleInspect<'_>) -> Result<PathBuf, String> {
     let base = path.as_os_str().to_owned();
     for n in 0..MAX_BACKUP_SLOTS {
         let mut candidate = base.clone();
         candidate.push(format!(".{BACKUP_SUFFIX}-{n}"));
         let candidate = PathBuf::from(candidate);
-        if !entry_exists(&candidate) {
-            return candidate;
+        if !inspect.present(&candidate)? {
+            return Ok(candidate);
         }
     }
     // Pathological fallback (10k existing backups): append a process-unique id.
@@ -70,7 +76,55 @@ pub fn next_backup_path(path: &Path) -> PathBuf {
         ".{BACKUP_SUFFIX}-{}",
         crate::zynk::message::new_prefixed_id("n")
     ));
-    PathBuf::from(candidate)
+    Ok(PathBuf::from(candidate))
+}
+
+/// The two inspections a relocation decides on, injectable so tests can model I/O failures the
+/// build machine cannot produce (Codex Gate-2 R20: an EIO on a member's metadata must never read
+/// as "absent", and a slot that cannot be listed completely must never read as "clean").
+struct BundleInspect<'a> {
+    /// Does a directory entry of any kind exist at the path? `Err` for anything but NotFound.
+    entry: &'a dyn Fn(&Path) -> std::io::Result<bool>,
+    /// Every entry of the directory; `Err` when the listing or any entry cannot be read.
+    list: &'a dyn Fn(&Path) -> std::io::Result<Vec<PathBuf>>,
+}
+
+impl BundleInspect<'static> {
+    fn real() -> Self {
+        Self {
+            entry: &entry_present,
+            list: &list_dir,
+        }
+    }
+}
+
+impl BundleInspect<'_> {
+    fn present(&self, path: &Path) -> Result<bool, String> {
+        (self.entry)(path).map_err(|err| {
+            format!(
+                "zynk: cannot inspect {}: {err}; nothing was relocated",
+                printable_path(path)
+            )
+        })
+    }
+}
+
+/// Only NotFound means absent; a dangling symlink is present; any other error is the caller's to
+/// fail closed on (`exists` follows links and swallows errors — never on a decision path).
+fn entry_present(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn list_dir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        entries.push(entry?.path());
+    }
+    Ok(entries)
 }
 
 /// Move the SQLite bundle at `path` (main file + every existing `-journal`/`-wal`/`-shm`) aside to
@@ -89,8 +143,9 @@ pub fn relocate_aside(path: &Path) -> Result<RelocateOutcome, String> {
     })
 }
 
-/// Does a directory entry exist at `path` in ANY form (a dangling symlink included)? `Path::exists`
-/// follows symlinks, so a dangling destination read as free while POSIX rename would replace it.
+/// Test-only convenience: does a directory entry of any kind exist at `path`? Production decision
+/// paths use [`entry_present`], which fails closed on inspection errors.
+#[cfg(test)]
 fn entry_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
@@ -234,7 +289,15 @@ fn relocate_bundle(
     path: &Path,
     mover: &mut dyn FnMut(&Path, &Path) -> Result<(), String>,
 ) -> Result<RelocateOutcome, String> {
-    let slot = next_backup_path(path);
+    relocate_bundle_with(path, mover, &BundleInspect::real())
+}
+
+fn relocate_bundle_with(
+    path: &Path,
+    mover: &mut dyn FnMut(&Path, &Path) -> Result<(), String>,
+    inspect: &BundleInspect<'_>,
+) -> Result<RelocateOutcome, String> {
+    let slot = next_backup_path_with(path, inspect)?;
     let Some(file_name) = path.file_name() else {
         return Err(format!(
             "zynk: cannot relocate {}: not a file path",
@@ -253,11 +316,11 @@ fn relocate_bundle(
     let mut plan: Vec<(PathBuf, PathBuf, &'static str)> = Vec::new();
     for suffix in BUNDLE_SUFFIXES {
         let member = sidecar(path, suffix);
-        if entry_exists(&member) {
+        if inspect.present(&member)? {
             plan.push((member, slot.join(member_name(suffix)), suffix));
         }
     }
-    if entry_exists(path) {
+    if inspect.present(path)? {
         plan.push((path.to_path_buf(), slot.join(member_name("")), ""));
     }
     if plan.is_empty() {
@@ -288,14 +351,20 @@ fn relocate_bundle(
         moved.push((from.clone(), to.clone()));
     }
     // The slot must hold exactly the members that were moved: an entry someone else created
-    // inside it means the backup is not this bundle — refuse and roll back.
+    // inside it means the backup is not this bundle — refuse and roll back. A slot that cannot be
+    // listed completely is not known to be clean: that is a failure too, never "clean".
     if failure.is_none() {
-        if let Some(unexpected) = unexpected_slot_entry(&slot, &moved) {
-            failure = Some(format!(
+        failure = match unexpected_slot_entry(&slot, &moved, inspect) {
+            Ok(None) => None,
+            Ok(Some(unexpected)) => Some(format!(
                 "an entry that is not a bundle member appeared in the backup slot: {}",
                 printable_path(&unexpected)
-            ));
-        }
+            )),
+            Err(err) => Some(format!(
+                "the backup slot {} could not be verified after the move ({err})",
+                printable_path(&slot)
+            )),
+        };
     }
     let Some(failure) = failure else {
         return Ok(RelocateOutcome {
@@ -338,16 +407,16 @@ fn create_private_dir(slot: &Path) -> std::io::Result<()> {
     builder.create(slot)
 }
 
-/// An entry in the slot that is not one of the members just moved there.
-fn unexpected_slot_entry(slot: &Path, moved: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(slot).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !moved.iter().any(|(_, to)| *to == path) {
-            return Some(path);
-        }
-    }
-    None
+/// An entry in the slot that is not one of the members just moved there; `Err` when the slot
+/// cannot be listed completely (the caller treats that as a failure, never as clean).
+fn unexpected_slot_entry(
+    slot: &Path,
+    moved: &[(PathBuf, PathBuf)],
+    inspect: &BundleInspect<'_>,
+) -> std::io::Result<Option<PathBuf>> {
+    Ok((inspect.list)(slot)?
+        .into_iter()
+        .find(|path| !moved.iter().any(|(_, to)| to == path)))
 }
 
 fn sidecar(path: &Path, ext: &str) -> PathBuf {
@@ -713,12 +782,12 @@ mod tests {
         let dir = tmp_home("backup-name");
         let db = dir.join("zynk.db");
         std::fs::write(&db, b"x").unwrap();
-        let first = next_backup_path(&db);
+        let first = next_backup_path(&db).unwrap();
         assert_eq!(first, db.with_file_name("zynk.db.wrapper-backup-0"));
         // Once slot 0 exists, the next call picks slot 1.
         std::fs::write(&first, b"y").unwrap();
         assert_eq!(
-            next_backup_path(&db),
+            next_backup_path(&db).unwrap(),
             db.with_file_name("zynk.db.wrapper-backup-1")
         );
         std::fs::remove_dir_all(dir).ok();
@@ -1333,7 +1402,7 @@ mod tests {
         let db = dir.join("zynk.db");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&db, b"MAIN ONLY").unwrap();
-        let slot = next_backup_path(&db);
+        let slot = next_backup_path(&db).unwrap();
         let mut mover = |from: &Path, to: &Path| -> Result<(), String> {
             // The competitor lands inside the reserved slot right before the main move.
             std::fs::write(
@@ -1397,6 +1466,87 @@ mod tests {
             "the original WAL stays under the slot"
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn io_err(kind: std::io::ErrorKind, what: &str) -> std::io::Error {
+        std::io::Error::new(kind, what.to_string())
+    }
+
+    #[test]
+    fn a_member_whose_metadata_cannot_be_read_refuses_the_relocation() {
+        // Codex Gate-2 R20 on a3a71bc: EIO on the source `-wal` metadata read as "absent", so adopt
+        // moved main + shm, left the data-bearing WAL behind and exited 0. Only NotFound is absent.
+        let dir = tmp_home("adopt-metadata-eio");
+        let db = dir.join("zynk.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        plant_foreign_wal_pair(&db);
+        let wal = bundle_member(&db, "-wal");
+        let failing_entry = |path: &Path| -> std::io::Result<bool> {
+            if path == wal {
+                Err(io_err(std::io::ErrorKind::Other, "input/output error"))
+            } else {
+                entry_present(path)
+            }
+        };
+        let inspect = BundleInspect {
+            entry: &failing_entry,
+            list: &list_dir,
+        };
+        let mut mover =
+            |from: &Path, to: &Path| move_no_replace(from, to).map_err(|e| e.to_string());
+        let err = relocate_bundle_with(&db, &mut mover, &inspect).unwrap_err();
+        assert!(
+            err.contains("cannot inspect") && err.contains("input/output error"),
+            "{err}"
+        );
+        assert!(db.exists() && wal.exists(), "nothing may move");
+        assert!(!entry_exists(
+            &db.with_file_name("zynk.db.wrapper-backup-0")
+        ));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_slot_that_cannot_be_listed_is_not_clean() {
+        // Codex Gate-2 R20 on a3a71bc: an unexpected WAL in the reserved slot plus opendir EACCES
+        // (or readdir EIO) was swallowed by `.ok()`/`flatten`, and adopt exited 0 with a mixed
+        // backup. A listing that fails is a verification failure: rollback + error.
+        for (label, failure) in [
+            ("opendir", std::io::ErrorKind::PermissionDenied),
+            ("readdir", std::io::ErrorKind::Other),
+        ] {
+            let dir = tmp_home(&format!("adopt-slot-list-{label}"));
+            let db = dir.join("zynk.db");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(&db, b"MAIN ONLY").unwrap();
+            let slot = next_backup_path(&db).unwrap();
+            let failing_list = |_path: &Path| -> std::io::Result<Vec<PathBuf>> {
+                Err(io_err(failure, "cannot list the slot"))
+            };
+            let inspect = BundleInspect {
+                entry: &entry_present,
+                list: &failing_list,
+            };
+            let mut mover = |from: &Path, to: &Path| -> Result<(), String> {
+                std::fs::write(slot.join("zynk.db-wal"), b"FOREIGN WAL").unwrap();
+                move_no_replace(from, to).map_err(|e| e.to_string())
+            };
+            let err = relocate_bundle_with(&db, &mut mover, &inspect).unwrap_err();
+            assert!(
+                err.contains("could not be verified") && err.contains("nothing was relocated"),
+                "{label}: {err}"
+            );
+            assert_eq!(
+                std::fs::read(&db).unwrap(),
+                b"MAIN ONLY",
+                "{label}: the source is back"
+            );
+            assert!(
+                !entry_exists(&slot.join("zynk.db")),
+                "{label}: no main left in the slot"
+            );
+            std::fs::remove_dir_all(dir).ok();
+        }
     }
 
     #[test]

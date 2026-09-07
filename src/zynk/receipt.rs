@@ -124,6 +124,33 @@ pub async fn append_received_event(
     }
 }
 
+/// Does the receiver's live hook session equal a stored session triple? Every stored component
+/// must match (an absent stored source/kind constrains nothing); the value must always match.
+fn receiver_matches_session(
+    receiver: &AuthoritativeReceiver,
+    stored_source: &Option<String>,
+    stored_kind: &Option<String>,
+    stored_value: &str,
+) -> bool {
+    let live = |key: &str| {
+        receiver
+            .agent_session
+            .as_ref()
+            .and_then(|session| session.get(key))
+            .and_then(|component| component.as_str())
+    };
+    let component_matches = |stored: &Option<String>, key: &str| match stored
+        .as_deref()
+        .filter(|component| !component.is_empty())
+    {
+        Some(stored) => live(key) == Some(stored),
+        None => true,
+    };
+    live("value") == Some(stored_value)
+        && component_matches(stored_source, "source")
+        && component_matches(stored_kind, "kind")
+}
+
 async fn append_received_event_in_tx(
     conn: &mut SqliteConnection,
     request: &ReceiptRequest,
@@ -137,6 +164,11 @@ async fn append_received_event_in_tx(
                 m.runtime_session_id AS runtime_session_id, \
                 m.socket_namespace AS socket_namespace, \
                 fp.pane_id AS from_pane_id, \
+                fp.agent_label AS from_agent_label, \
+                fp.terminal_id AS from_terminal_id, \
+                fp.agent_session_source AS from_session_source, \
+                fp.agent_session_kind AS from_session_kind, \
+                fp.agent_session_value AS from_session_value, \
                 m.from_participant_id AS from_participant_id, \
                 m.to_participant_id AS to_participant_id, \
                 tp.agent_label AS to_agent_label, \
@@ -165,6 +197,11 @@ async fn append_received_event_in_tx(
     let stored_runtime = row.try_get::<String, _>("runtime_session_id")?;
     let stored_socket = row.try_get::<String, _>("socket_namespace")?;
     let from_pane_id = row.try_get::<Option<String>, _>("from_pane_id")?;
+    let from_agent_label = row.try_get::<String, _>("from_agent_label")?;
+    let from_terminal_id = row.try_get::<Option<String>, _>("from_terminal_id")?;
+    let from_session_source = row.try_get::<Option<String>, _>("from_session_source")?;
+    let from_session_kind = row.try_get::<Option<String>, _>("from_session_kind")?;
+    let from_session_value = row.try_get::<Option<String>, _>("from_session_value")?;
     let from_participant_id = row.try_get::<String, _>("from_participant_id")?;
     let to_participant_id = row.try_get::<String, _>("to_participant_id")?;
     let to_agent_label = row.try_get::<String, _>("to_agent_label")?;
@@ -221,24 +258,12 @@ async fn append_received_event_in_tx(
         Some(stored_value) => {
             // The stored identity is the full session triple (source, kind, value) — the same
             // components the participant key hashes — never the value alone.
-            let live = |key: &str| {
-                receiver
-                    .agent_session
-                    .as_ref()
-                    .and_then(|session| session.get(key))
-                    .and_then(|component| component.as_str())
-            };
-            let component_matches = |stored: &Option<String>, key: &str| match stored
-                .as_deref()
-                .filter(|component| !component.is_empty())
-            {
-                Some(stored) => live(key) == Some(stored),
-                None => true,
-            };
-            if live("value") != Some(stored_value)
-                || !component_matches(&to_session_source, "source")
-                || !component_matches(&to_session_kind, "kind")
-            {
+            if !receiver_matches_session(
+                receiver,
+                &to_session_source,
+                &to_session_kind,
+                stored_value,
+            ) {
                 return Err(DbError::new(
                     "receiver_identity_mismatch",
                     "receiver agent session (source, kind, value) is not the session the message \
@@ -260,21 +285,31 @@ async fn append_received_event_in_tx(
             }
         }
     }
-    // Self-receipt is decided by DURABLE identity: a message whose sender and addressee are the
-    // same participant (label + terminal + session — the participant key never includes the pane
-    // id, which rotates and whose stored snapshot is the first one seen) can never be receipted by
-    // that participant, from any pane. The pane comparison below is only a secondary check for
-    // rows without durable identity (Gate-3 round 4, ARCH-RECEIPT-SELF-001).
-    if from_participant_id == to_participant_id {
+    // Self-receipt is decided by the SAME session-first logical identity as the target binding
+    // (Gate-3 round 4, ARCH-RECEIPT-SELF-001; Codex Gate-2 R20): the sender's stored label plus its
+    // hook session triple when it carried a session, else its terminal, else — for rows with no
+    // durable anchor at all — its stored pane id. Row identity alone is too narrow (the same
+    // session across a restore lives in two participant rows) and the stored pane id alone is both
+    // too narrow (pane ids rotate) and too wide (another participant may later resume at that
+    // pane). The pane id is otherwise audit metadata.
+    let receiver_is_sender = from_participant_id == to_participant_id
+        || (from_agent_label == receiver.agent_label
+            && match from_session_value.as_deref().filter(|v| !v.is_empty()) {
+                Some(stored) => receiver_matches_session(
+                    receiver,
+                    &from_session_source,
+                    &from_session_kind,
+                    stored,
+                ),
+                None => match from_terminal_id.as_deref().filter(|t| !t.is_empty()) {
+                    Some(stored) => receiver.terminal_id == stored,
+                    None => from_pane_id.as_deref() == Some(receiver.pane_id.as_str()),
+                },
+            });
+    if receiver_is_sender {
         return Err(DbError::new(
             "self_receipt_rejected",
             "the sender is the addressee of its own message and cannot report its receipt",
-        ));
-    }
-    if from_pane_id.as_deref() == Some(receiver.pane_id.as_str()) {
-        return Err(DbError::new(
-            "self_receipt_rejected",
-            "the sending pane cannot report receipt of its own message",
         ));
     }
 
@@ -1053,6 +1088,70 @@ mod tests {
             .await
             .unwrap_err();
             assert_eq!(err.code, "self_receipt_rejected");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_same_session_across_terminal_rows_cannot_receipt_its_own_message() {
+        // Codex Gate-2 R20 (item 3): sender and addressee with the SAME label and coherent hook
+        // session but different terminal ids (a restore in between) are different participant
+        // rows; self-receipt is decided by the session-first logical identity, not row equality.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let before = party_on("codex", "w-1", "term-1", Some("sess-1"));
+            let after = party_on("codex", "w-2", "term-2", Some("sess-1"));
+            let rec = setup_submitted_between(&mut conn, &before, &after, "msg_self_rows").await;
+            let err = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_self_rows"),
+                &receiver_on("codex", "w-9", "term-2", Some("sess-1")),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "self_receipt_rejected");
+            assert_eq!(
+                latest_event(&mut conn, "msg_self_rows").await.0,
+                "submitted"
+            );
+            let seq: i64 = sqlx::query("SELECT delivery_seq FROM messages WHERE id = ?")
+                .bind("msg_self_rows")
+                .fetch_one(&mut conn)
+                .await?
+                .try_get("delivery_seq")?;
+            assert_eq!(seq, 1);
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_distinct_participant_resuming_at_the_senders_old_pane_is_accepted() {
+        // Codex Gate-2 R20 (item 4): the stored sender pane id is not a veto for anchored senders.
+        // Claude (session a) sent from pane w-1; Codex (session b) later resumes at w-1 with a new
+        // terminal — a valid receipt by the addressee, not a self-receipt.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let sender = party_on("claude", "w-1", "term-1", Some("sess-a"));
+            let target = party_on("codex", "w-2", "term-2", Some("sess-b"));
+            let rec = setup_submitted_between(&mut conn, &sender, &target, "msg_old_pane").await;
+            let accepted = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_old_pane"),
+                &receiver_on("codex", "w-1", "term-9", Some("sess-b")),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await?;
+            assert!(matches!(accepted.status, ReceiptStatus::Received));
+            assert_eq!(latest_event(&mut conn, "msg_old_pane").await.0, "received");
             let _ = std::fs::remove_file(path);
             Ok(())
         });
