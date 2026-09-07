@@ -36,7 +36,10 @@ config key is removed (see **Changed**).
 - Startup: two zynk processes opening a fresh shared database at the same time (for example two named-session
   servers) no longer make the second one fail closed with a false "foreign database" error — first-time
   initialization is serialized across processes, and a database that holds only an empty migration ledger is
-  treated as new. Databases holding any foreign tables still fail closed and are never modified.
+  treated as new. A database is recognized as zynk's own by its recorded migration lineage (versions and
+  checksums), never by table names alone; any other non-empty database — whatever its objects are named — fails
+  closed and is left byte-for-byte unmodified. A server that cannot initialize or migrate its database now exits
+  with the error instead of starting without persistence.
 - Sessions: OMP resumes in the same pane after a restart with root-only hook state; lifecycle hook generations
   re-anchor; root-agent restore ownership is protected; Pi/OMP agents are released on shutdown.
 - Plugins: workspace/tab/pane lifecycle events also fire for panes created from the UI.
@@ -55,9 +58,10 @@ config key is removed (see **Changed**).
 
 - A **Windows** `cargo install zynk` (crates.io source) build links the registry `portable-pty` and therefore
   lacks only the ConPTY patch — Cargo strips `[patch.crates-io]` and excludes the nested vendored source.
-  Linux/macOS source builds are unaffected; Git-source builds and the 3.1.0 release binaries, Homebrew formula,
-  and Nix package ship the patched copy. Prefer `cargo install zynk --version 3.1.0 --locked` (without `--locked` Cargo
-  ignores the packaged lockfile).
+  Linux/macOS source builds are unaffected; Git-source builds ship the patched copy, and so will the 3.1.0
+  release binaries, Homebrew formula, and Nix package once each channel is published for 3.1.0 (until then the
+  published channels are still 3.0.x). When 3.1.0 is on crates.io, prefer `cargo install zynk --version 3.1.0 --locked`
+  (without `--locked` Cargo ignores the packaged lockfile).
 - Refresh installed integrations (`zynk integration install …`) after upgrading to receive the hook changes.
 - Contributors: Zynk is now one canonical public repo with public design docs (`docs/zynk/`) and
   contributor/tooling guides; private content is kept out by fail-closed gates.
