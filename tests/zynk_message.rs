@@ -388,6 +388,20 @@ fn delete_delivery_events(fixture: &Fixture, message_id: &str) {
     });
 }
 
+/// Age a message past the orphan-recovery grace window: a message with no delivery event is IN
+/// FLIGHT until it is older than `ORPHAN_GRACE` (a live sender persists before its first transport
+/// event), so a recoverable orphan is one whose sender died long ago.
+fn age_message_beyond_grace(fixture: &Fixture, message_id: &str) {
+    sqlite_runtime().block_on(async {
+        let mut conn = open_test_db(fixture).await;
+        sqlx::query("UPDATE messages SET created_at = '2020-01-01T00:00:00Z' WHERE id = ?")
+            .bind(message_id)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+    });
+}
+
 fn latest_event(fixture: &Fixture, message_id: &str) -> (String, String, String) {
     sqlite_runtime().block_on(async {
         let mut conn = open_test_db(fixture).await;
@@ -741,6 +755,7 @@ fn orphaned_message_without_event_recovers_as_failed_system_recovery() {
         .expect("message_id")
         .to_string();
     delete_delivery_events(&fixture, &orphan_id);
+    age_message_beyond_grace(&fixture, &orphan_id);
 
     if let Some(server) = fixture.server.take() {
         drop(server);

@@ -1024,14 +1024,48 @@ pub fn printable_path(path: &Path) -> String {
     printable_name(path.display().to_string().as_bytes())
 }
 
-/// A schema name for terminals and logs: valid UTF-8 with every control character (LF, ESC, C1)
-/// escaped so a hostile name cannot inject terminal or log control sequences; other bytes as hex.
+/// Characters that must never reach a terminal or log raw: the C0/C1 controls (`char::is_control`)
+/// plus the Unicode format, bidi and invisible characters and the line/paragraph separators, which
+/// can reorder, hide or split displayed text (Gate-3 round 3: a U+202E table name printed raw).
+/// The list is the Unicode `Cf` category plus `Zl`/`Zp`, spelled out because `std` has no category
+/// query; escaped with `escape_default` (`\u{202e}`).
+pub fn is_terminal_hostile(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            u32::from(c),
+            0x00AD
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x2028..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x206F
+                | 0xFEFF
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        )
+}
+
+/// A schema name for terminals and logs: valid UTF-8 with every terminal-hostile character (LF,
+/// ESC, C1, Unicode format/bidi controls) escaped so a hostile name cannot inject or reorder
+/// terminal or log text; other bytes as hex.
 fn printable_name(name: &[u8]) -> String {
     match std::str::from_utf8(name) {
         Ok(name) => name
             .chars()
             .map(|c| {
-                if c.is_control() {
+                if is_terminal_hostile(c) {
                     c.escape_default().to_string()
                 } else {
                     c.to_string()
@@ -1172,10 +1206,33 @@ async fn apply_pragmas(conn: &mut SqliteConnection) -> Result<(), DbError> {
     Ok(())
 }
 
+/// A message without any delivery event younger than this is treated as IN FLIGHT, never as an
+/// orphan: a sender persists its message before its first transport event, and with concurrent
+/// named-session servers sharing the global database a starting server must not fail a live peer's
+/// fresh send (Gate-3 round 3). A crashed sender's message becomes recoverable once it is this old.
+pub const ORPHAN_GRACE: Duration = Duration::from_secs(300);
+
 pub async fn recover_orphan_messages(conn: &mut SqliteConnection) -> Result<(), DbError> {
+    recover_orphan_messages_older_than(conn, ORPHAN_GRACE).await
+}
+
+/// Fail every message with no delivery event whose `created_at` is older than `grace`.
+pub async fn recover_orphan_messages_older_than(
+    conn: &mut SqliteConnection,
+    grace: Duration,
+) -> Result<(), DbError> {
+    let cutoff = crate::zynk::message::rfc3339_utc(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            - grace.as_secs() as i64,
+    );
     let orphan_ids: Vec<String> = sqlx::query(
-        "SELECT id FROM messages WHERE NOT EXISTS (SELECT 1 FROM delivery_events WHERE delivery_events.message_id = messages.id)",
+        "SELECT id FROM messages WHERE created_at < ? AND NOT EXISTS \
+         (SELECT 1 FROM delivery_events WHERE delivery_events.message_id = messages.id)",
     )
+    .bind(&cutoff)
     .fetch_all(&mut *conn)
     .await?
     .into_iter()
@@ -2936,6 +2993,31 @@ mod tests {
             before,
             "main DB bytes changed"
         );
+    }
+
+    #[test]
+    fn terminal_hostile_characters_cover_format_and_bidi_controls() {
+        // Gate-3 round 3 (SENT-R3-DB-001): Cc is not enough — Unicode format/bidi/invisible
+        // characters and the line/paragraph separators can reorder or hide terminal text.
+        for c in [
+            '\u{1b}',
+            '\n',
+            '\u{7f}',
+            '\u{85}',
+            '\u{202e}',
+            '\u{200b}',
+            '\u{2066}',
+            '\u{feff}',
+            '\u{2028}',
+            '\u{00ad}',
+            '\u{e0041}',
+        ] {
+            assert!(is_terminal_hostile(c), "{c:?} must be escaped");
+        }
+        for c in ['a', 'é', '中', '🦀', ' ', '\u{00a0}'] {
+            assert!(!is_terminal_hostile(c), "{c:?} must print as is");
+        }
+        assert_eq!(printable_name("a\u{202e}b".as_bytes()), "a\\u{202e}b");
     }
 
     #[test]

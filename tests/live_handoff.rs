@@ -1497,15 +1497,25 @@ fn zynk_send(
     outcome
 }
 
-/// Hook-authoritative agent identity for `pane_id` (what the agent hooks report), so the pane is
-/// receipt-capable.
+/// Hook-authoritative agent identity for `pane_id` the way a shipped (non-native) integration
+/// reports it: the official `zynk:<agent>` source WITH the agent's session id, which grants hook
+/// authority and the session ref in one report. The session is the durable receipt anchor — it
+/// survives the live handoff (terminal ids do not: the replacement allocates new ones). A generic
+/// `hook` source cannot carry a session id, and a reserved-native label (claude/codex) gets its
+/// authority from the server's native path, so the tests report as `pi`.
 fn report_agent(api_socket: &Path, pane_id: &str, label: &str) {
     assert_ok(request(
         api_socket,
         serde_json::json!({
             "id": "test:report-agent",
             "method": "pane.report_agent",
-            "params": {"pane_id": pane_id, "source": "hook", "agent": label, "state": "idle"}
+            "params": {
+                "pane_id": pane_id,
+                "source": format!("zynk:{label}"),
+                "agent": label,
+                "state": "idle",
+                "agent_session_id": format!("sess-{pane_id}")
+            }
         }),
     ));
 }
@@ -1700,7 +1710,7 @@ fn in_flight_send_is_not_failed_by_a_handoff(rollback: bool) {
         &[]
     };
     let f = handoff_fixture(env);
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let sent = zynk_send(
         &f.config_home,
         &f.runtime_dir,
@@ -1734,7 +1744,7 @@ fn in_flight_send_is_not_failed_by_a_handoff(rollback: bool) {
     );
     // A later send on the same server still works end to end (the sender records `submitted`);
     // the receiver's hook re-reports its identity as agent hooks do on every event.
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let later = zynk_send(
         &f.config_home,
         &f.runtime_dir,
@@ -1783,7 +1793,7 @@ fn db_workers_hand_over_a_blocked_job(commit_fails: bool) {
     }
     let f = handoff_fixture(&env);
     fs::create_dir_all(&base_hint).unwrap();
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let sent = zynk_send(
         &f.config_home,
         &f.runtime_dir,
@@ -1847,7 +1857,7 @@ fn db_workers_hand_over_a_blocked_job(commit_fails: bool) {
     );
 
     // The serving server (replacement, or the restored old one) owns a working receipt worker ...
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let receipt = request(&f.api_socket, receipt_request(&sent, &f.pane_id));
     assert!(receipt.get("error").is_none(), "receipt failed: {receipt}");
     assert_eq!(
@@ -1894,7 +1904,7 @@ fn busy_db_workers_reject_a_live_handoff_within_the_deadline() {
         ("ZYNK_HANDOFF_WORKER_IDLE_MS", "500"),
     ]);
     fs::create_dir_all(&base_hint).unwrap();
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let sent = zynk_send(
         &f.config_home,
         &f.runtime_dir,
@@ -1942,7 +1952,7 @@ fn busy_db_workers_reject_a_live_handoff_within_the_deadline() {
     register_replacement(&f.runtime_dir, old_pid);
     drop(f.spawned);
     wait_for_api(&f.api_socket, Duration::from_secs(10));
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let receipt = request(&f.api_socket, receipt_request(&sent, &f.pane_id));
     assert!(receipt.get("error").is_none(), "receipt failed: {receipt}");
     assert_eq!(
@@ -1976,7 +1986,7 @@ fn receipt_backlog_rejects_a_live_handoff_then_drains_and_hands_over() {
         ("ZYNK_EMBED_POLL_MS", "50"),
     ]);
     fs::create_dir_all(&base_hint).unwrap();
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let sent: Vec<serde_json::Value> = (0..3)
         .map(|i| {
             zynk_send(
@@ -2050,7 +2060,7 @@ fn receipt_backlog_rejects_a_live_handoff_then_drains_and_hands_over() {
         );
     }
     // The replacement serves a fresh receipt.
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let later = zynk_send(
         &f.config_home,
         &f.runtime_dir,
@@ -2077,7 +2087,7 @@ fn legacy_handoff_destination_eof_is_reported_with_the_restart_hint() {
     // peer / restart hint (the old child cannot log anything useful).
     let _lock = test_lock();
     let f = handoff_fixture(&[("ZYNK_TEST_HANDOFF_IMPORT_FAIL", "close_before_validate")]);
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let sent = zynk_send(
         &f.config_home,
         &f.runtime_dir,
@@ -2138,7 +2148,7 @@ fn legacy_handoff_sender_is_rejected_before_service_moves() {
     // its sockets and workers untouched, and the reason is in the durable server log.
     let _lock = test_lock();
     let f = handoff_fixture(&[("ZYNK_TEST_HANDOFF_MANIFEST_VERSION", "1")]);
-    report_agent(&f.api_socket, &f.pane_id, "codex");
+    report_agent(&f.api_socket, &f.pane_id, "pi");
     let sent = zynk_send(
         &f.config_home,
         &f.runtime_dir,

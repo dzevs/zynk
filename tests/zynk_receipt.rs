@@ -393,6 +393,40 @@ fn receipt_request(sent: &Value, receiver_pane: &str) -> String {
 }
 
 #[test]
+fn receipt_from_a_same_label_pane_that_is_not_the_target_is_rejected() {
+    // Gate-3 round 3 (AUD-310-RECEIPT-001): a receipt binds to the STORED target participant, not to
+    // an agent label. Two hook-authoritative panes both labeled "pi", each reporting its own agent
+    // session the way the shipped integration does: the message is sent to pane 1 (its session is
+    // the stored target); pane 2's receipt must be rejected and pane 1's accepted.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let target = create_root_pane(&fixture.socket_path, "receipt-target");
+    let impostor = create_root_pane(&fixture.socket_path, "receipt-impostor");
+    report_pi_agent_session(&fixture.socket_path, &target, "pi-session-1");
+    report_pi_agent_session(&fixture.socket_path, &impostor, "pi-session-2");
+    let out = run_cli(&fixture, None, &["send", &target, "--", "bound to pane 1"]);
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send must succeed: {}", out.stderr);
+    assert_eq!(sent["delivery_status"], "submitted", "{sent}");
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let wrong = send_json(&fixture.socket_path, &receipt_request(&sent, &impostor));
+    assert_eq!(
+        wrong["error"]["code"], "receiver_identity_mismatch",
+        "a same-label pane that is not the stored target must not receipt: {wrong}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
+
+    let right = send_json(&fixture.socket_path, &receipt_request(&sent, &target));
+    assert!(
+        right.get("error").is_none(),
+        "the target pane's receipt failed: {right}"
+    );
+    assert_eq!(right["result"]["delivery_status"], "received", "{right}");
+    assert_eq!(latest_event(&fixture, &message_id).0, "received");
+}
+
+#[test]
 fn receipt_records_received_via_raw_socket() {
     let _guard = test_lock();
     let fixture = spawn_fixture();

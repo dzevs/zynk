@@ -857,6 +857,57 @@ mod tests {
         .await
     }
 
+    async fn event_types(
+        conn: &mut SqliteConnection,
+        message_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows =
+            sqlx::query("SELECT event_type FROM delivery_events WHERE message_id = ? ORDER BY seq")
+                .bind(message_id)
+                .fetch_all(conn)
+                .await?;
+        Ok(rows
+            .iter()
+            .map(|row| row.get::<String, _>("event_type"))
+            .collect())
+    }
+
+    #[test]
+    fn orphan_recovery_spares_messages_inside_the_grace_window() {
+        // Gate-3 round 3: a message with no delivery event is IN FLIGHT until it is older than
+        // ORPHAN_GRACE (a sender persists before its first transport event; concurrent named
+        // servers share the database). Only the old one is failed by recovery.
+        crate::zynk::db::block_on(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at_without_recovery(&path).await?;
+            // The fixture pins `created_at` to 2026-06-14; stamp the in-flight one with the real
+            // clock so it sits inside the grace window, and age the other far beyond it.
+            let fresh = create_test_message(&mut conn, "msg_fresh", SendCommand::PaneRun).await;
+            let old = create_test_message(&mut conn, "msg_old", SendCommand::PaneRun).await;
+            sqlx::query("UPDATE messages SET created_at = ? WHERE id = ?")
+                .bind(crate::zynk::message::now_rfc3339())
+                .bind(&fresh.message_id)
+                .execute(&mut conn)
+                .await?;
+            sqlx::query("UPDATE messages SET created_at = '2020-01-01T00:00:00Z' WHERE id = ?")
+                .bind(&old.message_id)
+                .execute(&mut conn)
+                .await?;
+            crate::zynk::db::recover_orphan_messages(&mut conn).await?;
+            assert_eq!(
+                event_types(&mut conn, &fresh.message_id).await?,
+                Vec::<String>::new()
+            );
+            assert_eq!(
+                event_types(&mut conn, &old.message_id).await?,
+                vec!["failed"]
+            );
+            let _ = std::fs::remove_file(&path);
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn a_failed_event_freezes_the_message() {
         // Why a synthesized `failed` is destructive (Codex Gate-2 round 8): once `failed` is the

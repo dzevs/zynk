@@ -484,6 +484,7 @@ mod tests {
     fn dummy_receiver() -> AuthoritativeReceiver {
         AuthoritativeReceiver {
             pane_id: "p".into(),
+            terminal_id: "t".into(),
             agent_label: "a".into(),
             agent_session: None,
         }

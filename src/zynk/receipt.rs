@@ -29,6 +29,10 @@ use crate::zynk::persistence::{
 #[derive(Clone, Debug)]
 pub struct AuthoritativeReceiver {
     pub pane_id: String,
+    /// The durable terminal anchor (`TerminalId`), the same value `agent.get`/`pane.get` report as
+    /// `terminal_id` and the sender persisted on the target participant. Pane ids rotate; this
+    /// does not.
+    pub terminal_id: String,
     pub agent_label: String,
     pub agent_session: Option<serde_json::Value>,
 }
@@ -133,7 +137,9 @@ async fn append_received_event_in_tx(
                 m.runtime_session_id AS runtime_session_id, \
                 m.socket_namespace AS socket_namespace, \
                 fp.pane_id AS from_pane_id, \
-                tp.agent_label AS to_agent_label \
+                tp.agent_label AS to_agent_label, \
+                tp.terminal_id AS to_terminal_id, \
+                tp.agent_session_value AS to_session_value \
          FROM messages m \
          JOIN conversation_participants fp ON fp.id = m.from_participant_id \
          JOIN conversation_participants tp ON tp.id = m.to_participant_id \
@@ -156,6 +162,8 @@ async fn append_received_event_in_tx(
     let stored_socket = row.try_get::<String, _>("socket_namespace")?;
     let from_pane_id = row.try_get::<Option<String>, _>("from_pane_id")?;
     let to_agent_label = row.try_get::<String, _>("to_agent_label")?;
+    let to_terminal_id = row.try_get::<Option<String>, _>("to_terminal_id")?;
+    let to_session_value = row.try_get::<Option<String>, _>("to_session_value")?;
 
     // 1. Message identity + stored runtime namespace.
     if stored_conversation_id != request.conversation_id
@@ -189,6 +197,45 @@ async fn append_received_event_in_tx(
                 receiver.agent_label, to_agent_label
             ),
         ));
+    }
+    // The stored target participant is keyed by label + terminal + hook session — never by the
+    // pane id, which rotates. The receiver must be THAT participant, not merely a same-label pane.
+    // The hook session value is the durable anchor: it survives pane churn, a restart and a live
+    // handoff (the restored terminal keeps its persisted agent session, while terminal ids are
+    // allocated per server lifetime). When the stored participant carried a session, the receiver
+    // must present the same one; when it carried none (a hook that reported no session id), the
+    // terminal id binds instead — within this server's lifetime, which is all a session-less
+    // target can offer. Rows with neither anchor fall back to the label check above.
+    match to_session_value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        Some(stored) => {
+            let live = receiver
+                .agent_session
+                .as_ref()
+                .and_then(|session| session.get("value"))
+                .and_then(|value| value.as_str());
+            if live != Some(stored) {
+                return Err(DbError::new(
+                    "receiver_identity_mismatch",
+                    "receiver agent session is not the session the message was addressed to",
+                ));
+            }
+        }
+        None => {
+            if let Some(stored) = to_terminal_id.as_deref().filter(|id| !id.is_empty()) {
+                if receiver.terminal_id != stored {
+                    return Err(DbError::new(
+                        "receiver_identity_mismatch",
+                        format!(
+                            "receiver terminal {} is not the terminal the message was addressed to ({})",
+                            receiver.terminal_id, stored
+                        ),
+                    ));
+                }
+            }
+        }
     }
     if from_pane_id.as_deref() == Some(receiver.pane_id.as_str()) {
         return Err(DbError::new(
@@ -312,6 +359,17 @@ mod tests {
         }
     }
 
+    /// A party pinned to a terminal (and optionally a hook session) — the durable anchors of the
+    /// participant key; the pane id is deliberately NOT one of them (pane ids rotate).
+    fn party_on(agent: &str, pane: &str, terminal: &str, session: Option<&str>) -> Party {
+        Party {
+            terminal_id: Some(terminal.into()),
+            agent_session: session
+                .map(|value| serde_json::json!({"source": "hook", "kind": "id", "value": value})),
+            ..party(agent, pane)
+        }
+    }
+
     async fn setup_submitted(
         conn: &mut SqliteConnection,
         from_agent: &str,
@@ -322,14 +380,24 @@ mod tests {
     ) -> PersistedSend {
         let from = party(from_agent, from_pane);
         let to = party(to_agent, to_pane);
+        setup_submitted_between(conn, &from, &to, message_id).await
+    }
+
+    async fn setup_submitted_between(
+        conn: &mut SqliteConnection,
+        from: &Party,
+        to: &Party,
+        message_id: &str,
+    ) -> PersistedSend {
+        let target_arg = to.agent.clone().unwrap_or_default();
         let rec = begin_send_attempt_async(
             conn,
             SendAttempt {
                 command: SendCommand::PaneRun,
                 message_id,
-                target_arg: to_agent,
-                from: &from,
-                to: &to,
+                target_arg: &target_arg,
+                from,
+                to,
                 message_type: None,
                 body: "hi",
                 created_at: "2026-06-14T00:00:00Z",
@@ -387,8 +455,25 @@ mod tests {
     fn receiver(agent: &str, pane: &str) -> AuthoritativeReceiver {
         AuthoritativeReceiver {
             pane_id: pane.into(),
+            terminal_id: String::new(),
             agent_label: agent.into(),
             agent_session: None,
+        }
+    }
+
+    fn receiver_on(
+        agent: &str,
+        pane: &str,
+        terminal: &str,
+        session: Option<&str>,
+    ) -> AuthoritativeReceiver {
+        AuthoritativeReceiver {
+            pane_id: pane.into(),
+            terminal_id: terminal.into(),
+            agent_label: agent.into(),
+            agent_session: session.map(|value| {
+                serde_json::json!({"source": "hook", "agent": agent, "kind": "id", "value": value})
+            }),
         }
     }
 
@@ -640,6 +725,113 @@ mod tests {
             .await
             .unwrap_err();
             assert_eq!(err.code, "receiver_identity_mismatch");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn receipt_from_a_different_terminal_with_the_same_label_is_rejected() {
+        // Gate-3 round 3 (AUD-310-RECEIPT-001): a receipt binds to the STORED target participant
+        // (label + terminal + session = the participant key), never to an agent label alone. A
+        // second hook-authoritative "codex" on another terminal cannot receipt this message.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let from = party("claude", "w-1");
+            let to = party_on("codex", "w-2", "term-2", None);
+            let rec = setup_submitted_between(&mut conn, &from, &to, "msg_bound").await;
+            let err = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_bound"),
+                &receiver_on("codex", "w-3", "term-3", None),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "receiver_identity_mismatch");
+            assert_eq!(latest_event(&mut conn, "msg_bound").await.0, "submitted");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn receipt_from_the_same_terminal_under_another_session_is_rejected() {
+        // Same label, same terminal, but the hook session the message was addressed to is gone:
+        // the stored participant carried a session value, so the receiver must present it.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let from = party("claude", "w-1");
+            let to = party_on("codex", "w-2", "term-2", Some("sess-1"));
+            let rec = setup_submitted_between(&mut conn, &from, &to, "msg_sess").await;
+            let err = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_sess"),
+                &receiver_on("codex", "w-2", "term-2", Some("sess-2")),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "receiver_identity_mismatch");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn receipt_after_pane_churn_on_the_stored_terminal_is_accepted() {
+        // Pane-churn policy: pane ids rotate (restart, layout moves) and are NOT part of the
+        // participant key. The same terminal + session receipting from a different pane id is the
+        // addressed participant and is accepted.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let from = party("claude", "w-1");
+            let to = party_on("codex", "w-2", "term-2", Some("sess-1"));
+            let rec = setup_submitted_between(&mut conn, &from, &to, "msg_churn").await;
+            let accepted = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_churn"),
+                &receiver_on("codex", "w-9", "term-2", Some("sess-1")),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await?;
+            assert!(matches!(accepted.status, ReceiptStatus::Received));
+            assert_eq!(latest_event(&mut conn, "msg_churn").await.0, "received");
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn receipt_after_a_restore_with_the_stored_session_is_accepted() {
+        // Restart / live-handoff model: the restored terminal has a NEW terminal id (ids are
+        // allocated per server lifetime) but keeps its persisted agent session. The session is the
+        // durable anchor, so the addressed participant still receipts.
+        run(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let from = party("claude", "w-1");
+            let to = party_on("codex", "w-2", "term-2", Some("sess-1"));
+            let rec = setup_submitted_between(&mut conn, &from, &to, "msg_restore").await;
+            let accepted = append_received_event(
+                &mut conn,
+                &request_for(&rec, "msg_restore"),
+                &receiver_on("codex", "w-2", "term-7", Some("sess-1")),
+                "socket_test",
+                "rt",
+                "t",
+            )
+            .await?;
+            assert!(matches!(accepted.status, ReceiptStatus::Received));
             let _ = std::fs::remove_file(path);
             Ok(())
         });

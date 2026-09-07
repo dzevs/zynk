@@ -351,6 +351,7 @@ impl App {
             terminal_agent_session_info(terminal).and_then(|info| serde_json::to_value(info).ok());
         Some(crate::zynk::receipt::AuthoritativeReceiver {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
+            terminal_id: terminal.id.to_string(),
             agent_label: authority.agent_label.clone(),
             agent_session,
         })

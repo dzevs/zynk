@@ -176,6 +176,24 @@ fn spawn_named_server_with(
     sqlite_home: &Path,
     daemon_stdio: bool,
 ) -> SpawnedServerProcess {
+    spawn_named_server_with_env(
+        config_home,
+        runtime_dir,
+        session,
+        sqlite_home,
+        daemon_stdio,
+        &[],
+    )
+}
+
+fn spawn_named_server_with_env(
+    config_home: &Path,
+    runtime_dir: &Path,
+    session: &str,
+    sqlite_home: &Path,
+    daemon_stdio: bool,
+    extra_env: &[(&str, &str)],
+) -> SpawnedServerProcess {
     fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
@@ -196,6 +214,9 @@ fn spawn_named_server_with(
         .env_remove("ZYNK_CLIENT_SOCKET_PATH")
         .env_remove("ZYNK_ENV")
         .stdin(std::process::Stdio::null());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
     let log_path = if daemon_stdio {
         // Nothing is captured: assert on the server's durable log at
         // <config_home>/<app>/sessions/<session>/zynk-server.log instead.
@@ -1343,6 +1364,294 @@ fn cli_fails_closed_on_a_hot_rollback_journal_behind_a_symlink() {
         "target bytes changed"
     );
     cleanup_test_base(&base);
+}
+
+#[test]
+fn a_second_named_session_does_not_fail_a_peers_in_flight_send() {
+    // Gate-3 round 3: every ordinary named server runs cold-start orphan recovery on the shared
+    // database. A live peer's freshly persisted message (no delivery event yet) must be left alone;
+    // a genuinely old orphan (older than the grace window) is still recovered.
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let sqlite_home = config_home.join("sqlite");
+    let mut alpha = spawn_named_server_with_env(
+        &config_home,
+        &runtime_dir,
+        "alpha",
+        &sqlite_home,
+        false,
+        &[],
+    );
+    let socket_a = named_session_socket(&config_home, "alpha");
+    wait_for_named_server_socket(&mut alpha, "alpha", &socket_a, Duration::from_secs(15));
+    let created = send_request(
+        &socket_a,
+        r#"{"id":"test:workspace:create","method":"workspace.create","params":{"cwd":"/tmp","focus":true}}"#,
+    );
+    let pane = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let report = send_request(
+        &socket_a,
+        &format!(
+            r#"{{"id":"test:report","method":"pane.report_agent","params":{{"pane_id":"{pane}","source":"hook","agent":"codex","state":"idle"}}}}"#
+        ),
+    );
+    assert!(report.get("error").is_none(), "{report}");
+    let db = sqlite_home.join("zynk.db");
+    let fresh = run_cli_json_with_env(
+        &config_home,
+        &runtime_dir,
+        &socket_a,
+        &["send", &pane, "--", "in flight"],
+    );
+    let fresh_id = fresh["message_id"].as_str().unwrap().to_string();
+    let old = run_cli_json_with_env(
+        &config_home,
+        &runtime_dir,
+        &socket_a,
+        &["send", &pane, "--", "long dead"],
+    );
+    let old_id = old["message_id"].as_str().unwrap().to_string();
+    // Model the in-flight window (message committed, first event not yet recorded) and a genuine
+    // old orphan (a sender that died long ago).
+    sqlite_exec(&db, &format!("DELETE FROM delivery_events WHERE message_id IN ('{fresh_id}', '{old_id}'); UPDATE messages SET created_at = '2020-01-01T00:00:00Z' WHERE id = '{old_id}'"));
+
+    let mut beta =
+        spawn_named_server_with_env(&config_home, &runtime_dir, "beta", &sqlite_home, false, &[]);
+    let socket_b = named_session_socket(&config_home, "beta");
+    wait_for_named_server_socket(&mut beta, "beta", &socket_b, Duration::from_secs(15));
+    assert_eq!(
+        delivery_events_of(&db, &fresh_id),
+        Vec::<String>::new(),
+        "beta failed a live peer's in-flight send"
+    );
+    assert_eq!(
+        delivery_events_of(&db, &old_id),
+        vec!["failed"],
+        "beta must still recover a genuine old orphan"
+    );
+
+    for socket in [&socket_b, &socket_a] {
+        let _ = send_request(
+            socket,
+            r#"{"id":"test:stop","method":"server.stop","params":{}}"#,
+        );
+    }
+    for server in [&mut alpha, &mut beta] {
+        if !wait_for_pid_exit(server.child.id(), Duration::from_secs(10)) {
+            let _ = server.child.kill();
+        }
+        let _ = server.child.wait();
+    }
+    cleanup_test_base(&base);
+}
+
+fn sqlite_exec(db: &Path, sql: &str) {
+    use sqlx::{Connection, Executor};
+    sqlite_block_on(async {
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .create_if_missing(false),
+        )
+        .await
+        .unwrap();
+        conn.execute(sql).await.unwrap();
+        conn.close().await.unwrap();
+    });
+}
+
+fn delivery_events_of(db: &Path, message_id: &str) -> Vec<String> {
+    use sqlx::{Connection, Row};
+    sqlite_block_on(async {
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .create_if_missing(false),
+        )
+        .await
+        .unwrap();
+        sqlx::query("SELECT event_type FROM delivery_events WHERE message_id = ? ORDER BY seq")
+            .bind(message_id)
+            .fetch_all(&mut conn)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get::<String, _>("event_type"))
+            .collect()
+    })
+}
+
+#[test]
+fn a_second_named_session_never_reruns_a_job_another_server_owns() {
+    // Gate-3 round 3 (AUD-310-WORKER-001): every zynk server sharing the global database runs its
+    // own embedding worker. Server A holds a job `running` (blocking provider); server B, started
+    // on the same database, must neither recover (reset) that live claim nor run it: attempts stay
+    // at 1 while A holds it, the job finishes once for A, and B keeps serving its own work.
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let sqlite_home = config_home.join("sqlite");
+    let release = base.join("release-embedding");
+    let release_str = release.to_string_lossy().to_string();
+    let mut a = spawn_named_server_with_env(
+        &config_home,
+        &runtime_dir,
+        "alpha",
+        &sqlite_home,
+        false,
+        &[
+            ("ZYNK_EMBED_PROVIDER", "fake-blocking"),
+            ("ZYNK_TEST_EMBED_RELEASE_FILE", &release_str),
+            ("ZYNK_EMBED_POLL_MS", "50"),
+        ],
+    );
+    let socket_a = named_session_socket(&config_home, "alpha");
+    wait_for_named_server_socket(&mut a, "alpha", &socket_a, Duration::from_secs(15));
+    let created = send_request(
+        &socket_a,
+        r#"{"id":"test:workspace:create","method":"workspace.create","params":{"cwd":"/tmp","focus":true}}"#,
+    );
+    let pane = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // The send target needs a hook-authoritative agent identity (what the agent hooks report).
+    let report = send_request(
+        &socket_a,
+        &format!(
+            r#"{{"id":"test:report","method":"pane.report_agent","params":{{"pane_id":"{pane}","source":"hook","agent":"codex","state":"idle"}}}}"#
+        ),
+    );
+    assert!(report.get("error").is_none(), "{report}");
+    let sent = run_cli_json_with_env(
+        &config_home,
+        &runtime_dir,
+        &socket_a,
+        &["send", &pane, "--", "held by alpha"],
+    );
+    let message_id = sent["message_id"].as_str().unwrap().to_string();
+    let db = sqlite_home.join("zynk.db");
+    wait_for_job(&db, &message_id, ("running", 1), Duration::from_secs(10));
+
+    // Server B on the same database (default fake provider: it WOULD run the job if it took it).
+    let mut b = spawn_named_server_with_env(
+        &config_home,
+        &runtime_dir,
+        "beta",
+        &sqlite_home,
+        false,
+        &[("ZYNK_EMBED_POLL_MS", "50")],
+    );
+    let socket_b = named_session_socket(&config_home, "beta");
+    wait_for_named_server_socket(&mut b, "beta", &socket_b, Duration::from_secs(15));
+    thread::sleep(Duration::from_millis(600));
+    assert_eq!(
+        read_job(&db, &message_id),
+        Some(("running".to_string(), 1)),
+        "B must not reset or rerun A's live job"
+    );
+
+    fs::write(&release, b"go").unwrap();
+    wait_for_job(&db, &message_id, ("done", 1), Duration::from_secs(10));
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        read_job(&db, &message_id),
+        Some(("done".to_string(), 1)),
+        "exactly one attempt across both servers"
+    );
+
+    for socket in [&socket_b, &socket_a] {
+        let _ = send_request(
+            socket,
+            r#"{"id":"test:stop","method":"server.stop","params":{}}"#,
+        );
+    }
+    for server in [&mut a, &mut b] {
+        if !wait_for_pid_exit(server.child.id(), Duration::from_secs(10)) {
+            let _ = server.child.kill();
+        }
+        let _ = server.child.wait();
+    }
+    cleanup_test_base(&base);
+}
+
+fn read_job(db: &Path, message_id: &str) -> Option<(String, i64)> {
+    use sqlx::{Connection, Row};
+    sqlite_block_on(async {
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .create_if_missing(false),
+        )
+        .await
+        .ok()?;
+        sqlx::query("SELECT status, attempts FROM embedding_jobs WHERE message_id = ?")
+            .bind(message_id)
+            .fetch_optional(&mut conn)
+            .await
+            .ok()
+            .flatten()
+            .map(|row| {
+                (
+                    row.get::<String, _>("status"),
+                    row.get::<i64, _>("attempts"),
+                )
+            })
+    })
+}
+
+fn wait_for_job(db: &Path, message_id: &str, wanted: (&str, i64), timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = read_job(db, message_id);
+        if state.as_ref().map(|(s, a)| (s.as_str(), *a)) == Some(wanted) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "job for {message_id} never reached {wanted:?} (now {state:?})"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// `zynk <args>` against a named session's socket with the isolated DB env, parsing the F4 JSON
+/// outcome line.
+fn run_cli_json_with_env(
+    config_home: &Path,
+    runtime_dir: &Path,
+    socket: &Path,
+    args: &[&str],
+) -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_zynk"))
+        .args(args)
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("ZYNK_SOCKET_PATH", socket)
+        .env("ZYNK_SQLITE_HOME", config_home.join("sqlite"))
+        .env_remove("ZYNK_HOME")
+        .env_remove("ZYNK_CLIENT_SOCKET_PATH")
+        .env_remove("ZYNK_ENV")
+        .env_remove("ZYNK_PANE_ID")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "zynk {} failed: {}\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .unwrap_or_else(|| panic!("no JSON in: {stdout}"));
+    serde_json::from_str(line).unwrap()
 }
 
 #[test]

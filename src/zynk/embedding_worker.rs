@@ -42,6 +42,16 @@ pub const PROCESS_BATCH: i64 = 32;
 /// left `failed` and no longer selected.
 pub const MAX_ATTEMPTS: i64 = 5;
 
+/// A `running` job older than this is presumed orphaned by a crashed worker and is recovered
+/// (reset to `pending`). Every zynk server sharing the global database runs its own worker, so
+/// recovery must never touch a job another LIVE worker is still executing (Gate-3 round 3,
+/// AUD-310-WORKER-001); a real embedding takes seconds, so ten minutes is a safe stale bound.
+pub const RUNNING_LEASE: Duration = Duration::from_secs(600);
+
+/// How often the poll loop re-runs stale-job recovery (a crashed peer's jobs come back without a
+/// restart).
+const RECOVERY_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Resolve the poll cadence from `ZYNK_EMBED_POLL_MS` (>0), else the default.
 fn poll_interval() -> Duration {
     std::env::var(ZYNK_EMBED_POLL_MS_ENV)
@@ -189,6 +199,7 @@ fn worker_loop(shutdown_rx: Receiver<()>, control: std::sync::Arc<PauseControl>)
     }
 
     let interval = poll_interval();
+    let mut last_recovery = std::time::Instant::now();
     control.set_idle();
     loop {
         if conn.is_none() {
@@ -199,6 +210,10 @@ fn worker_loop(shutdown_rx: Receiver<()>, control: std::sync::Arc<PauseControl>)
         // Paused (live handoff): keep the connection, start no batch until resumed.
         if control.try_begin_work() {
             if let Some(c) = conn.as_mut() {
+                if last_recovery.elapsed() >= RECOVERY_INTERVAL {
+                    let _ = rt.block_on(recover_running_jobs(c, &model_id));
+                    last_recovery = std::time::Instant::now();
+                }
                 let _ = rt.block_on(process_pending_batch(
                     c,
                     embedder.as_mut(),
@@ -279,11 +294,32 @@ pub(crate) async fn recover_running_jobs(
     conn: &mut SqliteConnection,
     model_id: &str,
 ) -> Result<u64, DbError> {
-    let result =
-        sqlx::query("UPDATE embedding_jobs SET status='pending', started_at=NULL WHERE model_id=? AND status='running'")
-            .bind(model_id)
-            .execute(&mut *conn)
-            .await?;
+    recover_running_jobs_older_than(conn, model_id, RUNNING_LEASE).await
+}
+
+/// Reset to `pending` the `running` jobs whose `started_at` is older than `lease` (or NULL): the
+/// ones a crashed worker left behind. Jobs a live worker started inside the lease are left alone —
+/// a claim is only ever taken over once it is stale.
+pub(crate) async fn recover_running_jobs_older_than(
+    conn: &mut SqliteConnection,
+    model_id: &str,
+    lease: Duration,
+) -> Result<u64, DbError> {
+    let cutoff = crate::zynk::message::rfc3339_utc(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            - lease.as_secs() as i64,
+    );
+    let result = sqlx::query(
+        "UPDATE embedding_jobs SET status='pending', started_at=NULL \
+         WHERE model_id=? AND status='running' AND (started_at IS NULL OR started_at < ?)",
+    )
+    .bind(model_id)
+    .bind(&cutoff)
+    .execute(&mut *conn)
+    .await?;
     Ok(result.rows_affected())
 }
 
@@ -381,27 +417,52 @@ pub(crate) async fn process_one_job(
     vec_table: &str,
     dim: usize,
 ) -> Result<(), DbError> {
+    // Atomic claim: only a job that is still runnable becomes ours — a worker in another zynk
+    // server sharing this database may have taken it between the SELECT and here. Zero rows
+    // affected = not ours, skip it (the other worker owns it now).
+    // The claim returns the job's new `attempts` value: every claim increments it and nothing else
+    // ever changes it (recovery resets only status/started_at), so it is this claim's ownership
+    // token — every terminal update below matches on it, never on `status='running'` alone.
     let now = now_rfc3339();
-    sqlx::query(
-        "UPDATE embedding_jobs SET status='running', started_at=?, attempts=attempts+1 WHERE id=?",
+    let claimed = sqlx::query(
+        "UPDATE embedding_jobs SET status='running', started_at=?, attempts=attempts+1 \
+         WHERE id=? AND (status='pending' OR (status='failed' AND attempts < ?)) \
+         RETURNING attempts",
     )
     .bind(&now)
     .bind(job_id)
-    .execute(&mut *conn)
+    .bind(MAX_ATTEMPTS)
+    .fetch_optional(&mut *conn)
     .await?;
+    let Some(claimed) = claimed else {
+        return Ok(());
+    };
+    let claim = JobClaim {
+        job_id,
+        attempt: claimed.try_get::<i64, _>("attempts")?,
+    };
 
     // Everything past the running-mark runs in `run_job_inner`. Whether it returns a
     // `JobError::Recorded` (a known, retryable per-job failure) OR a `JobError::Db`
     // (a transient DB error mid-step — e.g. SQLITE_BUSY on the message fetch), we
     // mark the job `failed` and return Ok. NO error path may escape this fn while the
     // job is still `running` — that is the no-strand invariant.
-    let reason = match run_job_inner(conn, embedder, message_id, model_id, vec_table, dim).await {
-        Ok(()) => return Ok(()),
-        Err(JobError::Recorded(reason)) => reason,
-        Err(JobError::Db(err)) => err.to_string(),
-    };
-    mark_job_failed(conn, job_id, &reason).await;
+    let reason =
+        match run_job_inner(conn, embedder, message_id, model_id, vec_table, dim, &claim).await {
+            Ok(()) => return Ok(()),
+            Err(JobError::Recorded(reason)) => reason,
+            Err(JobError::Db(err)) => err.to_string(),
+        };
+    mark_job_failed(conn, &claim, &reason).await;
     Ok(())
+}
+
+/// This worker's ownership of one job: the `attempts` value its claim produced. A job recovered
+/// as stale and re-claimed elsewhere carries a higher value, so a late `done`/`failed` from the
+/// stale claim matches nothing (AUD-310-WORKER-001).
+struct JobClaim<'a> {
+    job_id: &'a str,
+    attempt: i64,
 }
 
 /// A failure from `run_job_inner`. `Recorded` is a known per-job reason (missing
@@ -436,6 +497,7 @@ async fn run_job_inner(
     model_id: &str,
     vec_table: &str,
     dim: usize,
+    claim: &JobClaim<'_>,
 ) -> Result<(), JobError> {
     let message = sqlx::query("SELECT rowid, body FROM messages WHERE id=?")
         .bind(message_id)
@@ -469,7 +531,7 @@ async fn run_job_inner(
     // ONE transaction so a crash never leaves a half-written embedding. `vec_table`
     // was validated as a safe identifier by `ensure_model_and_vec0`.
     write_embedding_txn(
-        conn, vec_table, rowid, &embedded, message_id, model_id, &body,
+        conn, vec_table, rowid, &embedded, message_id, model_id, &body, claim,
     )
     .await?;
     Ok(())
@@ -486,10 +548,11 @@ async fn write_embedding_txn(
     message_id: &str,
     model_id: &str,
     body: &str,
+    claim: &JobClaim<'_>,
 ) -> Result<(), DbError> {
     conn.execute("BEGIN IMMEDIATE").await?;
     let result = write_embedding_in_transaction(
-        conn, vec_table, rowid, embedded, message_id, model_id, body,
+        conn, vec_table, rowid, embedded, message_id, model_id, body, claim,
     )
     .await;
     match result {
@@ -520,6 +583,7 @@ async fn write_embedding_in_transaction(
     message_id: &str,
     model_id: &str,
     body: &str,
+    claim: &JobClaim<'_>,
 ) -> Result<(), DbError> {
     let now = now_rfc3339();
     // Format the embedding as a JSON array string — vec0's bind form.
@@ -552,25 +616,32 @@ async fn write_embedding_in_transaction(
     .execute(&mut *conn)
     .await?;
 
-    sqlx::query("UPDATE embedding_jobs SET status='done', last_error=NULL, finished_at=? WHERE message_id=? AND model_id=?")
-        .bind(&now)
-        .bind(message_id)
-        .bind(model_id)
-        .execute(&mut *conn)
-        .await?;
+    // Only THIS claim completes the job: a claim recovered as stale and re-taken by another
+    // worker carries a newer `attempts`, so this late completion matches nothing.
+    sqlx::query(
+        "UPDATE embedding_jobs SET status='done', last_error=NULL, finished_at=? \
+         WHERE id=? AND status='running' AND attempts=?",
+    )
+    .bind(&now)
+    .bind(claim.job_id)
+    .bind(claim.attempt)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
 /// Best-effort: mark a job `failed` with `last_error` + `finished_at`. Swallows any
 /// error (the worker must keep running even if this update fails).
-async fn mark_job_failed(conn: &mut SqliteConnection, job_id: &str, last_error: &str) {
+async fn mark_job_failed(conn: &mut SqliteConnection, claim: &JobClaim<'_>, last_error: &str) {
     let now = now_rfc3339();
     let _ = sqlx::query(
-        "UPDATE embedding_jobs SET status='failed', last_error=?, finished_at=? WHERE id=?",
+        "UPDATE embedding_jobs SET status='failed', last_error=?, finished_at=? \
+         WHERE id=? AND status='running' AND attempts=?",
     )
     .bind(last_error)
     .bind(&now)
-    .bind(job_id)
+    .bind(claim.job_id)
+    .bind(claim.attempt)
     .execute(&mut *conn)
     .await;
 }
@@ -657,6 +728,56 @@ mod tests {
             let _ = self.release.recv();
             self.inner.embed(texts)
         }
+    }
+
+    /// Blocks inside `embed` until released, then FAILS: models a worker whose provider call
+    /// stalled past the lease and comes back with an error after the job changed hands.
+    struct FailingAfterRelease {
+        inner: FakeEmbedder,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Embedder for FailingAfterRelease {
+        fn dim(&self) -> usize {
+            self.inner.dim()
+        }
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+        fn embed(
+            &mut self,
+            _texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, crate::zynk::embed::EmbedError> {
+            let _ = self.release.recv();
+            Err(crate::zynk::embed::EmbedError::Provider(
+                "stalled provider call failed late".into(),
+            ))
+        }
+    }
+
+    /// Run `process_one_job` for `message_id` on its own connection in a thread.
+    fn spawn_job_worker(
+        path: std::path::PathBuf,
+        job: (String, String, String, String, usize),
+        mut embedder: Box<dyn Embedder>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            crate::zynk::db::block_on(async {
+                let mut conn = open_migrated_at_without_recovery(&path).await?;
+                let (job_id, message_id, model_id, vec_table, dim) = job;
+                process_one_job(
+                    &mut conn,
+                    embedder.as_mut(),
+                    &job_id,
+                    &message_id,
+                    &model_id,
+                    &vec_table,
+                    dim,
+                )
+                .await
+            })
+            .unwrap()
+        })
     }
 
     /// `(status, attempts)` of the message's job — `None` while the database or the job row does not
@@ -794,6 +915,188 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    async fn job_status(conn: &mut SqliteConnection, message_id: &str) -> Result<String, DbError> {
+        Ok(
+            sqlx::query("SELECT status FROM embedding_jobs WHERE message_id=?")
+                .bind(message_id)
+                .fetch_one(conn)
+                .await?
+                .try_get::<String, _>("status")?,
+        )
+    }
+
+    #[test]
+    fn a_job_is_claimed_by_exactly_one_worker() {
+        // Gate-3 round 3 (AUD-310-WORKER-001): two workers (two zynk servers sharing the global
+        // database) select the same pending job; the claim is an atomic status-guarded UPDATE, so
+        // the second worker's claim affects zero rows and it skips the job — one attempt total.
+        crate::zynk::embed::vec::register_sqlite_vec();
+        std::env::remove_var(crate::zynk::embed::ZYNK_EMBED_PROVIDER_ENV);
+        let path = temp_db_path();
+        crate::zynk::db::block_on(async {
+            let mut a = open_migrated_at_without_recovery(&path).await?;
+            let mut b = open_migrated_at_without_recovery(&path).await?;
+            seed_message(&mut a, "msg_shared").await;
+            let mut embedder = FakeEmbedder::with_dim(8);
+            let (model_id, vec_table, dim) = ensure_model_and_vec0(&mut a, &embedder).await?;
+            let job_id: String = sqlx::query("SELECT id FROM embedding_jobs WHERE message_id=?")
+                .bind("msg_shared")
+                .fetch_one(&mut a)
+                .await?
+                .try_get("id")?;
+            // Both workers saw the job pending; A runs it first.
+            process_one_job(
+                &mut a,
+                &mut embedder,
+                &job_id,
+                "msg_shared",
+                &model_id,
+                &vec_table,
+                dim,
+            )
+            .await?;
+            // B's claim of the same (now done) job affects nothing and B does not run it.
+            process_one_job(
+                &mut b,
+                &mut embedder,
+                &job_id,
+                "msg_shared",
+                &model_id,
+                &vec_table,
+                dim,
+            )
+            .await?;
+            let (status, attempts): (String, i64) = {
+                let row = sqlx::query("SELECT status, attempts FROM embedding_jobs WHERE id=?")
+                    .bind(&job_id)
+                    .fetch_one(&mut a)
+                    .await?;
+                (row.try_get("status")?, row.try_get("attempts")?)
+            };
+            assert_eq!(
+                (status.as_str(), attempts),
+                ("done", 1),
+                "exactly one attempt"
+            );
+            let _ = std::fs::remove_file(&path);
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_stale_worker_cannot_fail_a_job_another_worker_is_running() {
+        // Gate-3 round 3 (AUD-310-WORKER-001 follow-up): terminal job updates are conditional on
+        // OWNERSHIP of the claim, not merely on `status='running'`. Worker A claims and stalls past
+        // the lease; recovery hands the job to worker B (still running). A's late failure must not
+        // flip B's job to `failed`, and B's completion must land.
+        crate::zynk::embed::vec::register_sqlite_vec();
+        std::env::remove_var(crate::zynk::embed::ZYNK_EMBED_PROVIDER_ENV);
+        let path = temp_db_path();
+        let job = crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            seed_message(&mut conn, "msg_owned").await;
+            let embedder = FakeEmbedder::with_dim(8);
+            let (model_id, vec_table, dim) = ensure_model_and_vec0(&mut conn, &embedder).await?;
+            let job_id: String = sqlx::query("SELECT id FROM embedding_jobs WHERE message_id=?")
+                .bind("msg_owned")
+                .fetch_one(&mut conn)
+                .await?
+                .try_get("id")?;
+            Ok::<_, DbError>((job_id, "msg_owned".to_string(), model_id, vec_table, dim))
+        })
+        .unwrap();
+        let model_id = job.2.clone();
+
+        let (release_a, gate_a) = std::sync::mpsc::channel();
+        let worker_a = spawn_job_worker(
+            path.clone(),
+            job.clone(),
+            Box::new(FailingAfterRelease {
+                inner: FakeEmbedder::with_dim(8),
+                release: gate_a,
+            }),
+        );
+        wait_for_job_state(&path, "msg_owned", ("running", 1));
+
+        // A's claim ages past the lease; recovery returns the job to the queue.
+        crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            sqlx::query("UPDATE embedding_jobs SET started_at='1970-01-01T00:00:00Z' WHERE message_id='msg_owned'")
+                .execute(&mut conn)
+                .await?;
+            assert_eq!(recover_running_jobs(&mut conn, &model_id).await?, 1);
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+
+        let (release_b, gate_b) = std::sync::mpsc::channel();
+        let worker_b = spawn_job_worker(
+            path.clone(),
+            job.clone(),
+            Box::new(BlockingEmbedder {
+                inner: FakeEmbedder::with_dim(8),
+                release: gate_b,
+            }),
+        );
+        wait_for_job_state(&path, "msg_owned", ("running", 2));
+
+        // A comes back late and fails: B still owns the job.
+        release_a.send(()).unwrap();
+        worker_a.join().unwrap();
+        assert_eq!(
+            job_state(&path, "msg_owned"),
+            Some(("running".into(), 2)),
+            "a stale claim failed the job under the current owner"
+        );
+
+        release_b.send(()).unwrap();
+        worker_b.join().unwrap();
+        assert_eq!(job_state(&path, "msg_owned"), Some(("done".into(), 2)));
+        let last_error = crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            let row =
+                sqlx::query("SELECT last_error FROM embedding_jobs WHERE message_id='msg_owned'")
+                    .fetch_one(&mut conn)
+                    .await?;
+            Ok::<Option<String>, DbError>(row.try_get("last_error")?)
+        })
+        .unwrap();
+        assert_eq!(last_error, None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn recovery_resets_only_stale_running_jobs() {
+        // A job another LIVE worker started moments ago must not be reset; one whose claim is
+        // older than the lease (a crashed worker) is recovered.
+        crate::zynk::embed::vec::register_sqlite_vec();
+        std::env::remove_var(crate::zynk::embed::ZYNK_EMBED_PROVIDER_ENV);
+        let path = temp_db_path();
+        crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            seed_message(&mut conn, "msg_fresh").await;
+            seed_message(&mut conn, "msg_stale").await;
+            let embedder = FakeEmbedder::with_dim(8);
+            let (model_id, _, _) = ensure_model_and_vec0(&mut conn, &embedder).await?;
+            let stale_start = crate::zynk::message::rfc3339_utc(0); // 1970: long past the lease
+            sqlx::query("UPDATE embedding_jobs SET status='running', started_at=? WHERE message_id='msg_fresh'")
+                .bind(now_rfc3339())
+                .execute(&mut conn)
+                .await?;
+            sqlx::query("UPDATE embedding_jobs SET status='running', started_at=? WHERE message_id='msg_stale'")
+                .bind(&stale_start)
+                .execute(&mut conn)
+                .await?;
+            assert_eq!(recover_running_jobs(&mut conn, &model_id).await?, 1, "only the stale one");
+            assert_eq!(job_status(&mut conn, "msg_fresh").await?, "running");
+            assert_eq!(job_status(&mut conn, "msg_stale").await?, "pending");
+            let _ = std::fs::remove_file(&path);
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn a_joined_old_worker_hands_a_blocked_job_over_exactly_once() {
         // Codex Gate-2 round 8 (P2): the live-handoff ORDER — old workers joined BEFORE the
@@ -831,27 +1134,40 @@ mod tests {
     #[test]
     fn an_unjoined_old_worker_double_processes_a_blocked_job() {
         // The hazard the protocol ordering prevents (negative control): a replacement that starts
-        // while the old worker still owns a `running` job resets and re-runs it — two attempts for
-        // one job, and the old worker's late completion lands on top of the new result.
+        // while an old worker still owns a `running` job re-runs it as soon as that claim looks
+        // stale (older than RUNNING_LEASE) — two attempts for one job. Inside the lease the claim
+        // is left alone (`recovery_resets_only_stale_running_jobs`), and the old worker's late
+        // completion no longer lands on top of the new result (claim token, `attempts`).
         crate::zynk::embed::vec::register_sqlite_vec();
         std::env::remove_var(crate::zynk::embed::ZYNK_EMBED_PROVIDER_ENV);
         let path = temp_db_path();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let old = spawn_blocked_old_worker(path.clone(), release_rx);
         wait_for_job_state(&path, "msg_handover", ("running", 1));
+        crate::zynk::db::block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            sqlx::query("UPDATE embedding_jobs SET started_at='1970-01-01T00:00:00Z' WHERE message_id='msg_handover'")
+                .execute(&mut conn)
+                .await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
         assert_eq!(
             replacement_startup_sweep(&path),
             1,
-            "the replacement re-ran the owned job"
+            "the replacement re-ran the stale-looking job"
         );
         assert_eq!(
-            job_state(&path, "msg_handover").unwrap().1,
-            2,
+            job_state(&path, "msg_handover"),
+            Some(("done".to_string(), 2)),
             "two attempts for one job"
         );
         release_tx.send(()).unwrap();
         let _ = old.join().unwrap();
-        assert_eq!(job_state(&path, "msg_handover").unwrap().1, 2);
+        assert_eq!(
+            job_state(&path, "msg_handover"),
+            Some(("done".to_string(), 2))
+        );
         let _ = std::fs::remove_file(&path);
     }
 
