@@ -1,9 +1,8 @@
 name: CI
 
-# Per-push CI runs the REQUIRED tier only (ADR 0012): `just check` on Ubuntu (lint, TS tests, nextest, and the
-# maintenance unittests) plus the conventional-commit check. Optional-tier platforms (macOS Apple silicon,
-# Windows) are tested and built on demand by the candidate-evidence workflow (release-dryrun.yml), whose manifest
-# decides which optional artifacts are ELIGIBLE for a release.
+# Linux x86_64 is the only supported target; there are no other platform tiers and no multi-target build or
+# release workflow. Per-push CI runs `check-required`, the authoritative gate: `just check` on Ubuntu
+# (lint, TS tests, nextest, and the maintenance unittests), plus the conventional-commit check.
 
 on:
   pull_request:
