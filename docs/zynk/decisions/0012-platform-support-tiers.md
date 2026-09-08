@@ -67,7 +67,8 @@ manifest in run attempt 2 may legitimately consume an artifact a successful prod
    symlinked dist root or target directory, sizes that differ from the downloaded bytes, and a producer attempt
    later than its own; an optional `candidate_sha` dispatch input makes the required jobs and the manifest refuse
    any other commit. The `build.rs` archive parser accepts only structurally complete `ar` input (exact EOF, every payload
-   and pad byte inside the file — a missing pad byte is rejected even for the final member — BSD name length
+   and pad byte inside the file — a missing or non-canonical (not 0x0A) pad byte is rejected even for the final
+   member — BSD name length
    within the member, checked arithmetic) and carries a tracked regression set.
 5. **Required checks** (a failure stops the release; never bypassed): conventional commits; the private-content
    gates; `check-required` (CI, `just check` on Ubuntu); the Nix flake check **including** its `--all-systems

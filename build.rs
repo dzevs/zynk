@@ -102,6 +102,13 @@ pub fn archive_misaligned_members(bytes: &[u8]) -> Result<Vec<String>, String> {
                 bytes.len()
             ));
         }
+        // The pad slot must hold the canonical ar padding byte (0x0A); any other value is a malformed archive.
+        if padded_end > data_end && bytes[data_end] != b'\n' {
+            return Err(format!(
+                "member at offset {offset} has a non-canonical pad byte 0x{:02x} at {data_end}",
+                bytes[data_end]
+            ));
+        }
         offset = padded_end;
     }
     Ok(misaligned)

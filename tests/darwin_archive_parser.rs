@@ -102,11 +102,24 @@ fn odd_payloads_need_their_pad_byte_even_for_the_final_member() {
     ]))
     .is_ok());
     // Gate-3 SENT-R7-BUILD-001: the required alignment byte of an odd final member must be present.
-    for member in [odd_plain, odd_bsd] {
+    for member in [odd_plain.clone(), odd_bsd.clone()] {
         let mut unpadded = archive(std::slice::from_ref(&member));
         unpadded.pop();
         let err =
             archive_misaligned_members(&unpadded).expect_err("missing pad byte must be rejected");
+        assert!(err.contains("pad"), "{err}");
+    }
+    // Gate-3 ARB-49E-AR-PAD-001: the pad slot must hold the canonical ar padding byte (0x0A), not any byte.
+    for member in [odd_plain, odd_bsd] {
+        let mut wrong_pad = archive(std::slice::from_ref(&member));
+        let last = wrong_pad.len() - 1;
+        assert_eq!(
+            wrong_pad[last], b'\n',
+            "fixture must end with the canonical pad"
+        );
+        wrong_pad[last] = b'x';
+        let err = archive_misaligned_members(&wrong_pad)
+            .expect_err("non-newline pad byte must be rejected");
         assert!(err.contains("pad"), "{err}");
     }
 }
