@@ -28,6 +28,12 @@ config key is removed (see **Changed**).
 - Custom keys and prefixes now **displace** conflicting default bindings instead of being rejected; a config
   reload keeps the valid subset of bindings.
 - The raw image-paste shortcut is remote-only: `keys.remote_image_paste` (default `ctrl+v`; empty disables).
+- **Platform support tiers** ([ADR 0012](docs/zynk/decisions/0012-platform-support-tiers.md)): Linux x86_64 is
+  the required release platform; macOS (Apple silicon) and Windows artifacts ship only when the release's
+  candidate run tested and verified them, and are otherwise omitted and named in `RELEASE_MANIFEST.txt`.
+  `macos-x86_64` and `linux-aarch64` are not shipped in 3.1.0 (no hosted test job). Existing cross-platform code
+  is retained; per-push CI runs the required Ubuntu suite (now including the maintenance unittests), while the
+  optional platforms are validated on demand by the candidate-evidence workflow.
 
 **Fixed**
 

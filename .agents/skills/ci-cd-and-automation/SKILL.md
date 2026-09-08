@@ -121,42 +121,33 @@ jobs:
 
 > **Note:** The bundled `libghostty-vt` is built with Zig, so CI must install Zig 0.15.2; the TS asset test needs Bun. Pin action versions (ideally by commit SHA) for supply-chain safety.
 
-### Cross-Platform Matrix
+### Required and optional platform tiers (ADR 0012)
 
-zynk targets Unix and Windows, so the real pipeline runs a matrix:
+Per-push CI runs the **required** tier only: `check-required` on `ubuntu-latest` executes `just check` (lint, TS
+tests, nextest, and the maintenance unittests — `just ci` alone skips the maintenance unittests). Linux x86_64 is the
+required release target; macOS (Apple silicon) and Windows are **optional** and are validated on demand by the
+candidate-evidence workflow (`.github/workflows/release-dryrun.yml`, `workflow_dispatch` at the candidate SHA):
 
 ```yaml
-  check:
-    name: check (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            kind: unix
-            nextest_filter: all()
-          - os: macos-latest
-            kind: unix
-            nextest_filter: not binary(live_handoff)   # env-sensitive PTY test
-          - os: windows-latest
-            kind: windows
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+  check-required:
+    name: check-required (ubuntu, just check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
-      # ... toolchain setup ...
-      - name: Run checks (unix)
-        if: matrix.kind == 'unix'
-        run: just ci '${{ matrix.nextest_filter }}'
-      - name: Run checks (windows)
-        if: matrix.kind == 'windows'
-        shell: pwsh
-        run: |
-          cargo fmt --check
-          cargo clippy --bin zynk --locked --target x86_64-pc-windows-msvc -- -D warnings
-          cargo test --locked --target x86_64-pc-windows-msvc --bin zynk
-          cargo build --locked --target x86_64-pc-windows-msvc
+      # ... toolchain setup (Rust, just + cargo-nextest, Zig 0.15.2, Bun) ...
+      - name: Run the required suite
+        run: just check
 ```
+
+The candidate workflow has fixed per-target job ids (`test-linux`, `build-linux-x86_64`, `test-macos-aarch64`,
+`build-macos-aarch64`, `test-windows-x86_64`, `build-windows-x86_64`, and the build-only `build-linux-aarch64` /
+`build-macos-x86_64`), an `optional_targets: none | eligible | all` input, and a `manifest` job that downloads only by
+immutable artifact id, verifies each producer's hash-bound `EVIDENCE.json` (the packaged binary executed on its native
+runner; archive/binary sha256, `GITHUB_SHA`, version, CPU/ABI, producer run id/attempt) and writes
+`RELEASE_MANIFEST.txt` + `SHA256SUMS` over **ELIGIBLE** targets only. A required-target failure means no release
+candidate; an optional failure is `OMITTED` / `BUILT_UNVERIFIED` / `INCONSISTENT` and never blocks Linux. Never use
+`continue-on-error` to hide an optional failure: it reports the job as successful to `needs` and defeats the manifest.
 
 ### Conventional-Commit Gate
 

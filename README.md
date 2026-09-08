@@ -61,7 +61,14 @@ zynk gives the terminal that missing coordination layer:
 
 Install with Homebrew, download a prebuilt binary, use Nix, or build from source.
 
-**Homebrew** (macOS and Linux):
+**Supported platforms** ([ADR 0012](docs/zynk/decisions/0012-platform-support-tiers.md)): **Linux x86_64** is the
+required, fully tested release platform (Fedora/Ubuntu; glibc ≥ 2.30). macOS on Apple silicon and Windows x86_64
+are **optional**: their artifacts are included in a release only when that release's candidate run tested and
+verified them, and they are otherwise omitted — the release's `RELEASE_MANIFEST.txt` names each target's status.
+`macos-x86_64` and `linux-aarch64` have no hosted test job today and are **not shipped in 3.1.0**. The cross-platform
+code stays in the tree; optional platforms may build from source, which is not guaranteed.
+
+**Homebrew** (Linux; macOS on Apple silicon when that release shipped a macOS artifact):
 
 ```bash
 brew install dzevs/tap/zynk
@@ -82,14 +89,16 @@ tar -xzf "zynk-$TAG-linux-x86_64.tar.gz" && install -m 755 zynk "$HOME/.local/bi
 zynk --version   # if this fails, add "$HOME/.local/bin" to your PATH
 ```
 
-Targets: `linux-x86_64`, `linux-aarch64` (GNU/glibc dynamic, **glibc ≥ 2.30**), `macos-x86_64`,
-`macos-aarch64`, `windows-x86_64` — always verify against `SHA256SUMS`.
+Targets: every release ships `linux-x86_64` (GNU/glibc dynamic, **glibc ≥ 2.30**); `macos-aarch64` and
+`windows-x86_64` are included only when they were eligible at that tag, and `RELEASE_MANIFEST.txt` in the release
+lists each target's status (`linux-aarch64` and `macos-x86_64` are not shipped in 3.1.0) — always verify against
+`SHA256SUMS`.
 
 > [!NOTE]
 > The macOS and Windows binaries are **unsigned**. On macOS, clear the quarantine
 > (`xattr -dr com.apple.quarantine ./zynk`); on Windows, use SmartScreen's "More info → Run anyway".
 
-**Nix:**
+**Nix** (`x86_64-linux` verified in CI; other systems best effort):
 
 ```bash
 nix run github:dzevs/zynk

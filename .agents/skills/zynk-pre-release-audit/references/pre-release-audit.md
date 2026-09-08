@@ -64,8 +64,9 @@ Process:
      stale hash fails the `nix` workflow and `nix flake check` with a fixed-output-derivation mismatch. Use the
      `got:` hash printed by `nix flake check --print-build-logs`.
    - Confirm `just check` is green and `just gate` is clean; confirm `LICENSE` + `NOTICE` (AGPL-3.0-or-later +
-     the upstream herdr attribution) are intact. The public `release-dryrun` / `build-artifacts-manual` / `nix`
-     workflows validate the release build itself.
+     the upstream herdr attribution) are intact. The public `release-dryrun` (the candidate-evidence workflow: its
+     `RELEASE_MANIFEST.txt` decides which optional targets are ELIGIBLE, ADR 0012) / `build-artifacts-manual` /
+     `nix` workflows validate the release build itself.
 
 9. Apply changes only when explicitly asked.
    - Do not edit files during the audit unless the user asks you to apply fixes.
