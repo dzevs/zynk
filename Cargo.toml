@@ -65,6 +65,9 @@ png = "0.17"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
+# Reports config keys the typed model ignored, so a typo in config.toml surfaces as a
+# diagnostic instead of being silently dropped (`src/config/io.rs`).
+serde_ignored = "0.1.14"
 serde_json = "1"
 sha2 = "0.10"
 # zynk M5b B4a (ADR 0006): vendors sqlite-vec.c, compiled -DSQLITE_CORE; exports

@@ -99,7 +99,7 @@ fn init_logging() {
     crate::logging::init_file_logging(crate::logging::LOG_FILE_MONOLITH);
 }
 
-const DEFAULT_CONFIG: &str = r##"# zynk configuration
+pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Place this file at ~/.config/zynk/config.toml
 
 # Show first-run notification setup on startup.

@@ -2448,6 +2448,38 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_applies_known_sibling_and_surfaces_unknown_key() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-unknown-key");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let target_mouse_capture = !app.state.mouse_capture;
+        std::fs::write(
+            &path,
+            format!("[ui]\nmouse_capture = {target_mouse_capture}\nmouse_captur = false\n"),
+        )
+        .unwrap();
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(
+            report.diagnostics,
+            vec!["unknown config key ui.mouse_captur; ignoring key"]
+        );
+        assert_eq!(app.state.mouse_capture, target_mouse_capture);
+        assert_eq!(
+            app.state.config_diagnostic.as_deref(),
+            Some("unknown config key ui.mouse_captur; ignoring key")
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn reload_config_disables_invalid_binding_but_applies_valid_keymap_and_other_sections() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-invalid-keybind");
