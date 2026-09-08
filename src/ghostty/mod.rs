@@ -10,6 +10,7 @@
 )]
 pub mod bindings;
 
+use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -416,8 +417,10 @@ impl CellWide {
 
 type WritePtyCallback = dyn FnMut(&[u8]) + Send;
 
-struct WritePtyCallbackState {
-    callback: Box<WritePtyCallback>,
+#[derive(Default)]
+struct TerminalCallbackState {
+    write_pty: Option<Box<WritePtyCallback>>,
+    pwd_changes: Vec<Vec<u8>>,
 }
 
 unsafe extern "C" fn write_pty_trampoline(
@@ -426,19 +429,43 @@ unsafe extern "C" fn write_pty_trampoline(
     data: *const u8,
     len: usize,
 ) {
-    if userdata.is_null() {
+    if userdata.is_null() || (data.is_null() && len != 0) {
         return;
     }
-    if data.is_null() && len != 0 {
+    let state = unsafe { &mut *(userdata.cast::<TerminalCallbackState>()) };
+    let Some(callback) = state.write_pty.as_mut() else {
         return;
-    }
-    let state = unsafe { &mut *(userdata.cast::<WritePtyCallbackState>()) };
+    };
     let bytes = if len == 0 {
         &[]
     } else {
         unsafe { slice::from_raw_parts(data, len) }
     };
-    (state.callback)(bytes);
+    callback(bytes);
+}
+
+unsafe extern "C" fn pwd_changed_trampoline(terminal: ffi::GhosttyTerminal, userdata: *mut c_void) {
+    if terminal.is_null() || userdata.is_null() {
+        return;
+    }
+    let mut pwd = ffi::GhosttyString::default();
+    let result = unsafe {
+        ffi::ghostty_terminal_get(
+            terminal,
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_PWD,
+            (&mut pwd as *mut ffi::GhosttyString).cast(),
+        )
+    };
+    if result != ffi::GhosttyResult_GHOSTTY_SUCCESS || (pwd.ptr.is_null() && pwd.len != 0) {
+        return;
+    }
+    let bytes = if pwd.len == 0 {
+        Vec::new()
+    } else {
+        unsafe { slice::from_raw_parts(pwd.ptr, pwd.len) }.to_vec()
+    };
+    let state = unsafe { &mut *(userdata.cast::<TerminalCallbackState>()) };
+    state.pwd_changes.push(bytes);
 }
 
 fn install_png_decoder_once() {
@@ -532,6 +559,18 @@ fn decode_png_rgba(bytes: &[u8]) -> Option<DecodedPng> {
     })
 }
 
+pub fn unicode_codepoint_width(codepoint: u32) -> u8 {
+    unsafe { ffi::ghostty_unicode_codepoint_width(codepoint) }
+}
+
+pub fn unicode_grapheme_width(codepoints: &[u32]) -> (usize, u8) {
+    let mut width = 0u8;
+    let consumed = unsafe {
+        ffi::ghostty_unicode_grapheme_width(codepoints.as_ptr(), codepoints.len(), &mut width)
+    };
+    (consumed, width)
+}
+
 pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>, Error> {
     let mut required = 0usize;
     // SAFETY: null buffer + out len is the documented way to query required size.
@@ -558,8 +597,9 @@ pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>, Error> {
 
 pub struct Terminal {
     raw: ffi::GhosttyTerminal,
-    write_pty_callback: Option<Box<WritePtyCallbackState>>,
+    callback_state: Box<TerminalCallbackState>,
     kitty_fingerprints: Mutex<HashMap<u32, KittyImageFingerprintEntry>>,
+    kitty_empty_generation: Cell<Option<u64>>,
 }
 
 impl Terminal {
@@ -575,13 +615,27 @@ impl Terminal {
             ffi::ghostty_terminal_new(ptr::null(), &mut raw, options).into_result()?;
         }
 
-        let terminal = Self {
+        let mut terminal = Self {
             raw,
-            write_pty_callback: None,
+            callback_state: Box::default(),
             kitty_fingerprints: Mutex::new(HashMap::new()),
+            kitty_empty_generation: Cell::new(None),
         };
+        let userdata = (&mut *terminal.callback_state as *mut TerminalCallbackState).cast();
         let glyph_protocol = false;
         unsafe {
+            ffi::ghostty_terminal_set(
+                terminal.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_USERDATA,
+                userdata,
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                terminal.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_PWD_CHANGED,
+                (pwd_changed_trampoline as *const ()).cast(),
+            )
+            .into_result()?;
             ffi::ghostty_terminal_set(
                 terminal.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_GLYPH_PROTOCOL,
@@ -664,17 +718,7 @@ impl Terminal {
     where
         F: FnMut(&[u8]) + Send + 'static,
     {
-        let mut state = Box::new(WritePtyCallbackState {
-            callback: Box::new(callback),
-        });
-        let userdata = (&mut *state as *mut WritePtyCallbackState).cast::<c_void>();
         unsafe {
-            ffi::ghostty_terminal_set(
-                self.raw,
-                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_USERDATA,
-                userdata.cast(),
-            )
-            .into_result()?;
             ffi::ghostty_terminal_set(
                 self.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_WRITE_PTY,
@@ -682,8 +726,12 @@ impl Terminal {
             )
             .into_result()?;
         }
-        self.write_pty_callback = Some(state);
+        self.callback_state.write_pty = Some(Box::new(callback));
         Ok(())
+    }
+
+    pub fn take_pwd_changes(&mut self) -> Vec<Vec<u8>> {
+        mem::take(&mut self.callback_state.pwd_changes)
     }
 
     pub fn mode_get(&self, mode: u16) -> Result<bool, Error> {
@@ -1011,6 +1059,17 @@ impl Terminal {
         }
     }
 
+    pub fn scroll_viewport_row(&mut self, row: usize) {
+        let viewport = ffi::GhosttyTerminalScrollViewport {
+            tag: ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_ROW,
+            value: ffi::GhosttyTerminalScrollViewportValue { row },
+        };
+        // SAFETY: self.raw is valid and viewport value matches the tag.
+        unsafe {
+            ffi::ghostty_terminal_scroll_viewport(self.raw, viewport);
+        }
+    }
+
     pub fn cols(&self) -> Result<u16, Error> {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLS)
     }
@@ -1065,6 +1124,30 @@ impl Terminal {
         Ok(out)
     }
 
+    fn kitty_graphics(&self) -> Result<ffi::GhosttyKittyGraphics, Error> {
+        let mut graphics: ffi::GhosttyKittyGraphics = ptr::null_mut();
+        unsafe {
+            ffi::ghostty_terminal_get(
+                self.raw,
+                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS,
+                (&mut graphics as *mut ffi::GhosttyKittyGraphics).cast(),
+            )
+            .into_result()?;
+        }
+        Ok(graphics)
+    }
+
+    pub fn kitty_graphics_generation(&self) -> Result<u64, Error> {
+        let graphics = self.kitty_graphics()?;
+        if graphics.is_null() {
+            return Ok(0);
+        }
+        kitty_graphics_u64(
+            graphics,
+            ffi::GhosttyKittyGraphicsData_GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION,
+        )
+    }
+
     pub fn kitty_image_placements(&self) -> Result<Vec<KittyImagePlacement>, Error> {
         self.kitty_image_placements_with_data_filter(|_| true)
     }
@@ -1076,16 +1159,15 @@ impl Terminal {
     where
         F: FnMut(KittyImageDescriptor) -> bool,
     {
-        let mut graphics: ffi::GhosttyKittyGraphics = ptr::null_mut();
-        unsafe {
-            ffi::ghostty_terminal_get(
-                self.raw,
-                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS,
-                (&mut graphics as *mut ffi::GhosttyKittyGraphics).cast(),
-            )
-            .into_result()?;
-        }
+        let graphics = self.kitty_graphics()?;
         if graphics.is_null() {
+            return Ok(Vec::new());
+        }
+        let generation = kitty_graphics_u64(
+            graphics,
+            ffi::GhosttyKittyGraphicsData_GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION,
+        )?;
+        if generation == 0 || self.kitty_empty_generation.get() == Some(generation) {
             return Ok(Vec::new());
         }
 
@@ -1103,13 +1185,21 @@ impl Terminal {
         let _guard = KittyPlacementIteratorGuard { raw: iterator };
 
         let mut placements = Vec::new();
+        let mut storage_has_placements = false;
         while unsafe { ffi::ghostty_kitty_graphics_placement_next(iterator) } {
+            storage_has_placements = true;
             if let Some(placement) =
                 self.kitty_image_placement(graphics, iterator, &mut needs_data)?
             {
                 placements.push(placement);
             }
         }
+        if !storage_has_placements {
+            self.kitty_empty_generation.set(Some(generation));
+            self.prune_kitty_fingerprints(&[]);
+            return Ok(Vec::new());
+        }
+
         placements.extend(self.kitty_virtual_image_placements(graphics, &mut needs_data)?);
         placements.sort_by_key(|placement| placement.z);
         self.prune_kitty_fingerprints(&placements);
@@ -1776,6 +1866,18 @@ impl KittyVirtualRun {
         self.y.hash(&mut hasher);
         1 + ((hasher.finish() as u32) % 900_000)
     }
+}
+
+fn kitty_graphics_u64(
+    graphics: ffi::GhosttyKittyGraphics,
+    data: ffi::GhosttyKittyGraphicsData,
+) -> Result<u64, Error> {
+    let mut out = 0u64;
+    unsafe {
+        ffi::ghostty_kitty_graphics_get(graphics, data, (&mut out as *mut u64).cast())
+            .into_result()?;
+    }
+    Ok(out)
 }
 
 fn kitty_image_u32(
@@ -2838,6 +2940,48 @@ mod tests {
     }
 
     #[test]
+    fn kitty_storage_generation_skips_only_proven_empty_storage() {
+        let mut terminal = Terminal::new(10, 5, 1_000_000).unwrap();
+        terminal.enable_kitty_graphics().unwrap();
+        terminal.resize(10, 5, 8, 16).unwrap();
+
+        assert_eq!(terminal.kitty_graphics_generation().unwrap(), 0);
+        assert!(terminal.kitty_image_placements().unwrap().is_empty());
+
+        terminal.write(b"\x1b_Ga=t,t=d,f=24,i=1,s=1,v=2;////////\x1b\\");
+        let transmitted = terminal.kitty_graphics_generation().unwrap();
+        assert_ne!(transmitted, 0);
+        assert!(terminal.kitty_image_placements().unwrap().is_empty());
+        assert_eq!(terminal.kitty_empty_generation.get(), Some(transmitted));
+
+        terminal.write(b"plain text");
+        assert_eq!(terminal.kitty_graphics_generation().unwrap(), transmitted);
+        assert!(terminal.kitty_image_placements().unwrap().is_empty());
+
+        terminal.write(b"\x1b_Ga=p,i=1,p=1,c=1,r=1;\x1b\\");
+        let placed = terminal.kitty_graphics_generation().unwrap();
+        assert_ne!(placed, transmitted);
+        assert_eq!(terminal.kitty_image_placements().unwrap().len(), 1);
+
+        terminal.resize(10, 5, 12, 24).unwrap();
+        assert_eq!(terminal.kitty_graphics_generation().unwrap(), placed);
+        assert_eq!(terminal.kitty_image_placements().unwrap().len(), 1);
+
+        write_numbered_lines(&mut terminal, 20);
+        assert_eq!(terminal.kitty_graphics_generation().unwrap(), placed);
+        assert!(terminal.kitty_image_placements().unwrap().is_empty());
+        assert_ne!(terminal.kitty_empty_generation.get(), Some(placed));
+        terminal.scroll_viewport_row(0);
+        assert_eq!(terminal.kitty_image_placements().unwrap().len(), 1);
+
+        terminal.write(b"\x1b_Ga=d,d=A\x1b\\");
+        let deleted = terminal.kitty_graphics_generation().unwrap();
+        assert_ne!(deleted, placed);
+        assert!(terminal.kitty_image_placements().unwrap().is_empty());
+        assert_eq!(terminal.kitty_empty_generation.get(), Some(deleted));
+    }
+
+    #[test]
     fn build_info_contract_matches_expected_vendored_features() {
         let _simd = build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_SIMD);
         let _tmux_control_mode =
@@ -2950,13 +3094,45 @@ mod tests {
     }
 
     #[test]
+    fn unicode_width_helpers_match_terminal_layout_rules() {
+        assert_eq!(unicode_codepoint_width('A' as u32), 1);
+        assert_eq!(unicode_codepoint_width('\u{301}' as u32), 0);
+        assert_eq!(unicode_codepoint_width('界' as u32), 2);
+        assert_eq!(unicode_codepoint_width(0x11_0000), 1);
+
+        let cases: &[(&[u32], usize, u8)] = &[
+            (&[], 0, 0),
+            (&['e' as u32, '\u{301}' as u32], 2, 1),
+            (&['⚠' as u32, '\u{fe0f}' as u32], 2, 2),
+            (&['⚠' as u32, '\u{fe0e}' as u32], 2, 1),
+            (&['🇧' as u32, '🇷' as u32], 2, 2),
+            (&['👍' as u32, '🏽' as u32], 2, 2),
+            (
+                &[
+                    '👨' as u32,
+                    '\u{200d}' as u32,
+                    '👩' as u32,
+                    '\u{200d}' as u32,
+                    '👧' as u32,
+                ],
+                5,
+                2,
+            ),
+            (&[0x11_0000, 'A' as u32], 1, 1),
+        ];
+        for &(codepoints, consumed, width) in cases {
+            assert_eq!(unicode_grapheme_width(codepoints), (consumed, width));
+        }
+    }
+
+    #[test]
     fn focus_encoding_matches_expected_sequences() {
         assert_eq!(encode_focus(FocusEvent::Gained).unwrap(), b"\x1b[I");
         assert_eq!(encode_focus(FocusEvent::Lost).unwrap(), b"\x1b[O");
     }
 
     #[test]
-    fn write_pty_callback_receives_terminal_query_responses() {
+    fn terminal_callbacks_report_pty_responses_and_pwd_changes() {
         let mut terminal = Terminal::new(8, 3, 100).unwrap();
         let responses = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
         let sink = responses.clone();
@@ -2964,11 +3140,12 @@ mod tests {
             .set_write_pty_callback(move |bytes| sink.lock().unwrap().extend_from_slice(bytes))
             .unwrap();
 
-        terminal.write(b"\x1b[6n");
+        terminal.write(b"\x1b[6n\x1b]7;file:///tmp/zynk\x07");
 
         let output = responses.lock().unwrap().clone();
         assert!(!output.is_empty());
         assert!(String::from_utf8_lossy(&output).contains("R"));
+        assert_eq!(terminal.take_pwd_changes(), [b"file:///tmp/zynk".to_vec()]);
     }
 
     #[test]
@@ -3077,6 +3254,23 @@ mod tests {
         let after = terminal.scrollbar().unwrap();
         assert_eq!(after.offset, 0);
         assert_eq!(after.len, before.len);
+    }
+
+    #[test]
+    fn absolute_scroll_row_round_trips_and_clamps() {
+        let mut terminal = Terminal::new(80, 3, 1_000_000).unwrap();
+        write_numbered_lines(&mut terminal, 1000);
+
+        let before = terminal.scrollbar().unwrap();
+        let max_row = before.total.saturating_sub(before.len);
+        assert!(max_row > 0);
+
+        for row in [0, max_row / 2, max_row, usize::MAX] {
+            terminal.scroll_viewport_row(row);
+            let after = terminal.scrollbar().unwrap();
+            assert_eq!(after.offset, row.min(max_row));
+            assert_eq!(after.len, before.len);
+        }
     }
 
     #[test]

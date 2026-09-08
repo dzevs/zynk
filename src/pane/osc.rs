@@ -391,84 +391,13 @@ impl Osc52Forwarder {
     }
 }
 
-/// Reconstructs cwd-reporting OSC sequences from child output. Shell
-/// integrations commonly use OSC 7 (`file://...`), while Windows Terminal
-/// documents OSC 9;9 for the same practical purpose.
-#[derive(Debug, Default)]
-pub(super) struct CwdOscTracker {
-    state: Osc52ForwarderState,
-    body: Vec<u8>,
-    pending: Vec<PathBuf>,
-}
-
-impl CwdOscTracker {
-    pub(super) fn observe(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            match self.state {
-                Osc52ForwarderState::Ground => {
-                    if byte == 0x1b {
-                        self.state = Osc52ForwarderState::Escape;
-                    }
-                }
-                Osc52ForwarderState::Escape => {
-                    if byte == b']' {
-                        self.body.clear();
-                        self.state = Osc52ForwarderState::OscBody;
-                    } else if byte == 0x1b {
-                        self.state = Osc52ForwarderState::Escape;
-                    } else {
-                        self.state = Osc52ForwarderState::Ground;
-                    }
-                }
-                Osc52ForwarderState::OscBody => match byte {
-                    0x07 => {
-                        self.finalize();
-                        self.state = Osc52ForwarderState::Ground;
-                    }
-                    0x1b => self.state = Osc52ForwarderState::OscEscape,
-                    _ => self.body.push(byte),
-                },
-                Osc52ForwarderState::OscEscape => {
-                    if byte == b'\\' {
-                        self.finalize();
-                        self.state = Osc52ForwarderState::Ground;
-                    } else {
-                        self.body.push(0x1b);
-                        self.body.push(byte);
-                        self.state = Osc52ForwarderState::OscBody;
-                    }
-                }
-            }
-
-            if self.body.len() > 4096 {
-                self.body.clear();
-                self.state = Osc52ForwarderState::Ground;
-            }
-        }
+pub(super) fn parse_reported_cwd(value: &[u8]) -> Option<PathBuf> {
+    let value = std::str::from_utf8(value).ok()?.trim();
+    if value.starts_with("file://") {
+        return parse_file_uri_cwd(value);
     }
-
-    fn finalize(&mut self) {
-        if let Some(cwd) = parse_cwd_osc(&self.body) {
-            self.pending.push(cwd);
-        }
-        self.body.clear();
-    }
-
-    pub(super) fn drain_latest(&mut self) -> Option<PathBuf> {
-        self.pending.drain(..).next_back()
-    }
-}
-
-fn parse_cwd_osc(body: &[u8]) -> Option<PathBuf> {
-    let body = std::str::from_utf8(body).ok()?;
-    if let Some(uri) = body.strip_prefix("7;") {
-        return parse_file_uri_cwd(uri);
-    }
-    if let Some(path) = body.strip_prefix("9;9;") {
-        let path = path.trim().trim_matches('"');
-        return (!path.is_empty()).then(|| PathBuf::from(path));
-    }
-    None
+    let path = value.trim_matches('"');
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 /// Maximum retained string length for agent OSC title and progress payloads.
@@ -1026,29 +955,26 @@ mod tests {
     }
 
     #[test]
-    fn cwd_osc_tracker_detects_split_osc7_sequence() {
-        let mut tracker = CwdOscTracker::default();
-
-        tracker.observe(b"\x1b]7;file:///tmp/zynk%20repo");
-        assert_eq!(tracker.drain_latest(), None);
-        tracker.observe(b"\x07");
-
+    fn reported_cwd_parses_file_uri_and_bare_paths() {
         assert_eq!(
-            tracker.drain_latest(),
+            parse_reported_cwd(b"file:///tmp/zynk%20repo"),
             Some(std::path::PathBuf::from("/tmp/zynk repo"))
+        );
+        assert_eq!(
+            parse_reported_cwd(b"C:\\Users\\zynk\\src\\zynk"),
+            Some(std::path::PathBuf::from("C:\\Users\\zynk\\src\\zynk"))
+        );
+        assert_eq!(
+            parse_reported_cwd(b"\"C:\\my proj\""),
+            Some(std::path::PathBuf::from("C:\\my proj"))
         );
     }
 
     #[test]
-    fn cwd_osc_tracker_detects_windows_terminal_cwd_sequence() {
-        let mut tracker = CwdOscTracker::default();
-
-        tracker.observe(b"\x1b]9;9;C:\\Users\\zynk\\src\\zynk\x1b\\");
-
-        assert_eq!(
-            tracker.drain_latest(),
-            Some(std::path::PathBuf::from("C:\\Users\\zynk\\src\\zynk"))
-        );
+    fn reported_cwd_rejects_invalid_or_empty_values() {
+        assert_eq!(parse_reported_cwd(b""), None);
+        assert_eq!(parse_reported_cwd(b"\xff"), None);
+        assert_eq!(parse_reported_cwd(b"file://remote/tmp"), None);
     }
 
     // -----------------------------------------------------------------------

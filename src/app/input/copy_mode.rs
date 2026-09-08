@@ -1,5 +1,4 @@
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-use unicode_width::UnicodeWidthChar;
 
 use crate::{
     app::{
@@ -608,7 +607,7 @@ fn word_spans(text: &str) -> Vec<WordSpan> {
 }
 
 fn char_cell_width(ch: char) -> u16 {
-    UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16
+    u16::from(crate::ghostty::unicode_codepoint_width(ch as u32)).max(1)
 }
 
 fn copy_mode_page_lines(height: u16, half_page: bool) -> usize {
