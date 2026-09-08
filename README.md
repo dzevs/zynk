@@ -65,10 +65,13 @@ Build zynk from source; a published crate is on crates.io.
 only (Fedora/Ubuntu). Building for any other target fails at compile time. zynk ships no prebuilt binaries
 and no package-manager distribution.
 
-**Build from source** — needs Rust (stable), **Zig 0.15.2** (the bundled `libghostty-vt` is built with Zig),
-and **network access during the build** (the Zig build fetches libghostty-vt's package dependencies; offline
-builds aren't supported yet). `cargo install zynk --locked` builds the same 3.x crate from source under the
-same requirements (`--locked` keeps the crate's packaged lockfile; without it Cargo re-resolves dependencies).
+**Build from source** — needs **Rust 1.98.0** (a git checkout pins it in `rust-toolchain.toml`, so rustup
+installs and selects that version for you and leaves your default toolchain alone), **Zig 0.15.2** (the bundled
+`libghostty-vt` is built with Zig), and **network access during the build** (the Zig build fetches
+libghostty-vt's package dependencies; offline builds aren't supported yet). `cargo install zynk --locked`
+builds the same 3.x crate from source under the same requirements, except that the published crate carries no
+toolchain pin and so builds on whichever toolchain is active (`--locked` keeps the crate's packaged lockfile;
+without it Cargo re-resolves dependencies).
 See [`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 ```bash

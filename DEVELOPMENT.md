@@ -10,8 +10,10 @@ thin client over a local socket server; most commands return JSON.
 
 ## Prerequisites
 
-- **Rust** (stable, via `rustup`). The toolchain is pinned through
-  `Cargo.lock`; build with `--locked`.
+- **Rust 1.98.0** (via `rustup`). `rust-toolchain.toml` pins the toolchain, so
+  rustup installs and selects that exact version inside this repository and
+  leaves your default toolchain untouched. Dependency versions are pinned
+  separately by `Cargo.lock`; build with `--locked`.
 - **Zig 0.15.2.** The bundled `libghostty-vt` terminal library is built from
   source with Zig at `cargo build` time. The exact version matters — other Zig
   releases won't compile the vendored source.

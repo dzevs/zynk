@@ -94,8 +94,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust (stable)
+      # The repo pins its toolchain in rust-toolchain.toml; the real workflow reads the channel out of
+      # that file and passes it here, so CI pre-installs the pinned version rather than `stable`.
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          components: rustfmt,clippy
 
       - name: Install Rust tools
         uses: taiki-e/install-action@v2
