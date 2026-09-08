@@ -1,15 +1,33 @@
 id = "claude"
-version = "2026.09.08.3"
+version = "2026.09.08.4"
 min_engine_version = 2
 updated_at = "2026-09-08T00:00:00Z"
 aliases = ["claude-code"]
 
 [[rules]]
+# A dialog is CURRENT when its hint footer is the last non-empty line (or the second-to-last, under a box
+# border): approval, permission and selection dialogs all end with "Esc to cancel" plus a second hint, and Claude
+# keeps its busy spinner title while such a dialog waits for the user (upstream issue #3467). Once the dialog is
+# answered and work continues below it, the footer leaves the bottom two lines and this rule stops matching.
+id = "current_approval_dialog"
+state = "blocked"
+priority = 990
+region = "bottom_non_empty_lines(2)"
+visible_blocker = true
+contains = ["esc to cancel"]
+any = [
+  { contains = ["tab to amend"] },
+  { contains = ["enter to select"] },
+  { contains = ["enter to confirm"] },
+  { contains = ["to navigate"] },
+  { contains = ["ctrl+e to explain"] },
+]
+
+[[rules]]
 id = "osc_title_working"
 state = "working"
-# 970: above the idle prompt box (950) and stale scrollback blockers (<= 850) but BELOW the current blocker
-# forms (980): Claude keeps its busy title while a permission or selection form waits for the user, and that
-# form must win (upstream issue #3467).
+# 970: above the idle prompt box (950), the suffix-selected form (960), the dynamic fallback (960) and stale
+# scrollback blockers (<= 850), but BELOW current_approval_dialog (990).
 priority = 970
 region = "osc_title"
 visible_working = true
@@ -35,7 +53,9 @@ any = [
 [[rules]]
 id = "live_blocked_form"
 state = "blocked"
-priority = 980
+# 960: after_last_horizontal_rule is a suffix selector, not proof of freshness — an answered form followed by
+# work still matches it — so it stays below the busy title (970); current dialogs win via current_approval_dialog.
+priority = 960
 region = "after_last_horizontal_rule"
 visible_blocker = true
 contains = ["enter to select", "esc to cancel"]

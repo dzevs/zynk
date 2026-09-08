@@ -652,66 +652,149 @@ fn claude_osc_title_half_circle_frames_are_working() {
     }
 }
 
+const CLAUDE_BUSY_TITLES: [&str; 5] = [
+    "\u{25D0} Initial conversation with Claude",
+    "\u{25D3} Initial conversation with Claude",
+    "\u{25D1} Reading files",
+    "\u{25D2} Reading files",
+    "\u{280B} Thinking",
+];
+
+// Current dialogs: their hint footer is the last (or second-to-last, under a box border) non-empty line.
+const CLAUDE_BASH_APPROVAL: &str = "do you want to proceed?\n\
+    bash command: rm -rf /tmp/test\n\
+    ❯ 1. Yes\n   2. No\n\n\
+    Esc to cancel · Tab to amend · ctrl+e to explain\n";
+const CLAUDE_GENERIC_PERMISSION: &str =
+    "──────────\nDo you want to proceed?\n  1. Yes\n  2. No\n\nEsc to cancel · Tab to amend\n";
+const CLAUDE_SELECTION_FORM: &str =
+    "──────────\n  1. Yes\n  2. No\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n";
+const CLAUDE_DYNAMIC_PROMPT: &str =
+    "Run a dynamic workflow?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n";
+const CLAUDE_BOXED_APPROVAL: &str = "╭──────────╮\n│ Bash command: ls │\n│ Do you want to proceed? │\n\
+    │ ❯ 1. Yes │\n│   2. No │\n│ Esc to cancel · Tab to amend · ctrl+e to explain │\n╰──────────╯\n";
+const CLAUDE_PROMPT_BOX: &str = "──────────\n❯ Ask Claude\n──────────\n";
+
+fn claude_current_dialogs() -> [(&'static str, &'static str); 5] {
+    [
+        ("bash approval", CLAUDE_BASH_APPROVAL),
+        ("generic permission", CLAUDE_GENERIC_PERMISSION),
+        ("selection form", CLAUDE_SELECTION_FORM),
+        ("dynamic prompt", CLAUDE_DYNAMIC_PROMPT),
+        ("boxed approval", CLAUDE_BOXED_APPROVAL),
+    ]
+}
+
 #[test]
-fn claude_current_blocker_form_outranks_a_retained_busy_title() {
-    // Gate-3 ARB-4FDA-OSC-PRECEDENCE-001: Claude keeps its busy spinner title while a permission or
-    // selection form waits for the user (upstream issue #3467). The current form must win, or a pane that
-    // needs input reads as working for hours.
-    let form =
-        "──────────\n  1. Yes\n  2. No\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n";
-    for title in [
-        "\u{25D0} Initial conversation with Claude",
-        "\u{25D3} Initial conversation with Claude",
-        "\u{25D1} Reading files",
-        "\u{25D2} Reading files",
-        "\u{280B} Thinking",
-    ] {
-        let result = osc_explain(Agent::Claude, form, title, "");
-        assert_eq!(result.state, AgentState::Blocked, "title {title}");
-        assert_eq!(
-            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
-            Some("live_blocked_form"),
-            "title {title}"
-        );
-        assert!(result.visible_blocker, "title {title}");
-        assert!(!result.visible_working, "title {title}");
+fn claude_current_dialog_outranks_a_retained_busy_title() {
+    // Gate-3 ARB-4FDA-OSC-PRECEDENCE-001 / ARB-EE13-OSC-FRESHNESS-001: Claude keeps its busy spinner title
+    // while an approval, permission or selection dialog waits for the user (upstream issue #3467). A dialog
+    // that is CURRENT — its hint footer is at the bottom of the buffer — must win over that title.
+    for (label, screen) in claude_current_dialogs() {
+        for title in CLAUDE_BUSY_TITLES {
+            let result = osc_explain(Agent::Claude, screen, title, "");
+            assert_eq!(result.state, AgentState::Blocked, "{label} / {title}");
+            assert_eq!(
+                result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+                Some("current_approval_dialog"),
+                "{label} / {title}"
+            );
+            assert!(result.visible_blocker, "{label} / {title}");
+            assert!(!result.visible_working, "{label} / {title}");
+        }
+        // Control: with a static title the same dialog is Blocked too.
+        let result = osc_explain(Agent::Claude, screen, "\u{2733} Claude", "");
+        assert_eq!(result.state, AgentState::Blocked, "{label} static");
+        assert!(result.visible_blocker, "{label} static");
     }
 }
 
 #[test]
-fn claude_busy_title_still_outranks_the_idle_prompt_box_and_stale_scrollback() {
-    // The spinner must keep beating weak evidence: the idle prompt box (a working Claude keeps its input box
-    // visible) and a stale permission prompt left in scrollback.
-    let prompt_box = "❯ \n";
-    let stale_scrollback = "do you want to proceed?\n\
-        bash command: ls\n\
-        ❯ 1. Yes\n   2. No\n\n\
-        Esc to cancel · Tab to amend · ctrl+e to explain\n";
-    for screen in [prompt_box, stale_scrollback] {
-        let result = osc_explain(Agent::Claude, screen, "\u{25D0} Reading files", "");
-        assert_eq!(result.state, AgentState::Working, "screen {screen:?}");
+fn claude_answered_dialog_followed_by_work_is_working() {
+    // The inverse failure: once the dialog was answered and work continued below it, the same text must no
+    // longer block an active spinner (freshness, not just priority).
+    for (label, screen) in claude_current_dialogs() {
+        // No later divider or prompt box on purpose: only freshness (the footer is no longer at the bottom)
+        // may release the blocker; a suffix selector such as after_last_horizontal_rule still sees the footer.
+        let answered = format!("{screen}Selected: yes\nReading src/main.rs\n");
+        for title in ["\u{25D0} Reading files", "\u{280B} Reading files"] {
+            let result = osc_explain(Agent::Claude, &answered, title, "");
+            assert_eq!(result.state, AgentState::Working, "{label} / {title}");
+            assert_eq!(
+                result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+                Some("osc_title_working"),
+                "{label} / {title}"
+            );
+            assert!(result.visible_working, "{label} / {title}");
+            assert!(!result.visible_blocker, "{label} / {title}");
+        }
+    }
+}
+
+#[test]
+fn claude_historical_dialog_above_a_later_divider_is_working() {
+    for (label, screen) in claude_current_dialogs() {
+        let historical = format!("{screen}\n──────────\nReading src/main.rs\n{CLAUDE_PROMPT_BOX}");
+        let result = osc_explain(Agent::Claude, &historical, "\u{25D0} Reading files", "");
+        assert_eq!(result.state, AgentState::Working, "{label}");
         assert_eq!(
             result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
             Some("osc_title_working"),
-            "screen {screen:?}"
+            "{label}"
         );
-        assert!(result.visible_working, "screen {screen:?}");
     }
+}
+
+#[test]
+fn claude_busy_title_outranks_a_matched_idle_prompt_box() {
+    // Gate-3 ARB-EE13-PROMPT-TEST-001: a REAL two-border prompt box must match live_prompt_box (proved from
+    // evaluated_rules) and still lose to the busy title; with a static title the same box is Idle.
+    let busy = osc_explain(
+        Agent::Claude,
+        CLAUDE_PROMPT_BOX,
+        "\u{25D0} Reading files",
+        "",
+    );
+    assert!(
+        busy.evaluated_rules
+            .iter()
+            .any(|rule| rule.id == "live_prompt_box" && rule.matched),
+        "the fixture must exercise live_prompt_box: {:?}",
+        busy.evaluated_rules
+            .iter()
+            .map(|rule| (rule.id.as_str(), rule.matched))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(busy.state, AgentState::Working);
+    assert_eq!(
+        busy.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("osc_title_working")
+    );
+    assert!(busy.visible_working && !busy.visible_idle);
+    let idle = osc_explain(Agent::Claude, CLAUDE_PROMPT_BOX, "\u{2733} Claude", "");
+    assert_eq!(idle.state, AgentState::Idle);
+    assert_eq!(
+        idle.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(idle.visible_idle);
 }
 
 #[test]
 fn claude_stale_dynamic_workflow_text_does_not_override_a_busy_title() {
     // Codex Gate-2 on 7b5639f: `dynamic_workflow_prompt` matches the whole recent screen, so a historical
-    // "Run a dynamic workflow?" left in scrollback must stay below an active spinner, while a CURRENT dynamic
-    // workflow prompt without a busy title is still Blocked.
+    // "Run a dynamic workflow?" left in scrollback must stay below an active spinner, while a dynamic
+    // workflow prompt without a busy title is still Blocked through that broad fallback.
     let stale = "Earlier prompt: Run a dynamic workflow?\nEsc to cancel\n\nSelected: yes\n\n\
-        ──────────\nReading src/main.rs\n❯ \n";
+        ──────────\nReading src/main.rs\n──────────\n❯ Ask Claude\n──────────\n";
     let result = osc_explain(Agent::Claude, stale, "\u{25D0} Reading files", "");
     assert_eq!(result.state, AgentState::Working);
     assert_eq!(
         result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
         Some("osc_title_working")
     );
+    // A bare "Esc to cancel" footer without a second hint is not a current dialog for the bounded rule;
+    // the broad fallback still classifies the prompt as Blocked when no busy title is present.
     let current = "Run a dynamic workflow?\n  1. Yes\n  2. No\nEsc to cancel\n";
     let result = osc_explain(Agent::Claude, current, "", "");
     assert_eq!(result.state, AgentState::Blocked);
