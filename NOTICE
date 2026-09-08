@@ -42,6 +42,9 @@ code and was changed by zynk is recorded per commit in
 docs/zynk/fork-patch-ledger.md and enumerated here.
 
 <!-- apache-modified-files: begin -->
+- Cargo.toml
+- src/client/mod.rs
+- tests/client_mode.rs
 <!-- apache-modified-files: end -->
 
 The built-in notification sounds (assets/sounds/) are inherited from upstream
