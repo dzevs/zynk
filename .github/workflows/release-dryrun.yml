@@ -69,10 +69,14 @@ jobs:
       # to compile (with both musl-gcc AND zig cc). Restoring a static musl build is a SEPARATE gated change
       # (patch sqlite-vec's typedefs, or upgrade to a fixed release after a musl + vector/retrieval test
       # pass) — not a release-tooling hack. See docs/zynk/fork-patch-ledger.md, row "release build known gaps".
+      # rustc >= 1.98 links aarch64-unknown-linux-gnu with `-Wl,--fix-cortex-a53-843419`
+      # (rust-lang/rust#155453), which `zig cc` refuses ("unsupported linker arg"); cargo-zigbuild 0.23.4
+      # filters that flag (src/zig/linker_args.rs), so the aarch64 artifact is linked WITHOUT the
+      # Cortex-A53 erratum 843419 workaround — as every earlier zynk aarch64 build was.
       - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
+        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.23.4
       - name: Remove Zig caches
         run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
       - name: Build (cargo-zigbuild)
