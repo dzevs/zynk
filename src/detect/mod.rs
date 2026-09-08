@@ -62,7 +62,51 @@ pub enum Agent {
 }
 
 impl Agent {
+    /// Every agent identity this build knows, whether or not it ships a screen
+    /// manifest. Iterate this for identity work (labels, aliases, hook
+    /// authority); iterate [`Agent::SCREEN_MANIFEST_AGENTS`] for manifest work.
+    ///
+    /// A member that is absent from `SCREEN_MANIFEST_AGENTS` is identity-only:
+    /// its state comes from a hook, never from reading the screen.
+    // Every production path here resolves a single label through
+    // `parse_agent_label`; nothing enumerates the roster, so the manifest cache
+    // moving to `SCREEN_MANIFEST_AGENTS` leaves this constant read only by the
+    // identity tests. Its first iterating caller is M3-02's
+    // `every_agent_label_round_trips_through_canonical_and_alias_parsers`, and
+    // M3-04 (mastracode) is where it first diverges from
+    // `SCREEN_MANIFEST_AGENTS`. Upstream's two production readers (the clap
+    // agent-kind value list and `metadata_report_agent`) have no counterpart in
+    // this fork, so the allow stays until a fork surface needs the roster.
+    #[allow(dead_code)]
     pub const ALL: [Self; 18] = [
+        Self::Pi,
+        Self::Claude,
+        Self::Codex,
+        Self::Gemini,
+        Self::Cursor,
+        Self::Devin,
+        Self::Antigravity,
+        Self::Cline,
+        Self::OpenCode,
+        Self::GithubCopilot,
+        Self::Kimi,
+        Self::Kiro,
+        Self::Droid,
+        Self::Amp,
+        Self::Grok,
+        Self::Hermes,
+        Self::Kilo,
+        Self::Qodercli,
+    ];
+
+    /// The agents that ship a bundled screen manifest -- exactly the agents the
+    /// manifest cache loads. Every member must have a `BUNDLED_MANIFESTS` entry;
+    /// `all_bundled_manifests_parse_and_validate` enforces that, so a
+    /// manifest-less agent listed here fails the suite instead of silently
+    /// caching a `None` manifest nobody notices.
+    ///
+    /// A subset of [`Agent::ALL`], currently equal to it.
+    pub const SCREEN_MANIFEST_AGENTS: [Self; 18] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
@@ -692,6 +736,18 @@ mod tests {
         assert_eq!(agent_label(Agent::Grok), "grok");
         assert_eq!(agent_label(Agent::Hermes), "hermes");
         assert_eq!(agent_label(Agent::Kilo), "kilo");
+    }
+
+    #[test]
+    fn screen_manifest_agents_is_a_subset_of_all_agents() {
+        for agent in Agent::SCREEN_MANIFEST_AGENTS {
+            assert!(
+                Agent::ALL.contains(&agent),
+                "{} is a screen-manifest agent but missing from Agent::ALL",
+                agent_label(agent)
+            );
+        }
+        assert!(Agent::SCREEN_MANIFEST_AGENTS.len() <= Agent::ALL.len());
     }
 
     #[test]

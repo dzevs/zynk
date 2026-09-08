@@ -291,28 +291,10 @@ fn detection_uses_cached_manifest_until_explicit_reload() {
 
 #[test]
 fn all_bundled_manifests_parse_and_validate() {
-    let agents = [
-        Agent::Pi,
-        Agent::Claude,
-        Agent::Codex,
-        Agent::Gemini,
-        Agent::Cursor,
-        Agent::Devin,
-        Agent::Antigravity,
-        Agent::Cline,
-        Agent::OpenCode,
-        Agent::GithubCopilot,
-        Agent::Kimi,
-        Agent::Kiro,
-        Agent::Droid,
-        Agent::Amp,
-        Agent::Grok,
-        Agent::Hermes,
-        Agent::Kilo,
-        Agent::Qodercli,
-    ];
-
-    for agent in agents {
+    // Iterate the constant, not a hand-listed array: an agent added to
+    // SCREEN_MANIFEST_AGENTS without a bundled manifest must fail here rather
+    // than land in the cache as a silent `(agent, None)` entry.
+    for agent in Agent::SCREEN_MANIFEST_AGENTS {
         assert!(
             bundled_manifest(agent).is_some(),
             "missing bundled manifest for {}",
