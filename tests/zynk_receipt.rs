@@ -448,7 +448,11 @@ fn start_detected_hermes(fixture: &Fixture, pane: &str) {
         ],
     );
     assert_eq!(out.code, 0, "start hermes pane: stderr={}", out.stderr);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Foreground-process detection is polled by the server; when the whole receipt
+    // suite runs in parallel (each test spawning its own server) a 10 s deadline was
+    // observed to expire (2/6 full runs on 2026-09-08) while the same test passed alone
+    // and on rerun. Detection latency is not what this test asserts, so give it room.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let got = send_json(
             &fixture.socket_path,
