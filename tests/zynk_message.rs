@@ -245,6 +245,39 @@ fn pane_recent_text(socket_path: &Path, pane_id: &str) -> String {
         .to_string()
 }
 
+/// Turn a freshly-created shell pane into a PASSIVE reader (`cat`) before it is reported as an agent
+/// target. A plain shell EXECUTES the injected multi-line message: its `command not found` errors are
+/// written while the tty is still echoing the paste, and the two streams interleave at byte level, so an
+/// asserted substring (the body, a header line) may never be contiguous in the rendered pane — hosted
+/// Ubuntu CI rendered the body as `h` / `ello there`. With echo off, `cat` writes each delivered line
+/// verbatim and in order, which still exercises real dispatch into an agent-target PTY.
+fn start_passive_cat(fixture: &Fixture, pane: &str) {
+    // The ready marker is shell-quote-split so the ECHOED command line does not contain it verbatim —
+    // only the `printf` output (emitted just before `exec cat`) does.
+    let out = run_cli(
+        fixture,
+        None,
+        &[
+            "pane",
+            "run",
+            pane,
+            "--",
+            "stty -echo 2>/dev/null; printf '__zynk''_cat_ready__\\n'; exec cat",
+        ],
+    );
+    assert_eq!(out.code, 0, "start passive cat: stderr={}", out.stderr);
+    assert!(
+        wait_for_pane_text(
+            &fixture.socket_path,
+            pane,
+            "__zynk_cat_ready__",
+            Duration::from_secs(10)
+        ),
+        "passive cat pane did not signal ready; pane text: {:?}",
+        pane_recent_text(&fixture.socket_path, pane)
+    );
+}
+
 fn wait_for_pane_text(socket_path: &Path, pane_id: &str, needle: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -441,6 +474,7 @@ fn agent_send_to_real_agent_submits_and_returns_f4_ok() {
     let fixture = spawn_fixture();
 
     let pane = create_root_pane(&fixture.socket_path, "agent-ok");
+    start_passive_cat(&fixture, &pane);
     report_agent(&fixture.socket_path, &pane, "codex");
 
     let out = run_cli(
