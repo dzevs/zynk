@@ -2,7 +2,7 @@
   description = "zynk — terminal workspace manager for AI coding agents";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   };
 
   outputs =
