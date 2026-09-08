@@ -17,9 +17,16 @@ pub const DEFAULT_KNOWN_AGENT_IDLE_FALLBACK: &str = "default_known_agent_idle_fa
 /// OSC-derived strings captured from the terminal title / progress sequences.
 /// Pass empty strings for `osc_title` and `osc_progress` when the data is not
 /// available — behavior is identical to the pre-OSC engine in that case.
+///
+/// `unwrapped_tail` is the same bottom-of-buffer snapshot with soft wraps
+/// joined, so one logical agent line is one line of text however narrow the
+/// pane is. It is what `bottom_logical_non_empty_lines(N)` reads; `None` (a
+/// caller that has no terminal to ask, such as a remote or a shim) makes that
+/// region fall back to the physical `bottom_non_empty_lines(N)`.
 #[derive(Debug, Clone, Copy)]
 pub struct DetectionInput<'a> {
     pub screen: &'a str,
+    pub unwrapped_tail: Option<&'a str>,
     pub osc_title: &'a str,
     pub osc_progress: &'a str,
 }
@@ -325,6 +332,7 @@ pub fn detect(agent: Agent, screen_content: &str) -> AgentDetection {
         agent,
         DetectionInput {
             screen: screen_content,
+            unwrapped_tail: None,
             osc_title: "",
             osc_progress: "",
         },
@@ -343,6 +351,7 @@ pub fn explain(agent: Agent, screen_content: &str) -> DetectionExplain {
         agent,
         DetectionInput {
             screen: screen_content,
+            unwrapped_tail: None,
             osc_title: "",
             osc_progress: "",
         },
@@ -390,6 +399,7 @@ pub fn should_skip_state_update(agent: Agent, screen_content: &str) -> bool {
         agent,
         DetectionInput {
             screen: screen_content,
+            unwrapped_tail: None,
             osc_title: "",
             osc_progress: "",
         },
@@ -922,15 +932,17 @@ fn validate_manifest(manifest: &AgentManifest) -> Result<(), String> {
         }
         validate_region_name(&rule.region)
             .map_err(|err| format!("rule {} uses invalid region: {err}", rule.id))?;
-        if rule.region.trim().starts_with("top_non_empty_lines(")
-            && manifest
-                .min_engine_version
-                .is_some_and(|version| version < TOP_NON_EMPTY_LINES_ENGINE_VERSION)
-        {
-            return Err(format!(
-                "rule {} uses top_non_empty_lines but min_engine_version is below {}",
-                rule.id, TOP_NON_EMPTY_LINES_ENGINE_VERSION
-            ));
+        for region in ENGINE_3_REGIONS {
+            if region_is_named(&rule.region, region)
+                && manifest
+                    .min_engine_version
+                    .is_some_and(|version| version < ENGINE_3_REGION_VERSION)
+            {
+                return Err(format!(
+                    "rule {} uses {region} but min_engine_version is below {}",
+                    rule.id, ENGINE_3_REGION_VERSION
+                ));
+            }
         }
         validate_rule_gate(rule, &mut complexity)
             .map_err(|err| format!("rule {} has invalid matcher gates: {err}", rule.id))?;
@@ -1086,7 +1098,8 @@ fn validate_region_name(spec: &str) -> Result<(), String> {
         | "osc_progress" => Ok(()),
         _ if region_count(trimmed, "bottom_lines").is_some()
             || region_count(trimmed, "bottom_non_empty_lines").is_some()
-            || top_region_count(trimmed).is_some() =>
+            || strict_region_count(trimmed, BOTTOM_LOGICAL_NON_EMPTY_LINES).is_some()
+            || strict_region_count(trimmed, TOP_NON_EMPTY_LINES).is_some() =>
         {
             Ok(())
         }
@@ -1283,7 +1296,10 @@ fn region<'a>(input: DetectionInput<'a>, spec: &str) -> &'a str {
             if let Some(count) = region_count(trimmed, "bottom_non_empty_lines") {
                 return bottom_non_empty_lines(content, count);
             }
-            if let Some(count) = top_region_count(trimmed) {
+            if let Some(count) = strict_region_count(trimmed, BOTTOM_LOGICAL_NON_EMPTY_LINES) {
+                return bottom_non_empty_lines(input.unwrapped_tail.unwrap_or(content), count);
+            }
+            if let Some(count) = strict_region_count(trimmed, TOP_NON_EMPTY_LINES) {
                 return top_non_empty_lines(content, count);
             }
             ""
@@ -1298,12 +1314,24 @@ fn region_count(spec: &str, name: &str) -> Option<usize> {
         .and_then(|count| count.parse::<usize>().ok())
 }
 
-const TOP_NON_EMPTY_LINES_ENGINE_VERSION: u32 = 3;
-const MAX_TOP_REGION_LINE_COUNT: usize = u16::MAX as usize;
+const TOP_NON_EMPTY_LINES: &str = "top_non_empty_lines";
+const BOTTOM_LOGICAL_NON_EMPTY_LINES: &str = "bottom_logical_non_empty_lines";
+/// Regions introduced with engine 3 refuse anything but a canonical decimal count.
+const MAX_STRICT_REGION_LINE_COUNT: usize = u16::MAX as usize;
+/// Every engine-3 region shares one floor, so a manifest that declares 3 gets all of them.
+const ENGINE_3_REGION_VERSION: u32 = 3;
+const ENGINE_3_REGIONS: [&str; 2] = [TOP_NON_EMPTY_LINES, BOTTOM_LOGICAL_NON_EMPTY_LINES];
 
-fn top_region_count(spec: &str) -> Option<usize> {
+/// True when `spec` names the parameterized region `name`, whatever its count argument is.
+fn region_is_named(spec: &str, name: &str) -> bool {
+    spec.trim()
+        .strip_prefix(name)
+        .is_some_and(|rest| rest.starts_with('('))
+}
+
+fn strict_region_count(spec: &str, name: &str) -> Option<usize> {
     let count = spec
-        .strip_prefix("top_non_empty_lines")?
+        .strip_prefix(name)?
         .strip_prefix('(')?
         .strip_suffix(')')?;
     if count.starts_with('0') || !count.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -1312,7 +1340,7 @@ fn top_region_count(spec: &str) -> Option<usize> {
     count
         .parse::<usize>()
         .ok()
-        .filter(|count| *count <= MAX_TOP_REGION_LINE_COUNT)
+        .filter(|count| *count <= MAX_STRICT_REGION_LINE_COUNT)
 }
 
 fn bottom_lines(content: &str, count: usize) -> &str {

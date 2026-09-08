@@ -787,9 +787,11 @@ fn spawn_basic_detection_task(
 
             let osc_title = terminal.agent_osc_title();
             let osc_progress = terminal.agent_osc_progress();
+            let unwrapped_content = terminal.detection_unwrapped_text();
             let Some(screen_detection) = detection_update_for_publish_with_osc(
                 agent,
                 &content,
+                Some(&unwrapped_content),
                 &osc_title,
                 &osc_progress,
                 process_exited,
@@ -2084,9 +2086,11 @@ impl PaneRuntime {
 
                     let osc_title = terminal.agent_osc_title();
                     let osc_progress = terminal.agent_osc_progress();
+                    let unwrapped_content = terminal.detection_unwrapped_text();
                     let Some(screen_detection) = detection_update_for_publish_with_osc(
                         agent,
                         &content,
+                        Some(&unwrapped_content),
                         &osc_title,
                         &osc_progress,
                         process_exited,
@@ -2280,6 +2284,10 @@ impl PaneRuntime {
 
     pub fn detection_text(&self) -> String {
         self.terminal.detection_text()
+    }
+
+    pub fn detection_unwrapped_text(&self) -> String {
+        self.terminal.detection_unwrapped_text()
     }
 
     pub fn agent_osc_title(&self) -> String {

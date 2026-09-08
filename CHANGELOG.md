@@ -98,9 +98,12 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 - Self-update messages now say accurately that self-update is unavailable; the updater remains fail-closed.
 - Claude Code 2.1.228 and newer spin with half-circle frames in the terminal title; a working Claude was
   detected as idle. The title rule now recognizes those frames. Because Claude keeps that busy title while an
-  approval, permission or selection dialog waits for you, a dialog whose hint footer sits at the bottom of the
-  screen now outranks the retained title (blocked, not working); once you answer and work continues below it,
-  the title wins again.
+  approval, permission or selection dialog waits for you, a *current* dialog outranks the retained title
+  (blocked, not working). A dialog is current when its hint footer is the last logical line on screen, or the
+  line directly above a closing box border that ends the screen — nothing else admits an earlier footer.
+  *Logical* means soft wraps are joined first, so a pane too narrow to hold the footer on one row (below
+  roughly 48 columns) still reports blocked instead of hiding the approval as working. One line of output
+  printed below the footer already ends the match and the busy title wins again.
 
 **Removed**
 

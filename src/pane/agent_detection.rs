@@ -292,12 +292,13 @@ pub(super) fn detection_update_for_publish(
     content: &str,
     process_exited: bool,
 ) -> Option<crate::detect::AgentDetection> {
-    detection_update_for_publish_with_osc(agent, content, "", "", process_exited)
+    detection_update_for_publish_with_osc(agent, content, None, "", "", process_exited)
 }
 
 pub(super) fn detection_update_for_publish_with_osc(
     agent: Option<Agent>,
     content: &str,
+    unwrapped_tail: Option<&str>,
     osc_title: &str,
     osc_progress: &str,
     process_exited: bool,
@@ -312,7 +313,13 @@ pub(super) fn detection_update_for_publish_with_osc(
         });
     }
 
-    let detection = crate::detect::detect_agent_with_osc(agent, content, osc_title, osc_progress);
+    let detection = crate::detect::detect_agent_with_osc(
+        agent,
+        content,
+        unwrapped_tail,
+        osc_title,
+        osc_progress,
+    );
     (!detection.skip_state_update).then_some(detection)
 }
 

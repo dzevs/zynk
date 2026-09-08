@@ -40,11 +40,15 @@ REGION_RE = re.compile(
     r"prompt_box_body|above_prompt_box|last_non_empty_above_prompt_box|after_last_horizontal_rule|"
     r"osc_title|osc_progress|"
     r"bottom_lines\([1-9][0-9]*\)|bottom_non_empty_lines\([1-9][0-9]*\)|"
+    r"bottom_logical_non_empty_lines\([1-9][0-9]*\)|"
     r"top_non_empty_lines\([1-9][0-9]*\))$"
 )
 REGION_COUNT_RE = re.compile(r"\(([1-9][0-9]*)\)$")
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
-MAX_TOP_REGION_LINE_COUNT = 65_535
+# Regions introduced with engine 3: one shared floor, one shared count bound.
+ENGINE_3_REGIONS = ("top_non_empty_lines", "bottom_logical_non_empty_lines")
+ENGINE_3_REGION_VERSION = 3
+MAX_STRICT_REGION_LINE_COUNT = 65_535
 MAX_RULES_PER_MANIFEST = 128
 MAX_GATE_DEPTH = 8
 MAX_TOTAL_GATES = 512
@@ -140,9 +144,13 @@ def validate_manifest(path: Path, engine_version: int) -> dict:
     for index, rule in enumerate(rules):
         validate_rule(path, index, rule, complexity)
         region = rule.get("region", "whole_recent")
-        if region.startswith("top_non_empty_lines(") and min_engine < 3:
+        if (
+            any(region.startswith(f"{name}(") for name in ENGINE_3_REGIONS)
+            and min_engine < ENGINE_3_REGION_VERSION
+        ):
             raise CheckError(
-                f"{path}: rule {rule['id']} region {region!r} requires min_engine_version 3"
+                f"{path}: rule {rule['id']} region {region!r} "
+                f"requires min_engine_version {ENGINE_3_REGION_VERSION}"
             )
 
     return manifest
@@ -165,9 +173,9 @@ def validate_rule(path: Path, index: int, rule: object, complexity: dict[str, in
         raise CheckError(f"{path}: rule {rule_id} has invalid region {region!r}")
     count_match = REGION_COUNT_RE.search(region)
     if (
-        region.startswith("top_non_empty_lines(")
+        any(region.startswith(f"{name}(") for name in ENGINE_3_REGIONS)
         and count_match
-        and int(count_match.group(1)) > MAX_TOP_REGION_LINE_COUNT
+        and int(count_match.group(1)) > MAX_STRICT_REGION_LINE_COUNT
     ):
         raise CheckError(f"{path}: rule {rule_id} has invalid region {region!r}")
     if rule.get("skip_state_update"):

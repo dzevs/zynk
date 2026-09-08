@@ -270,6 +270,10 @@ impl TerminalRuntime {
         self.0.detection_text()
     }
 
+    pub fn detection_unwrapped_text(&self) -> String {
+        self.0.detection_unwrapped_text()
+    }
+
     pub fn agent_osc_title(&self) -> String {
         self.0.agent_osc_title()
     }

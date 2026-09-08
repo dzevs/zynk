@@ -1,20 +1,41 @@
 id = "claude"
-version = "2026.09.08.4"
-min_engine_version = 2
-updated_at = "2026-09-08T00:00:00Z"
+version = "2026.09.09.1"
+min_engine_version = 3
+updated_at = "2026-09-09T00:00:00Z"
 aliases = ["claude-code"]
 
 [[rules]]
-# A dialog is CURRENT when its hint footer is the last non-empty line (or the second-to-last, under a box
-# border): approval, permission and selection dialogs all end with "Esc to cancel" plus a second hint, and Claude
-# keeps its busy spinner title while such a dialog waits for the user (upstream issue #3467). Once the dialog is
-# answered and work continues below it, the footer leaves the bottom two lines and this rule stops matching.
-id = "current_approval_dialog"
+# A dialog is CURRENT when its hint footer is the LAST logical non-empty line: approval, permission and
+# selection dialogs all end with "Esc to cancel" plus a second hint, and Claude keeps its busy spinner title
+# while such a dialog waits for the user (upstream issue #3467), so this must outrank that title. The region is
+# logical, not physical, because a narrow pane soft-wraps the footer across two or three rows (Gate-3
+# ARB-18C-BOTTOM-WINDOW-001); one answered dialog line printed below the footer already ends the match.
+id = "current_approval_footer"
 state = "blocked"
 priority = 990
-region = "bottom_non_empty_lines(2)"
+region = "bottom_logical_non_empty_lines(1)"
 visible_blocker = true
 contains = ["esc to cancel"]
+any = [
+  { contains = ["tab to amend"] },
+  { contains = ["enter to select"] },
+  { contains = ["enter to confirm"] },
+  { contains = ["to navigate"] },
+  { contains = ["ctrl+e to explain"] },
+]
+
+[[rules]]
+# The boxed form of the same dialog: Claude draws the footer inside the box, so the last logical line is the
+# box's closing border. Admitting that earlier footer row costs nothing only while the border is PROVEN — the
+# regex is anchored to the end of the region, so any other trailing line (work printed after the dialog was
+# answered, a prompt box, a divider) leaves this rule unmatched. Structure, not a wider window.
+id = "current_approval_boxed"
+state = "blocked"
+priority = 990
+region = "bottom_logical_non_empty_lines(2)"
+visible_blocker = true
+contains = ["esc to cancel"]
+regex = ['(?m)^\s*[╰└╚┗][─━═╌╍┄┅┈┉]+[╯┘╝┛]\s*\z']
 any = [
   { contains = ["tab to amend"] },
   { contains = ["enter to select"] },
@@ -27,7 +48,7 @@ any = [
 id = "osc_title_working"
 state = "working"
 # 970: above the idle prompt box (950), the suffix-selected form (960), the dynamic fallback (960) and stale
-# scrollback blockers (<= 850), but BELOW current_approval_dialog (990).
+# scrollback blockers (<= 850), but BELOW the current-dialog rules (990).
 priority = 970
 region = "osc_title"
 visible_working = true
@@ -54,7 +75,7 @@ any = [
 id = "live_blocked_form"
 state = "blocked"
 # 960: after_last_horizontal_rule is a suffix selector, not proof of freshness — an answered form followed by
-# work still matches it — so it stays below the busy title (970); current dialogs win via current_approval_dialog.
+# work still matches it — so it stays below the busy title (970); current dialogs win at 990.
 priority = 960
 region = "after_last_horizontal_rule"
 visible_blocker = true

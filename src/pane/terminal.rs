@@ -211,6 +211,10 @@ impl PaneTerminal {
         self.ghostty.detection_text()
     }
 
+    pub fn detection_unwrapped_text(&self) -> String {
+        self.ghostty.detection_unwrapped_text()
+    }
+
     pub fn recent_text(&self, lines: usize) -> String {
         self.ghostty.recent_text(lines)
     }
@@ -1108,6 +1112,14 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
+    pub fn detection_unwrapped_text(&self) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| ghostty_detection_unwrapped_text(&core).ok())
+            .unwrap_or_default()
+    }
+
     pub fn recent_text(&self, lines: usize) -> String {
         self.core
             .lock()
@@ -1592,14 +1604,25 @@ fn ghostty_visible_ansi(core: &GhosttyPaneCore) -> Result<String, crate::ghostty
     )
 }
 
-fn ghostty_detection_text(core: &GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
-    let lines = core
-        .terminal
+/// The bottom-of-buffer window both detection snapshots read, in physical rows.
+fn ghostty_detection_rows(core: &GhosttyPaneCore) -> usize {
+    core.terminal
         .rows()
         .ok()
         .map(|rows| usize::from(rows).max(1))
-        .unwrap_or(DEFAULT_DETECTION_ROWS);
-    ghostty_recent_text(core, lines)
+        .unwrap_or(DEFAULT_DETECTION_ROWS)
+}
+
+fn ghostty_detection_text(core: &GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
+    ghostty_recent_text(core, ghostty_detection_rows(core))
+}
+
+/// The same window as `ghostty_detection_text`, with soft wraps joined so one agent line is one
+/// line of text. Detection reads it for logical-line regions; it is a snapshot, never the parser.
+fn ghostty_detection_unwrapped_text(
+    core: &GhosttyPaneCore,
+) -> Result<String, crate::ghostty::Error> {
+    ghostty_recent_text_unwrapped(core, ghostty_detection_rows(core))
 }
 
 fn ghostty_recent_text(
@@ -3046,6 +3069,224 @@ mod tests {
 
         assert_eq!(pane.recent_text(3), "ABCDE\nFGHIJ\n");
         assert_eq!(pane.recent_unwrapped_text(3), "ABCDEFGHIJ");
+    }
+
+    // --- Claude approval-footer detection on the production snapshot path ---
+    //
+    // Gate-3 ARB-18C-BOTTOM-WINDOW-001. Detection must read a Claude approval footer as a LOGICAL
+    // line: a footer the terminal soft-wraps in a narrow pane is still a current dialog, and an
+    // answered footer that scrolled up by a single work row is no longer one. These cases are
+    // rendered through the real Ghostty terminal at production widths, then read with the same
+    // snapshot the pane's detection loop takes.
+
+    const CLAUDE_FOOTER: &str = "Esc to cancel · Tab to amend · ctrl+e to explain";
+    const CLAUDE_BUSY_TITLES: [&str; 2] = [
+        "\u{25D0} Initial conversation with Claude",
+        "\u{280B} Reading files",
+    ];
+
+    fn boxed_dialog_row(text: &str, inner: usize) -> String {
+        let padding = " ".repeat(inner.saturating_sub(text.chars().count()));
+        format!("│ {text}{padding} │")
+    }
+
+    /// A Claude approval dialog as the agent draws it, optionally inside a box, followed by
+    /// `work_rows` rows of work that Claude prints after the dialog is answered.
+    fn claude_dialog_screen(boxed: bool, work_rows: usize) -> String {
+        let body = [
+            "Bash command: ls",
+            "Do you want to proceed?",
+            "❯ 1. Yes",
+            "  2. No",
+            CLAUDE_FOOTER,
+        ];
+        let mut lines: Vec<String> = Vec::new();
+        if boxed {
+            let inner = CLAUDE_FOOTER.chars().count();
+            let bar = "─".repeat(inner + 2);
+            lines.push(format!("╭{bar}╮"));
+            lines.extend(body.iter().map(|row| boxed_dialog_row(row, inner)));
+            lines.push(format!("╰{bar}╯"));
+        } else {
+            lines.extend(body.iter().map(|row| (*row).to_string()));
+        }
+        for index in 0..work_rows {
+            lines.push(format!("Reading src/file{index}.rs"));
+        }
+        lines.join("\n")
+    }
+
+    fn claude_pane(cols: u16, screen: &str) -> GhosttyPaneTerminal {
+        let (tx, _rx) = mpsc::channel(64);
+        let mut terminal = crate::ghostty::Terminal::new(cols, 40, 10_000).unwrap();
+        for line in screen.lines() {
+            terminal.write(line.as_bytes());
+            terminal.write(b"\r\n");
+        }
+        GhosttyPaneTerminal::new(terminal, tx).unwrap()
+    }
+
+    /// Read the snapshot pair the pane's detection loop reads, then run the production detection
+    /// path over it: `detection_update_for_publish_with_osc` for the published state and flags, and
+    /// the explain entry for the rule that won.
+    fn claude_detection(
+        cols: u16,
+        screen: &str,
+        osc_title: &str,
+    ) -> (crate::detect::AgentDetection, Option<String>) {
+        let pane = claude_pane(cols, screen);
+        let detection_text = pane.detection_text();
+        let unwrapped = pane.detection_unwrapped_text();
+        let published = super::super::agent_detection::detection_update_for_publish_with_osc(
+            Some(crate::detect::Agent::Claude),
+            &detection_text,
+            Some(&unwrapped),
+            osc_title,
+            "",
+            false,
+        )
+        .expect("a claude screen without skip_state_update must publish a detection");
+        let explain = crate::detect::manifest::explain_with_input(
+            crate::detect::Agent::Claude,
+            crate::detect::manifest::DetectionInput {
+                screen: &detection_text,
+                unwrapped_tail: Some(&unwrapped),
+                osc_title,
+                osc_progress: "",
+            },
+        );
+        assert_eq!(
+            published.state, explain.state,
+            "the published state and the explained state must agree: cols={cols}"
+        );
+        (published, explain.matched_rule.map(|rule| rule.id))
+    }
+
+    #[test]
+    fn claude_current_approval_footer_is_blocked_at_every_width() {
+        // ARB-18C-BOTTOM-WINDOW-001, direction 2: below roughly 48 columns the terminal soft-wraps
+        // the footer, which a physical bottom window either splits or pushes out of range — the
+        // approval then read as Working and the pane looked busy while it waited for the user.
+        for cols in [80u16, 40, 30, 20] {
+            for (boxed, expected_rule) in [
+                (false, "current_approval_footer"),
+                (true, "current_approval_boxed"),
+            ] {
+                for title in CLAUDE_BUSY_TITLES {
+                    let (detection, rule) =
+                        claude_detection(cols, &claude_dialog_screen(boxed, 0), title);
+                    let case = format!("cols={cols} boxed={boxed} title={title}");
+                    assert_eq!(
+                        detection.state,
+                        crate::detect::AgentState::Blocked,
+                        "{case}"
+                    );
+                    assert_eq!(rule.as_deref(), Some(expected_rule), "{case}");
+                    assert!(detection.visible_blocker, "{case}");
+                    assert!(!detection.visible_working, "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_answered_approval_footer_is_working_at_every_width() {
+        // ARB-18C-BOTTOM-WINDOW-001, direction 1: a two-row physical suffix still held the answered
+        // footer when exactly one work row followed it. One row must already release the blocker.
+        for cols in [80u16, 40, 30, 20] {
+            for boxed in [false, true] {
+                for work_rows in [1usize, 2] {
+                    for title in CLAUDE_BUSY_TITLES {
+                        let (detection, rule) =
+                            claude_detection(cols, &claude_dialog_screen(boxed, work_rows), title);
+                        let case =
+                            format!("cols={cols} boxed={boxed} rows={work_rows} title={title}");
+                        assert_eq!(
+                            detection.state,
+                            crate::detect::AgentState::Working,
+                            "{case}"
+                        );
+                        assert_eq!(rule.as_deref(), Some("osc_title_working"), "{case}");
+                        assert!(detection.visible_working, "{case}");
+                        assert!(!detection.visible_blocker, "{case}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_historical_approval_footer_above_a_prompt_box_is_working() {
+        // The dialog scrolled well above a later divider and prompt box: still not current.
+        for cols in [80u16, 40, 20] {
+            for boxed in [false, true] {
+                let screen = format!(
+                    "{}\n──────────\nReading src/main.rs\n──────────\n❯ Ask Claude\n──────────",
+                    claude_dialog_screen(boxed, 0)
+                );
+                let (detection, rule) = claude_detection(cols, &screen, CLAUDE_BUSY_TITLES[0]);
+                let case = format!("cols={cols} boxed={boxed}");
+                assert_eq!(
+                    detection.state,
+                    crate::detect::AgentState::Working,
+                    "{case}"
+                );
+                assert_eq!(rule.as_deref(), Some("osc_title_working"), "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn claude_static_title_over_a_prompt_box_is_idle_at_every_width() {
+        // Control: no dialog at all. The static title must not turn the prompt box into a blocker.
+        for cols in [80u16, 40, 20] {
+            let (detection, rule) = claude_detection(
+                cols,
+                "──────────\n❯ Ask Claude about this repository\n──────────",
+                "\u{2733} Claude",
+            );
+            assert_eq!(
+                detection.state,
+                crate::detect::AgentState::Idle,
+                "cols={cols}"
+            );
+            assert_eq!(rule.as_deref(), Some("live_prompt_box"), "cols={cols}");
+            assert!(detection.visible_idle, "cols={cols}");
+        }
+    }
+
+    #[test]
+    fn claude_footer_hint_quoted_inside_a_log_line_is_not_blocked() {
+        // SENT-R11-DETECT-003: the footer grammar quoted inside output that keeps scrolling is not a
+        // dialog. The busy title wins because the quoted hint never ends the logical tail.
+        for cols in [80u16, 40, 20] {
+            let screen = concat!(
+                "$ grep -n 'Esc to cancel · Tab to amend' src/detect/manifests/claude.toml\n",
+                "17:contains = [\"esc to cancel\"]\n",
+                "Reading src/detect/manifests/claude.toml"
+            );
+            let (detection, rule) = claude_detection(cols, screen, CLAUDE_BUSY_TITLES[0]);
+            assert_eq!(
+                detection.state,
+                crate::detect::AgentState::Working,
+                "cols={cols}"
+            );
+            assert_eq!(rule.as_deref(), Some("osc_title_working"), "cols={cols}");
+            assert!(!detection.visible_blocker, "cols={cols}");
+        }
+    }
+
+    #[test]
+    fn detection_unwrapped_text_joins_soft_wraps_over_the_detection_window() {
+        // The logical snapshot must cover exactly the window `detection_text` covers, with soft
+        // wraps joined and hard line breaks kept.
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(6, 6, 100).unwrap();
+        terminal.write(b"ABCDEFGHIJ\r\nKLM\r\nNOPQRSTU");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        assert_eq!(pane.detection_text(), "ABCDEF\nGHIJ\nKLM\nNOPQRS\nTU\n");
+        assert_eq!(pane.detection_unwrapped_text(), "ABCDEFGHIJ\nKLM\nNOPQRSTU");
     }
 
     #[test]

@@ -781,6 +781,7 @@ fn bottom_non_empty_lines_uses_bottom_occurrence_for_repeated_text() {
         region(
             DetectionInput {
                 screen: content,
+                unwrapped_tail: None,
                 osc_title: "",
                 osc_progress: "",
             },
@@ -791,6 +792,77 @@ fn bottom_non_empty_lines_uses_bottom_occurrence_for_repeated_text() {
 }
 
 #[test]
+fn bottom_logical_non_empty_lines_reads_the_unwrapped_tail() {
+    // Gate-3 ARB-18C-BOTTOM-WINDOW-001: the physical snapshot splits a footer the terminal
+    // soft-wrapped; the logical region reads the same window with those wraps joined.
+    let wrapped = "Do you want to proceed?\nEsc to cancel · Tab to amend · ctrl+e to\n explain\n";
+    let unwrapped = "Do you want to proceed?\nEsc to cancel · Tab to amend · ctrl+e to explain";
+
+    assert_eq!(
+        region(
+            DetectionInput {
+                screen: wrapped,
+                unwrapped_tail: Some(unwrapped),
+                osc_title: "",
+                osc_progress: "",
+            },
+            "bottom_logical_non_empty_lines(1)"
+        ),
+        "Esc to cancel · Tab to amend · ctrl+e to explain"
+    );
+}
+
+#[test]
+fn bottom_logical_non_empty_lines_falls_back_to_physical_rows_without_a_tail() {
+    // A caller with no terminal to ask (a remote manifest evaluated from a plain string, a shim)
+    // still gets a defined region: the physical bottom window, exactly as before engine 3.
+    let wrapped = "Do you want to proceed?\nEsc to cancel · Tab to amend · ctrl+e to\n explain\n";
+
+    assert_eq!(
+        region(
+            DetectionInput {
+                screen: wrapped,
+                unwrapped_tail: None,
+                osc_title: "",
+                osc_progress: "",
+            },
+            "bottom_logical_non_empty_lines(1)"
+        ),
+        " explain\n"
+    );
+}
+
+#[test]
+fn bottom_logical_non_empty_lines_requires_a_canonical_positive_bounded_count() {
+    let name = "bottom_logical_non_empty_lines";
+    assert!(validate_region_name(&format!("{name}(1)")).is_ok());
+    assert!(validate_region_name(&format!("{name}({})", u16::MAX)).is_ok());
+    for count in ["0", "01", "+1", "65536", "999999999999999999999999"] {
+        assert!(
+            validate_region_name(&format!("{name}({count})")).is_err(),
+            "{name} accepted invalid count {count}"
+        );
+    }
+}
+
+#[test]
+fn bottom_logical_non_empty_lines_requires_engine_three_when_declared() {
+    let manifest = r#"
+id = "claude"
+version = "1"
+min_engine_version = 2
+
+[[rules]]
+id = "footer"
+state = "blocked"
+region = " bottom_logical_non_empty_lines(1) "
+contains = ["esc to cancel"]
+"#;
+
+    assert!(parse_manifest(manifest).is_err());
+}
+
+#[test]
 fn top_non_empty_lines_uses_top_occurrence_for_repeated_text() {
     let content = "\nmarker\nold\n\nmiddle\nmarker\nnew\n";
 
@@ -798,6 +870,7 @@ fn top_non_empty_lines_uses_top_occurrence_for_repeated_text() {
         region(
             DetectionInput {
                 screen: content,
+                unwrapped_tail: None,
                 osc_title: "",
                 osc_progress: "",
             },
@@ -852,8 +925,27 @@ fn osc_explain(
         agent,
         DetectionInput {
             screen,
+            unwrapped_tail: None,
             osc_title,
             osc_progress,
+        },
+    )
+}
+
+/// A caller that carries the soft-wrap-joined twin of the same snapshot, the way the pane does.
+fn osc_explain_with_tail(
+    agent: Agent,
+    screen: &str,
+    unwrapped_tail: &str,
+    osc_title: &str,
+) -> DetectionExplain {
+    explain_with_input(
+        agent,
+        DetectionInput {
+            screen,
+            unwrapped_tail: Some(unwrapped_tail),
+            osc_title,
+            osc_progress: "",
         },
     )
 }
@@ -912,13 +1004,35 @@ const CLAUDE_BOXED_APPROVAL: &str = "╭──────────╮\n│ B
     │ ❯ 1. Yes │\n│   2. No │\n│ Esc to cancel · Tab to amend · ctrl+e to explain │\n╰──────────╯\n";
 const CLAUDE_PROMPT_BOX: &str = "──────────\n❯ Ask Claude\n──────────\n";
 
-fn claude_current_dialogs() -> [(&'static str, &'static str); 5] {
+/// Each current dialog with the 990 rule that must claim it: an unboxed footer ends the logical
+/// tail itself, a boxed one is admitted only under its proven closing border.
+fn claude_current_dialogs() -> [(&'static str, &'static str, &'static str); 5] {
     [
-        ("bash approval", CLAUDE_BASH_APPROVAL),
-        ("generic permission", CLAUDE_GENERIC_PERMISSION),
-        ("selection form", CLAUDE_SELECTION_FORM),
-        ("dynamic prompt", CLAUDE_DYNAMIC_PROMPT),
-        ("boxed approval", CLAUDE_BOXED_APPROVAL),
+        (
+            "bash approval",
+            CLAUDE_BASH_APPROVAL,
+            "current_approval_footer",
+        ),
+        (
+            "generic permission",
+            CLAUDE_GENERIC_PERMISSION,
+            "current_approval_footer",
+        ),
+        (
+            "selection form",
+            CLAUDE_SELECTION_FORM,
+            "current_approval_footer",
+        ),
+        (
+            "dynamic prompt",
+            CLAUDE_DYNAMIC_PROMPT,
+            "current_approval_footer",
+        ),
+        (
+            "boxed approval",
+            CLAUDE_BOXED_APPROVAL,
+            "current_approval_boxed",
+        ),
     ]
 }
 
@@ -927,13 +1041,13 @@ fn claude_current_dialog_outranks_a_retained_busy_title() {
     // Gate-3 ARB-4FDA-OSC-PRECEDENCE-001 / ARB-EE13-OSC-FRESHNESS-001: Claude keeps its busy spinner title
     // while an approval, permission or selection dialog waits for the user (upstream issue #3467). A dialog
     // that is CURRENT — its hint footer is at the bottom of the buffer — must win over that title.
-    for (label, screen) in claude_current_dialogs() {
+    for (label, screen, expected_rule) in claude_current_dialogs() {
         for title in CLAUDE_BUSY_TITLES {
             let result = osc_explain(Agent::Claude, screen, title, "");
             assert_eq!(result.state, AgentState::Blocked, "{label} / {title}");
             assert_eq!(
                 result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
-                Some("current_approval_dialog"),
+                Some(expected_rule),
                 "{label} / {title}"
             );
             assert!(result.visible_blocker, "{label} / {title}");
@@ -950,7 +1064,7 @@ fn claude_current_dialog_outranks_a_retained_busy_title() {
 fn claude_answered_dialog_followed_by_work_is_working() {
     // The inverse failure: once the dialog was answered and work continued below it, the same text must no
     // longer block an active spinner (freshness, not just priority).
-    for (label, screen) in claude_current_dialogs() {
+    for (label, screen, _) in claude_current_dialogs() {
         // No later divider or prompt box on purpose: only freshness (the footer is no longer at the bottom)
         // may release the blocker; a suffix selector such as after_last_horizontal_rule still sees the footer.
         let answered = format!("{screen}Selected: yes\nReading src/main.rs\n");
@@ -969,8 +1083,85 @@ fn claude_answered_dialog_followed_by_work_is_working() {
 }
 
 #[test]
+fn claude_answered_dialog_followed_by_one_work_row_is_working() {
+    // Gate-3 ARB-18C-BOTTOM-WINDOW-001, direction 1: an unconditional two-row physical suffix keeps an
+    // ANSWERED footer inside the window when exactly one row of work follows it, so the dialog kept
+    // reporting Blocked after the user answered it.
+    for (label, screen, _) in claude_current_dialogs() {
+        let answered = format!("{screen}Reading src/main.rs\n");
+        for title in CLAUDE_BUSY_TITLES {
+            let result = osc_explain(Agent::Claude, &answered, title, "");
+            assert_eq!(result.state, AgentState::Working, "{label} / {title}");
+            assert_eq!(
+                result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+                Some("osc_title_working"),
+                "{label} / {title}"
+            );
+            assert!(result.visible_working, "{label} / {title}");
+            assert!(!result.visible_blocker, "{label} / {title}");
+        }
+    }
+}
+
+#[test]
+fn claude_wrapped_current_footer_is_blocked_from_the_logical_tail() {
+    // The pane hands the engine both snapshots of one window. The physical one splits the footer in
+    // a narrow pane — only the logical one proves the dialog is still current.
+    let wrapped_unboxed = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n\
+        Esc to cancel · Tab to amend · ctrl+e to\n explain\n";
+    let logical_unboxed = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n\
+        Esc to cancel · Tab to amend · ctrl+e to explain";
+    let wrapped_boxed = "│ Do you want to proceed? │\n│ ❯ 1. Yes │\n\
+        │ Esc to cancel · Tab to amend · ctrl+e\nto explain │\n╰──────────────\n────────╯\n";
+    let logical_boxed = "│ Do you want to proceed? │\n│ ❯ 1. Yes │\n\
+        │ Esc to cancel · Tab to amend · ctrl+e to explain │\n╰──────────────────────╯";
+
+    for (label, wrapped, logical, expected_rule) in [
+        (
+            "unboxed",
+            wrapped_unboxed,
+            logical_unboxed,
+            "current_approval_footer",
+        ),
+        (
+            "boxed",
+            wrapped_boxed,
+            logical_boxed,
+            "current_approval_boxed",
+        ),
+    ] {
+        for title in CLAUDE_BUSY_TITLES {
+            let result = osc_explain_with_tail(Agent::Claude, wrapped, logical, title);
+            assert_eq!(result.state, AgentState::Blocked, "{label} / {title}");
+            assert_eq!(
+                result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+                Some(expected_rule),
+                "{label} / {title}"
+            );
+            assert!(result.visible_blocker, "{label} / {title}");
+        }
+
+        // Answered: one work row below the same wrapped dialog releases the blocker.
+        let answered_logical = format!("{logical}\nReading src/main.rs");
+        let answered_wrapped = format!("{wrapped}Reading src/main.rs\n");
+        let result = osc_explain_with_tail(
+            Agent::Claude,
+            &answered_wrapped,
+            &answered_logical,
+            CLAUDE_BUSY_TITLES[0],
+        );
+        assert_eq!(result.state, AgentState::Working, "{label} answered");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("osc_title_working"),
+            "{label} answered"
+        );
+    }
+}
+
+#[test]
 fn claude_historical_dialog_above_a_later_divider_is_working() {
-    for (label, screen) in claude_current_dialogs() {
+    for (label, screen, _) in claude_current_dialogs() {
         let historical = format!("{screen}\n──────────\nReading src/main.rs\n{CLAUDE_PROMPT_BOX}");
         let result = osc_explain(Agent::Claude, &historical, "\u{25D0} Reading files", "");
         assert_eq!(result.state, AgentState::Working, "{label}");

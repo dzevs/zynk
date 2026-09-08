@@ -160,12 +160,14 @@ impl App {
         };
 
         let screen = pane.detection_text();
+        let unwrapped_tail = pane.detection_unwrapped_text();
         let osc_title = pane.agent_osc_title();
         let osc_progress = pane.agent_osc_progress();
         let explain = crate::detect::manifest::explain_with_input(
             agent,
             crate::detect::manifest::DetectionInput {
                 screen: &screen,
+                unwrapped_tail: Some(&unwrapped_tail),
                 osc_title: &osc_title,
                 osc_progress: &osc_progress,
             },

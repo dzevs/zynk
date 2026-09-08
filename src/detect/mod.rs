@@ -267,13 +267,17 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
 /// Detect state and whether a visible blocker is present on the current screen.
 #[allow(dead_code)] // shim for existing callers; detect_agent_with_osc is the real path
 pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetection {
-    detect_agent_with_osc(agent, screen_content, "", "")
+    detect_agent_with_osc(agent, screen_content, None, "", "")
 }
 
 /// Detect state using screen content plus OSC title/progress strings.
+///
+/// `unwrapped_tail` is the same bottom-of-buffer snapshot with soft wraps joined; pass `None` when
+/// the caller has no terminal to ask and logical-line regions should fall back to physical rows.
 pub fn detect_agent_with_osc(
     agent: Option<Agent>,
     screen_content: &str,
+    unwrapped_tail: Option<&str>,
     osc_title: &str,
     osc_progress: &str,
 ) -> AgentDetection {
@@ -290,6 +294,7 @@ pub fn detect_agent_with_osc(
         agent,
         manifest::DetectionInput {
             screen: screen_content,
+            unwrapped_tail,
             osc_title,
             osc_progress,
         },
