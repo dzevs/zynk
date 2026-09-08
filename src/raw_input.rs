@@ -90,7 +90,6 @@ pub fn parse_raw_input_bytes_sync(data: &[u8]) -> Vec<RawInputEvent> {
     events
 }
 
-#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use tokio::sync::mpsc;
 
@@ -128,11 +127,6 @@ pub(crate) struct RawInputFramer {
 impl RawInputFramer {
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<RawInputEvent> {
         Self::events_from_chunks(self.byte_framer.push(data))
-    }
-
-    #[cfg(any(windows, test))]
-    pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
-        self.byte_framer.has_pending_bracketed_paste()
     }
 
     pub(crate) fn host_color_query_sent(&mut self) {
@@ -177,12 +171,6 @@ impl RawInputByteFramer {
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         self.buffer.extend_from_slice(data);
         self.drain_available_chunks()
-    }
-
-    #[cfg(any(windows, test))]
-    pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
-        self.buffer.starts_with(BRACKETED_PASTE_START)
-            && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
     }
 
     /// Hold a lone trailing ESC for one idle flush so an OSC 10/11 reply split
@@ -371,9 +359,6 @@ pub(crate) fn events_require_host_surface_redraw(
             .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
 }
 
-// upstream b7a504b: only the non-windows client input path queries the host terminal
-// theme; gate this off windows (keep it in tests) so it isn't dead code on the windows build.
-#[cfg(any(not(windows), test))]
 pub(crate) fn events_require_host_terminal_theme_query(events: &[RawInputEvent]) -> bool {
     events
         .iter()
@@ -466,21 +451,10 @@ pub(crate) fn flush_incomplete_input_bytes(buffer: &mut Vec<u8>) -> Option<Vec<u
     chunks.pop()
 }
 
-#[cfg(unix)]
-fn stdin_read_ready<R: AsRawFd>(_reader: &R, _timeout_ms: i32) -> Option<bool> {
-    #[cfg(unix)]
-    {
-        let fd = _reader.as_raw_fd();
-        poll_read_ready(fd, _timeout_ms)
-    }
+fn stdin_read_ready<R: AsRawFd>(reader: &R, timeout_ms: i32) -> Option<bool> {
+    poll_read_ready(reader.as_raw_fd(), timeout_ms)
 }
 
-#[cfg(not(unix))]
-fn stdin_read_ready<R>(_reader: &R, _timeout_ms: i32) -> Option<bool> {
-    None
-}
-
-#[cfg(unix)]
 fn poll_read_ready(fd: i32, timeout_ms: i32) -> Option<bool> {
     #[repr(C)]
     struct PollFd {

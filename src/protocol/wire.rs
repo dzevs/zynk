@@ -130,15 +130,6 @@ pub enum ClientInputEvent {
 }
 
 impl ClientKeyKind {
-    #[cfg(any(windows, test))]
-    pub(crate) fn from_crossterm(kind: crossterm::event::KeyEventKind) -> Self {
-        match kind {
-            crossterm::event::KeyEventKind::Press => Self::Press,
-            crossterm::event::KeyEventKind::Repeat => Self::Repeat,
-            crossterm::event::KeyEventKind::Release => Self::Release,
-        }
-    }
-
     pub(crate) fn to_crossterm(self) -> crossterm::event::KeyEventKind {
         match self {
             Self::Press => crossterm::event::KeyEventKind::Press,
@@ -149,32 +140,6 @@ impl ClientKeyKind {
 }
 
 impl ClientKeyCode {
-    #[cfg(any(windows, test))]
-    pub(crate) fn from_crossterm(code: crossterm::event::KeyCode) -> Option<Self> {
-        use crossterm::event::KeyCode;
-        Some(match code {
-            KeyCode::Backspace => Self::Backspace,
-            KeyCode::Enter => Self::Enter,
-            KeyCode::Left => Self::Left,
-            KeyCode::Right => Self::Right,
-            KeyCode::Up => Self::Up,
-            KeyCode::Down => Self::Down,
-            KeyCode::Home => Self::Home,
-            KeyCode::End => Self::End,
-            KeyCode::PageUp => Self::PageUp,
-            KeyCode::PageDown => Self::PageDown,
-            KeyCode::Tab => Self::Tab,
-            KeyCode::BackTab => Self::BackTab,
-            KeyCode::Delete => Self::Delete,
-            KeyCode::Insert => Self::Insert,
-            KeyCode::Esc => Self::Esc,
-            KeyCode::Char(ch) => Self::Char(ch),
-            KeyCode::F(n) => Self::F(n),
-            KeyCode::Null => Self::Null,
-            _ => return None,
-        })
-    }
-
     pub(crate) fn to_crossterm(&self) -> crossterm::event::KeyCode {
         use crossterm::event::KeyCode;
         match self {
@@ -201,15 +166,6 @@ impl ClientKeyCode {
 }
 
 impl ClientMouseButton {
-    #[cfg(any(windows, test))]
-    pub(crate) fn from_crossterm(button: crossterm::event::MouseButton) -> Self {
-        match button {
-            crossterm::event::MouseButton::Left => Self::Left,
-            crossterm::event::MouseButton::Right => Self::Right,
-            crossterm::event::MouseButton::Middle => Self::Middle,
-        }
-    }
-
     pub(crate) fn to_crossterm(self) -> crossterm::event::MouseButton {
         match self {
             Self::Left => crossterm::event::MouseButton::Left,
@@ -220,21 +176,6 @@ impl ClientMouseButton {
 }
 
 impl ClientMouseKind {
-    #[cfg(any(windows, test))]
-    pub(crate) fn from_crossterm(kind: crossterm::event::MouseEventKind) -> Option<Self> {
-        use crossterm::event::MouseEventKind;
-        Some(match kind {
-            MouseEventKind::Down(button) => Self::Down(ClientMouseButton::from_crossterm(button)),
-            MouseEventKind::Up(button) => Self::Up(ClientMouseButton::from_crossterm(button)),
-            MouseEventKind::Drag(button) => Self::Drag(ClientMouseButton::from_crossterm(button)),
-            MouseEventKind::Moved => Self::Moved,
-            MouseEventKind::ScrollUp => Self::ScrollUp,
-            MouseEventKind::ScrollDown => Self::ScrollDown,
-            MouseEventKind::ScrollLeft => Self::ScrollLeft,
-            MouseEventKind::ScrollRight => Self::ScrollRight,
-        })
-    }
-
     pub(crate) fn to_crossterm(self) -> crossterm::event::MouseEventKind {
         use crossterm::event::MouseEventKind;
         match self {
@@ -251,27 +192,6 @@ impl ClientMouseKind {
 }
 
 impl ClientInputEvent {
-    #[cfg(windows)]
-    pub(crate) fn from_crossterm(event: crossterm::event::Event) -> Option<Self> {
-        match event {
-            crossterm::event::Event::Key(key) => Some(Self::Key {
-                code: ClientKeyCode::from_crossterm(key.code)?,
-                modifiers: key.modifiers.bits(),
-                kind: ClientKeyKind::from_crossterm(key.kind),
-            }),
-            crossterm::event::Event::Mouse(mouse) => Some(Self::Mouse {
-                kind: ClientMouseKind::from_crossterm(mouse.kind)?,
-                column: mouse.column,
-                row: mouse.row,
-                modifiers: mouse.modifiers.bits(),
-            }),
-            crossterm::event::Event::Paste(text) => Some(Self::Paste { text }),
-            crossterm::event::Event::FocusGained => Some(Self::FocusGained),
-            crossterm::event::Event::FocusLost => Some(Self::FocusLost),
-            crossterm::event::Event::Resize(_, _) => None,
-        }
-    }
-
     pub(crate) fn to_raw_input_event(&self) -> crate::raw_input::RawInputEvent {
         match self {
             Self::Key {
@@ -1870,7 +1790,6 @@ mod tests {
 
     // ---- Unix socketpair integration test ----
 
-    #[cfg(unix)]
     #[test]
     fn framing_over_unix_socketpair() {
         use std::os::unix::net::UnixStream;

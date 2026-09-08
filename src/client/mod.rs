@@ -22,12 +22,9 @@ use std::time::Duration;
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture,
+    EnableFocusChange, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-#[cfg(unix)]
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-#[cfg(not(windows))]
-use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::TryClone as _;
@@ -36,11 +33,10 @@ use tracing::{debug, info, warn};
 use crate::ipc::LocalStream;
 use crate::protocol::render_ansi;
 use crate::protocol::{
-    self, ClientKeybindings, ClientLaunchMode, ClientMessage, NotifyKind, RenderEncoding,
-    ServerMessage, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
+    ClientMessage, NotifyKind, RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD,
+    MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
-#[cfg(unix)]
-use crate::protocol::{AttachScrollDirection, AttachScrollSource, MAX_CLIPBOARD_IMAGE_PAYLOAD};
 use crate::server::socket_paths::client_socket_path;
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
@@ -55,7 +51,6 @@ struct ClientLoopConfig {
     redraw_on_focus_gained: bool,
     kitty_graphics_enabled: bool,
     mouse_capture_active: bool,
-    #[cfg(unix)]
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
 }
 
@@ -74,27 +69,19 @@ struct ClientState {
     /// Direct attach prefix escape state. None for full-app clients.
     attach_escape: Option<AttachEscapeState>,
     /// Rows scrolled for one direct-attach wheel notch.
-    #[cfg(unix)]
     mouse_scroll_lines: usize,
     /// Local-client shortcut that sends a clipboard image to a remote zynk session.
-    #[cfg(unix)]
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     /// Whether outer focus gain should force a full host-terminal redraw.
     redraw_on_focus_gained: bool,
 }
 
 #[derive(Debug, Default)]
-#[cfg(windows)]
-struct AttachEscapeState;
-
-#[derive(Debug, Default)]
-#[cfg(unix)]
 struct AttachEscapeState {
     pending_prefix: bool,
 }
 
 #[derive(Debug)]
-#[cfg(unix)]
 enum AttachInputAction {
     Forward(Vec<u8>),
     Scroll {
@@ -110,7 +97,6 @@ enum AttachInputAction {
 }
 
 impl AttachEscapeState {
-    #[cfg(unix)]
     fn filter_input(
         &mut self,
         data: Vec<u8>,
@@ -153,7 +139,6 @@ impl AttachEscapeState {
     }
 }
 
-#[cfg(unix)]
 fn attach_scroll_action(
     data: &[u8],
     viewport_rows: u16,
@@ -365,33 +350,9 @@ fn setup_terminal_with_capabilities(
         io::stdout().flush()?;
     }
 
-    #[cfg(windows)]
-    let windows_virtual_terminal_input =
-        if enable_client_protocols && windows_vti_input_backend_enabled() {
-            enable_windows_virtual_terminal_input()
-        } else {
-            WindowsVirtualTerminalInputSetup::default()
-        };
-
-    #[cfg(windows)]
-    if enable_client_protocols
-        && windows_vti_input_backend_enabled()
-        && windows_virtual_terminal_input.active
-        && windows_win32_input_mode_enabled()
-    {
-        if let Err(err) = enable_windows_win32_input_mode(&mut io::stdout()) {
-            if let Some(mode) = windows_virtual_terminal_input.restore_mode {
-                restore_windows_input_mode_value(mode);
-            }
-            return Err(err);
-        }
-    }
-
     Ok(TerminalGuard {
         reset_modify_other_keys: modify_other_keys_mode.is_some(),
         reset_host_color_scheme_reports: host_color_scheme_reports,
-        #[cfg(windows)]
-        restore_windows_input_mode: windows_virtual_terminal_input.restore_mode,
     })
 }
 
@@ -403,8 +364,6 @@ fn should_enable_host_color_scheme_reports(enable_client_protocols: bool) -> boo
 struct TerminalGuard {
     reset_modify_other_keys: bool,
     reset_host_color_scheme_reports: bool,
-    #[cfg(windows)]
-    restore_windows_input_mode: Option<u32>,
 }
 
 fn write_host_color_scheme_report_mode(
@@ -434,108 +393,18 @@ fn write_terminal_restore_postlude(
     writer.flush()
 }
 
-#[cfg(windows)]
-#[derive(Default)]
-struct WindowsVirtualTerminalInputSetup {
-    active: bool,
-    restore_mode: Option<u32>,
-}
-
-#[cfg(windows)]
-fn enable_windows_virtual_terminal_input() -> WindowsVirtualTerminalInputSetup {
-    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Console::{
-        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_INPUT,
-        STD_INPUT_HANDLE,
-    };
-
-    let handle: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        tracing::warn!("failed to get Windows console input handle for VT input");
-        return WindowsVirtualTerminalInputSetup::default();
-    }
-
-    let mut mode = 0;
-    if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
-        tracing::warn!("failed to read Windows console input mode for VT input");
-        return WindowsVirtualTerminalInputSetup::default();
-    }
-
-    let desired = windows_virtual_terminal_input_mode(mode);
-    if desired == mode {
-        return WindowsVirtualTerminalInputSetup {
-            active: true,
-            restore_mode: None,
-        };
-    }
-
-    if unsafe { SetConsoleMode(handle, desired) } == 0 {
-        tracing::warn!("failed to enable Windows virtual terminal input");
-        return WindowsVirtualTerminalInputSetup::default();
-    }
-
-    let mut applied = 0;
-    if unsafe { GetConsoleMode(handle, &mut applied) } == 0 {
-        tracing::warn!("failed to verify Windows virtual terminal input mode");
-        let _ = unsafe { SetConsoleMode(handle, mode) };
-        return WindowsVirtualTerminalInputSetup::default();
-    }
-    if applied & ENABLE_VIRTUAL_TERMINAL_INPUT == 0 {
-        tracing::warn!("Windows virtual terminal input bit did not stick");
-        let _ = unsafe { SetConsoleMode(handle, mode) };
-        return WindowsVirtualTerminalInputSetup::default();
-    }
-
-    WindowsVirtualTerminalInputSetup {
-        active: true,
-        restore_mode: Some(mode),
-    }
-}
-
-#[cfg(windows)]
-fn windows_vti_input_backend_enabled() -> bool {
-    std::env::var("ZYNK_WINDOWS_INPUT_BACKEND")
-        .map(|backend| !backend.eq_ignore_ascii_case("crossterm"))
-        .unwrap_or(true)
-}
-
-#[cfg(any(windows, test))]
-fn windows_virtual_terminal_input_mode(mode: u32) -> u32 {
-    mode | 0x0200
-}
-
-#[cfg(windows)]
-fn restore_windows_input_mode_value(mode: u32) {
-    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
-
-    let handle: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return;
-    }
-    if unsafe { SetConsoleMode(handle, mode) } == 0 {
-        tracing::warn!("failed to restore Windows console input mode");
-    }
-}
-
 fn set_mouse_capture(enabled: bool) -> io::Result<()> {
     if enabled {
         execute!(io::stdout(), EnableMouseCapture)
     } else {
         match execute!(io::stdout(), DisableMouseCapture) {
             Ok(()) => Ok(()),
-            #[cfg(windows)]
-            Err(err) if err.to_string() == "Initial console modes not set" => Ok(()),
             Err(err) => Err(err),
         }
     }
 }
 
-fn restore_terminal_state(
-    reset_modify_other_keys: bool,
-    reset_host_color_scheme_reports: bool,
-    #[cfg(windows)] restore_windows_input_mode: Option<u32>,
-) {
+fn restore_terminal_state(reset_modify_other_keys: bool, reset_host_color_scheme_reports: bool) {
     let _ = clear_received_kitty_graphics(&mut io::stdout());
 
     // Reset modifyOtherKeys if we enabled it.
@@ -551,21 +420,10 @@ fn restore_terminal_state(
         DisableBracketedPaste,
         DisableMouseCapture
     );
-    #[cfg(windows)]
-    if let Some(mode) = restore_windows_input_mode {
-        restore_windows_input_mode_value(mode);
-    }
-
     ratatui::restore();
     let _ = write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
-
-    #[cfg(windows)]
-    if windows_vti_input_backend_enabled() && windows_win32_input_mode_enabled() {
-        let _ = disable_windows_win32_input_mode(&mut io::stdout());
-    }
 }
 
-#[cfg(not(windows))]
 fn push_keyboard_enhancement_flags() -> io::Result<()> {
     execute!(
         io::stdout(),
@@ -573,38 +431,8 @@ fn push_keyboard_enhancement_flags() -> io::Result<()> {
     )
 }
 
-#[cfg(windows)]
-fn push_keyboard_enhancement_flags() -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(not(windows))]
 fn pop_keyboard_enhancement_flags() -> io::Result<()> {
     execute!(io::stdout(), PopKeyboardEnhancementFlags)
-}
-
-#[cfg(windows)]
-fn pop_keyboard_enhancement_flags() -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(windows)]
-fn windows_win32_input_mode_enabled() -> bool {
-    std::env::var("ZYNK_WINDOWS_INPUT_PROBE")
-        .map(|probe| probe.eq_ignore_ascii_case("win32"))
-        .unwrap_or(true)
-}
-
-#[cfg(windows)]
-fn enable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Result<()> {
-    writer.write_all(b"\x1b[?9001h")?;
-    writer.flush()
-}
-
-#[cfg(windows)]
-fn disable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Result<()> {
-    writer.write_all(b"\x1b[?9001l")?;
-    writer.flush()
 }
 
 impl Drop for TerminalGuard {
@@ -612,8 +440,6 @@ impl Drop for TerminalGuard {
         restore_terminal_state(
             self.reset_modify_other_keys,
             self.reset_host_color_scheme_reports,
-            #[cfg(windows)]
-            self.restore_windows_input_mode,
         );
     }
 }
@@ -629,7 +455,6 @@ fn requested_render_encoding() -> RenderEncoding {
     }
 }
 
-#[cfg(unix)]
 fn is_remote_client_process() -> bool {
     std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
 }
@@ -642,11 +467,9 @@ fn is_remote_client_process() -> bool {
 /// window; on a high-latency link that easily exceeds 5s, so it gets a far
 /// larger budget. See upstream issue #753.
 const LOCAL_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(unix)]
 const REMOTE_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn handshake_read_timeout() -> Duration {
-    #[cfg(unix)]
     if is_remote_client_process() {
         return REMOTE_HANDSHAKE_READ_TIMEOUT;
     }
@@ -667,23 +490,6 @@ fn requested_keybindings() -> ClientKeybindings {
     }
 }
 
-#[cfg(windows)]
-fn set_handshake_recv_timeout(
-    stream: &LocalStream,
-    timeout: Option<Duration>,
-    context: &'static str,
-) -> Result<(), ClientError> {
-    match stream.set_recv_timeout(timeout) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-            debug!(err = %err, context, "client socket receive timeout unavailable");
-            Ok(())
-        }
-        Err(err) => Err(ClientError::ConnectionFailed(err)),
-    }
-}
-
-#[cfg(not(windows))]
 fn set_handshake_recv_timeout(
     stream: &LocalStream,
     timeout: Option<Duration>,
@@ -767,11 +573,7 @@ fn do_handshake(
 /// Internal events for the client event loop.
 enum ClientLoopEvent {
     /// Raw input bytes from stdin.
-    #[cfg(unix)]
     StdinInput(Vec<u8>),
-    /// Structured input events from platforms without Unix-style stdin bytes.
-    #[cfg(windows)]
-    StdinEvents(Vec<crate::protocol::ClientInputEvent>),
     /// Terminal resize detected.
     Resize(u16, u16, u32, u32),
     /// Server message received.
@@ -796,7 +598,6 @@ pub fn run_client() -> io::Result<()> {
 }
 
 /// Runs a direct terminal attach client.
-#[cfg(unix)]
 pub fn run_terminal_attach(terminal_id: String, takeover: bool) -> io::Result<()> {
     run_client_with_mode(
         RenderEncoding::TerminalAnsi,
@@ -804,16 +605,6 @@ pub fn run_terminal_attach(terminal_id: String, takeover: bool) -> io::Result<()
         Some(AttachEscapeState::default()),
         "attaching to terminal",
     )
-}
-
-/// Direct terminal attach is Unix raw-byte input only until Windows gets a semantic attach path.
-#[cfg(windows)]
-pub fn run_terminal_attach(_terminal_id: String, _takeover: bool) -> io::Result<()> {
-    debug_assert!(!crate::platform::capabilities().direct_terminal_attach);
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "direct terminal attach is not supported on Windows yet",
-    ))
 }
 
 fn run_client_with_mode(
@@ -829,7 +620,6 @@ fn run_client_with_mode(
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
     let direct_attach_requested = attach_request.is_some();
-    #[cfg(unix)]
     let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
     let kitty_graphics_enabled =
         loaded_config.config.experimental.kitty_graphics && !direct_attach_requested;
@@ -839,7 +629,6 @@ fn run_client_with_mode(
         redraw_on_focus_gained,
         kitty_graphics_enabled,
         mouse_capture_active: mouse_capture,
-        #[cfg(unix)]
         remote_image_paste_key,
     };
 
@@ -906,15 +695,11 @@ fn run_client_with_mode(
     // Install a panic hook to restore the terminal on panic (same as monolithic).
     let panic_resets_modify_other_keys = terminal_guard.reset_modify_other_keys;
     let panic_resets_host_color_scheme_reports = terminal_guard.reset_host_color_scheme_reports;
-    #[cfg(windows)]
-    let panic_restore_windows_input_mode = terminal_guard.restore_windows_input_mode;
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal_state(
             panic_resets_modify_other_keys,
             panic_resets_host_color_scheme_reports,
-            #[cfg(windows)]
-            panic_restore_windows_input_mode,
         );
         original_hook(info);
     }));
@@ -987,9 +772,6 @@ async fn run_client_loop(
     negotiated_encoding: RenderEncoding,
     attach_escape: Option<AttachEscapeState>,
 ) -> Result<(), ClientError> {
-    #[cfg(windows)]
-    let _ = config.mouse_scroll_lines;
-
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
         mouse_capture_active: config.mouse_capture_active,
@@ -997,9 +779,7 @@ async fn run_client_loop(
         sound_config: config.sound_config,
         kitty_graphics_enabled: config.kitty_graphics_enabled,
         attach_escape,
-        #[cfg(unix)]
         mouse_scroll_lines: config.mouse_scroll_lines,
-        #[cfg(unix)]
         remote_image_paste_key: config.remote_image_paste_key,
         redraw_on_focus_gained: config.redraw_on_focus_gained,
     };
@@ -1063,7 +843,6 @@ async fn run_client_loop(
         };
 
         match event {
-            #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
                 let data = if let Some(attach_escape) = &mut state.attach_escape {
                     match attach_escape.filter_input(
@@ -1145,26 +924,6 @@ async fn run_client_loop(
                     return Err(ClientError::ConnectionLost(e));
                 }
             }
-            #[cfg(windows)]
-            ClientLoopEvent::StdinEvents(events) => {
-                if state.attach_escape.is_some() {
-                    continue;
-                }
-                let raw_events = events
-                    .iter()
-                    .map(crate::protocol::ClientInputEvent::to_raw_input_event)
-                    .collect::<Vec<_>>();
-                if crate::raw_input::events_require_host_surface_redraw(
-                    &raw_events,
-                    state.redraw_on_focus_gained,
-                ) {
-                    state.request_full_redraw();
-                }
-                let msg = ClientMessage::InputEvents { events };
-                if let Err(e) = write_to_server(&mut write_stream, &msg) {
-                    return Err(ClientError::ConnectionLost(e));
-                }
-            }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
                 state.reported_size = (new_cols, new_rows);
                 let msg = ClientMessage::Resize {
@@ -1229,7 +988,6 @@ async fn run_client_loop(
                     reload_local_client_config(
                         &mut state.sound_config,
                         &mut state.redraw_on_focus_gained,
-                        #[cfg(unix)]
                         &mut state.remote_image_paste_key,
                     );
                 }
@@ -1237,10 +995,6 @@ async fn run_client_loop(
                     let desired = enabled;
                     if desired != state.mouse_capture_active {
                         set_mouse_capture(desired).map_err(ClientError::ConnectionFailed)?;
-                        #[cfg(windows)]
-                        if windows_vti_input_backend_enabled() {
-                            let _ = enable_windows_virtual_terminal_input();
-                        }
                         state.mouse_capture_active = desired;
                     }
                 }
@@ -1334,7 +1088,6 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
 // Notifications
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 fn client_remote_image_paste_key(
     config: &crate::config::Config,
 ) -> Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
@@ -1354,7 +1107,7 @@ fn client_remote_image_paste_key(
 fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
     redraw_on_focus_gained: &mut bool,
-    #[cfg(unix)] remote_image_paste_key: &mut Option<(
+    remote_image_paste_key: &mut Option<(
         crossterm::event::KeyCode,
         crossterm::event::KeyModifiers,
     )>,
@@ -1364,14 +1117,10 @@ fn reload_local_client_config(
             for diagnostic in loaded.config.ui.sound.diagnostics() {
                 warn!(diagnostic = %diagnostic, "local sound config diagnostic");
             }
-            #[cfg(unix)]
             let loaded_remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
             *sound_config = loaded.config.ui.sound;
             *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
-            #[cfg(unix)]
-            {
-                *remote_image_paste_key = loaded_remote_image_paste_key;
-            }
+            *remote_image_paste_key = loaded_remote_image_paste_key;
             debug!("reloaded local client config");
         }
         Err(diagnostics) => {
@@ -1446,7 +1195,6 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
     }
 }
 
-#[cfg(unix)]
 fn should_bridge_clipboard_image_paste(
     data: &[u8],
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
@@ -1685,12 +1433,6 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    #[test]
-    fn windows_virtual_terminal_input_mode_sets_only_vti_bit() {
-        assert_eq!(windows_virtual_terminal_input_mode(0x01f0), 0x03f0);
-        assert_eq!(windows_virtual_terminal_input_mode(0x03f0), 0x03f0);
-    }
-
     fn restore_env_var(key: &str, value: Option<OsString>) {
         if let Some(value) = value {
             std::env::set_var(key, value);
@@ -1743,7 +1485,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn clipboard_image_paste_bridge_triggers_on_configured_key_and_empty_paste() {
         let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
@@ -1881,7 +1622,6 @@ mod tests {
         assert_eq!(output, expected);
     }
 
-    #[cfg(unix)]
     #[test]
     fn attach_escape_detaches_on_prefix_q() {
         let mut escape = AttachEscapeState::default();
@@ -1895,7 +1635,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn attach_escape_sends_literal_prefix_on_double_prefix() {
         let mut escape = AttachEscapeState::default();
@@ -1909,7 +1648,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn attach_escape_forwards_prefix_before_non_escape_key() {
         let mut escape = AttachEscapeState::default();
@@ -1923,7 +1661,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn attach_escape_turns_wheel_into_scroll_action() {
         let mut escape = AttachEscapeState::default();
@@ -1946,7 +1683,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn attach_escape_swallows_non_wheel_mouse_reports() {
         let mut escape = AttachEscapeState::default();
@@ -1956,7 +1692,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn attach_escape_turns_plain_page_keys_into_scroll_actions() {
         let mut escape = AttachEscapeState::default();
@@ -1999,7 +1734,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn attach_escape_forwards_modified_page_key() {
         let mut escape = AttachEscapeState::default();
@@ -2099,7 +1833,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn handshake_read_timeout_extends_for_remote_client() {
         let _guard = env_lock().lock().unwrap();
@@ -2178,13 +1911,11 @@ mod tests {
         let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
         let mut sound_config = crate::config::SoundConfig::default();
         let mut redraw_on_focus_gained = true;
-        #[cfg(unix)]
         let mut remote_image_paste_key = None;
 
         reload_local_client_config(
             &mut sound_config,
             &mut redraw_on_focus_gained,
-            #[cfg(unix)]
             &mut remote_image_paste_key,
         );
 

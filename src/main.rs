@@ -2,10 +2,9 @@ use std::io;
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture,
+    EnableFocusChange, EnableMouseCapture, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
-#[cfg(not(windows))]
-use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 
 #[cfg(not(target_os = "linux"))]
@@ -29,7 +28,6 @@ fn host_protocol_env() -> Option<String> {
     crate::config::env_first(&[ZYNK_ENV_VAR])
 }
 
-#[cfg(not(windows))]
 fn push_keyboard_enhancement_flags() -> io::Result<()> {
     execute!(
         io::stdout(),
@@ -37,19 +35,8 @@ fn push_keyboard_enhancement_flags() -> io::Result<()> {
     )
 }
 
-#[cfg(windows)]
-fn push_keyboard_enhancement_flags() -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(not(windows))]
 fn pop_keyboard_enhancement_flags() -> io::Result<()> {
     execute!(io::stdout(), PopKeyboardEnhancementFlags)
-}
-
-#[cfg(windows)]
-fn pop_keyboard_enhancement_flags() -> io::Result<()> {
-    Ok(())
 }
 
 fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
@@ -68,7 +55,6 @@ mod agent_resume;
 mod api;
 mod app;
 mod build_info;
-#[cfg(not(windows))]
 mod checksum;
 mod cli;
 mod client;
