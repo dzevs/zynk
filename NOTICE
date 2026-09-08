@@ -44,6 +44,8 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 <!-- apache-modified-files: begin -->
 - Cargo.toml
 - src/client/mod.rs
+- src/detect/manifests/cursor.toml
+- src/detect/manifests/kiro.toml
 - src/detect/mod.rs
 - tests/client_mode.rs
 <!-- apache-modified-files: end -->

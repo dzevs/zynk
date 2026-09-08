@@ -399,6 +399,31 @@ fn copilot_manifest_detects_ask_user_accept_prompt_and_ignores_bare_cancel_hint(
 }
 
 #[test]
+fn copilot_esc_interrupt_footer_is_working() {
+    // Copilot CLI v1.0.69-2 replaced the interrupt footer with `esc interrupt`
+    // (upstream #1119). It is not an `esc cancel` phrasing, so before the new
+    // alternative a working pane matched nothing and fell through to idle.
+    let working = explain(
+        Agent::GithubCopilot,
+        "\u{25cf} Working on your request\n\n  esc interrupt \u{b7} ctrl+c quit",
+    );
+    assert_eq!(working.state, AgentState::Working);
+    assert!(working.visible_working);
+    assert!(!working.visible_blocker);
+    assert_eq!(
+        working.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("working_cancel_hint")
+    );
+
+    // No interrupt hint at all is still the idle fallback, so the alternative
+    // above is what carries the working verdict.
+    let done = explain(Agent::GithubCopilot, "Done. Updated 2 files.\n\n> ");
+    assert_eq!(done.state, AgentState::Idle);
+    assert!(!done.visible_working);
+    assert!(done.matched_rule.is_none());
+}
+
+#[test]
 fn maki_manifest_detects_idle_working_and_blocked_states() {
     // Maki paints a persistent one-line status bar on the bottom row: the bare
     // mode label is idle, a leading braille spinner cell is working. It sets no
@@ -481,6 +506,104 @@ fn maki_manifest_detects_idle_working_and_blocked_states() {
     );
     assert!(!narrow_streaming.visible_idle);
     assert!(narrow_streaming.matched_rule.is_none());
+}
+
+#[test]
+fn antigravity_background_task_chip_is_working_without_the_tasks_hint() {
+    // The `/tasks` slash-command hint left the background-task status row
+    // (upstream #755), so a rule anchored on that literal stopped matching and
+    // a pane waiting on background work read as idle. The chip itself is the
+    // anchor now.
+    let waiting = explain(
+        Agent::Antigravity,
+        "Wrote src/lib.rs\n\n\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\n\u{2502} > Ask Antigravity \u{2502}\n\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}\ngemini-3-pro \u{b7} 2 tasks \u{b7} ctrl-c quit",
+    );
+    assert_eq!(waiting.state, AgentState::Working);
+    assert!(waiting.visible_working);
+    assert_eq!(
+        waiting.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("background_tasks_working")
+    );
+
+    // Same footer with no chip: nothing to wait on, so nothing matches.
+    let no_chip = explain(
+        Agent::Antigravity,
+        "Wrote src/lib.rs\n\n\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\n\u{2502} > Ask Antigravity \u{2502}\n\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}\ngemini-3-pro \u{b7} ctrl-c quit",
+    );
+    assert!(!no_chip.visible_working);
+    assert!(no_chip.matched_rule.is_none());
+
+    // The rule reads `bottom_non_empty_lines(5)`, so a chip left behind in
+    // scrollback above five newer lines is stale evidence and must not match.
+    let stale_chip = explain(
+        Agent::Antigravity,
+        "gemini-3-pro \u{b7} 2 tasks \u{b7} ctrl-c quit\nRead src/a.rs\nRead src/b.rs\n\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\n\u{2502} > Ask Antigravity \u{2502}\n\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}",
+    );
+    assert!(!stale_chip.visible_working);
+    assert!(stale_chip.matched_rule.is_none());
+}
+
+#[test]
+fn cursor_run_everything_status_is_not_an_approval_control() {
+    // The approval rule's catch-all matched any line opening with `run `, so
+    // Cursor's `Run Everything` status row read as a blocked approval and an
+    // idle pane looked stuck (upstream #1763). The alternative now requires a
+    // literal `run ... (y)` control.
+    let run_everything = explain(
+        Agent::Cursor,
+        "Done. Updated 3 files.\n\n\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\n\u{2502} > Plan, search, build \u{2502}\n\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}\n  Run Everything    shift+tab",
+    );
+    assert_eq!(run_everything.state, AgentState::Idle);
+    assert!(!run_everything.visible_blocker);
+    assert!(run_everything.matched_rule.is_none());
+
+    // The control the rule is actually for still blocks, with or without the
+    // selection arrow the tightened pattern makes optional. Neither screen
+    // carries another `any` alternative, so this rule is what answers.
+    for screen in [
+        "Cursor wants to run a command\n\n  $ npm test\n\n\u{2192} Run (y)\n  Reject (n)",
+        "Cursor wants to run a command\n\n  $ npm test\n\n  Run (y)\n  Reject (n)",
+    ] {
+        let approval = explain(Agent::Cursor, screen);
+        assert_eq!(approval.state, AgentState::Blocked);
+        assert!(approval.visible_blocker);
+        assert_eq!(
+            approval.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("approval_prompt")
+        );
+    }
+}
+
+#[test]
+fn kiro_prompt_placeholder_is_idle_and_yields_to_the_working_banner() {
+    // Kiro carried only negative idle evidence, so an idle pane fell through to
+    // the fallback (upstream discussion #982). The composer placeholder is
+    // positive evidence now.
+    let idle = explain(
+        Agent::Kiro,
+        "Updated src/main.rs\n\n\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\n\u{2502} > Ask a question or describe a task \u{2502}\n\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}\nctrl-j newline \u{b7} /copy to clipboard",
+    );
+    assert_eq!(idle.state, AgentState::Idle);
+    assert!(idle.visible_idle);
+    assert_eq!(
+        idle.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("prompt_idle")
+    );
+
+    // The composer keeps that placeholder while the agent works, and the idle
+    // rule outranks the working banner 200 to 100 -- so the two `not` gates are
+    // the only thing keeping a busy pane from reading as idle.
+    let working = explain(
+        Agent::Kiro,
+        "\u{25d4} Kiro is working... (esc to cancel)\n\n\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\n\u{2502} > Ask a question or describe a task \u{2502}\n\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}\nctrl-j newline \u{b7} /copy to clipboard",
+    );
+    assert_eq!(working.state, AgentState::Working);
+    assert!(working.visible_working);
+    assert!(!working.visible_idle);
+    assert_eq!(
+        working.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("kiro_working_marker")
+    );
 }
 
 #[test]
