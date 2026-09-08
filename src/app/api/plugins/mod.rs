@@ -1162,7 +1162,6 @@ command = ["echo", "b"]
         assert_eq!(value["error"]["code"], "plugin_not_found");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn plugin_pane_open_uses_plugin_root_title_env_and_target_context() {
         let mut app = test_app();
@@ -1269,7 +1268,6 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$ZYNK_P
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn plugin_pane_open_injects_plugin_paths_and_protects_overrides() {
         let mut app = test_app();
@@ -1364,7 +1362,6 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$ZYNK_PLUGIN_ROOT\" \"$ZYNK_PLUG
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn plugin_pane_open_tab_emits_tab_created_before_pane_created() {
         let event_hub = crate::api::EventHub::default();
@@ -1583,7 +1580,6 @@ command = ["sh", "-c", "sleep 1"]
         assert_eq!(value["error"]["code"], "plugin_manifest_unavailable");
     }
 
-    #[cfg(unix)]
     #[test]
     fn manifest_action_invoke_runs_command_and_captures_log() {
         let mut app = test_app();
@@ -1650,7 +1646,6 @@ command = ["sh", "-c", "printf '%s' \"$ZYNK_PLUGIN_ACTION_ID\""]
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(unix)]
     #[test]
     fn manifest_action_invoke_injects_plugin_paths() {
         let mut app = test_app();
@@ -1761,7 +1756,6 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$ZYNK_PLUGIN_ROOT\" \"$ZYNK_PLUGIN
         assert_eq!(context.selected_text.as_deref(), Some("hello"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn event_hooks_use_event_target_context() {
         let mut app = test_app();
@@ -1906,7 +1900,6 @@ command = ["sh", "-c", "printf '%s' \"$ZYNK_PLUGIN_CONTEXT_JSON\" > {}"]
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn plugin_link_handler_invokes_action_with_clicked_url_context() {
         let mut app = test_app();

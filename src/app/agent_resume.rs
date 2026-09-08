@@ -347,7 +347,6 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         App::new(
@@ -359,12 +358,10 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
     fn long_running_test_argv() -> Vec<String> {
         vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()]
     }
 
-    #[cfg(unix)]
     fn marker_resume_test_argv() -> Vec<String> {
         vec![
             "/bin/sh".into(),
@@ -373,7 +370,6 @@ mod tests {
         ]
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn pending_agent_resume_waits_for_host_theme_before_launch() {
         let mut app = test_app();
@@ -452,7 +448,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn pending_agent_resume_can_launch_after_theme_wait_expires() {
         let mut app = test_app();
@@ -486,7 +481,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn pending_agent_resume_records_effective_argv_back_into_launch_argv() {
         let mut app = test_app();
@@ -525,7 +519,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
     #[tokio::test]
     async fn pending_agent_resume_launches_hidden_panes_with_current_terminal_area() {
         let mut app = test_app();
@@ -581,7 +574,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
     #[tokio::test]
     async fn pending_agent_resume_launches_inactive_tab_panes_with_current_terminal_area() {
         let mut app = test_app();
@@ -645,7 +637,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
     #[tokio::test]
     async fn pending_agent_resume_launches_zoom_hidden_active_tab_panes() {
         let mut app = test_app();
@@ -705,7 +696,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
     #[tokio::test]
     async fn pending_agent_resume_uses_current_terminal_area_for_background_panes() {
         let mut app = test_app();
@@ -764,7 +754,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn pending_agent_resume_launches_with_inner_rect_size() {
         let mut app = test_app();

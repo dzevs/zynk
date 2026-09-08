@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use tracing::{debug, error, info, warn};
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use std::fs;
 
 use crate::api::schema::{
@@ -611,7 +611,7 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use interprocess::local_socket::traits::Listener as _;

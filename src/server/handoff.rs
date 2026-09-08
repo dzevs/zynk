@@ -1,24 +1,14 @@
-#[cfg(unix)]
 use std::io::{self, Read, Write};
-#[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
-#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(unix)]
 use std::os::unix::process::CommandExt;
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::process::{Child, Command};
-#[cfg(unix)]
 use std::time::Duration;
 
-#[cfg(unix)]
 use serde::{Deserialize, Serialize};
-#[cfg(unix)]
 use tracing::{error, info, warn};
 
-#[cfg(unix)]
 /// The handoff protocol version. 2 (zynk 3.1.0) adds the ordered DB-worker handover contract: the
 /// sender pauses/joins its DB workers before "committed" and the replacement starts its own only
 /// after. A version-1 peer (zynk 3.0.x) sends "committed" with its workers still running, so mixing
@@ -36,18 +26,12 @@ fn sender_handoff_version() -> u32 {
 
 /// The replacement's answer when it refuses the manifest: the sender surfaces the reason.
 const REJECTED_PREFIX: &str = "rejected: ";
-#[cfg(unix)]
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(unix)]
 const OWNED_ACK_TIMEOUT: Duration = Duration::from_millis(500);
-#[cfg(unix)]
 pub(crate) const MAX_FDS_PER_HANDOFF: usize = 64;
-#[cfg(unix)]
 pub(crate) const MAX_REPLAY_BYTES_PER_PANE: usize = 8 * 1024;
-#[cfg(unix)]
 pub(crate) const COMMIT_TIMEOUT: Duration = READY_TIMEOUT;
 
-#[cfg(unix)]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HandoffManifest {
     pub version: u32,
@@ -59,19 +43,16 @@ pub(crate) struct HandoffManifest {
     pub panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
 }
 
-#[cfg(unix)]
 pub(crate) struct ReceivedHandoff {
     pub manifest: HandoffManifest,
     pub fds: Vec<RawFd>,
     pub stream: UnixStream,
 }
 
-#[cfg(unix)]
 pub(crate) fn handoff_socket_path() -> PathBuf {
     crate::session::data_dir().join(format!("zynk-handoff-{}.sock", std::process::id()))
 }
 
-#[cfg(unix)]
 pub(crate) fn spawn_handoff_import(
     import_exe: Option<&Path>,
     socket_path: &Path,
@@ -110,7 +91,6 @@ pub(crate) fn spawn_handoff_import(
     })
 }
 
-#[cfg(unix)]
 pub(crate) fn cleanup_failed_import_child(child: &mut Child) {
     let pid = child.id();
     match child.try_wait() {
@@ -137,7 +117,6 @@ pub(crate) fn cleanup_failed_import_child(child: &mut Child) {
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn bind_listener(socket_path: &Path) -> io::Result<UnixListener> {
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
@@ -146,7 +125,6 @@ pub(crate) fn bind_listener(socket_path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-#[cfg(unix)]
 pub(crate) fn accept_and_validate_on(
     listener: UnixListener,
     socket_path: &Path,
@@ -215,7 +193,6 @@ pub(crate) fn accept_and_validate_on(
     Ok(stream)
 }
 
-#[cfg(unix)]
 pub(crate) fn send_fds_and_wait_restored(stream: &mut UnixStream, fds: &[RawFd]) -> io::Result<()> {
     if fds.len() > MAX_FDS_PER_HANDOFF {
         return Err(io::Error::new(
@@ -235,7 +212,6 @@ pub(crate) fn send_fds_and_wait_restored(stream: &mut UnixStream, fds: &[RawFd])
     Ok(())
 }
 
-#[cfg(unix)]
 pub(crate) fn wait_ready(stream: &mut UnixStream) -> io::Result<()> {
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let ready = read_line_unbuffered(&mut *stream)?;
@@ -245,13 +221,11 @@ pub(crate) fn wait_ready(stream: &mut UnixStream) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 pub(crate) fn report_committed(stream: &mut UnixStream) -> io::Result<()> {
     stream.write_all(b"committed\n")?;
     stream.flush()
 }
 
-#[cfg(unix)]
 pub(crate) fn wait_owned_ack(stream: &mut UnixStream) {
     if let Err(err) = stream.set_read_timeout(Some(OWNED_ACK_TIMEOUT)) {
         warn!(err = %err, "failed to set handoff ownership ack timeout");
@@ -271,7 +245,6 @@ pub(crate) fn wait_owned_ack(stream: &mut UnixStream) {
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHandoff> {
     let mut stream = UnixStream::connect(socket_path)?;
     stream.write_all(token.as_bytes())?;
@@ -339,19 +312,16 @@ fn validate_manifest(manifest: &HandoffManifest) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(unix)]
 pub(crate) fn report_restored(stream: &mut UnixStream) -> io::Result<()> {
     stream.write_all(b"restored\n")?;
     stream.flush()
 }
 
-#[cfg(unix)]
 pub(crate) fn report_ready(stream: &mut UnixStream) -> io::Result<()> {
     stream.write_all(b"ready\n")?;
     stream.flush()
 }
 
-#[cfg(unix)]
 pub(crate) fn wait_committed(stream: &mut UnixStream) -> io::Result<()> {
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let committed = read_line_unbuffered(&mut *stream)?;
@@ -361,13 +331,11 @@ pub(crate) fn wait_committed(stream: &mut UnixStream) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 pub(crate) fn report_owned(stream: &mut UnixStream) -> io::Result<()> {
     stream.write_all(b"owned\n")?;
     stream.flush()
 }
 
-#[cfg(unix)]
 pub(crate) fn manifest_for(
     snapshot: crate::persist::SessionSnapshot,
     panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
@@ -385,14 +353,12 @@ pub(crate) fn manifest_for(
     }
 }
 
-#[cfg(unix)]
 fn restrict_socket_permissions(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
-#[cfg(unix)]
 fn accept_with_timeout(
     listener: &UnixListener,
     timeout: Duration,
@@ -416,7 +382,6 @@ fn accept_with_timeout(
     }
 }
 
-#[cfg(unix)]
 fn read_line_unbuffered(stream: &mut UnixStream) -> io::Result<String> {
     let mut bytes = Vec::new();
     let mut byte = [0u8; 1];
@@ -442,7 +407,6 @@ fn read_line_unbuffered(stream: &mut UnixStream) -> io::Result<String> {
     }
 }
 
-#[cfg(unix)]
 fn send_fds(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
     if fds.is_empty() {
         return Ok(());
@@ -476,7 +440,6 @@ fn send_fds(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
     if expected == 0 {
         return Ok(Vec::new());
@@ -529,7 +492,6 @@ fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
     Ok(out)
 }
 
-#[cfg(unix)]
 pub(crate) fn log_import_result(panes: usize) {
     info!(panes, "handoff import ready");
 }

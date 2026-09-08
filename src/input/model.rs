@@ -1,4 +1,3 @@
-#[cfg(not(windows))]
 use crossterm::event::KeyboardEnhancementFlags;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
@@ -43,7 +42,6 @@ impl From<KeyEvent> for TerminalKey {
     }
 }
 
-#[cfg(not(windows))]
 pub fn ime_compatible_keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
@@ -145,7 +143,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn keyboard_enhancement_flags_stay_ime_compatible() {
         let flags = ime_compatible_keyboard_enhancement_flags();

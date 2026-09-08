@@ -750,7 +750,7 @@ impl App {
     pub(crate) fn should_shutdown_workspace_terminal_runtimes_for_worktree_remove(
         force: bool,
     ) -> bool {
-        force || cfg!(windows)
+        force
     }
 
     pub(crate) fn shutdown_workspace_terminal_runtimes_for_worktree_remove(
@@ -1485,10 +1485,7 @@ mod tests {
 
     #[test]
     fn worktree_remove_runtime_shutdown_policy_preserves_windows_safe_remove() {
-        assert_eq!(
-            App::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(false),
-            cfg!(windows)
-        );
+        assert!(!App::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(false));
         assert!(App::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(true));
     }
 }

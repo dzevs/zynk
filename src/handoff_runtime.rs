@@ -1,7 +1,5 @@
-#[cfg(unix)]
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HandoffRuntimeState {
     pub pane_id: u32,
@@ -20,7 +18,6 @@ pub(crate) struct HandoffRuntimeState {
     pub initial_history_ansi: Option<String>,
 }
 
-#[cfg(unix)]
 impl HandoffRuntimeState {
     pub fn with_pane_id(mut self, pane_id: crate::layout::PaneId) -> Self {
         self.pane_id = pane_id.raw();
@@ -30,8 +27,6 @@ impl HandoffRuntimeState {
 
 #[derive(Debug)]
 pub(crate) struct ImportedHandoffRuntime {
-    #[cfg(unix)]
     pub master_fd: std::os::fd::RawFd,
-    #[cfg(unix)]
     pub state: HandoffRuntimeState,
 }

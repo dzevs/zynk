@@ -282,7 +282,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn save_to_path_preserves_existing_symlink() {
         let target = temp_session_path("symlink-target");
@@ -302,7 +301,6 @@ mod tests {
         assert_eq!(parsed.selected, 7);
     }
 
-    #[cfg(unix)]
     #[test]
     fn save_to_path_writes_through_dangling_symlink() {
         let target = temp_session_path("dangling-target");
@@ -319,7 +317,6 @@ mod tests {
         assert!(target.exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn save_to_path_resolves_relative_symlink() {
         let session = temp_session_path("relative-symlink");

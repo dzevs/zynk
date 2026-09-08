@@ -37,19 +37,16 @@ impl TerminalRuntimeRegistry {
         self.runtimes.values()
     }
 
-    #[cfg(unix)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&TerminalId, &TerminalRuntime)> {
         self.runtimes.iter()
     }
 
-    #[cfg(unix)]
     pub(crate) fn set_handoff_readers_paused(&self, paused: bool) {
         for runtime in self.runtimes.values() {
             runtime.set_handoff_reader_paused(paused);
         }
     }
 
-    #[cfg(unix)]
     pub(crate) fn assume_handoff_ownership(&mut self) {
         for runtime in self.runtimes.values_mut() {
             runtime.assume_handoff_ownership();
@@ -60,14 +57,12 @@ impl TerminalRuntimeRegistry {
         self.runtimes.len()
     }
 
-    #[cfg(unix)]
     pub(crate) fn nudge_child_redraw_after_handoff(&self) {
         for runtime in self.runtimes.values() {
             runtime.nudge_child_redraw_after_handoff();
         }
     }
 
-    #[cfg(unix)]
     pub(crate) fn drain_for_handoff(
         &mut self,
     ) -> impl Iterator<Item = (TerminalId, TerminalRuntime)> + '_ {

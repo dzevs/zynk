@@ -1103,7 +1103,6 @@ mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
 
-    #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
@@ -1367,7 +1366,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn zynk_toast_context_uses_live_root_runtime_cwd_label() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1459,7 +1457,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp_root);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn delayed_zynk_toast_context_uses_live_root_runtime_cwd_label() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

@@ -625,7 +625,6 @@ mod tests {
         std::fs::write(&fake_xclip, "#!/bin/sh\nprintf '# Tasks'\n")
             .expect("fake xclip should be written");
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
 
@@ -680,7 +679,6 @@ mod tests {
         std::fs::write(&fake_xclip, "#!/bin/sh\nprintf '# Tasks'\n")
             .expect("fake xclip should be written");
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
 

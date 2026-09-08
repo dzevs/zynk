@@ -81,7 +81,6 @@ impl KittyKeyboardTracker {
         }
     }
 
-    #[cfg(unix)]
     pub(crate) fn replay_ansi(&self) -> Option<String> {
         if self.stack.is_empty() {
             return (self.flags != 0).then(|| format!("\x1b[={}u", self.flags));

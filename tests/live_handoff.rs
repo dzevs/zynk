@@ -310,7 +310,6 @@ fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> Strin
     );
 }
 
-#[cfg(target_os = "linux")]
 fn server_ptmx_fd_count(pid: u32) -> usize {
     let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
         return 0;
@@ -322,21 +321,6 @@ fn server_ptmx_fd_count(pid: u32) -> usize {
         .count()
 }
 
-#[cfg(target_os = "macos")]
-fn server_ptmx_fd_count(pid: u32) -> usize {
-    let Ok(output) = std::process::Command::new("lsof")
-        .args(["-nP", "-p", &pid.to_string()])
-        .output()
-    else {
-        return 0;
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| line.contains("/dev/ptmx"))
-        .count()
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn wait_for_server_ptmx_fd_count(pid: u32, expected: usize, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     let mut last_count = 0;
@@ -350,7 +334,6 @@ fn wait_for_server_ptmx_fd_count(pid: u32, expected: usize, timeout: Duration) {
     panic!("server pid {pid} had {last_count} /dev/ptmx fds; expected {expected}");
 }
 
-#[cfg(target_os = "linux")]
 fn wait_for_replacement_server_pid(runtime_dir: &Path, old_pid: u32, timeout: Duration) -> u32 {
     let deadline = Instant::now() + timeout;
     let mut last_pids = Vec::new();
@@ -365,38 +348,6 @@ fn wait_for_replacement_server_pid(runtime_dir: &Path, old_pid: u32, timeout: Du
         "replacement server for {} did not appear; last pids: {:?}",
         runtime_dir.display(),
         last_pids
-    );
-}
-
-#[cfg(target_os = "macos")]
-fn wait_for_replacement_server_pid(_runtime_dir: &Path, old_pid: u32, timeout: Duration) -> u32 {
-    let handoff_socket_pattern = format!("zynk-handoff-{old_pid}.sock");
-    let deadline = Instant::now() + timeout;
-    let mut last_stdout = String::new();
-    while Instant::now() < deadline {
-        if let Ok(output) = std::process::Command::new("pgrep")
-            .args(["-af", &handoff_socket_pattern])
-            .output()
-        {
-            last_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            for line in last_stdout.lines() {
-                let Some(pid_text) = line.split_whitespace().next() else {
-                    continue;
-                };
-                let Ok(pid) = pid_text.parse::<u32>() else {
-                    continue;
-                };
-                if pid != old_pid {
-                    return pid;
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!(
-        "replacement server for {} did not appear; last pgrep output: {}",
-        _runtime_dir.display(),
-        last_stdout
     );
 }
 
@@ -429,7 +380,6 @@ fn wait_for_http_contains(port: u16, needle: &str, timeout: Duration) -> String 
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn live_server_holds_one_pty_master_fd_per_pane() {
     let _lock = test_lock();

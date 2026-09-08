@@ -198,7 +198,6 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::super::{app_for_mouse_test, mouse, numbered_lines_bytes};
-    #[cfg(unix)]
     use super::super::{unique_temp_path, wait_for_file};
     use super::*;
     use crate::{config::Config, events::AppEvent, workspace::Workspace};
@@ -261,7 +260,6 @@ mod tests {
             .is_some_and(crate::selection::Selection::is_visible));
     }
 
-    #[cfg(unix)]
     fn install_test_link_handler(app: &mut App) {
         let plugin_root = std::env::temp_dir();
         app.state.installed_plugins = std::collections::HashMap::from([(
@@ -504,7 +502,6 @@ mod tests {
         assert!(app.selection_highlight_clear_deadline.is_none());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn ctrl_click_url_invokes_plugin_link_handler_but_super_click_does_not() {
         let line = "see https://github.com/example/repo/issues/398";
@@ -812,7 +809,6 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn terminal_direct_edit_scrollback_opens_editor_pane() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -866,7 +862,6 @@ mod tests {
         let _ = std::fs::remove_file(output_path);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn direct_custom_command_runs_before_forwarding_to_pane() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -903,7 +898,6 @@ mod tests {
         let _ = std::fs::remove_file(output_path);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn direct_custom_pane_command_opens_overlay_pane() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

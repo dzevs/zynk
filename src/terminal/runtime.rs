@@ -19,32 +19,26 @@ impl TerminalRuntime {
         self.0.shutdown();
     }
 
-    #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.0.duplicate_handoff_fd()
     }
 
-    #[cfg(unix)]
     pub fn preserve_for_handoff(self) {
         self.0.preserve_for_handoff()
     }
 
-    #[cfg(unix)]
     pub fn assume_handoff_ownership(&mut self) {
         self.0.assume_handoff_ownership();
     }
 
-    #[cfg(unix)]
     pub fn set_handoff_reader_paused(&self, paused: bool) {
         self.0.set_handoff_reader_paused(paused);
     }
 
-    #[cfg(unix)]
     pub fn pause_handoff_reader(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         self.0.pause_handoff_reader(timeout)
     }
 
-    #[cfg(unix)]
     pub fn handoff_runtime_state(
         &self,
         pane_id: u32,
@@ -52,12 +46,10 @@ impl TerminalRuntime {
         self.0.handoff_runtime_state(pane_id)
     }
 
-    #[cfg(unix)]
     pub fn handoff_history_ansi(&self) -> Option<String> {
         self.0.handoff_history_ansi()
     }
 
-    #[cfg(unix)]
     pub fn from_handoff_fd(
         import: crate::handoff_runtime::ImportedHandoffRuntime,
         scrollback_limit_bytes: usize,
@@ -226,7 +218,6 @@ impl TerminalRuntime {
         self.0.resize(rows, cols, cell_width_px, cell_height_px);
     }
 
-    #[cfg(unix)]
     pub fn nudge_child_redraw_after_handoff(&self) {
         self.0.nudge_child_redraw_after_handoff();
     }

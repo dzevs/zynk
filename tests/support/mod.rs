@@ -61,7 +61,6 @@ pub fn unregister_runtime_dir(path: &Path) {
     }
 }
 
-#[cfg(target_os = "linux")]
 pub fn zynk_server_pids_for_runtime_dir(runtime_dir: &Path) -> std::io::Result<Vec<u32>> {
     let mut pids = Vec::new();
     for pid in iter_worktree_server_pids()? {

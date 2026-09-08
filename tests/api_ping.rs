@@ -71,7 +71,6 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
     panic!("socket did not appear at {}", path.display());
 }
 
-#[cfg(target_os = "linux")]
 fn wait_for_path(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -102,7 +101,6 @@ fn spawn_zynk_with_path(
     )
 }
 
-#[cfg(target_os = "linux")]
 fn spawn_zynk_with_shell(
     config_home: &Path,
     runtime_dir: &Path,
@@ -229,7 +227,6 @@ fn open_subscription(socket_path: &Path, json: &str) -> JsonLineReader {
     reader
 }
 
-#[cfg(not(target_os = "macos"))]
 fn wait_for_event(
     reader: &mut JsonLineReader,
     expected: &str,
@@ -238,7 +235,6 @@ fn wait_for_event(
     wait_for_event_matching(reader, expected, timeout, |_| true)
 }
 
-#[cfg(not(target_os = "macos"))]
 fn wait_for_event_matching<F>(
     reader: &mut JsonLineReader,
     expected: &str,
@@ -258,7 +254,6 @@ where
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 fn wait_for_events(
     reader: &mut JsonLineReader,
     expected: &[&str],
@@ -281,7 +276,6 @@ fn wait_for_events(
     events
 }
 
-#[cfg(not(target_os = "macos"))]
 fn event_by_kind<'a>(events: &'a [serde_json::Value], kind: &str) -> &'a serde_json::Value {
     events
         .iter()
@@ -361,7 +355,6 @@ contains = ["server-reload-marker"]
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn workspace_list_and_create_round_trip() {
     let _lock = test_lock();
@@ -566,7 +559,6 @@ fn workspace_list_and_create_round_trip() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn tab_methods_round_trip_over_socket() {
     let _lock = test_lock();
@@ -685,7 +677,6 @@ fn tab_methods_round_trip_over_socket() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
     let _lock = test_lock();
@@ -798,7 +789,6 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn agent_start_creates_named_terminal_over_socket() {
     let _lock = test_lock();
@@ -1076,7 +1066,6 @@ fn tab_create_with_no_focus_preserves_active_tab() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn events_subscribe_streams_workspace_tab_and_agent_events() {
     let _lock = test_lock();
@@ -1093,7 +1082,6 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
         "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
@@ -1221,7 +1209,6 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn events_subscribe_streams_pane_split_and_close_events() {
     let _lock = test_lock();
@@ -1298,7 +1285,6 @@ fn events_subscribe_streams_pane_split_and_close_events() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn events_subscribe_streams_tab_and_workspace_close_events() {
     let _lock = test_lock();
@@ -1381,8 +1367,6 @@ fn events_subscribe_streams_tab_and_workspace_close_events() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn pane_report_agent_updates_effective_state() {
     let _lock = test_lock();
@@ -1395,7 +1379,6 @@ fn pane_report_agent_updates_effective_state() {
     fs::create_dir_all(&bin_dir).unwrap();
     let fake_pi = bin_dir.join("pi");
     fs::write(&fake_pi, "#!/bin/sh\nprintf 'Working...\\n'\nsleep 3\n").unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
@@ -1589,7 +1572,6 @@ fn pane_report_agent_updates_effective_state() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn pane_report_agent_accepts_unknown_agent_labels() {
     let _lock = test_lock();
@@ -1634,7 +1616,6 @@ fn pane_report_agent_accepts_unknown_agent_labels() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
     let _lock = test_lock();
@@ -1655,7 +1636,6 @@ fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
         ),
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
@@ -1782,7 +1762,6 @@ fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
     cleanup_spawned_zynk(child, base);
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn pane_clear_agent_authority_restores_fallback_state() {
     let _lock = test_lock();
@@ -1795,7 +1774,6 @@ fn pane_clear_agent_authority_restores_fallback_state() {
     fs::create_dir_all(&bin_dir).unwrap();
     let fake_pi = bin_dir.join("pi");
     fs::write(&fake_pi, "#!/bin/sh\nprintf 'Working...\\n'\nsleep 3\n").unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
@@ -1920,7 +1898,6 @@ fn events_subscribe_streams_output_and_agent_status_events() {
         "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
@@ -2048,7 +2025,6 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
         ),
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_pi).unwrap().permissions();

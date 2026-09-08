@@ -219,12 +219,6 @@ fn channel_set_rejection(
     channel: &str,
     install_rejection: Option<&'static str>,
 ) -> Option<&'static str> {
-    if cfg!(windows) && channel == "stable" {
-        return Some(
-            "stable channel is not available on Windows yet; Windows builds are preview-only",
-        );
-    }
-
     if channel == "preview" {
         return install_rejection;
     }
@@ -996,29 +990,14 @@ mod tests {
         );
         assert_eq!(
             super::channel_set_rejection("stable", Some("no preview")),
-            if cfg!(windows) {
-                Some(
-                    "stable channel is not available on Windows yet; Windows builds are preview-only",
-                )
-            } else {
-                None
-            }
+            None
         );
         assert_eq!(super::channel_set_rejection("preview", None), None);
     }
 
     #[test]
     fn channel_set_rejects_stable_only_on_windows() {
-        assert_eq!(
-            super::channel_set_rejection("stable", None),
-            if cfg!(windows) {
-                Some(
-                    "stable channel is not available on Windows yet; Windows builds are preview-only",
-                )
-            } else {
-                None
-            }
-        );
+        assert_eq!(super::channel_set_rejection("stable", None), None);
     }
 
     #[test]

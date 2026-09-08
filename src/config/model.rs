@@ -66,11 +66,7 @@ impl Default for UpdateConfig {
 }
 
 fn default_update_channel() -> UpdateChannelConfig {
-    if cfg!(windows) {
-        UpdateChannelConfig::Preview
-    } else {
-        UpdateChannelConfig::Stable
-    }
+    UpdateChannelConfig::Stable
 }
 
 /// Feature #107 (IM3): the `[header]` section controlling the agent-visible message

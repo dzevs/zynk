@@ -598,7 +598,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn temp_detection_path(name: &str) -> std::path::PathBuf {
         let unique = format!(
             "zynk-detect-tests-{}-{}-{}",
@@ -1006,7 +1005,6 @@ mod tests {
         assert_eq!(cmdline_argv0_agent_name("/tmp/my-codex-helper"), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn identify_agent_in_job_resolves_cursor_agent_symlink_argv0() {
         let dir = temp_detection_path("cursor-agent-symlink");
@@ -1043,7 +1041,6 @@ mod tests {
 
     // ---- Process identification (real PTY) ----
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn foreground_job_detects_sleep() {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -1083,7 +1080,6 @@ mod tests {
         child.wait().ok();
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn foreground_job_detects_shell_running_command() {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -1127,7 +1123,6 @@ mod tests {
         child.wait().ok();
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn proc_stat_parsing_handles_spaces_in_comm() {
         // Verify our /proc/pid/stat parser correctly extracts fields

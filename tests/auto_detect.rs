@@ -1,7 +1,5 @@
 //! Integration tests for auto-detect launch behavior.
 
-#![cfg(not(target_os = "macos"))]
-
 mod support;
 
 use std::fs;

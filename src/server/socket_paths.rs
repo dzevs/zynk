@@ -92,7 +92,7 @@ pub(crate) fn restrict_socket_permissions(path: &Path) -> io::Result<()> {
     crate::ipc::restrict_socket_permissions(path, SOCKET_PERMISSION_MODE)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;

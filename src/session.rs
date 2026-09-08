@@ -449,7 +449,6 @@ fn normalize_name(name: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     use interprocess::local_socket::traits::Listener as _;
     use std::sync::{Mutex, OnceLock};
 
@@ -458,7 +457,6 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    #[cfg(unix)]
     fn unique_test_path(name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -467,7 +465,6 @@ mod tests {
         std::env::temp_dir().join(format!("zynk-{name}-{}-{nanos}", std::process::id()))
     }
 
-    #[cfg(unix)]
     fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, std::path::PathBuf) {
         let path = unique_test_path(name);
         let listener = crate::ipc::bind_local_listener(&path).unwrap();
@@ -504,7 +501,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn stop_request_empty_response_waits_for_socket_state() {
         let (client, server, _path) = local_stream_pair("stop-empty-response");
@@ -531,7 +527,6 @@ mod tests {
         assert!(handle.join().unwrap().contains("server.stop"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn stop_session_times_out_when_socket_stays_open_without_response() {
         let _guard = env_lock().lock().unwrap();
@@ -939,7 +934,6 @@ mod tests {
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
     }
 
-    #[cfg(unix)]
     #[test]
     fn stop_session_fails_when_socket_remains_reachable_after_timeout() {
         let _guard = env_lock().lock().unwrap();

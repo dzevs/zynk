@@ -258,13 +258,7 @@ impl RemotePlatform {
     }
 
     fn local() -> Self {
-        let os = if cfg!(target_os = "linux") {
-            "linux"
-        } else if cfg!(target_os = "macos") {
-            "macos"
-        } else {
-            "unknown"
-        };
+        let os = "linux";
 
         let arch = if cfg!(target_arch = "x86_64") {
             "x86_64"

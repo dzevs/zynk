@@ -1,10 +1,8 @@
-#[cfg(unix)]
 use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     sync::Arc,
 };
 
-#[cfg(unix)]
 pub(crate) fn duplicate_fd(fd: RawFd) -> std::io::Result<RawFd> {
     let duplicated = unsafe { libc::dup(fd) };
     if duplicated < 0 {
@@ -13,7 +11,6 @@ pub(crate) fn duplicate_fd(fd: RawFd) -> std::io::Result<RawFd> {
     Ok(duplicated)
 }
 
-#[cfg(unix)]
 pub(crate) fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
@@ -25,7 +22,6 @@ pub(crate) fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 pub(crate) fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
@@ -37,7 +33,6 @@ pub(crate) fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 pub(crate) fn duplicate_cloexec_fd(fd: RawFd) -> std::io::Result<RawFd> {
     let duplicated = duplicate_fd(fd)?;
     if let Err(err) = set_cloexec(duplicated) {
@@ -47,13 +42,11 @@ pub(crate) fn duplicate_cloexec_fd(fd: RawFd) -> std::io::Result<RawFd> {
     Ok(duplicated)
 }
 
-#[cfg(unix)]
 #[derive(Clone)]
 pub(crate) struct WakeWriter {
     fd: Arc<OwnedFd>,
 }
 
-#[cfg(unix)]
 impl WakeWriter {
     pub(crate) fn wake(&self) -> std::io::Result<()> {
         loop {
@@ -75,13 +68,11 @@ impl WakeWriter {
     }
 }
 
-#[cfg(unix)]
 pub(crate) struct WakePipe {
     pub(crate) read_fd: OwnedFd,
     pub(crate) writer: WakeWriter,
 }
 
-#[cfg(unix)]
 pub(crate) fn create_wake_pipe() -> std::io::Result<WakePipe> {
     let mut fds = [-1; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
@@ -102,7 +93,6 @@ pub(crate) fn create_wake_pipe() -> std::io::Result<WakePipe> {
     })
 }
 
-#[cfg(unix)]
 pub(crate) fn drain_wake_fd(fd: RawFd) -> std::io::Result<()> {
     let mut buf = [0u8; 64];
     loop {
@@ -124,14 +114,12 @@ pub(crate) fn drain_wake_fd(fd: RawFd) -> std::io::Result<()> {
     }
 }
 
-#[cfg(unix)]
 pub(crate) struct PtyWakeReadiness {
     pub(crate) pty_read_ready: bool,
     pub(crate) pty_write_ready: bool,
     pub(crate) wake_ready: bool,
 }
 
-#[cfg(unix)]
 pub(crate) fn poll_pty_and_wake(
     pty_fd: RawFd,
     wake_fd: RawFd,
@@ -194,7 +182,6 @@ pub(crate) fn poll_pty_and_wake(
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn poll_write_ready(fd: RawFd, timeout_ms: i32) -> std::io::Result<bool> {
     let mut poll_fd = libc::pollfd {
         fd,
@@ -214,7 +201,6 @@ pub(crate) fn poll_write_ready(fd: RawFd, timeout_ms: i32) -> std::io::Result<bo
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn resize_pty_fd(
     fd: RawFd,
     rows: u16,

@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 mod support;
 
 use std::fs;
@@ -3495,7 +3493,6 @@ fn wait_output_matches_recent_unwrapped_text() {
     let token = "WRAP_WAIT_TEST_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789";
     let script = base.join("emit-long-token.sh");
     std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{token}'\n")).unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&script).unwrap().permissions();
@@ -3891,7 +3888,6 @@ fn wait_agent_status_exits_when_idle_status_matches() {
         "#!/bin/sh\nprintf 'starting\\n'\nsleep 4\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
@@ -4019,7 +4015,6 @@ fn wait_agent_status_exits_when_done_status_matches() {
         "#!/bin/sh\nprintf 'starting\\n'\nsleep 4\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
