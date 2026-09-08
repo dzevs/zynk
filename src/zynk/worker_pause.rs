@@ -85,7 +85,6 @@ impl PauseControl {
     /// nothing is queued. `true` = quiescent now and staying so until `resume`; `false` = still
     /// busy or still draining (the loop keeps running; the owner keeps ownership and should
     /// `resume`).
-    #[cfg_attr(not(unix), allow(dead_code))] // paused only by the Unix-only live handoff
     pub(crate) fn pause(&self, deadline: Duration) -> bool {
         let started = Instant::now();
         let mut state = self.lock();
@@ -104,7 +103,6 @@ impl PauseControl {
         true
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn resume(&self) {
         self.lock().paused = false;
         self.changed.notify_all();

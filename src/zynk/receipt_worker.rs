@@ -68,7 +68,6 @@ pub struct ReceiptWorkerHandle {
 }
 
 // The live handoff (the only caller) is Unix-only.
-#[cfg_attr(not(unix), allow(dead_code))]
 impl ReceiptWorkerHandle {
     /// Stop ACCEPTING receipt jobs and wait (bounded) until the in-flight one and every job already
     /// queued have finished. `false` = still draining past `deadline` (the worker keeps running;

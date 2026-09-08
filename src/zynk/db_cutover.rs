@@ -119,54 +119,16 @@ fn entry_present(path: &Path) -> std::io::Result<bool> {
     }
 }
 
-/// The identity of a directory entry — the entry itself, links included: device + inode on Unix,
-/// volume serial + file index on Windows. `None` when it cannot be read; the custody check treats
-/// that as "not the member that left the source" (fail closed), never as a pass.
-#[cfg(unix)]
+/// The identity of a directory entry — the entry itself, links included: device + inode. `None`
+/// when it cannot be read; the custody check treats that as "not the member that left the source"
+/// (fail closed), never as a pass.
 type FileIdentity = (u64, u64);
-#[cfg(windows)]
-type FileIdentity = (u32, u64);
-#[cfg(not(any(unix, windows)))]
-type FileIdentity = ();
 
-#[cfg(unix)]
 fn entry_identity(path: &Path) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     std::fs::symlink_metadata(path)
         .ok()
         .map(|meta| (meta.dev(), meta.ino()))
-}
-
-#[cfg(windows)]
-fn entry_identity(path: &Path) -> Option<FileIdentity> {
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT,
-    };
-    // Open the entry itself (a reparse point is not followed) with a metadata-only access mask:
-    // querying file information needs no data-read permission, so an entry whose bytes this
-    // process may not read is still identifiable.
-    let file = std::fs::OpenOptions::new()
-        .access_mode(0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
-        .ok()?;
-    // SAFETY: `info` is a properly sized, writable out-parameter and the handle is valid for the
-    // duration of the call (the `File` outlives it).
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
-    (ok != 0).then(|| {
-        (
-            info.dwVolumeSerialNumber,
-            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-        )
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn entry_identity(_path: &Path) -> Option<FileIdentity> {
-    None
 }
 
 fn list_dir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -201,15 +163,15 @@ fn entry_exists(path: &Path) -> bool {
 }
 
 /// Move `from` to `to` in ONE atomic step that never replaces an existing entry at `to` (a
-/// dangling symlink included): Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`,
-/// Windows `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`. A competitor that appears between the
-/// preflight and the move fails the move with `AlreadyExists` (the bundle rolls back), never an
-/// overwrite. Where no such primitive exists the member is refused with an actionable error: a
-/// two-step move (link or copy, then unlink of the source NAME) cannot be made safe against a
-/// writer that atomically replaces the source or the target between the steps — it deletes the
-/// newcomer or loses the original — so it is not offered at all (Gate-3 round 3). What is at the
-/// source name at the instant of the move is what moves; a writer replacing the source afterwards
-/// keeps its file at the source, and nothing else is ever deleted.
+/// dangling symlink included): `renameat2(RENAME_NOREPLACE)`. A competitor that appears between
+/// the preflight and the move fails the move with `AlreadyExists` (the bundle rolls back), never
+/// an overwrite. Where the kernel or the filesystem does not provide the primitive the member is
+/// refused with an actionable error: a two-step move (link or copy, then unlink of the source
+/// NAME) cannot be made safe against a writer that atomically replaces the source or the target
+/// between the steps — it deletes the newcomer or loses the original — so it is not offered at
+/// all (Gate-3 round 3). What is at the source name at the instant of the move is what moves; a
+/// writer replacing the source afterwards keeps its file at the source, and nothing else is ever
+/// deleted.
 fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     move_no_replace_with(from, to, &atomic_rename_noreplace)
 }
@@ -233,7 +195,7 @@ fn move_no_replace_with(
     }
 }
 
-/// The platform primitive exists but this filesystem or kernel does not provide it (as opposed
+/// The kernel primitive exists but this kernel or filesystem does not provide it (as opposed
 /// to an ordinary permission or I/O failure, which keeps its own cause).
 fn primitive_unavailable(err: &std::io::Error) -> bool {
     if matches!(
@@ -242,25 +204,13 @@ fn primitive_unavailable(err: &std::io::Error) -> bool {
     ) {
         return true;
     }
-    #[cfg(unix)]
-    {
-        // ENOTSUP and EOPNOTSUPP share a value on Linux and differ on macOS: compare, don't match.
-        err.raw_os_error().is_some_and(|code| {
-            [libc::ENOSYS, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EXDEV].contains(&code)
-        })
-    }
-    #[cfg(windows)]
-    {
-        // ERROR_NOT_SAME_DEVICE: the move would need a copy.
-        err.raw_os_error() == Some(17)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
+    // ENOTSUP and EOPNOTSUPP share a value on Linux: compare, don't match (a `matches!` listing
+    // both would be an unreachable pattern).
+    err.raw_os_error().is_some_and(|code| {
+        [libc::ENOSYS, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EXDEV].contains(&code)
+    })
 }
 
-#[cfg(target_os = "linux")]
 fn atomic_rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
     let (from_c, to_c) = (c_path(from)?, c_path(to)?);
     // SAFETY: both pointers are valid NUL-terminated strings that outlive the call; the kernel
@@ -283,56 +233,11 @@ fn atomic_rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn atomic_rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-    let (from_c, to_c) = (c_path(from)?, c_path(to)?);
-    // SAFETY: both pointers are valid NUL-terminated strings that outlive the call; the kernel
-    // copies them. `RENAME_EXCL` fails with EEXIST instead of replacing an existing `to`.
-    let rc = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn c_path(path: &Path) -> std::io::Result<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL byte")
     })
-}
-
-#[cfg(windows)]
-fn atomic_rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    let wide = |path: &Path| {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<u16>>()
-    };
-    let (from_w, to_w) = (wide(from), wide(to));
-    // SAFETY: both buffers are valid NUL-terminated UTF-16 strings that outlive the call. Flags 0:
-    // without `MOVEFILE_REPLACE_EXISTING` an existing target fails with ERROR_ALREADY_EXISTS, and
-    // without `MOVEFILE_COPY_ALLOWED` the move is a single directory operation on one volume.
-    let ok = unsafe {
-        windows_sys::Win32::Storage::FileSystem::MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), 0)
-    };
-    if ok != 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn atomic_rename_noreplace(_from: &Path, _to: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "no atomic no-replace rename on this platform",
-    ))
 }
 
 fn relocate_bundle(
@@ -513,20 +418,13 @@ fn relocate_bundle_with(
     Err(message)
 }
 
-/// Create the backup slot directory atomically (fails when ANY entry exists at that name). On Unix
-/// it is created owner-only (mode 0700); elsewhere `DirBuilder` inherits the parent directory's
-/// permissions — the SQLite home is expected to be private to the operator, and the post-move
-/// member check is the guard against an entry someone else adds (Gate-3 round 5).
+/// Create the backup slot directory atomically (fails when ANY entry exists at that name). It is
+/// created owner-only (mode 0700), and the post-move member check is the guard against an entry
+/// someone else adds (Gate-3 round 5).
 fn create_private_dir(slot: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    let builder = {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut builder = std::fs::DirBuilder::new();
-        builder.mode(0o700);
-        builder
-    };
-    #[cfg(not(unix))]
-    let builder = std::fs::DirBuilder::new();
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
     builder.create(slot)
 }
 
@@ -1075,14 +973,6 @@ mod tests {
         adopt_moves_the_complete_bundle_including_an_inactive_persist_journal_body();
     }
 
-    /// Windows CI runs only `windows_`-prefixed tests: the real `MoveFileExW` path must be
-    /// exercised there, not merely compiled (Gate-3 round 4, WARDEN-R4-WIN-001).
-    #[cfg(windows)]
-    #[test]
-    fn windows_adopt_moves_the_complete_bundle_including_an_inactive_persist_journal() {
-        adopt_moves_the_complete_bundle_including_an_inactive_persist_journal_body();
-    }
-
     fn adopt_moves_the_complete_bundle_including_an_inactive_persist_journal_body() {
         // Gate-3 round 3 (AUD-310-CUTOVER-001): a PERSIST-mode foreign database keeps a nonempty
         // (zeroed-header) `-journal`. Relocation must move the COMPLETE SQLite bundle — otherwise the
@@ -1229,7 +1119,6 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    #[cfg(unix)]
     #[test]
     fn backup_slot_treats_a_dangling_symlink_as_occupied() {
         // Gate-3 round 3 pre-read (arbiter r79-dangle, Codex): `Path::exists()` follows symlinks, so a
@@ -1263,14 +1152,6 @@ mod tests {
 
     #[test]
     fn relocation_refuses_a_target_that_appears_after_preflight() {
-        relocation_refuses_a_target_that_appears_after_preflight_body();
-    }
-
-    /// Windows CI runs only `windows_`-prefixed tests: the real `MoveFileExW` path must be
-    /// exercised there, not merely compiled (Gate-3 round 4, WARDEN-R4-WIN-001).
-    #[cfg(windows)]
-    #[test]
-    fn windows_relocation_refuses_a_target_that_appears_after_preflight() {
         relocation_refuses_a_target_that_appears_after_preflight_body();
     }
 
@@ -1311,7 +1192,6 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    #[cfg(unix)]
     #[test]
     fn adopt_through_a_final_symlink_relocates_the_target_bundle() {
         // Gate-3 round 3 pre-read (Codex finding 2; arbiter r79-symlinkorphan): inspection resolves
@@ -1363,14 +1243,6 @@ mod tests {
         a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback_body();
     }
 
-    /// Windows CI runs only `windows_`-prefixed tests: the real `MoveFileExW` path must be
-    /// exercised there, not merely compiled (Gate-3 round 4, WARDEN-R4-WIN-001).
-    #[cfg(windows)]
-    #[test]
-    fn windows_a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback() {
-        a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback_body();
-    }
-
     fn a_missing_atomic_move_is_an_actionable_refusal_not_a_fallback_body() {
         // Gate-3 round 3 (arbiter G3-PRE-B135-002, Codex R13): a two-step link/copy + unlink of
         // the source name deleted a file another writer placed there in between. Without the
@@ -1408,21 +1280,11 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted() {
         a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted_body();
     }
 
-    /// Windows CI runs only `windows_`-prefixed tests: the real `MoveFileExW` path must be
-    /// exercised there, not merely compiled (Gate-3 round 4, WARDEN-R4-WIN-001).
-    #[cfg(windows)]
-    #[test]
-    fn windows_a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted() {
-        a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted_body();
-    }
-
-    #[cfg(any(any(target_os = "linux", target_os = "macos"), windows))]
     fn a_source_replaced_before_the_atomic_move_moves_whole_and_nothing_else_is_deleted_body() {
         // The boundary the atomic move guarantees: whatever sits at the source name at the instant
         // of the move is moved intact; a writer that replaced the source just before discarded its
@@ -1449,7 +1311,6 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    #[cfg(unix)]
     #[test]
     fn adopt_moves_a_dangling_source_sidecar_link_and_native_startup_follows() {
         // Gate-3 round 4 (SENT-R4-CUTOVER-001): a dangling sidecar link beside the database was
@@ -1672,7 +1533,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_member_replaced_inside_the_slot_after_its_move_is_not_claimed() {
         // Gate-3 round 5 (custody): after the real move, a competitor atomically renamed over the

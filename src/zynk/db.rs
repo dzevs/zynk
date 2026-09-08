@@ -289,9 +289,7 @@ const MAX_SYMLINKS: usize = 100;
 /// so the main file, its `-journal`/`-wal`/`-shm` and the init lock already coincide through it, and
 /// the kernel applies the same resolution to the unresolved prefix on every open. Only a linked
 /// FINAL component moves the sidecars away from the configured name — that is what is resolved.
-/// An absent final target is returned as is (SQLite creates the database there). Windows' VFS follows
-/// a final link while zynk cannot resolve it there, so a final-component link is refused (item 25) and
-/// only the absolute form is taken.
+/// An absent final target is returned as is (SQLite creates the database there).
 pub(crate) fn sqlite_effective_path(path: &Path) -> Result<PathBuf, DbError> {
     let io = |what: &str, err: std::io::Error| {
         DbError::new(
@@ -309,29 +307,6 @@ pub(crate) fn sqlite_effective_path(path: &Path) -> Result<PathBuf, DbError> {
             .map_err(|err| io("cwd", err))?
             .join(path)
     };
-    if !cfg!(unix) {
-        // No link resolution on this platform: the guards would inspect `<link>-wal` while SQLite
-        // (`CreateFileW` without FILE_FLAG_OPEN_REPARSE_POINT, WAL names built from the unresolved
-        // path) follows the link — so a final-component link fails closed instead (Gate-3 round 5,
-        // WARDEN-09F-WINPATH-001). Resolving reparse points consistently is a documented follow-up.
-        match std::fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(DbError::new(
-                    "db_path_link",
-                    format!(
-                        "zynk: refusing to use the database path {}: it is a symbolic link, and zynk \
-                         does not resolve links on this platform. Point the configuration at the \
-                         target file instead.",
-                        printable_path(&current)
-                    ),
-                ));
-            }
-            Ok(_) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(io("inspect", err)),
-        }
-        return Ok(current);
-    }
     for _ in 0..MAX_SYMLINKS {
         match std::fs::symlink_metadata(&current) {
             Ok(meta) if meta.file_type().is_symlink() => {
@@ -419,39 +394,13 @@ fn sidecar_len(sidecar: &Path) -> Result<Option<u64>, DbError> {
 }
 
 /// `(dev, inode)` of whatever `path` currently refers to — the identity the pinned connection is
-/// compared against while a by-name sidecar open is still ahead: device + inode on Unix, volume
-/// serial + file index on Windows (`GetFileInformationByHandle`; links are refused on Windows before
-/// this point, item 25). `None` — the check is skipped — only where neither is available.
-#[cfg(unix)]
+/// compared against while a by-name sidecar open is still ahead. `None` — the check is skipped —
+/// only when the metadata cannot be read.
 fn file_identity(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path)
         .ok()
         .map(|meta| (meta.dev(), meta.ino()))
-}
-
-#[cfg(windows)]
-fn file_identity(path: &Path) -> Option<(u64, u64)> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-    };
-    let file = std::fs::File::open(path).ok()?;
-    // SAFETY: `info` is a properly sized, writable out-parameter and the handle stays valid for
-    // the duration of the call (the `File` outlives it).
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
-    (ok != 0).then(|| {
-        (
-            u64::from(info.dwVolumeSerialNumber),
-            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-        )
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn file_identity(_path: &Path) -> Option<(u64, u64)> {
-    None
 }
 
 /// The single pinned connection: no journal-mode change at connect, checkpoint-on-close disabled
@@ -1572,14 +1521,6 @@ mod tests {
         init_lock_contention_is_bounded_body();
     }
 
-    /// Windows CI runs only `windows_`-prefixed tests: the portable init-lock deadline contract
-    /// must be exercised there too (Gate-3 round 4, INSPECTOR-BA765-002).
-    #[cfg(windows)]
-    #[test]
-    fn windows_init_lock_contention_is_bounded() {
-        init_lock_contention_is_bounded_body();
-    }
-
     fn init_lock_contention_is_bounded_body() {
         // Gate-2 P2: an init lock held by another process must not stall an opener forever.
         let path = tmp_db("init-lock-contention");
@@ -2472,7 +2413,6 @@ mod tests {
         assert_eq!(data_bytes(&path), before, "foreign main/-wal bytes changed");
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_dangling_sidecar_entry_is_refused_before_initialization() {
         // Gate-3 round 4 (SENT-R4-CUTOVER-001): a dangling `-wal` link beside an absent database
@@ -2505,42 +2445,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Windows CI runs only `windows_`-prefixed tests: a final-component link is refused there
-    /// (no link resolution on this platform), nothing is created through it, and the target's
-    /// sidecar is left alone (Gate-3 round 5, WARDEN-09F-WINPATH-001). Skips explicitly when the
-    /// runner cannot create symbolic links.
-    #[cfg(windows)]
-    #[test]
-    fn windows_a_symlinked_database_path_is_refused() {
-        let dir = std::env::temp_dir().join(format!(
-            "zynk-win-link-{}-{}",
-            std::process::id(),
-            crate::zynk::message::new_prefixed_id("t")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let link = dir.join("zynk.db");
-        let target = dir.join("target.db");
-        match std::os::windows::fs::symlink_file(&target, &link) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("skipping: this runner cannot create symbolic links ({err})");
-                let _ = std::fs::remove_dir_all(&dir);
-                return;
-            }
-            Err(err) => panic!("symlink_file: {err}"),
-        }
-        std::fs::write(sidecar(&target, "-wal"), vec![0x5au8; 4096]).unwrap();
-        let err = block_on(open_migrated_at(&link)).unwrap_err();
-        assert_eq!(err.code, "db_path_link", "{}", err.message);
-        assert!(!target.exists(), "nothing may be created through the link");
-        assert_eq!(
-            std::fs::metadata(sidecar(&target, "-wal")).unwrap().len(),
-            4096,
-            "the target's WAL is untouched"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[test]
     fn held_init_lock_creates_no_database_file() {
         // Sentinel: first-time initialization is serialized by the init lock, so nothing may be
@@ -2561,7 +2465,6 @@ mod tests {
     /// `zynk.db` is a symlink to a fully-current native `safe.db`; exactly after the verdict the link
     /// is flipped to a foreign WAL database. The opener must keep working on the file it inspected
     /// and never touch the foreign main file or its pre-existing `-wal`.
-    #[cfg(unix)]
     #[test]
     fn opener_pins_the_inspected_file_across_a_symlink_flip() {
         let safe = tmp_db("g3r2-toctou-safe");
@@ -2600,7 +2503,6 @@ mod tests {
     /// writes). Exactly after the verdict a foreign WAL database is renamed over `zynk.db` and its
     /// `-wal` over `zynk.db-wal`. The writes must land in the inspected file — whose data and WAL
     /// are bound to the connection — never in the foreign pair now carrying those names.
-    #[cfg(unix)]
     #[test]
     fn opener_pins_the_inspected_file_across_an_atomic_rename() {
         let db = plant_partial_native_db("g3r2-rename-db");
@@ -2633,7 +2535,6 @@ mod tests {
     /// First-time initialization has no WAL bound at verdict time (SQLite creates it only when the
     /// journal mode is switched): if the name is re-pointed at another file in between, the opener
     /// must fail closed rather than create sidecars beside a file it never inspected.
-    #[cfg(unix)]
     #[test]
     fn fresh_init_fails_closed_when_a_foreign_db_is_renamed_into_place_after_inspection() {
         let db = tmp_db("g3r2-fresh-rename-db");
@@ -2661,7 +2562,6 @@ mod tests {
     /// A native DB externally converted to rollback journaling has no WAL bound at verdict time
     /// either (the WAL is opened by name when `apply_pragmas` switches it back): a foreign WAL pair
     /// renamed into place after the verdict must be refused with its bytes untouched.
-    #[cfg(unix)]
     #[test]
     fn rollback_mode_native_open_fails_closed_when_a_foreign_wal_db_is_renamed_into_place() {
         let db = plant_partial_native_db("g3r2-rollback-rename-db");
@@ -2849,7 +2749,6 @@ mod tests {
     /// name SQLite actually opens. A STABLE `zynk.db -> foreign.db` link with the target's own hot
     /// journal used to pass the guards (they looked at `zynk.db-journal`) while SQLite replayed
     /// `foreign.db-journal`.
-    #[cfg(unix)]
     #[test]
     fn stable_symlink_to_a_foreign_db_with_a_hot_journal_is_refused_untouched() {
         let foreign = tmp_db("g2r9-link-hot-foreign");
@@ -2892,7 +2791,6 @@ mod tests {
 
     /// Relative and chained links resolve exactly like SQLite (`readlink` joined with the link's
     /// directory, repeated): the target's hot journal is refused through both.
-    #[cfg(unix)]
     #[test]
     fn relative_and_chained_symlinks_resolve_to_the_target_hot_journal() {
         let dir = std::env::temp_dir().join(format!(
@@ -2941,7 +2839,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
     fn stable_symlink_to_an_absent_target_with_an_orphan_wal_is_refused() {
         // Orphan sidecars live beside the TARGET: `zynk.db -> missing.db` with a nonempty
@@ -2964,7 +2861,6 @@ mod tests {
         assert_eq!(std::fs::read(sidecar(&target, "-wal")).unwrap(), before);
     }
 
-    #[cfg(unix)]
     #[test]
     fn init_lock_at_the_link_target_blocks_a_symlinked_open() {
         // The init lock is keyed by the resolved name too: a holder at `<target>.init-lock` blocks an

@@ -71,7 +71,6 @@ pub struct EmbeddingWorkerHandle {
 }
 
 // The live handoff (the only caller) is Unix-only.
-#[cfg_attr(not(unix), allow(dead_code))]
 impl EmbeddingWorkerHandle {
     /// Stop starting new batches and wait (bounded) for the loop to be between batches — the
     /// in-flight `embed` call is never interrupted. `true` = idle now and staying idle until
