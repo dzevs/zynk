@@ -510,10 +510,16 @@ fn start_detected_hermes(fixture: &Fixture, pane: &str) {
     }
 }
 
-/// Report through the SHIPPED session-identity-only reporter shape: one
-/// `pane.report_agent` carrying BOTH a lifecycle `state` and `agent_session_id`, the
-/// call `src/integration/assets/hermes/__init__.py` makes from every hook it registers
-/// (including `on_session_start`).
+/// Report through the COMBINED session-identity-only reporter shape: one
+/// `pane.report_agent` carrying BOTH a lifecycle `state` and `agent_session_id`.
+///
+/// The bundled hermes asset (`src/integration/assets/hermes/__init__.py`) no longer
+/// emits this shape -- since the upstream `5f1957c2` asset half it reports identity
+/// through `pane.report_agent_session` only, which
+/// `both_report_shapes_bind_the_addressed_session_only` covers. The combined shape is
+/// still a live wire contract every OTHER integration uses, and it is the one an
+/// installed pre-`5f1957c2` hermes plugin keeps sending, so the identity-only routing
+/// must keep accepting it: these tests are its characterization.
 fn report_identity_only_agent(socket_path: &Path, pane_id: &str, state: &str, session: &str) {
     let response = send_json(
         socket_path,

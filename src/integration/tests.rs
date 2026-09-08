@@ -115,6 +115,7 @@ fn enforce_agent_version_accepts_current_version() {
 
 fn clear_integration_path_env() {
     std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
+    std::env::remove_var(OMP_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(CODEX_HOME_ENV_VAR);
     std::env::remove_var(COPILOT_HOME_ENV_VAR);
@@ -446,13 +447,14 @@ fn install_omp_preserves_non_zynk_file_with_pi_install_name() {
 }
 
 #[test]
-fn install_omp_uses_pi_coding_agent_dir_env() {
+fn install_omp_uses_pi_config_dir_env() {
     let _lock = integration_env_lock();
     let base = unique_base();
-    let agent_dir = base.join("custom-omp-agent");
-    let ext_dir = agent_dir.join("extensions");
+    let home = base.join("home");
+    let ext_dir = home.join("custom-omp/agent/extensions");
     fs::create_dir_all(&ext_dir).unwrap();
-    std::env::set_var(PI_CODING_AGENT_DIR_ENV_VAR, &agent_dir);
+    std::env::set_var("HOME", &home);
+    std::env::set_var(OMP_CONFIG_DIR_ENV_VAR, "custom-omp");
 
     let installed = install_omp().unwrap();
 
@@ -461,6 +463,30 @@ fn install_omp_uses_pi_coding_agent_dir_env() {
         ext_dir.join(OMP_EXTENSION_INSTALL_NAME)
     );
     assert!(!installed.removed_legacy_pi_extension);
+
+    std::env::remove_var("HOME");
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_omp_refuses_shared_pi_extension_directory() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let agent_dir = base.join("shared-agent");
+    let ext_dir = agent_dir.join("extensions");
+    let pi_extension = ext_dir.join(PI_EXTENSION_INSTALL_NAME);
+    fs::create_dir_all(&ext_dir).unwrap();
+    fs::write(&pi_extension, PI_EXTENSION_ASSET).unwrap();
+    std::env::set_var(PI_CODING_AGENT_DIR_ENV_VAR, &agent_dir);
+    std::env::set_var(OMP_CONFIG_DIR_ENV_VAR, "ignored-omp-config");
+
+    let err = install_omp().unwrap_err().to_string();
+
+    assert!(err.contains("Pi and OMP resolve to the same extension directory"));
+    assert!(err.contains(&ext_dir.display().to_string()));
+    assert!(pi_extension.is_file());
+    assert!(!ext_dir.join(OMP_EXTENSION_INSTALL_NAME).exists());
 
     clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
@@ -2721,10 +2747,6 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(KILO_PLUGIN_ASSET.contains("pane.report_agent_session"));
     assert!(KILO_PLUGIN_ASSET.contains("reportState"));
     assert!(!KILO_PLUGIN_ASSET.contains("pane.release_agent"));
-    assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = _session_id(kwargs)"));
-    assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
-    assert!(HERMES_PLUGIN_INIT_ASSET.contains("pane.report_agent\","));
-    assert!(!HERMES_PLUGIN_INIT_ASSET.contains("pane.release_agent"));
     assert!(QODERCLI_HOOK_ASSET.contains("ZYNK_PANE_ID"));
     assert!(QODERCLI_HOOK_ASSET.contains("session_id"));
     assert!(QODERCLI_HOOK_ASSET.contains("report-agent-session"));

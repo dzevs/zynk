@@ -43,6 +43,8 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 
 <!-- apache-modified-files: begin -->
 - Cargo.toml
+- justfile
+- scripts/test_hermes_integration_asset.py
 - src/client/mod.rs
 - src/config/model.rs
 - src/config/sound.rs
@@ -53,6 +55,10 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 - src/detect/manifests/kiro.toml
 - src/detect/manifests/qwen.toml
 - src/detect/mod.rs
+- src/integration/assets/hermes/__init__.py
+- src/integration/env.rs
+- src/integration/targets.rs
+- src/integration/tests.rs
 - src/main.rs
 - src/terminal/state.rs
 - tests/client_mode.rs

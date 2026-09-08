@@ -16,6 +16,11 @@ pub(crate) const ZYNK_TAB_ID_ENV_VAR: &str = "ZYNK_TAB_ID";
 pub(crate) const ZYNK_WORKSPACE_ID_ENV_VAR: &str = "ZYNK_WORKSPACE_ID";
 
 pub(crate) const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
+/// Third-party env var read by the omp coding agent itself to relocate its config
+/// directory. Deliberately NOT renamed to a `ZYNK_*` name: it is omp's own variable,
+/// not part of the zynk env surface, so the installed extension must land where omp
+/// will look for it.
+pub(crate) const OMP_CONFIG_DIR_ENV_VAR: &str = "PI_CONFIG_DIR";
 pub(crate) const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 pub(crate) const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 pub(crate) const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
@@ -42,10 +47,19 @@ pub(crate) fn pi_extension_dir() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn omp_extension_dir() -> io::Result<PathBuf> {
-    Ok(
-        config_dir_from_env_or_home(PI_CODING_AGENT_DIR_ENV_VAR, &[".omp", "agent"])?
-            .join("extensions"),
-    )
+    if let Some(value) =
+        std::env::var_os(PI_CODING_AGENT_DIR_ENV_VAR).filter(|value| !value.is_empty())
+    {
+        return expand_tilde_path(PathBuf::from(value)).map(|path| path.join("extensions"));
+    }
+
+    let config_dir = std::env::var_os(OMP_CONFIG_DIR_ENV_VAR)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ".omp".into());
+    Ok(home_dir()?
+        .join(config_dir)
+        .join("agent")
+        .join("extensions"))
 }
 
 pub(crate) fn claude_dir() -> io::Result<PathBuf> {
