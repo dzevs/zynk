@@ -74,9 +74,9 @@ describe("receiver/footer/receipt surface is fully removed (state-only)", () => 
 // ---------------------------------------------------------------------------
 
 describe("install markers + identity are preserved", () => {
-  test("integration id stays pi and version is bumped to 5", () => {
+  test("integration id stays pi and version is bumped to 6", () => {
     expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_ID=pi");
-    expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_VERSION=5");
+    expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_VERSION=6");
   });
 
   test("ZYNK_* env reads keep the ZYNK_* fallback", () => {
@@ -207,14 +207,24 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
   // The lifecycle handlers only fire for a root (hasUI) session — a non-root pi
   // instance must not publish/release pane state. Every test below activates the
   // root session via session_start with `hasUI: true`.
-  function startRootSession(fake: ReturnType<typeof makeFakePi>) {
-    fake.emit("session_start", { hasUI: true }, {
+  function rootSessionContext() {
+    return {
       hasUI: true,
       sessionManager: {
         getSessionId: () => "sess-xyz",
         getSessionFile: () => "/tmp/pi/session.json",
       },
-    });
+    };
+  }
+
+  function startRootSession(fake: ReturnType<typeof makeFakePi>) {
+    fake.emit("session_start", { hasUI: true }, rootSessionContext());
+  }
+
+  // agent_start now refreshes the session ref from its context and re-reports the
+  // session, so the fake must hand it the same root context the pi runtime passes.
+  function startAgent(fake: ReturnType<typeof makeFakePi>) {
+    fake.emit("agent_start", {}, rootSessionContext());
   }
 
   test("session_start reports the session ref; agent_start->working; agent_end->idle", async () => {
@@ -232,7 +242,7 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     );
 
     // agent_start -> working
-    fake.emit("agent_start");
+    startAgent(fake);
     await waitFor(() =>
       sink.requests
         .slice(before)
@@ -263,8 +273,9 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
       .find((r) => r.method === "pane.report_agent_session");
     expect(sessionReport.params.agent_session_path).toBe("/tmp/pi/session.json");
 
-    // A root-session shutdown releases the agent.
-    await fake.emit("session_shutdown");
+    // A root-session shutdown releases the agent, but only when the shutdown is a
+    // real quit — an internal reload/new/resume/fork keeps the pane's agent.
+    await fake.emit("session_shutdown", { reason: "quit" });
     await waitFor(() =>
       sink.requests.slice(before).some((r) => r.method === "pane.release_agent"),
     );
@@ -306,6 +317,25 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     );
   });
 
+  test("a non-quit session_shutdown does not release the agent", async () => {
+    const fake = makeFakePi();
+    factory(fake.pi);
+    startRootSession(fake);
+    await waitFor(() =>
+      sink.requests.some((r) => r.method === "pane.report_agent_session"),
+    );
+    const before = sink.requests.length;
+
+    // pi tears down and rebinds the extension runtime on /reload, /new, /resume and
+    // /fork. That is not a process exit, so hook authority must survive it.
+    await fake.emit("session_shutdown", { reason: "reload" });
+    await new Promise((r) => setTimeout(r, 30));
+    const released = sink.requests
+      .slice(before)
+      .some((r) => r.method === "pane.release_agent");
+    expect(released).toBe(false);
+  });
+
   test("retryable provider error at agent_end holds working (not idle)", async () => {
     const fake = makeFakePi();
     factory(fake.pi);
@@ -318,7 +348,7 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     await new Promise((r) => setTimeout(r, 10));
     const before = sink.requests.length;
 
-    fake.emit("agent_start");
+    startAgent(fake);
     fake.emit("agent_end", {
       messages: [
         {

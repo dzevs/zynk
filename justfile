@@ -10,8 +10,9 @@ test:
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
-# Run the pi state-only integration TypeScript tests (bun). Wired into `ci`/`check`.
+# Run the bundled agent-integration asset TypeScript tests (bun). Wired into `ci`/`check`.
 test-ts:
+    bun test src/integration/assets/zynk-agent-state.test.ts
     bun test src/integration/assets/pi/zynk-agent-state.test.ts
 
 # Run fast local lint checks
