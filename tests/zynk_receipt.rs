@@ -870,6 +870,110 @@ fn receipt_from_pane_without_hook_authority_is_unverified() {
 }
 
 #[test]
+fn retired_session_must_not_receipt_after_a_late_report() {
+    // Codex Gate-2 M3 extension finding (msg_fd6336c8e9038990): once the
+    // identity-only owner is released, its own late hook callback must not restore the
+    // receipt authority of the session that was retired.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "retired-identity");
+    start_detected_hermes(&fixture, &pane);
+    report_session(
+        &fixture.socket_path,
+        &pane,
+        "zynk:hermes",
+        "hermes",
+        "hermes-1",
+    );
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "message for the original session"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let sent = parse_outcome(&out);
+    let released = send_json(
+        &fixture.socket_path,
+        &serde_json::json!({
+            "id": "release", "method": "pane.release_agent", "params": {
+                "pane_id": pane, "source": "zynk:hermes", "agent": "hermes", "seq": 21
+            }
+        })
+        .to_string(),
+    );
+    assert!(released.get("error").is_none(), "{released}");
+    let before = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    assert_eq!(
+        before["error"]["code"], "receiver_identity_unverified",
+        "{before}"
+    );
+
+    let late = send_json(
+        &fixture.socket_path,
+        &serde_json::json!({
+            "id": "late", "method": "pane.report_agent", "params": {
+                "pane_id": pane, "source": "zynk:hermes", "agent": "hermes", "seq": 22,
+                "state": "idle", "agent_session_id": "hermes-1"
+            }
+        })
+        .to_string(),
+    );
+    assert!(late.get("error").is_none(), "{late}");
+
+    let after = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    fixture.cleanup();
+    assert_eq!(
+        after["error"]["code"], "receiver_identity_unverified",
+        "a late report restored a retired session's receipt authority: {after}"
+    );
+}
+
+#[test]
+fn both_report_shapes_bind_the_addressed_session_only() {
+    // Positive control for the retirement guards: both reporter shapes still anchor a
+    // live receipt on the addressed pane, and a same-label pane with a different
+    // session still fails the stored-triple check.
+    let _guard = test_lock();
+    for session_only in [false, true] {
+        let fixture = spawn_fixture();
+        let a = create_root_pane(&fixture.socket_path, "identity-a");
+        let b = create_root_pane(&fixture.socket_path, "identity-b");
+        for (pane, session) in [(&a, "hermes-a"), (&b, "hermes-b")] {
+            start_detected_hermes(&fixture, pane);
+            let method = if session_only {
+                "pane.report_agent_session"
+            } else {
+                "pane.report_agent"
+            };
+            let mut params = serde_json::json!({"pane_id": pane, "source": "zynk:hermes",
+                "agent": "hermes", "agent_session_id": session});
+            if !session_only {
+                params["state"] = serde_json::json!("blocked");
+            }
+            let report = send_json(
+                &fixture.socket_path,
+                &serde_json::json!({
+                    "id": "report", "method": method, "params": params
+                })
+                .to_string(),
+            );
+            assert!(report.get("error").is_none(), "{report}");
+        }
+        let out = run_cli(&fixture, None, &["send", &a, "--", "for a only"]);
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        let sent = parse_outcome(&out);
+        let wrong = send_json(&fixture.socket_path, &receipt_request(&sent, &b));
+        let right = send_json(&fixture.socket_path, &receipt_request(&sent, &a));
+        fixture.cleanup();
+        assert_eq!(
+            wrong["error"]["code"], "receiver_identity_mismatch",
+            "{wrong}"
+        );
+        assert_eq!(right["result"]["delivery_status"], "received", "{right}");
+    }
+}
+
+#[test]
 fn identity_only_hook_report_keeps_its_session_identity() {
     // Codex Gate-2 M3 finding (msg_34f2e9b655927aaf): a session-identity-only
     // integration reports lifecycle state AND `agent_session_id` through the one
