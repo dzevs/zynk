@@ -36,6 +36,7 @@ include = [
     "/NOTICE",
     "/README.md",
     "/LICENSE",
+    "/LICENSE-APACHE-2.0.upstream",
     "/Cargo.toml",
 ]
 

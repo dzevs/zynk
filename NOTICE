@@ -1,24 +1,48 @@
 zynk
 ====
 
-zynk is a fork of herdr (https://github.com/ogulcancelik/herdr),
-created and maintained by Zevs <hi@zevs.gg>.
+zynk is a fork of herdr, created and maintained by Zevs <hi@zevs.gg>.
+Upstream repository: https://github.com/herdrdev/herdr
+(historically https://github.com/ogulcancelik/herdr).
+
+Upstream provenance
+-------------------
+Upstream code up to and including upstream tag v0.7.1 was received under the
+GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).
+
+Upstream relicensed to the Apache License 2.0 at upstream commit cd5ea1be
+(2026-07-22). Upstream code from that commit onward — incorporated into zynk
+during the v0.7.2 to v0.8.2 port — was received under the Apache License 2.0,
+whose full text is in LICENSE-APACHE-2.0.upstream, and is redistributed here
+as part of the AGPL-3.0-or-later combined work, which Apache-2.0 section 4
+permits. Upstream ships no NOTICE file of its own.
 
 Licensing
 ---------
-zynk is distributed under the GNU Affero General Public License v3.0 or
-later (AGPL-3.0-or-later) — the same license as upstream herdr. See LICENSE
-for the full text. The license is NOT changed by this fork; it is preserved.
+zynk is distributed under the GNU Affero General Public License v3.0 or later
+(AGPL-3.0-or-later). See LICENSE for the full text. This is not the upstream
+license: upstream is Apache-2.0 from commit cd5ea1be onward. zynk's license is
+unchanged by that relicense — the AGPL-3.0-or-later terms zynk received with
+the pre-relicense upstream code still govern the combined work.
 
 Copyright
 ---------
-Copyright (C) ogulcancelik and the herdr contributors (upstream herdr).
+Copyright (C) the herdr contributors (upstream).
 Copyright (C) 2026 Zevs <hi@zevs.gg> — the zynk fork and its additions.
 
-This is a derivative work of herdr. Upstream copyright notices and the AGPL
-license are preserved. New zynk-layer code is also AGPL-3.0-or-later as part
-of the combined work. Per AGPL, complete corresponding source is available
-with any conveyed or network-served build.
+This is a derivative work of the upstream project. Upstream copyright notices
+and license texts are preserved. New zynk-layer code is also AGPL-3.0-or-later
+as part of the combined work. Per AGPL, complete corresponding source is
+available with any conveyed or network-served build.
 
-The built-in notification sounds (assets/sounds/) are inherited from herdr and
-are covered by this combined-work AGPL provenance.
+Modified files (Apache-2.0 provenance)
+--------------------------------------
+Per Apache-2.0 section 4(b): every file that carries post-cd5ea1be upstream
+code and was changed by zynk is recorded per commit in
+docs/zynk/fork-patch-ledger.md and enumerated here.
+
+<!-- apache-modified-files: begin -->
+<!-- apache-modified-files: end -->
+
+The built-in notification sounds (assets/sounds/) are inherited from upstream
+and are covered by this combined-work AGPL provenance.

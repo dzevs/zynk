@@ -32,6 +32,9 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   `x86_64-unknown-linux-gnu`; every other target fails at compile time with a message naming that ADR. There are
   no platform tiers, no optional targets and no release artifacts to verify — distribution is source only, from
   this repository or crates.io. CI is one Ubuntu `just check` (which now includes the maintenance unittests).
+- `NOTICE` now records that upstream relicensed from AGPL-3.0-or-later to Apache-2.0 (upstream commit
+  `cd5ea1be`), and the repository ships that Apache-2.0 text as `LICENSE-APACHE-2.0.upstream`. zynk's own
+  license is unchanged: AGPL-3.0-or-later, as recorded in `LICENSE`.
 
 **Fixed**
 

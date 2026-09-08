@@ -2003,3 +2003,18 @@ ADRs stay frozen as written. 12 commits; the counts are net deleted lines.
 `src/integration/mod.rs` ~2528/2560 `"powershell"` hook-config JSON keys (shared-dotfile data compatibility);
 `src/detect/mod.rs` ~535 executable-suffix stripping (`.exe`/`.cmd`/`.bat`/`.ps1`) in agent identification —
 upstream detection code, revisited in M3; `PluginPlatform::{Macos,Windows}` plugin-manifest enum variants.
+
+---
+
+# LINUX-ONLY + v0.8.2 PORT LEDGER — M2 build base
+
+The upstream `v0.7.2..v0.8.2` port, on branch `port/linux-only-v0.8.2`. **Upstream relicensed** from
+AGPL-3.0-or-later to Apache-2.0 at upstream `cd5ea1be` (2026-07-22) and moved to a new organization
+repository at upstream `b44b5b10` (2026-07-30), so every upstream hunk taken from here on arrives under
+Apache-2.0. zynk stays AGPL-3.0-or-later: Apache-2.0 §4 permits incorporating that code into the AGPL
+combined work as long as the Apache license text travels with it (§4a), changed files are recorded (§4b)
+and the upstream attribution notices are kept (§4c). §4d does not apply — upstream ships no NOTICE file.
+
+| zynk | upstream | what / where / why / adaptations |
+|---|---|---|
+| *(this commit)* | `cd5ea1be` + `b44b5b10` | **Provenance only — no upstream code taken.** New `LICENSE-APACHE-2.0.upstream` is the Apache-2.0 text verbatim from upstream `cd5ea1be:LICENSE` (201 lines, sha256-identical), added to the Cargo `include` list so crates.io packages carry it. `NOTICE` rewritten: upstream code through upstream tag v0.7.1 was received under AGPL-3.0-or-later, upstream code from `cd5ea1be` onward under Apache-2.0 and redistributed inside the AGPL combined work; the false "the same license as upstream" sentence is gone; the attribution line carries the new upstream repository URL alongside the historical one. Adds the §4(b) section *Modified files (Apache-2.0 provenance)* with an initially empty `<!-- apache-modified-files: begin/end -->` list that later M2 commits append to as they touch post-`cd5ea1be` upstream files. `CHANGELOG.md` 3.1.0 **Changed** gains the licensing line. **EXCLUDED** from upstream `cd5ea1be`: its `Cargo.toml` `license = "Apache-2.0"` flip, `README.md` license section, `nix/package.nix` and `docs/next/*` hunks — zynk's own license is unchanged (ADR 0010) and the Nix packaging is gone (ADR 0013). **EXCLUDED** from upstream `b44b5b10`: every rename hunk (upstream URLs/branding, website and vendor-patch headers) — only the NOTICE attribution URL is adopted. |
