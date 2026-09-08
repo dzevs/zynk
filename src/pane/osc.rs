@@ -142,10 +142,9 @@ impl DefaultColorOscTracker {
 }
 
 fn is_default_color_set_osc(body: &[u8]) -> bool {
-    matches!(
-        parse_default_color_event(body),
-        Some(DefaultColorEvent::Set(_))
-    )
+    parse_default_color_events(body)
+        .iter()
+        .any(|event| matches!(event, DefaultColorEvent::Set(_)))
 }
 
 #[derive(Debug, Default)]
@@ -231,11 +230,23 @@ impl DefaultColorEventTracker {
     }
 
     fn finalize(&mut self, end_offset: usize) {
-        if let Some(event) = parse_default_color_event(&self.body) {
-            self.pending
-                .push(DefaultColorTrackedEvent { end_offset, event });
-        }
+        self.pending.extend(
+            parse_default_color_events(&self.body)
+                .into_iter()
+                .map(|event| DefaultColorTrackedEvent { end_offset, event }),
+        );
         self.body.clear();
+    }
+
+    pub(super) fn in_progress_event(&self) -> Option<DefaultColorEvent> {
+        if !matches!(
+            self.state,
+            DefaultColorOscTrackerState::OscBody | DefaultColorOscTrackerState::OscEscape
+        ) {
+            return None;
+        }
+        let mut events = parse_default_color_events(&self.body);
+        (events.len() == 1).then(|| events.remove(0))
     }
 
     pub(super) fn drain_pending(&mut self) -> Vec<DefaultColorTrackedEvent> {
@@ -243,14 +254,18 @@ impl DefaultColorEventTracker {
     }
 }
 
-fn parse_default_color_event(body: &[u8]) -> Option<DefaultColorEvent> {
-    match body {
+fn parse_default_color_events(body: &[u8]) -> Vec<DefaultColorEvent> {
+    let single = match body {
         b"10;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Foreground)),
         b"11;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Background)),
         b"110" | b"110;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Foreground)),
         b"111" | b"111;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Background)),
-        _ => parse_palette_color_query(body).or_else(|| parse_default_color_set_event(body)),
+        _ => parse_palette_color_query(body),
+    };
+    if let Some(event) = single {
+        return vec![event];
     }
+    parse_default_color_set_events(body)
 }
 
 fn parse_palette_color_query(body: &[u8]) -> Option<DefaultColorEvent> {
@@ -267,15 +282,31 @@ fn parse_palette_color_query(body: &[u8]) -> Option<DefaultColorEvent> {
         .map(DefaultColorEvent::PaletteQuery)
 }
 
-fn parse_default_color_set_event(body: &[u8]) -> Option<DefaultColorEvent> {
-    let separator = body.iter().position(|byte| *byte == b';')?;
-    let query = match &body[..separator] {
-        b"10" => DefaultColorQuery::Foreground,
-        b"11" => DefaultColorQuery::Background,
-        _ => return None,
+fn parse_default_color_set_events(body: &[u8]) -> Vec<DefaultColorEvent> {
+    let Some(separator) = body.iter().position(|byte| *byte == b';') else {
+        return Vec::new();
     };
-    let value = &body[separator + 1..];
-    (!value.is_empty() && value != b"?").then_some(DefaultColorEvent::Set(query))
+    let start = match &body[..separator] {
+        b"10" => 10,
+        b"11" => 11,
+        _ => return Vec::new(),
+    };
+    body[separator + 1..]
+        .split(|byte| *byte == b';')
+        .filter(|value| !value.is_empty())
+        .enumerate()
+        .filter_map(|(offset, value)| {
+            if value == b"?" {
+                return None;
+            }
+            let query = match start + offset {
+                10 => DefaultColorQuery::Foreground,
+                11 => DefaultColorQuery::Background,
+                _ => return None,
+            };
+            Some(DefaultColorEvent::Set(query))
+        })
+        .collect()
 }
 
 /// 256 KiB of base64 ≈ 192 KiB of text — enough for real source-file copies
@@ -1265,6 +1296,25 @@ mod tests {
                 DefaultColorEvent::PaletteQuery(0),
                 DefaultColorEvent::Set(DefaultColorQuery::Foreground),
                 DefaultColorEvent::Reset(DefaultColorQuery::Background),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_color_event_tracker_tracks_each_multi_value_set() {
+        let mut tracker = DefaultColorEventTracker::default();
+
+        tracker.observe(
+            b"\x1b]10;rgb:11/22/33;rgb:44/55/66\x1b\\\x1b]10;?;rgb:77/88/99\x1b\\\x1b]10;;rgb:aa/bb/cc\x1b\\",
+        );
+
+        assert_eq!(
+            tracked_default_color_events(tracker.drain_pending()),
+            vec![
+                DefaultColorEvent::Set(DefaultColorQuery::Foreground),
+                DefaultColorEvent::Set(DefaultColorQuery::Background),
+                DefaultColorEvent::Set(DefaultColorQuery::Background),
+                DefaultColorEvent::Set(DefaultColorQuery::Foreground),
             ]
         );
     }
