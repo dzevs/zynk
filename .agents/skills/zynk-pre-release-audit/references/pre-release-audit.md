@@ -52,21 +52,16 @@ Process:
 
 7. Audit the root `README.md` — the project's single, in-repo public doc.
    - Compare user-facing changes in the range against the README: new/changed commands, config keys, supported
-     agents, integrations, defaults, compatibility notes, and the install snippets / version pins (the `vX.Y.Z`
-     download URLs + the Homebrew / crates.io / Nix lines).
+     agents, integrations, defaults, compatibility notes, and the install snippet / version pins (the crates.io
+     line; zynk is source-only and Linux x86_64 only, ADR 0013).
    - Flag README sections that disagree with the implementation or with the version being released.
 
 8. Check version + packaging consistency.
    - `Cargo.toml` `version` must match the intended tag (`vX.Y.Z`), the top `CHANGELOG.md` section, and the
-     README version pins (note: the prebuilt-binary/Homebrew version can intentionally trail the crates.io
-     source version — confirm the README says so rather than assuming a mismatch is a bug).
-   - If the release changes `Cargo.lock` or the version, refresh the Nix `cargoHash` in `nix/package.nix`; a
-     stale hash fails the `nix` workflow and `nix flake check` with a fixed-output-derivation mismatch. Use the
-     `got:` hash printed by `nix flake check --print-build-logs`.
+     README version pins.
    - Confirm `just check` is green and `just gate` is clean; confirm `LICENSE` + `NOTICE` (AGPL-3.0-or-later +
-     the upstream herdr attribution) are intact. The public `release-dryrun` (the candidate-evidence workflow: its
-     `RELEASE_MANIFEST.txt` decides which optional targets are ELIGIBLE, ADR 0012) / `build-artifacts-manual` /
-     `nix` workflows validate the release build itself.
+     the upstream attribution) are intact. `check-required` on the candidate SHA is the only build evidence
+     there is — zynk publishes no binaries (ADR 0013).
 
 9. Apply changes only when explicitly asked.
    - Do not edit files during the audit unless the user asks you to apply fixes.
@@ -91,7 +86,6 @@ Wrong or questionable:
 README: OK | MISSING | INACCURATE
 - <user-facing gaps or stale sections>
 
-Nix cargoHash: OK | NEEDS UPDATE | NOT CHECKED
 Gates: just check <green|red> · just gate <clean|fail> · LICENSE/NOTICE <intact|issue>
 
 Issue references the release will close:

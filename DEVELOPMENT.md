@@ -180,9 +180,9 @@ exports above.
   just check   # lint + TypeScript asset test + nextest + maintenance unit tests
   ```
 
-  `just check` is exactly what the CI `check-required` job runs (ADR 0012: per-push CI is the required Linux
-  tier; optional platforms are validated by the candidate-evidence workflow on demand); `just ci` is the same path
-  without the maintenance unit tests.
+  `just check` is exactly what the CI `check-required` job runs — the single target zynk builds for is Linux
+  x86_64 (ADR 0013), so this is the whole functional gate; `just ci` is the same path without the maintenance
+  unit tests.
 
 Rust conventions: no `unwrap()` in production code, use `tracing` for logging,
 and keep OS-specific behavior in `src/platform/`.

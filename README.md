@@ -59,63 +59,17 @@ zynk gives the terminal that missing coordination layer:
 
 ## Install
 
-Install with Homebrew, download a prebuilt binary, use Nix, or build from source.
+Build zynk from source; a published crate is on crates.io.
 
-**Supported platforms** ([ADR 0012](docs/zynk/decisions/0012-platform-support-tiers.md)): **Linux x86_64** is the
-required, fully tested release platform (Fedora/Ubuntu; glibc ≥ 2.30). macOS on Apple silicon and Windows x86_64
-are **optional**: their artifacts are included in a release only when that release's candidate run tested and
-verified them, and they are otherwise omitted — the release's `RELEASE_MANIFEST.txt` names each target's status.
-`macos-x86_64` and `linux-aarch64` have no hosted test job today and are **not shipped in 3.1.0**. The cross-platform
-code stays in the tree; optional platforms may build from source, which is not guaranteed.
-
-**Homebrew** (Linux; macOS on Apple silicon when that release shipped a macOS artifact):
-
-```bash
-brew install dzevs/tap/zynk
-```
-
-This installs the prebuilt v3.0.0 binary from [GitHub Releases](https://github.com/dzevs/zynk/releases); on
-Linuxbrew the binary is glibc-dynamic and needs **glibc ≥ 2.30**.
-
-**Prebuilt binary** (without Homebrew) — Linux x86_64 (glibc ≥ 2.30):
-
-```bash
-TAG=v3.0.0   # one immutable release: the archive and SHA256SUMS below come from the same tag
-curl -LO "https://github.com/dzevs/zynk/releases/download/$TAG/zynk-$TAG-linux-x86_64.tar.gz"
-curl -LO "https://github.com/dzevs/zynk/releases/download/$TAG/SHA256SUMS"
-sha256sum --ignore-missing -c SHA256SUMS
-mkdir -p "$HOME/.local/bin"
-tar -xzf "zynk-$TAG-linux-x86_64.tar.gz" && install -m 755 zynk "$HOME/.local/bin/zynk"
-zynk --version   # if this fails, add "$HOME/.local/bin" to your PATH
-```
-
-Targets: every release ships `linux-x86_64` (GNU/glibc dynamic, **glibc ≥ 2.30**); `macos-aarch64` and
-`windows-x86_64` are included only when they were eligible at that tag, and `RELEASE_MANIFEST.txt` in the release
-lists each target's status (`linux-aarch64` and `macos-x86_64` are not shipped in 3.1.0) — always verify against
-`SHA256SUMS`.
-
-> [!NOTE]
-> The macOS and Windows binaries are **unsigned**. On macOS, clear the quarantine
-> (`xattr -dr com.apple.quarantine ./zynk`); on Windows, use SmartScreen's "More info → Run anyway".
-
-**Nix** (`x86_64-linux` verified in CI; other systems best effort):
-
-```bash
-nix run github:dzevs/zynk
-```
+**Supported platform** ([ADR 0013](docs/zynk/decisions/0013-linux-only-platform-scope.md)): **Linux x86_64**
+only (Fedora/Ubuntu). Building for any other target fails at compile time. zynk ships no prebuilt binaries
+and no package-manager distribution.
 
 **Build from source** — needs Rust (stable), **Zig 0.15.2** (the bundled `libghostty-vt` is built with Zig),
 and **network access during the build** (the Zig build fetches libghostty-vt's package dependencies; offline
 builds aren't supported yet). `cargo install zynk --locked` builds the same 3.x crate from source under the
 same requirements (`--locked` keeps the crate's packaged lockfile; without it Cargo re-resolves dependencies).
 See [`DEVELOPMENT.md`](DEVELOPMENT.md).
-
-- **Windows, crates.io source only:** a `cargo install zynk` build links the registry `portable-pty` and lacks
-  the ConPTY patch (Cargo strips `[patch.crates-io]` from published crates). Binaries built from this source
-  tree — Git-source builds, and the 3.1.0 release onward on GitHub Releases, Homebrew and Nix — ship the patched
-  copy; the v3.0.0 downloads above predate it. Linux/macOS source builds are unaffected.
-- **macOS source builds:** CI builds with Homebrew's `zig@0.15` (`brew install zig@0.15`), which is the tested
-  Zig on macOS.
 
 ```bash
 git clone https://github.com/dzevs/zynk && cd zynk
@@ -272,8 +226,8 @@ overwrite it, and points you at the explicit `zynk db` adopt/backup/import actio
 
 > [!NOTE]
 > Auto-update and update channels stay fail-closed until release-manifest hosting exists, so `zynk update`
-> doesn't fetch yet. Update with `brew upgrade dzevs/tap/zynk`, a newer release binary, Nix, or a source
-> rebuild — then stop the old server (`zynk server stop`) so the new binary takes effect.
+> doesn't fetch yet. Update with a source rebuild — then stop the old server (`zynk server stop`) so the new
+> binary takes effect.
 
 ## Docs
 

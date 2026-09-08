@@ -86,7 +86,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  check-required:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -115,43 +115,15 @@ jobs:
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
-      # `just check` = lint + TS + nextest + the Python maintenance/release-evidence tests. `just ci` is only
-      # the fast subset (lint + TS + nextest) — never use it as the CI gate.
+      # `just check` = lint + TS + nextest + the Python maintenance tests. `just ci` is only the fast subset
+      # (lint + TS + nextest) — never use it as the CI gate.
       - name: Run the full check
         run: just check
 ```
 
 > **Note:** The bundled `libghostty-vt` is built with Zig, so CI must install Zig 0.15.2; the TS asset test needs Bun; the gitleaks maintenance tests need the `gitleaks` binary (install it as `ci.yml` does, or those tests skip). Pin action versions (ideally by commit SHA) for supply-chain safety.
 
-### Required and optional platform tiers (ADR 0012)
-
-Per-push CI runs the **required** tier only: `check-required` on `ubuntu-latest` executes `just check` (lint, TS
-tests, nextest, and the maintenance unittests — `just ci` alone skips the maintenance unittests). Linux x86_64 is the
-required release target; macOS (Apple silicon) and Windows are **optional** and are validated on demand by the
-candidate-evidence workflow (`.github/workflows/release-dryrun.yml`, `workflow_dispatch` at the candidate SHA):
-
-```yaml
-  check-required:
-    name: check-required (ubuntu, just check)
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v6
-      # ... toolchain setup (Rust, just + cargo-nextest, Zig 0.15.2, Bun) ...
-      - name: Run the required suite
-        run: just check
-```
-
-The candidate workflow has fixed per-target job ids (`test-linux`, `build-linux-x86_64`, `test-macos-aarch64`,
-`build-macos-aarch64`, `test-windows-x86_64`, `build-windows-x86_64`, and the build-only `build-linux-aarch64` /
-`build-macos-x86_64`), an `optional_targets: none | eligible | all` input, and a `manifest` job that downloads only by
-immutable artifact id, verifies each producer's hash-bound `EVIDENCE.json` (for the eligible-capable targets the
-packaged binary executed on its native runner — the build-only targets stay BUILT_UNVERIFIED because they have no
-native test job, whether they record `not_run` (linux-aarch64) or a Rosetta `ran` (macos-x86_64);
-archive/binary sha256, `GITHUB_SHA`, clean tracked tree, version, CPU/ABI, producer runner and run id/attempt) and writes
-`RELEASE_MANIFEST.txt` + `SHA256SUMS` over **ELIGIBLE** targets only. A required-target failure means no release
-candidate; an optional failure is `OMITTED` / `BUILT_UNVERIFIED` / `INCONSISTENT` and never blocks Linux. Never use
-`continue-on-error` to hide an optional failure: it reports the job as successful to `needs` and defeats the manifest.
+> **Single build target (ADR 0013).** zynk builds for Linux x86_64 only; every other target is a compile error. `check-required` on `ubuntu-latest` is therefore the whole functional gate — there is no build matrix, no optional tier and no per-target evidence to reconcile. Never add a runner for another OS.
 
 ### Conventional-Commit Gate
 
@@ -239,30 +211,18 @@ Gate failure   → Agent fixes the root cause (never bypass the gate)
 
 ## Release and Verification Strategies
 
-### Dry-Run / Build-Artifact Workflows
+### Verifying a release build
 
-Validate the release pipeline before cutting a real release. A manual `workflow_dispatch` build-artifacts job and a release dry-run job let you exercise packaging on every target without publishing:
+zynk publishes no binaries, so there is no packaging pipeline to dry-run. The release build is verified where it is made — locally, from the exact reviewed SHA:
 
-```yaml
-# Build artifacts on demand for verification
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    strategy:
-      matrix:
-        target: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin]
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Build release
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: zynk-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/zynk*
+```bash
+git switch --detach <reviewed-sha>
+just check                      # the full gate
+just build                      # cargo build --release --locked
+sha256sum target/release/zynk   # record the SHA + this hash in the gate
 ```
+
+Record the commit SHA and that sha256 with the operator gate. A binary whose provenance is not recorded is not release evidence.
 
 ### Feature Flags
 
@@ -302,29 +262,16 @@ PR merged to main
 
 ### Rollback Plan
 
-Every release should be reversible. Because zynk ships as a single binary, rollback is "reinstall the previous version":
+Every release should be reversible. Because zynk ships as a single binary built from source, rollback is "reinstall the previous version":
 
-```yaml
-# Manual rollback workflow (re-publish a known-good tag's artifacts)
-name: Rollback
-on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version/tag to roll back to'
-        required: true
-
-jobs:
-  rollback:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Re-publish previous release artifacts
-        run: |
-          echo "Re-publishing ${{ inputs.version }} as the current release"
-          # gh release / artifact re-promotion for the specified tag
+```bash
+git switch --detach <previous-good-sha>
+just build
+cp target/release/zynk ~/.cargo/bin/zynk.new && mv ~/.cargo/bin/zynk.new ~/.cargo/bin/zynk
+zynk server stop     # the new binary takes effect on the next server start
 ```
 
-For a local install, keep the prior binary so an atomic `cp → mv` swap can be reversed.
+Keep the prior binary beside the live one so the atomic `cp → mv` swap can be reversed without a rebuild. On crates.io, `cargo yank --version X.Y.Z` withdraws a bad version (then publish a fixed patch) — an operator gate of its own.
 
 ## Environment and Secrets
 
@@ -429,7 +376,7 @@ jobs:
 - No CI pipeline in the project
 - CI failures ignored or silenced
 - Tests disabled in CI to make the pipeline pass
-- Releases published without a verified build / dry-run
+- Releases published without a recorded build SHA and binary sha256
 - No rollback mechanism (no way to reinstall the previous binary)
 - Secrets stored in code or CI config files (not GitHub Secrets / vault)
 - Private-content gate bypassed instead of fixing the root cause

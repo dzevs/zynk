@@ -4,8 +4,8 @@
 
 The **herdr v0.7.1 port** (36 upstream changes re-applied on top of the Zynk identity — see
 `docs/zynk/fork-patch-ledger.md`, *v0.7.1 PORT LEDGER*) plus a hardened single public repo. No wire/protocol
-change: socket method IDs, protocol-ID fields, and the delivery/receipt matrix are unchanged. One documented
-config key is removed (see **Changed**).
+change: socket method IDs, protocol-ID fields, and the delivery/receipt matrix are unchanged. Two documented
+config keys are removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 only.
 
 **Added**
 
@@ -28,17 +28,13 @@ config key is removed (see **Changed**).
 - Custom keys and prefixes now **displace** conflicting default bindings instead of being rejected; a config
   reload keeps the valid subset of bindings.
 - The raw image-paste shortcut is remote-only: `keys.remote_image_paste` (default `ctrl+v`; empty disables).
-- **Platform support tiers** ([ADR 0012](docs/zynk/decisions/0012-platform-support-tiers.md)): Linux x86_64 is
-  the required release platform; macOS (Apple silicon) and Windows artifacts ship only when the release's
-  candidate run tested and verified them, and are otherwise omitted and named in `RELEASE_MANIFEST.txt`.
-  `macos-x86_64` and `linux-aarch64` are not shipped in 3.1.0 (no hosted test job). Existing cross-platform code
-  is retained; per-push CI runs the required Ubuntu suite (now including the maintenance unittests), while the
-  optional platforms are validated on demand by the candidate-evidence workflow.
+- **Linux x86_64 only** ([ADR 0013](docs/zynk/decisions/0013-linux-only-platform-scope.md)): zynk builds for
+  `x86_64-unknown-linux-gnu`; every other target fails at compile time with a message naming that ADR. There are
+  no platform tiers, no optional targets and no release artifacts to verify — distribution is source only, from
+  this repository or crates.io. CI is one Ubuntu `just check` (which now includes the maintenance unittests).
 
 **Fixed**
 
-- Windows: the terminal backend vendors `portable-pty` and forces the **system ConPTY** (`kernel32.dll`; no
-  `conpty.dll` sideload); multiline paste is preserved; npm-wrapped `pi` is detected.
 - Startup: two zynk processes opening a fresh shared database at the same time (for example two named-session
   servers) no longer make the second one fail closed with a false "foreign database" error — first-time
   initialization is serialized across processes, and a database that holds only an empty migration ledger is
@@ -73,12 +69,12 @@ config key is removed (see **Changed**).
 - `zynk db adopt` / `zynk db backup` relocate the **complete SQLite bundle** (main file plus any `-journal`,
   `-wal`, `-shm`, a dangling sidecar link included) into one backup **directory**, `<db>.wrapper-backup-N/`,
   reserved with a single atomic `mkdir`; a leftover journal no longer strands the native path, nothing at an
-  existing slot name is ever touched, each member moves in one atomic no-replace step (Linux, macOS and
-  Windows each provide one — where none exists the command refuses instead of copying), a backup that gained
+  existing slot name is ever touched, each member moves in one atomic no-replace step (Linux
+  `renameat2(RENAME_NOREPLACE)`; where no atomic no-replace move exists the command refuses instead of
+  copying), a backup that gained
   an entry that is not a bundle member is refused and rolled back, a blocked rollback is reported naming the
-  members left under the slot, on Unix a symlinked database path is relocated where SQLite would open it (the
-  link stays) while on Windows a database path whose final component is a symbolic link is refused outright
-  (zynk does not resolve links there), and `adopt` never touches the ambient `~/.zynk/zynk-v2` database when the native path was selected
+  members left under the slot, a symlinked database path is relocated where SQLite would open it (the link
+  stays), and `adopt` never touches the ambient `~/.zynk/zynk-v2` database when the native path was selected
   explicitly. A sidecar that is a symbolic link is refused at startup instead of being opened through. They also move aside what the startup guards refuse to open (a rollback journal that looks hot, orphan
   sidecars beside a missing database) — the remedy those refusals name. Output from every `zynk db` command
   escapes control and Unicode format/bidi characters in names and paths.
@@ -100,25 +96,28 @@ config key is removed (see **Changed**).
   approval, permission or selection dialog waits for you, a dialog whose hint footer sits at the bottom of the
   screen now outranks the retained title (blocked, not working); once you answer and work continues below it,
   the title wins again.
-- Source builds on macOS: the vendored libghostty-vt static archive is normalized for Apple's linker.
-  Zig 0.15's archive writer pads members to 2 bytes and Apple's `ld` (Xcode 15+) rejects a 64-bit Mach-O
-  member that is not 8-byte aligned (`64-bit mach-o member 'compiler_rt.o' not 8-byte aligned`); whether a
-  member landed aligned depended on the sizes of the members before it (a `LIBGHOSTTY_VT_SIMD=false` build
-  failed to link, the default SIMD build happened to work). `build.rs` now rewrites a misaligned archive with
-  Apple's `libtool -static` (override the tool with `LIBGHOSTTY_VT_LIBTOOL`) and verifies the result.
-- Release tooling: the aarch64 Linux release build uses cargo-zigbuild 0.23.4, which filters the
-  `-Wl,--fix-cortex-a53-843419` flag rustc 1.98 now passes for `aarch64-unknown-linux-gnu` and `zig cc`
-  refuses; the Nix flake tracks `nixos-26.05` (crates fetched from `static.crates.io` instead of the
-  rate-limited crates.io API, and `x86_64-darwin` stays supported).
+
+**Removed**
+
+- **macOS and Windows support** ([ADR 0013](docs/zynk/decisions/0013-linux-only-platform-scope.md)): the
+  platform implementations, the Windows PTY / named-pipe IPC / console input paths, the darwin archive-rewrite
+  path in `build.rs`, the platform-only dependencies and the non-Linux CI targets. A build for any other target
+  now stops at a compile error instead of producing a binary.
+- The Nix flake and package, and distribution through a package manager. zynk is source only: this repository
+  or crates.io. The prebuilt release binaries, `RELEASE_MANIFEST.txt` and `SHA256SUMS` flow are gone with them.
+- The multi-target release workflows (`release-dryrun.yml`, `build-artifacts-manual.yml`, `nix.yml`) and the
+  release evidence/manifest scripts.
+- The vendored `portable-pty` (the Windows ConPTY patch). zynk links the registry crate directly, so a
+  crates.io source build and a Git-source build now use identical PTY code.
+- `experimental.switch_ascii_input_source_in_prefix` (macOS-only input-source switching). The
+  Settings › Experiments section loses that row, and the key now emits a removed-key startup diagnostic.
+- The PowerShell hook assets for claude, codex, copilot, droid, kimi and qodercli.
+- `tests/darwin_archive_parser.rs`.
 
 **Install notes**
 
-- A **Windows** `cargo install zynk` (crates.io source) build links the registry `portable-pty` and therefore
-  lacks only the ConPTY patch — Cargo strips `[patch.crates-io]` and excludes the nested vendored source.
-  Linux/macOS source builds are unaffected; Git-source builds ship the patched copy, and so will the 3.1.0
-  release binaries, Homebrew formula, and Nix package once each channel is published for 3.1.0 (until then the
-  published channels are still 3.0.x). When 3.1.0 is on crates.io, prefer `cargo install zynk --version 3.1.0 --locked`
-  (without `--locked` Cargo ignores the packaged lockfile).
+- When 3.1.0 is on crates.io, prefer `cargo install zynk --version 3.1.0 --locked` (without `--locked` Cargo
+  ignores the packaged lockfile).
 - Refresh installed integrations (`zynk integration install …`) after upgrading to receive the hook changes.
 - A **live update** (`server.live_handoff`) between a 3.0.x server and 3.1.0 — in either direction — is refused
   (handoff protocol version 2 hands the DB workers over in order; 3.0.x cannot); the running server keeps

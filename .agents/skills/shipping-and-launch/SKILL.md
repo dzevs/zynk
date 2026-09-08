@@ -9,7 +9,7 @@ description: Prepares production launches. Use when preparing to cut a release. 
 
 Ship with confidence. The goal is not just to release — it's to release safely, with monitoring in place, a rollback plan ready, and a clear understanding of what success looks like. Every launch should be reversible, observable, and incremental.
 
-For this repo, "launch" means cutting a versioned release of the `zynk` binary: tagging a version, publishing a GitHub binary release, pushing the crate to crates.io, and updating the Homebrew tap. The same discipline applies whether you're shipping to package registries or rolling out a new agent-detection behavior to live runtimes.
+For this repo, "launch" means cutting a versioned release of `zynk`: tagging a version and publishing the crate to crates.io — each a separate operator gate. zynk builds for Linux x86_64 only and ships no binaries (ADR 0013), so there is nothing to package per target. The same discipline applies whether you're publishing to crates.io or rolling out a new agent-detection behavior to live runtimes.
 
 ## When to Use
 
@@ -116,14 +116,13 @@ None
    └── Full test suite (`just check`) on an isolated CARGO_TARGET_DIR
    └── Manual smoke test of critical flows against a dev socket/config (never the live one)
 
-2. CANDIDATE EVIDENCE at the exact reviewed SHA (ADR 0012; after Gate-2, Gate-3 and the operator's
-   merge/push gates, before ANY tag)
-   └── Dispatch the candidate-evidence workflow (`release-dryrun.yml`) on that SHA
-   └── Required jobs green (`test-linux`, `build-linux-x86_64`, `manifest`); review `RELEASE_MANIFEST.txt`
-   └── Only ELIGIBLE targets may ship; omitted targets are named in the release notes
+2. BUILD EVIDENCE at the exact reviewed SHA (after Gate-2, Gate-3 and the operator's merge/push
+   gates, before ANY tag)
+   └── CI `check-required` green on that SHA
+   └── `just build` from that detached SHA; record the SHA and the binary's sha256 in the gate
 
-3. TAG (separate operator gate) + attach the ELIGIBLE artifacts from that candidate run (flag OFF)
-   └── Verify the release binary boots and reports the right version
+3. TAG (separate operator gate), flag OFF
+   └── Verify the built binary boots and reports the right version
    └── Check the build is clean (no warnings, locked deps)
 
 4. ENABLE for team (flag ON for internal/dogfood install)
@@ -136,7 +135,7 @@ None
    └── 24-48 hour monitoring window
    └── Advance only if all thresholds pass (see table below)
 
-6. PUBLISH widely (crates.io + GitHub release + Homebrew tap)
+6. PUBLISH to crates.io (separate operator gate)
    └── Same monitoring after publish
    └── Ability to yank / point users back to the previous version
 
@@ -249,8 +248,7 @@ Every release needs a rollback plan before it happens:
    OR
 1. Point users back to the previous version:
    - crates.io: `cargo yank --version X.Y.Z` (then publish a fixed patch)
-   - GitHub release: mark the release as a draft / re-pin "latest" to the prior tag
-   - Homebrew tap: revert the formula to the previous bottle/version
+   - local installs: rebuild from the previous good tag and swap the binary back (atomic `cp → mv`)
 2. Revert the code: `git revert <commit>` on a branch, then push — **push is an operator gate** (WORKFLOW.md rule 1); never force-push main
 3. Verify rollback: `zynk --version`, error logs clean
 4. Communicate: notify team of rollback

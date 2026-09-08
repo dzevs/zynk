@@ -19,8 +19,8 @@ readme = "README.md"
 # `cargo install zynk --locked` builds from source: it needs Zig 0.15.2 AND network during the build
 # (libghostty-vt's Zig deps are fetched into Zig's global cache; `--offline` is unsupported, so the build is not
 # hermetic). `publish = ["crates-io"]` enables `cargo publish` (and `--dry-run`) to crates.io ONLY; the actual
-# publish, the GitHub release, and the Homebrew tap bump are separate operator-gated steps run from the tagged
-# release commit (WORKFLOW.md).
+# publish and the version tag are separate operator-gated steps run from the tagged release commit
+# (WORKFLOW.md). zynk builds for Linux x86_64 only (ADR 0013) and ships no binaries.
 publish = ["crates-io"]
 include = [
     "/src/**/*",

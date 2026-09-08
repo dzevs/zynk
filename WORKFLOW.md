@@ -20,9 +20,8 @@ unverified agent output never reaches `main`. Project conventions live in `CLAUD
 1. No merge / push / tag / release / publish until the operator explicitly approves — each is a separate gate.
 2. No "ready to merge" claim until Gate-1, Gate-2, and Gate-3 all approve.
 3. Pi must not edit source files or write code; Pi coordinates and verifies read-only.
-4. On any **required** gate/check failure: STOP, fix the root cause, re-run until clean. Never bypass (`--no-verify`
-   is forbidden). **Informational** (optional-tier) checks never block, are never hidden or bypassed, and decide
-   optional-artifact inclusion through the release manifest (ADR 0012).
+4. On any gate/check failure: STOP, fix the root cause, re-run until clean. Never bypass (`--no-verify` is
+   forbidden). Every check is required — zynk builds for one target (ADR 0013), so there is no informational tier.
 5. Local builds/tests use an isolated `CARGO_TARGET_DIR`, never the live runtime.
 6. Precise `git add <path>` — never `git add -A`. Lowercase conventional commits; never force-push `main`.
 
@@ -100,33 +99,20 @@ Run whole-tree with `just gate`. On any failure: STOP, fix the root cause, never
 
 ## Release gates (each a separate operator gate)
 
-A GitHub binary release (`vX.Y.Z` tag + assets + `SHA256SUMS`), a crates.io publish (`cargo publish`), and the
-Homebrew tap bump each need a separate explicit operator approval. Never tag / release / publish / yank /
-bump-version / force-push without one. Released tags are immutable provenance anchors.
+A `vX.Y.Z` tag and a crates.io publish (`cargo publish`) each need a separate explicit operator approval.
+Never tag / release / publish / yank / bump-version / force-push without one. Released tags are immutable
+provenance anchors. zynk builds for Linux x86_64 only (ADR 0013): one target, no release artifacts to verify.
 
-**Required vs informational checks (ADR 0012).** `linux-x86_64` is the required release target; every other
-target is optional and ships only when the candidate-evidence workflow (`.github/workflows/release-dryrun.yml`,
-`workflow_dispatch` at the exact candidate SHA) marks it **ELIGIBLE** in `RELEASE_MANIFEST.txt`.
+**Release gates** (a failure stops the release, never bypassed): `just check` — the same path as CI
+`check-required` (`just check` on Ubuntu); `just gate` (the private-content gates, `gates.yml`); conventional
+commits; Gate-1 / Gate-2 / Gate-3 on exact SHAs; and the operator merge/push gate. Fedora validation is the
+operator's dogfood of a binary built locally from the exact reviewed SHA, recorded in the gate with that SHA,
+the binary's sha256, the version and the exercised session/send/receipt/recovery flows; the installed live
+binary isn't evidence for an uninstalled candidate.
 
-- Required (a failure stops the release, never bypassed): conventional commits; the private-content gates
-  (`gates.yml`); CI `check-required` (`just check` on Ubuntu); the Nix `flake check` including its
-  `--all-systems --no-build` evaluation (transitional: an evaluation failure on a non-Linux system still blocks;
-  splitting that gate is a separate operator decision); in the candidate run `test-linux`, `build-linux-x86_64`
-  and `manifest`; Gate-2 and Gate-3 on exact SHAs; and every operator gate.
-- Informational (never block, never hidden): the optional-tier test/build jobs in the candidate run. Their
-  outcome appears per target in the manifest as ELIGIBLE / BUILT_UNVERIFIED / OMITTED / INCONSISTENT; only
-  ELIGIBLE archives enter `SHA256SUMS`, and ELIGIBLE is evidence for the G2/operator inclusion decision, not
-  permission to publish. Omitted targets are named in the release notes.
-- Candidate dispatch: `optional_targets: eligible` by default; `none` is the required-only escape when an optional
-  runner is unavailable (job timeouts bound execution, not queueing — use `none` when an optional job is still
-  queued after 30 minutes).
-- Fedora validation for 3.1.0 = the operator's dogfood of the downloaded **candidate artifact**, recorded in the
-  gate with its checksum, version, distro and the exercised session/send/receipt/recovery flows; the installed
-  live binary is not evidence for an uninstalled candidate.
-- Enforcement: `dzevs/zynk` has no branch protection or rulesets, so "required" is enforced by this procedure
-  reading the named jobs. If rulesets are ever introduced, the PR/push-required check names are `check-required`,
-  `conventional-commits`, `gates` and the Nix `flake check`; the candidate `manifest` is dispatch-only evidence,
-  never a PR check.
+Enforcement: `dzevs/zynk` has no branch protection or rulesets, so "required" is enforced by this procedure
+reading the named jobs. If rulesets are ever introduced, the PR/push-required check names are `check-required`,
+`conventional-commits` and `gates`.
 
 ## Message bodies (native zynk)
 

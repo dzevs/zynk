@@ -39,7 +39,7 @@ class ReleaseAuditRefsTests(unittest.TestCase):
     def test_anchors_present(self):
         # The rewrite must point at the real public anchors so it stays runnable.
         ref = (ROOT / ".agents/skills/zynk-pre-release-audit/references/pre-release-audit.md").read_text()
-        for anchor in ["CHANGELOG.md", "README.md", "Cargo.toml", "cargoHash", "main"]:
+        for anchor in ["CHANGELOG.md", "README.md", "Cargo.toml", "main"]:
             self.assertIn(anchor, ref, f"pre-release-audit reference missing anchor: {anchor}")
 
 
