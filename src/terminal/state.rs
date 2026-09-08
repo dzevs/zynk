@@ -3332,7 +3332,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_report_records_authority_not_identity_only_identity() {
+    fn a_full_lifecycle_hook_report_records_authority_not_identity_only_identity() {
         let mut terminal = test_terminal();
         terminal
             .set_hook_authority_with_session_ref(
