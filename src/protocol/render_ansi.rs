@@ -439,20 +439,13 @@ fn blit_frame_to_with_cursor_memory_and_policy(
     // Some native IMEs track candidate-window placement from normal terminal
     // cursor updates and may not observe cursor moves emitted inside synchronized
     // output. Re-emit only the resolved final cursor anchor after the sync block
-    // on targets that need it; Windows Terminal exposes that repeat as cursor
-    // movement during active TUI repaints.
+    // on targets that need it.
     if repeat_ime_anchor {
         write_ime_anchor_cursor_state(&mut writer, host_cursor);
     }
     let _ = writer.flush();
 }
 
-#[cfg(windows)]
-fn repeat_ime_anchor_after_sync() -> bool {
-    false
-}
-
-#[cfg(not(windows))]
 fn repeat_ime_anchor_after_sync() -> bool {
     true
 }

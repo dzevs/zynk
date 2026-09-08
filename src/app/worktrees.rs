@@ -569,14 +569,6 @@ impl App {
                 if remove.removing {
                     return None;
                 }
-                #[cfg(windows)]
-                if !remove.force_confirmation
-                    && crate::worktree::checkout_has_dirty_files(&remove.path).unwrap_or(false)
-                {
-                    remove.force_confirmation = true;
-                    remove.error = None;
-                    return None;
-                }
                 remove.removing = true;
                 remove.error = None;
                 Some((
@@ -1454,7 +1446,6 @@ mod tests {
 
         app.start_worktree_remove();
 
-        #[cfg(not(windows))]
         {
             let safe_event = wait_for_worktree_event(&mut app);
             match safe_event {

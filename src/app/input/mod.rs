@@ -442,15 +442,7 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
         return false;
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        key.modifiers.contains(KeyModifiers::SUPER) || key.modifiers.contains(KeyModifiers::CONTROL)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        key.modifiers.contains(KeyModifiers::CONTROL)
-    }
+    key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
@@ -612,7 +604,6 @@ fn unique_temp_path(name: &str) -> std::path::PathBuf {
 }
 
 #[cfg(test)]
-#[cfg(unix)]
 fn wait_for_file(path: &std::path::Path) -> String {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
@@ -687,9 +678,6 @@ mod tests {
 
     #[test]
     fn modal_paste_shortcut_matches_platform_primary_v() {
-        #[cfg(target_os = "macos")]
-        let modifiers = KeyModifiers::SUPER;
-        #[cfg(not(target_os = "macos"))]
         let modifiers = KeyModifiers::CONTROL;
 
         assert!(is_modal_paste_shortcut(&KeyEvent::new(

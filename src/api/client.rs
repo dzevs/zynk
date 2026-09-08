@@ -146,8 +146,6 @@ fn set_timeout_best_effort(
     };
     match result {
         Ok(()) => Ok(()),
-        #[cfg(windows)]
-        Err(err) if err.kind() == io::ErrorKind::Unsupported => Ok(()),
         Err(err) => Err(err),
     }
 }

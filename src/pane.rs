@@ -8,15 +8,13 @@ use std::sync::{
 
 use bytes::Bytes;
 use portable_pty::CommandBuilder;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use portable_pty::{native_pty_system, PtySize};
 use ratatui::{layout::Rect, Frame};
 #[cfg(test)]
 use tokio::sync::watch;
 use tokio::sync::{mpsc, Notify};
-#[cfg(not(windows))]
-use tracing::debug;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
@@ -243,12 +241,10 @@ struct AgentDetectionPresence {
     consecutive_misses: u8,
 }
 
-#[cfg(unix)]
 fn usable_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
     crate::platform::process_cwd(pid).filter(|cwd| cwd.is_absolute() && cwd.is_dir())
 }
 
-#[cfg(unix)]
 fn foreground_member_cwd_different_from_shell(
     shell_pid: u32,
     shell_cwd: Option<&std::path::PathBuf>,
@@ -541,7 +537,6 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
     )
 }
 
-#[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,
@@ -943,7 +938,6 @@ impl PaneRuntimeIo {
         }
     }
 
-    #[cfg(unix)]
     fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.duplicate_for_handoff(),
@@ -954,7 +948,6 @@ impl PaneRuntimeIo {
         }
     }
 
-    #[cfg(unix)]
     fn foreground_process_group_id(&self) -> Option<u32> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
@@ -963,7 +956,6 @@ impl PaneRuntimeIo {
         }
     }
 
-    #[cfg(unix)]
     fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
@@ -972,7 +964,6 @@ impl PaneRuntimeIo {
         }
     }
 
-    #[cfg(unix)]
     fn set_handoff_paused(&self, paused: bool) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => {
@@ -987,7 +978,6 @@ impl PaneRuntimeIo {
         }
     }
 
-    #[cfg(unix)]
     fn release_after_commit(&self) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
@@ -1021,7 +1011,6 @@ impl PaneRuntimeIo {
         }
     }
 
-    #[cfg(unix)]
     fn nudge_child_redraw_after_handoff(
         &self,
         rows: u16,
@@ -1167,7 +1156,6 @@ fn shutdown_pane_processes(
     );
 }
 
-#[cfg(unix)]
 fn truncate_handoff_history(history: String, max_bytes: usize) -> String {
     if history.len() <= max_bytes {
         return history;
@@ -1193,25 +1181,12 @@ fn pane_shell_from(configured_shell: &str, env_shell: Option<String>) -> String 
         return configured_shell.to_string();
     }
 
-    #[cfg(windows)]
-    {
-        let _ = env_shell;
-        default_pane_shell()
-    }
-
-    #[cfg(not(windows))]
     env_shell
         .map(|shell| shell.trim().to_string())
         .filter(|shell| !shell.is_empty())
         .unwrap_or_else(default_pane_shell)
 }
 
-#[cfg(windows)]
-fn default_pane_shell() -> String {
-    "powershell.exe".into()
-}
-
-#[cfg(not(windows))]
 fn default_pane_shell() -> String {
     "/bin/sh".into()
 }
@@ -1231,14 +1206,10 @@ impl<'a> PaneShellConfig<'a> {
     }
 }
 
-fn shell_mode_uses_login_shell(
-    mode: crate::config::ShellModeConfig,
-    target_is_macos: bool,
-) -> bool {
+fn shell_mode_uses_login_shell(mode: crate::config::ShellModeConfig) -> bool {
     match mode {
-        crate::config::ShellModeConfig::Auto => target_is_macos,
+        crate::config::ShellModeConfig::Auto | crate::config::ShellModeConfig::NonLogin => false,
         crate::config::ShellModeConfig::Login => true,
-        crate::config::ShellModeConfig::NonLogin => false,
     }
 }
 
@@ -1249,15 +1220,8 @@ fn is_executable_file(path: &Path) -> bool {
     if !metadata.is_file() {
         return false;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
 }
 
 fn resolve_shell_for_login_mode(shell: &str) -> io::Result<String> {
@@ -1288,57 +1252,15 @@ fn resolve_shell_for_login_mode(shell: &str) -> io::Result<String> {
         })
 }
 
-fn pane_shell_command_builder_for_target(
-    shell_config: PaneShellConfig<'_>,
-    target_is_macos: bool,
-) -> io::Result<CommandBuilder> {
+fn pane_shell_command_builder(shell_config: PaneShellConfig<'_>) -> io::Result<CommandBuilder> {
     let shell = pane_shell(shell_config.default_shell);
-    if shell_mode_uses_login_shell(shell_config.mode, target_is_macos) {
+    if shell_mode_uses_login_shell(shell_config.mode) {
         let mut cmd = CommandBuilder::new_default_prog();
         cmd.env("SHELL", resolve_shell_for_login_mode(&shell)?);
         Ok(cmd)
     } else {
-        let mut cmd = CommandBuilder::new(&shell);
-        apply_windows_powershell_cwd_reporting(&mut cmd, &shell);
-        Ok(cmd)
+        Ok(CommandBuilder::new(&shell))
     }
-}
-
-fn pane_shell_command_builder(shell_config: PaneShellConfig<'_>) -> io::Result<CommandBuilder> {
-    pane_shell_command_builder_for_target(shell_config, cfg!(target_os = "macos"))
-}
-
-#[cfg(windows)]
-fn apply_windows_powershell_cwd_reporting(cmd: &mut CommandBuilder, shell: &str) {
-    if !is_windows_powershell_shell(shell) {
-        return;
-    }
-    cmd.arg("-NoExit");
-    cmd.arg("-Command");
-    cmd.arg(windows_powershell_cwd_prompt_wrapper());
-}
-
-#[cfg(not(windows))]
-fn apply_windows_powershell_cwd_reporting(cmd: &mut CommandBuilder, shell: &str) {
-    let _ = (cmd, shell);
-}
-
-#[cfg(windows)]
-fn is_windows_powershell_shell(shell: &str) -> bool {
-    let name = Path::new(shell)
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .unwrap_or(shell)
-        .to_ascii_lowercase();
-    matches!(
-        name.as_str(),
-        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
-    )
-}
-
-#[cfg(windows)]
-fn windows_powershell_cwd_prompt_wrapper() -> &'static str {
-    r#"$global:__ZYNK_ORIGINAL_PROMPT = if (Test-Path Function:\prompt) { (Get-Command prompt -CommandType Function).ScriptBlock } else { { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " } }; function global:prompt { try { if ($PWD.Provider.Name -eq 'FileSystem') { $uri = ([System.Uri]$PWD.ProviderPath).AbsoluteUri; [Console]::Write("$([char]27)]7;$uri$([char]7)") } } catch {}; & $global:__ZYNK_ORIGINAL_PROMPT }"#
 }
 
 fn usable_reported_cwd(cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
@@ -1381,12 +1303,10 @@ impl PaneRuntime {
         self.preserve_processes_on_drop = true;
     }
 
-    #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.io.duplicate_handoff_fd()
     }
 
-    #[cfg(unix)]
     pub fn preserve_for_handoff(mut self) {
         if let Err(err) = self.io.release_after_commit() {
             warn!(
@@ -1399,12 +1319,10 @@ impl PaneRuntime {
         self.preserve_processes_on_drop = true;
     }
 
-    #[cfg(unix)]
     pub fn assume_handoff_ownership(&mut self) {
         self.preserve_processes_on_drop = false;
     }
 
-    #[cfg(unix)]
     pub fn set_handoff_reader_paused(&self, paused: bool) {
         if let Err(err) = self.io.set_handoff_paused(paused) {
             warn!(
@@ -1416,12 +1334,10 @@ impl PaneRuntime {
         }
     }
 
-    #[cfg(unix)]
     pub fn pause_handoff_reader(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         self.io.begin_handoff(timeout)
     }
 
-    #[cfg(unix)]
     pub fn handoff_runtime_state(
         &self,
         pane_id: u32,
@@ -1445,7 +1361,6 @@ impl PaneRuntime {
         }
     }
 
-    #[cfg(unix)]
     pub fn handoff_history_ansi(&self) -> Option<String> {
         if self
             .terminal
@@ -1607,7 +1522,6 @@ impl PaneRuntime {
         )
     }
 
-    #[cfg(unix)]
     pub fn from_handoff_fd(
         import: crate::handoff_runtime::ImportedHandoffRuntime,
         scrollback_limit_bytes: usize,
@@ -1866,10 +1780,7 @@ impl PaneRuntime {
             });
             PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
                 pane_id: pane_id.raw(),
-                #[cfg(unix)]
                 master_fd: spawned.master_fd,
-                #[cfg(windows)]
-                master: spawned.master,
                 initially_quiesced: false,
                 on_read,
                 on_reader_exit: None,
@@ -2311,7 +2222,6 @@ impl PaneRuntime {
         );
     }
 
-    #[cfg(unix)]
     pub fn nudge_child_redraw_after_handoff(&self) {
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
         self.io
@@ -2574,27 +2484,19 @@ impl PaneRuntime {
 
     /// Get the current working directory of the process group controlling the pane PTY.
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
-        #[cfg(unix)]
-        {
-            let pid = self.child_pid.load(Ordering::Acquire);
-            let shell_cwd = usable_process_cwd(pid);
-            let foreground_pgid = self
-                .io
-                .foreground_process_group_id()
-                .or_else(|| crate::platform::foreground_process_group_id(pid));
-            let leader_cwd = foreground_pgid.and_then(usable_process_cwd);
+        let pid = self.child_pid.load(Ordering::Acquire);
+        let shell_cwd = usable_process_cwd(pid);
+        let foreground_pgid = self
+            .io
+            .foreground_process_group_id()
+            .or_else(|| crate::platform::foreground_process_group_id(pid));
+        let leader_cwd = foreground_pgid.and_then(usable_process_cwd);
 
-            if leader_cwd.as_ref() == shell_cwd.as_ref() {
-                foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()).or(leader_cwd)
-            } else {
-                leader_cwd
-                    .or_else(|| foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()))
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            None
+        if leader_cwd.as_ref() == shell_cwd.as_ref() {
+            foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()).or(leader_cwd)
+        } else {
+            leader_cwd
+                .or_else(|| foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()))
         }
     }
 }
@@ -2762,7 +2664,6 @@ mod tests {
         assert!(!process_alive_for_shutdown(43, 42, false, |_| false));
     }
 
-    #[cfg(unix)]
     fn capture_shell_output(command: &str, extra_env: &[(&str, &str)]) -> String {
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -2808,21 +2709,11 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn pane_shell_falls_back_to_shell_env() {
         assert_eq!(
             pane_shell_from("", Some("/bin/bash".to_string())),
             "/bin/bash"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn pane_shell_ignores_shell_env_on_windows() {
-        assert_eq!(
-            pane_shell_from("", Some("c:\\windows\\system32\\cmd.exe".to_string())),
-            default_pane_shell()
         );
     }
 
@@ -2836,47 +2727,24 @@ mod tests {
     }
 
     #[test]
-    fn shell_mode_auto_uses_login_shell_only_on_macos() {
+    fn only_login_shell_mode_uses_a_login_shell() {
         assert!(shell_mode_uses_login_shell(
-            crate::config::ShellModeConfig::Auto,
-            true
+            crate::config::ShellModeConfig::Login
         ));
         assert!(!shell_mode_uses_login_shell(
-            crate::config::ShellModeConfig::Auto,
-            false
-        ));
-        assert!(shell_mode_uses_login_shell(
-            crate::config::ShellModeConfig::Login,
-            false
+            crate::config::ShellModeConfig::Auto
         ));
         assert!(!shell_mode_uses_login_shell(
-            crate::config::ShellModeConfig::NonLogin,
-            true
+            crate::config::ShellModeConfig::NonLogin
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn login_shell_builder_uses_default_prog_with_resolved_shell_env() {
-        let cmd = pane_shell_command_builder_for_target(
-            PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::Login),
-            false,
-        )
-        .unwrap();
-        assert!(cmd.is_default_prog());
-        assert_eq!(
-            cmd.get_env("SHELL").and_then(std::ffi::OsStr::to_str),
-            Some("/bin/sh")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn auto_shell_builder_uses_login_shell_on_macos_target() {
-        let cmd = pane_shell_command_builder_for_target(
-            PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::Auto),
-            true,
-        )
+        let cmd = pane_shell_command_builder(PaneShellConfig::new(
+            "/bin/sh",
+            crate::config::ShellModeConfig::Login,
+        ))
         .unwrap();
         assert!(cmd.is_default_prog());
         assert_eq!(
@@ -2886,51 +2754,26 @@ mod tests {
     }
 
     #[test]
-    fn auto_shell_builder_keeps_direct_shell_on_non_macos_target() {
-        let cmd = pane_shell_command_builder_for_target(
-            PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::Auto),
-            false,
-        )
+    fn auto_shell_builder_keeps_direct_shell() {
+        let cmd = pane_shell_command_builder(PaneShellConfig::new(
+            "/bin/sh",
+            crate::config::ShellModeConfig::Auto,
+        ))
         .unwrap();
         assert!(!cmd.is_default_prog());
         assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("/bin/sh")]);
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn windows_powershell_shell_builder_wraps_cwd_reporting_prompt() {
-        let cmd = pane_shell_command_builder_for_target(
-            PaneShellConfig::new("powershell.exe", crate::config::ShellModeConfig::NonLogin),
-            false,
-        )
-        .unwrap();
-        let argv: Vec<_> = cmd
-            .get_argv()
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-
-        assert_eq!(argv[0], "powershell.exe");
-        assert!(argv.iter().any(|arg| arg == "-NoExit"));
-        assert!(argv
-            .iter()
-            .any(|arg| arg.contains("]7;") && arg.contains("Function:\\prompt")));
-    }
-
     #[test]
     fn login_shell_builder_rejects_missing_shell_instead_of_falling_back() {
-        let err = pane_shell_command_builder_for_target(
-            PaneShellConfig::new(
-                "/__zynk_missing_shell__",
-                crate::config::ShellModeConfig::Login,
-            ),
-            false,
-        )
+        let err = pane_shell_command_builder(PaneShellConfig::new(
+            "/__zynk_missing_shell__",
+            crate::config::ShellModeConfig::Login,
+        ))
         .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
-    #[cfg(unix)]
     #[test]
     fn login_shell_builder_resolves_bare_shell_names_from_path() {
         let _lock = crate::integration::integration_env_lock();
@@ -2946,7 +2789,6 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         let shell = bin.join("fake-shell");
         std::fs::write(&shell, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2954,10 +2796,10 @@ mod tests {
         let original_path = std::env::var_os("PATH");
         std::env::set_var("PATH", &bin);
 
-        let cmd = pane_shell_command_builder_for_target(
-            PaneShellConfig::new("fake-shell", crate::config::ShellModeConfig::Login),
-            false,
-        )
+        let cmd = pane_shell_command_builder(PaneShellConfig::new(
+            "fake-shell",
+            crate::config::ShellModeConfig::Login,
+        ))
         .unwrap();
 
         assert!(cmd.is_default_prog());
@@ -2972,7 +2814,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
-    #[cfg(unix)]
     #[test]
     fn login_shell_resolution_preserves_shell_paths() {
         assert_eq!(resolve_shell_for_login_mode("/bin/sh").unwrap(), "/bin/sh");
@@ -2989,14 +2830,12 @@ mod tests {
         assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("/bin/sh")]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn pane_terminal_identity_overrides_outer_terminal_env() {
         let output = capture_shell_output("printf '%s\\n%s\\n' \"$TERM\" \"$COLORTERM\"", &[]);
         assert_eq!(output, "xterm-256color\ntruecolor\n");
     }
 
-    #[cfg(unix)]
     #[test]
     fn pane_terminal_identity_allows_explicit_override() {
         let output = capture_shell_output(
@@ -3006,7 +2845,6 @@ mod tests {
         assert_eq!(output, "vt100\n24bit\n");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn handoff_history_ansi_captures_primary_screen() {
         let runtime =
@@ -3017,7 +2855,6 @@ mod tests {
         assert!(history.contains("handoff-primary-history"));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn handoff_history_ansi_skips_alternate_screen() {
         let runtime = PaneRuntime::test_with_scrollback_bytes(
@@ -3030,7 +2867,6 @@ mod tests {
         assert!(runtime.handoff_history_ansi().is_none());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn handoff_runtime_state_captures_terminal_input_state() {
         let runtime = PaneRuntime::test_with_screen_bytes(
@@ -3057,7 +2893,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn truncate_handoff_history_keeps_recent_utf8_boundary() {
         let history = format!("old\n{}\nrecent\n", "é".repeat(8));
@@ -3068,7 +2903,6 @@ mod tests {
         assert!(truncated.is_char_boundary(0));
     }
 
-    #[cfg(unix)]
     #[test]
     fn truncate_handoff_history_drops_partial_long_line() {
         let history = format!("old\n{}", "x".repeat(64));

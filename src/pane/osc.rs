@@ -712,20 +712,6 @@ fn parse_file_uri_cwd(uri: &str) -> Option<PathBuf> {
     };
     let path = percent_decode_utf8(path)?;
 
-    #[cfg(windows)]
-    {
-        let mut path = path;
-        if path.len() >= 3
-            && path.as_bytes()[0] == b'/'
-            && path.as_bytes()[2] == b':'
-            && path.as_bytes()[1].is_ascii_alphabetic()
-        {
-            path.remove(0);
-        }
-        Some(PathBuf::from(path.replace('/', "\\")))
-    }
-
-    #[cfg(not(windows))]
     Some(PathBuf::from(path))
 }
 
@@ -843,26 +829,6 @@ pub(super) fn maybe_filter_primary_screen_scrollback_clear<'a>(
     strip_scrollback_clear_sequences(bytes)
 }
 
-#[cfg(target_os = "macos")]
-pub(super) fn should_restore_host_terminal_theme(
-    owner_pgid: u32,
-    shell_pid: u32,
-    alternate_screen: bool,
-    foreground_job: Option<&crate::platform::ForegroundJob>,
-) -> bool {
-    if alternate_screen {
-        return false;
-    }
-
-    let Some(foreground_job) = foreground_job else {
-        return false;
-    };
-
-    let _ = owner_pgid;
-    foreground_job_is_shell(foreground_job, shell_pid)
-}
-
-#[cfg(not(target_os = "macos"))]
 pub(super) fn should_restore_host_terminal_theme(
     owner_pgid: u32,
     shell_pid: u32,
@@ -1632,15 +1598,6 @@ mod tests {
             Some(&shell_job(7)),
         ));
 
-        #[cfg(target_os = "macos")]
-        assert!(should_restore_host_terminal_theme(
-            7,
-            7,
-            false,
-            Some(&shell_job(7)),
-        ));
-
-        #[cfg(not(target_os = "macos"))]
         assert!(!should_restore_host_terminal_theme(
             7,
             7,

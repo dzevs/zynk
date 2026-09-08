@@ -45,26 +45,10 @@ pub(crate) fn expand_tilde_path(path: PathBuf) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// The user's home directory, honoring `HOME` first and the Windows
-/// `USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` fallbacks.
+/// The user's home directory, resolved from `HOME`.
 pub(crate) fn home_dir() -> io::Result<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(home));
-    }
-
-    #[cfg(windows)]
-    {
-        if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
-            return Ok(PathBuf::from(profile));
-        }
-        if let (Some(drive), Some(path)) = (
-            std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty()),
-            std::env::var_os("HOMEPATH").filter(|value| !value.is_empty()),
-        ) {
-            let mut home = PathBuf::from(drive);
-            home.push(path);
-            return Ok(home);
-        }
     }
 
     Err(io::Error::other(

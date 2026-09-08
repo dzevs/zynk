@@ -1,8 +1,7 @@
 //! Sound notifications for agent state changes.
 //!
 //! Embeds mp3 files in the binary and plays them via system audio tools.
-//! Uses afplay (macOS), Windows MediaPlayer, or decoder-capable Linux audio
-//! players — no Rust audio dependencies.
+//! Uses decoder-capable Linux audio players — no Rust audio dependencies.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -90,81 +89,16 @@ fn temp_sound_path() -> PathBuf {
     std::env::temp_dir().join(format!("zynk-sound-{}-{id}.mp3", std::process::id()))
 }
 
-#[cfg(windows)]
-fn run_player(path: &Path) -> Result<Output, String> {
-    run_windows_player(path)
-}
-
-#[cfg(target_os = "macos")]
-fn run_player(path: &Path) -> Result<Output, String> {
-    Command::new("afplay")
-        .arg(path)
-        .output()
-        .map_err(|e| format!("no audio player available: {e}"))
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
 fn run_player(path: &Path) -> Result<Output, String> {
     run_linux_player(path)
 }
 
-#[cfg(any(windows, test))]
-fn windows_media_player_script() -> &'static str {
-    r#"
-param([string]$Path)
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName PresentationCore
-$resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
-$player = [System.Windows.Media.MediaPlayer]::new()
-$script:done = $false
-$script:failed = $null
-$player.add_MediaEnded({ $script:done = $true })
-$player.add_MediaFailed({
-    param($sender, $eventArgs)
-    $script:failed = $eventArgs.ErrorException
-    $script:done = $true
-})
-$player.Open([Uri]::new($resolved))
-$deadline = [DateTime]::UtcNow.AddSeconds(15)
-while (-not $script:done -and -not $player.NaturalDuration.HasTimeSpan -and [DateTime]::UtcNow -lt $deadline) {
-    Start-Sleep -Milliseconds 25
-}
-if ($script:failed) { throw $script:failed }
-$player.Play()
-while (-not $script:done -and [DateTime]::UtcNow -lt $deadline) {
-    Start-Sleep -Milliseconds 50
-}
-$player.Close()
-if ($script:failed) { throw $script:failed }
-if (-not $script:done) { throw 'sound playback timed out' }
-"#
-}
-
-#[cfg(windows)]
-fn run_windows_player(path: &Path) -> Result<Output, String> {
-    Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            windows_media_player_script(),
-        ])
-        .arg(path)
-        .output()
-        .map_err(|e| format!("Windows MediaPlayer playback failed: {e}"))
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
 #[derive(Debug, Clone, Copy)]
 struct AudioPlayer {
     program: &'static str,
     args: &'static [&'static str],
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
 impl AudioPlayer {
     fn output(self, path: &Path) -> std::io::Result<Output> {
         Command::new(self.program)
@@ -174,7 +108,6 @@ impl AudioPlayer {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
 fn linux_audio_players() -> &'static [AudioPlayer] {
     // Do not add bare aplay here. It does not decode MP3 and plays MP3 bytes as raw PCM.
     &[
@@ -201,7 +134,6 @@ fn linux_audio_players() -> &'static [AudioPlayer] {
     ]
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
 fn run_linux_player(path: &Path) -> Result<Output, String> {
     let mut errors = Vec::new();
 
@@ -219,7 +151,6 @@ fn run_linux_player(path: &Path) -> Result<Output, String> {
     ))
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
 fn player_error(player: AudioPlayer, output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim();
@@ -240,7 +171,6 @@ mod tests {
         assert_ne!(temp_sound_path(), temp_sound_path());
     }
 
-    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn linux_audio_players_are_mp3_capable() {
         let programs: Vec<&str> = linux_audio_players()
@@ -250,14 +180,5 @@ mod tests {
 
         assert_eq!(programs, ["paplay", "pw-play", "ffplay", "mpg123", "mpv"]);
         assert!(!programs.contains(&"aplay"));
-    }
-
-    #[test]
-    fn windows_media_player_script_accepts_literal_path_argument() {
-        let script = windows_media_player_script();
-
-        assert!(script.contains("param([string]$Path)"));
-        assert!(script.contains("Resolve-Path -LiteralPath $Path"));
-        assert!(script.contains("System.Windows.Media.MediaPlayer"));
     }
 }

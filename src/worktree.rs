@@ -188,43 +188,6 @@ pub(crate) fn is_not_working_tree_remove_error(message: &str) -> bool {
     lower.contains("is not a working tree") || lower.contains("is not a worktree")
 }
 
-#[cfg(windows)]
-pub(crate) fn worktree_dirty_remove_message(path: &Path) -> String {
-    format!(
-        "fatal: '{}' contains modified or untracked files, use --force to delete it",
-        path.display()
-    )
-}
-
-#[cfg(any(windows, test))]
-pub(crate) fn checkout_has_dirty_files(path: &Path) -> Result<bool, String> {
-    let path_arg = path.display().to_string();
-    let output = std::process::Command::new("git")
-        .args([
-            "-C",
-            &path_arg,
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-        ])
-        .output()
-        .map_err(|err| err.to_string())?;
-
-    if output.status.success() {
-        return Ok(!output.stdout.is_empty());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stderr.is_empty() {
-        Err(stderr)
-    } else if !stdout.is_empty() {
-        Err(stdout)
-    } else {
-        Err(format!("git status failed with status {}", output.status))
-    }
-}
-
 pub(crate) fn build_worktree_add_new_branch_command(
     repo_root: &Path,
     path: &Path,
@@ -667,7 +630,6 @@ prunable stale
         );
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn non_windows_tilde_expansion_keeps_windows_separator_literal() {
         assert_eq!(
@@ -676,32 +638,6 @@ prunable stale
                 _ => None,
             }),
             PathBuf::from(r"~\.zynk\worktrees")
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_tilde_expansion_normalizes_separators() {
-        fn env(key: &str) -> Option<OsString> {
-            match key {
-                "HOME" => Some("~".into()),
-                "USERPROFILE" => Some(r"C:\Users\zynk".into()),
-                _ => None,
-            }
-        }
-
-        let default_path = expand_tilde_path_from_env("~/.zynk/worktrees", true, env);
-        assert_eq!(
-            default_path,
-            PathBuf::from(r"C:\Users\zynk\.zynk\worktrees")
-        );
-        assert_eq!(
-            default_path.display().to_string(),
-            r"C:\Users\zynk\.zynk\worktrees"
-        );
-        assert_eq!(
-            expand_tilde_path_from_env(r"~\.zynk\worktrees", true, env),
-            PathBuf::from(r"C:\Users\zynk\.zynk\worktrees")
         );
     }
 
@@ -715,32 +651,6 @@ prunable stale
             ),
             PathBuf::from("/home/me/.zynk/worktrees/zynk/worktree-brave-river")
         );
-    }
-
-    #[test]
-    fn checkout_dirty_detection_reports_clean_and_dirty_worktrees() {
-        let repo = create_committed_repo("worktree-dirty-detection-repo");
-        let checkout = unique_temp_path("worktree-dirty-detection-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/dirty-detection",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
-
-        assert_eq!(checkout_has_dirty_files(&checkout), Ok(false));
-        std::fs::write(checkout.join("README.md"), "dirty\n").unwrap();
-        assert_eq!(checkout_has_dirty_files(&checkout), Ok(true));
-
-        let remove = build_worktree_remove_command(&repo, &checkout, true);
-        run_worktree_command(&remove).unwrap();
-        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]

@@ -8,18 +8,13 @@
 
 use std::collections::BTreeMap;
 use std::env;
-#[cfg(not(windows))]
 use std::fs;
-#[cfg(not(windows))]
 use std::io;
-#[cfg(not(windows))]
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(not(windows))]
 use std::time::{Duration, Instant};
 
-#[cfg(not(windows))]
 use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
@@ -40,13 +35,9 @@ const MISE_INSTALLS_DIR_ENV: &str = "MISE_INSTALLS_DIR";
 const FAKE_UPDATE_VERSION_ENV: &str = "ZYNK_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "ZYNK_FAKE_UPDATE_NOTES_VERSION";
 const DEFAULT_FAKE_UPDATE_NOTES_VERSION: &str = "0.3.0";
-#[cfg(not(windows))]
 const SERVER_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(not(windows))]
 const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
-#[cfg(not(windows))]
 const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(not(windows))]
 const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 fn fake_release_notes_body(version: &str) -> String {
     let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
@@ -171,7 +162,6 @@ impl<'de> Deserialize<'de> for AssetRef {
 struct UpdateManifest {
     version: String,
     /// Thin-client protocol spoken by this release, when advertised by the manifest.
-    #[cfg(not(windows))]
     protocol: Option<u32>,
     notes: String,
     assets: BTreeMap<String, AssetRef>,
@@ -233,7 +223,7 @@ struct HomebrewFormulaVersions {
 }
 
 impl UpdateManifest {
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     fn download_url_for(&self, os: &str, arch: &str) -> Option<String> {
         self.assets
             .get(&format!("{os}-{arch}"))
@@ -275,7 +265,6 @@ struct ReleaseInfo {
     channel: UpdateChannel,
     build_id: Option<String>,
     commit: Option<String>,
-    #[cfg(not(windows))]
     target_protocol: Option<u32>,
     download_url: String,
     sha256: Option<String>,
@@ -375,7 +364,6 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
         channel: UpdateChannel::Stable,
         build_id: None,
         commit: None,
-        #[cfg(not(windows))]
         target_protocol: manifest.protocol,
         download_url,
         sha256: asset.sha256.clone(),
@@ -460,7 +448,6 @@ fn release_info_from_preview_manifest(
         channel: UpdateChannel::Preview,
         build_id: Some(build_id.to_string()),
         commit: Some(manifest.commit.clone()),
-        #[cfg(not(windows))]
         target_protocol: Some(manifest.protocol),
         download_url,
         sha256: asset.sha256.clone(),
@@ -539,13 +526,11 @@ fn check_homebrew_latest() -> Result<Option<Version>, String> {
 // Download + install
 // ---------------------------------------------------------------------------
 
-#[cfg(not(windows))]
 struct DownloadedUpdate {
     current_exe: PathBuf,
     tmp_path: Option<PathBuf>,
 }
 
-#[cfg(not(windows))]
 impl Drop for DownloadedUpdate {
     fn drop(&mut self) {
         if let Some(tmp_path) = self.tmp_path.take() {
@@ -555,7 +540,6 @@ impl Drop for DownloadedUpdate {
 }
 
 /// Download a release to a prepared executable temp file without touching the running server.
-#[cfg(not(windows))]
 fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
     let current_exe = env::current_exe().map_err(|e| format!("can't find current binary: {e}"))?;
 
@@ -600,7 +584,6 @@ fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
     }
 
     // Make executable
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755)) {
@@ -615,7 +598,6 @@ fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
     })
 }
 
-#[cfg(not(windows))]
 fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String> {
     let tmp_path = update
         .tmp_path
@@ -633,48 +615,6 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
     Ok(())
 }
 
-#[cfg(windows)]
-fn install_windows_update_with_installer(channel: UpdateChannel) -> Result<(), String> {
-    let status = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "irm https://zynk.dev/install.ps1 | iex",
-        ])
-        .env("ZYNK_CHANNEL", channel.as_str())
-        // Drop any inherited PSModulePath. When zynk is launched from
-        // PowerShell 7, its Core module paths come first and Windows
-        // PowerShell 5.1 (this `powershell`) fails to autoload cmdlets like
-        // Get-FileHash. Removing it lets 5.1 compute its own default path.
-        // See PowerShell/PowerShell#8635.
-        .env_remove("PSModulePath")
-        .status()
-        .map_err(|err| format!("failed to run Windows installer: {err}"))?;
-
-    if !status.success() {
-        return Err(format!("Windows installer failed with status {status}"));
-    }
-
-    Ok(())
-}
-
-#[cfg(windows)]
-fn windows_installed_zynk_exe_path() -> Result<PathBuf, String> {
-    if let Some(install_dir) = env::var_os("ZYNK_INSTALL_DIR").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(install_dir).join("zynk.exe"));
-    }
-
-    let local_app_data =
-        env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set; cannot locate Zynk install")?;
-    Ok(PathBuf::from(local_app_data)
-        .join("Programs")
-        .join("Zynk")
-        .join("bin")
-        .join("zynk.exe"))
-}
-
 // ---------------------------------------------------------------------------
 // Upgrade flow helpers
 // ---------------------------------------------------------------------------
@@ -688,7 +628,6 @@ fn running_inside_zynk() -> bool {
     running_inside_zynk_env(crate::config::env_first(&[crate::ZYNK_ENV_VAR]).as_deref())
 }
 
-#[cfg(not(windows))]
 fn client_protocol_server_is_running_at(socket_path: &Path) -> bool {
     if !socket_path.exists() {
         return false;
@@ -697,17 +636,14 @@ fn client_protocol_server_is_running_at(socket_path: &Path) -> bool {
     crate::ipc::connect_local_stream(socket_path).is_ok()
 }
 
-#[cfg(not(windows))]
 fn client_protocol_server_is_running() -> bool {
     client_protocol_server_is_running_at(&crate::server::socket_paths::client_socket_path())
 }
 
-#[cfg(not(windows))]
 fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
 }
 
-#[cfg(not(windows))]
 fn update_requires_server_restart(
     server: &crate::api::RuntimeStatus,
     release: &ReleaseInfo,
@@ -718,7 +654,6 @@ fn update_requires_server_restart(
     }
 }
 
-#[cfg(not(windows))]
 fn server_supports_live_handoff(server: &crate::api::RuntimeStatus) -> bool {
     server
         .capabilities
@@ -726,7 +661,6 @@ fn server_supports_live_handoff(server: &crate::api::RuntimeStatus) -> bool {
         .is_some_and(|capabilities| capabilities.live_handoff)
 }
 
-#[cfg(not(windows))]
 fn parse_stop_old_servers_after_update_response(input: &str, default_yes: bool) -> Option<bool> {
     let trimmed = input.trim().to_ascii_lowercase();
     match trimmed.as_str() {
@@ -738,14 +672,12 @@ fn parse_stop_old_servers_after_update_response(input: &str, default_yes: bool) 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(not(windows))]
 struct RunningServerUpdatePlan {
     target: RunningUpdateTarget,
     server: crate::api::RuntimeStatus,
     requires_server_restart: bool,
 }
 
-#[cfg(not(windows))]
 impl RunningServerUpdatePlan {
     fn label(&self) -> &str {
         &self.target.label
@@ -773,14 +705,12 @@ impl RunningServerUpdatePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(not(windows))]
 struct RunningServerUpdateDecision {
     plan: RunningServerUpdatePlan,
     action: RunningServerUpdateAction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(not(windows))]
 enum RunningServerUpdateAction {
     None,
     LiveHandoff,
@@ -788,7 +718,6 @@ enum RunningServerUpdateAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(not(windows))]
 enum RunningServerUpdateOutcome {
     RestartDeferred,
     Stopped,
@@ -800,7 +729,6 @@ enum RunningServerUpdateOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(not(windows))]
 struct RunningSessionUpdateOutcome {
     session_label: String,
     target_noun: &'static str,
@@ -811,7 +739,6 @@ struct RunningSessionUpdateOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(not(windows))]
 enum FailedHandoffServerState {
     UpdatedServerRunning,
     OldServerRunning(crate::api::RuntimeStatus),
@@ -819,7 +746,6 @@ enum FailedHandoffServerState {
     Unknown(String),
 }
 
-#[cfg(not(windows))]
 fn plan_running_server_updates(
     release: &ReleaseInfo,
 ) -> Result<Vec<RunningServerUpdatePlan>, String> {
@@ -877,7 +803,6 @@ fn plan_running_server_updates(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(not(windows))]
 struct RunningUpdateTarget {
     name: Option<String>,
     label: String,
@@ -888,7 +813,6 @@ struct RunningUpdateTarget {
     must_be_running: bool,
 }
 
-#[cfg(not(windows))]
 fn running_update_targets() -> Result<Vec<RunningUpdateTarget>, String> {
     if crate::session::explicit_session_requested() {
         return Ok(vec![RunningUpdateTarget {
@@ -961,7 +885,6 @@ fn running_update_targets() -> Result<Vec<RunningUpdateTarget>, String> {
         .collect())
 }
 
-#[cfg(not(windows))]
 fn target_client_protocol_server_is_running() -> Result<bool, String> {
     if crate::session::explicit_session_requested()
         || std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some()
@@ -1000,7 +923,6 @@ pub(crate) fn parse_self_update_args(args: &[String]) -> Result<SelfUpdateOption
     Ok(options)
 }
 
-#[cfg(not(windows))]
 fn prompt_to_stop_old_servers_before_update(
     plans: &[RunningServerUpdatePlan],
     release: &ReleaseInfo,
@@ -1049,7 +971,6 @@ fn prompt_to_stop_old_servers_before_update(
     }
 }
 
-#[cfg(not(windows))]
 fn confirm_running_server_update_action(
     plans: Vec<RunningServerUpdatePlan>,
     release: &ReleaseInfo,
@@ -1104,7 +1025,6 @@ fn confirm_running_server_update_action(
     Ok(decisions)
 }
 
-#[cfg(not(windows))]
 fn target_group_nouns(plans: &[&RunningServerUpdatePlan]) -> (&'static str, &'static str) {
     let all_sessions = plans.iter().all(|plan| plan.target_noun() == "session");
     let all_servers = plans.iter().all(|plan| plan.target_noun() == "server");
@@ -1117,7 +1037,6 @@ fn target_group_nouns(plans: &[&RunningServerUpdatePlan]) -> (&'static str, &'st
     }
 }
 
-#[cfg(not(windows))]
 fn prompt_to_complete_plain_update(
     decisions: &[RunningServerUpdateDecision],
     release: &ReleaseInfo,
@@ -1174,7 +1093,6 @@ fn prompt_to_complete_plain_update(
     }
 }
 
-#[cfg(not(windows))]
 fn mark_plain_update_stop_decisions(
     decisions: Vec<RunningServerUpdateDecision>,
 ) -> Vec<RunningServerUpdateDecision> {
@@ -1187,7 +1105,6 @@ fn mark_plain_update_stop_decisions(
         .collect()
 }
 
-#[cfg(not(windows))]
 fn print_running_session_update_summary(
     plans: &[RunningServerUpdatePlan],
     release: &ReleaseInfo,
@@ -1219,7 +1136,6 @@ fn print_running_session_update_summary(
     eprintln!();
 }
 
-#[cfg(not(windows))]
 fn live_handoff_running_server_for_update(
     plan: &RunningServerUpdatePlan,
     release: &ReleaseInfo,
@@ -1240,7 +1156,6 @@ fn live_handoff_running_server_for_update(
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn runtime_matches_release(status: &crate::api::RuntimeStatus, release: &ReleaseInfo) -> bool {
     let protocol_matches = release
         .target_protocol
@@ -1249,7 +1164,6 @@ fn runtime_matches_release(status: &crate::api::RuntimeStatus, release: &Release
     protocol_matches && version_matches
 }
 
-#[cfg(not(windows))]
 fn classify_failed_live_handoff_state_at(
     socket_path: &Path,
     release: &ReleaseInfo,
@@ -1264,7 +1178,6 @@ fn classify_failed_live_handoff_state_at(
     }
 }
 
-#[cfg(not(windows))]
 fn prompt_to_stop_old_server_after_failed_handoff(
     plan: &RunningServerUpdatePlan,
     release: &ReleaseInfo,
@@ -1313,7 +1226,6 @@ fn prompt_to_stop_old_server_after_failed_handoff(
     }
 }
 
-#[cfg(not(windows))]
 fn recover_failed_live_handoff_for_update(
     plan: &RunningServerUpdatePlan,
     release: &ReleaseInfo,
@@ -1370,7 +1282,6 @@ fn recover_failed_live_handoff_for_update(
     }
 }
 
-#[cfg(not(windows))]
 fn reconnect_or_stop_guidance(plan: &RunningServerUpdatePlan) -> String {
     if let Some(command) = plan.attach_command() {
         format!(
@@ -1385,7 +1296,6 @@ fn reconnect_or_stop_guidance(plan: &RunningServerUpdatePlan) -> String {
     }
 }
 
-#[cfg(not(windows))]
 fn stop_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
     use crate::api::schema::{EmptyParams, Method};
 
@@ -1398,7 +1308,6 @@ fn stop_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), S
     )
 }
 
-#[cfg(not(windows))]
 fn send_server_update_method_at(
     socket_path: &Path,
     timeout: Duration,
@@ -1452,7 +1361,7 @@ fn send_server_update_method_at(
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 fn live_handoff_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
     use crate::api::schema::{Method, ServerLiveHandoffParams};
 
@@ -1467,7 +1376,6 @@ fn live_handoff_server_via_api_at(socket_path: &Path, timeout: Duration) -> Resu
     )
 }
 
-#[cfg(not(windows))]
 fn live_handoff_server_via_api_for_release_at(
     socket_path: &Path,
     timeout: Duration,
@@ -1491,7 +1399,6 @@ fn live_handoff_server_via_api_for_release_at(
     )
 }
 
-#[cfg(not(windows))]
 fn live_handoff_server_via_api_for_update_at(
     socket_path: &Path,
     updated_exe: &Path,
@@ -1505,7 +1412,6 @@ fn live_handoff_server_via_api_for_update_at(
     )
 }
 
-#[cfg(not(windows))]
 fn server_shutdown_confirmed_at(socket_path: &Path) -> Result<bool, String> {
     if !socket_path.exists() {
         return Ok(true);
@@ -1530,7 +1436,6 @@ fn server_shutdown_confirmed_at(socket_path: &Path) -> Result<bool, String> {
     }
 }
 
-#[cfg(not(windows))]
 fn wait_for_server_shutdown_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -1548,7 +1453,6 @@ fn wait_for_server_shutdown_at(socket_path: &Path, timeout: Duration) -> Result<
     }
 }
 
-#[cfg(not(windows))]
 fn stop_running_server_for_update(plan: &RunningServerUpdatePlan) -> Result<(), String> {
     eprintln!("stopping zynk {} {}...", plan.target_noun(), plan.label());
     stop_server_via_api_at(plan.socket_path(), SERVER_STOP_RESPONSE_TIMEOUT)?;
@@ -1556,7 +1460,6 @@ fn stop_running_server_for_update(plan: &RunningServerUpdatePlan) -> Result<(), 
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn wait_for_server_handoff_at(
     socket_path: &Path,
     timeout: Duration,
@@ -1570,7 +1473,6 @@ fn wait_for_server_handoff_at(
     )
 }
 
-#[cfg(not(windows))]
 fn wait_for_running_server_protocol_at(
     socket_path: &Path,
     timeout: Duration,
@@ -1602,7 +1504,6 @@ fn wait_for_running_server_protocol_at(
     }
 }
 
-#[cfg(not(windows))]
 fn apply_running_session_update_decisions(
     release: &ReleaseInfo,
     updated_exe: &Path,
@@ -1641,7 +1542,6 @@ fn apply_running_session_update_decisions(
     Ok(outcomes)
 }
 
-#[cfg(not(windows))]
 fn print_running_session_update_outcomes(
     outcomes: &[RunningSessionUpdateOutcome],
     release: &ReleaseInfo,
@@ -1828,7 +1728,6 @@ fn preview_channel_rejection_for_exe_path(path: &Path) -> Option<&'static str> {
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
     is_homebrew_managed_exe_path_following_links(path)
         || is_mise_managed_exe_path_following_links(path)
@@ -1986,13 +1885,6 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
     }
 
     let channel = UpdateChannel::configured();
-    #[cfg(windows)]
-    if channel == UpdateChannel::Stable {
-        return Err(
-            "Windows builds are preview-only for now; run `zynk channel set preview`".into(),
-        );
-    }
-
     if is_homebrew_managed_install() {
         if channel == UpdateChannel::Preview {
             return Err(
@@ -2049,60 +1941,33 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
         tracing::warn!("failed to save pending release notes: {e}");
     }
 
-    #[cfg(windows)]
+    let running_server_plans = plan_running_server_updates(&release)?;
+    let server_update_decisions =
+        confirm_running_server_update_action(running_server_plans, &release, options)?;
+
+    eprintln!("downloading {}...", release.label());
+    let downloaded_update = download_update(&release)?;
+    let updated_exe = downloaded_update.current_exe.clone();
+    eprintln!("downloaded {}", release.label());
+    if !options.live_handoff
+        && !prompt_to_complete_plain_update(&server_update_decisions, &release)?
     {
-        let _ = options;
-
-        eprintln!(
-            "installing {} with the Windows installer...",
-            release.label()
-        );
-        if let Some(sha256) = &release.sha256 {
-            tracing::debug!(sha256 = %sha256, "selected Windows update asset has checksum");
-        }
-        install_windows_update_with_installer(channel)?;
-        let updated_exe = windows_installed_zynk_exe_path()?;
-        eprintln!("installed {}", release.label());
-        print_outdated_integration_notice_with_updated_binary(&updated_exe);
-        eprintln!(
-            "Restart any running Zynk sessions to use {}.",
-            release.label()
-        );
+        eprintln!("Zynk was not updated.");
+        eprintln!("Stop running Zynk sessions when ready, then run `zynk update` again.");
+        return Ok(current);
     }
+    install_downloaded_update(downloaded_update)?;
+    eprintln!("installed {}", release.label());
+    let server_update_decisions = if options.live_handoff {
+        server_update_decisions
+    } else {
+        mark_plain_update_stop_decisions(server_update_decisions)
+    };
+    let server_update_outcomes =
+        apply_running_session_update_decisions(&release, &updated_exe, server_update_decisions)?;
+    print_outdated_integration_notice_with_updated_binary(&updated_exe);
 
-    #[cfg(not(windows))]
-    {
-        let running_server_plans = plan_running_server_updates(&release)?;
-        let server_update_decisions =
-            confirm_running_server_update_action(running_server_plans, &release, options)?;
-
-        eprintln!("downloading {}...", release.label());
-        let downloaded_update = download_update(&release)?;
-        let updated_exe = downloaded_update.current_exe.clone();
-        eprintln!("downloaded {}", release.label());
-        if !options.live_handoff
-            && !prompt_to_complete_plain_update(&server_update_decisions, &release)?
-        {
-            eprintln!("Zynk was not updated.");
-            eprintln!("Stop running Zynk sessions when ready, then run `zynk update` again.");
-            return Ok(current);
-        }
-        install_downloaded_update(downloaded_update)?;
-        eprintln!("installed {}", release.label());
-        let server_update_decisions = if options.live_handoff {
-            server_update_decisions
-        } else {
-            mark_plain_update_stop_decisions(server_update_decisions)
-        };
-        let server_update_outcomes = apply_running_session_update_decisions(
-            &release,
-            &updated_exe,
-            server_update_decisions,
-        )?;
-        print_outdated_integration_notice_with_updated_binary(&updated_exe);
-
-        print_running_session_update_outcomes(&server_update_outcomes, &release);
-    }
+    print_running_session_update_outcomes(&server_update_outcomes, &release);
 
     Ok(release.version)
 }
@@ -2256,16 +2121,6 @@ fn homebrew_release_notes_body_from_manifest(
 // ---------------------------------------------------------------------------
 
 fn platform_target() -> (&'static str, &'static str) {
-    let os = if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "unknown"
-    };
-
     let arch = if cfg!(target_arch = "x86_64") {
         "x86_64"
     } else if cfg!(target_arch = "aarch64") {
@@ -2274,14 +2129,14 @@ fn platform_target() -> (&'static str, &'static str) {
         "unknown"
     };
 
-    (os, arch)
+    ("linux", arch)
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
@@ -2497,7 +2352,6 @@ mod tests {
 
     #[test]
     fn package_manager_path_detection_follows_homebrew_symlink() {
-        #[cfg(unix)]
         {
             let root = std::env::temp_dir()
                 .join(format!("zynk-homebrew-symlink-test-{}", std::process::id()));
@@ -2518,7 +2372,6 @@ mod tests {
 
     #[test]
     fn package_manager_path_detection_follows_mise_symlink() {
-        #[cfg(unix)]
         {
             let root =
                 std::env::temp_dir().join(format!("zynk-mise-symlink-test-{}", std::process::id()));
@@ -3223,7 +3076,7 @@ mod tests {
     #[test]
     fn platform_target_is_known() {
         let (os, arch) = platform_target();
-        assert!(os == "linux" || os == "macos", "os: {os}");
+        assert_eq!(os, "linux");
         assert!(arch == "x86_64" || arch == "aarch64", "arch: {arch}");
     }
 

@@ -23,40 +23,16 @@ const OMP_EXTENSION_INSTALL_NAME: &str = "zynk-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/zynk-agent-state.ts");
 const OMP_INTEGRATION_VERSION: u32 = 3;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
-const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
-    "zynk-agent-state.ps1"
-} else {
-    "zynk-agent-state.sh"
-};
-const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
-    include_str!("assets/claude/zynk-agent-state.ps1")
-} else {
-    include_str!("assets/claude/zynk-agent-state.sh")
-};
+const CLAUDE_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
+const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/zynk-agent-state.sh");
 const CLAUDE_INTEGRATION_VERSION: u32 = 7;
 const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
-const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
-    "zynk-agent-state.ps1"
-} else {
-    "zynk-agent-state.sh"
-};
-const CODEX_HOOK_ASSET: &str = if cfg!(windows) {
-    include_str!("assets/codex/zynk-agent-state.ps1")
-} else {
-    include_str!("assets/codex/zynk-agent-state.sh")
-};
+const CODEX_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
+const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/zynk-agent-state.sh");
 const CODEX_INTEGRATION_VERSION: u32 = 6;
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
-const KIMI_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
-    "zynk-agent-state.ps1"
-} else {
-    "zynk-agent-state.sh"
-};
-const KIMI_HOOK_ASSET: &str = if cfg!(windows) {
-    include_str!("assets/kimi/zynk-agent-state.ps1")
-} else {
-    include_str!("assets/kimi/zynk-agent-state.sh")
-};
+const KIMI_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
+const KIMI_HOOK_ASSET: &str = include_str!("assets/kimi/zynk-agent-state.sh");
 const KIMI_INTEGRATION_VERSION: u32 = 4;
 const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
 const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> zynk kimi integration";
@@ -74,16 +50,8 @@ const KIMI_HOOK_EVENTS: [(&str, &str); 9] = [
     ("Stop", "idle"),
     ("Interrupt", "idle"),
 ];
-const COPILOT_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
-    "zynk-agent-state.ps1"
-} else {
-    "zynk-agent-state.sh"
-};
-const COPILOT_HOOK_ASSET: &str = if cfg!(windows) {
-    include_str!("assets/copilot/zynk-agent-state.ps1")
-} else {
-    include_str!("assets/copilot/zynk-agent-state.sh")
-};
+const COPILOT_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
+const COPILOT_HOOK_ASSET: &str = include_str!("assets/copilot/zynk-agent-state.sh");
 const COPILOT_INTEGRATION_VERSION: u32 = 2;
 const COPILOT_HOME_ENV_VAR: &str = "COPILOT_HOME";
 const COPILOT_HOOK_EVENTS: [&str; 1] = ["SessionStart"];
@@ -117,16 +85,8 @@ const DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 6] = [
     ("Stop", "idle"),
     ("SessionEnd", "release"),
 ];
-const DROID_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
-    "zynk-agent-state.ps1"
-} else {
-    "zynk-agent-state.sh"
-};
-const DROID_HOOK_ASSET: &str = if cfg!(windows) {
-    include_str!("assets/droid/zynk-agent-state.ps1")
-} else {
-    include_str!("assets/droid/zynk-agent-state.sh")
-};
+const DROID_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
+const DROID_HOOK_ASSET: &str = include_str!("assets/droid/zynk-agent-state.sh");
 const DROID_INTEGRATION_VERSION: u32 = 2;
 const DROID_HOOK_EVENTS: [(&str, &str); 1] = [("SessionStart", "session")];
 const DROID_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 9] = [
@@ -154,16 +114,8 @@ const HERMES_PLUGIN_INIT_INSTALL_NAME: &str = "__init__.py";
 const HERMES_PLUGIN_MANIFEST_ASSET: &str = include_str!("assets/hermes/plugin.yaml");
 const HERMES_PLUGIN_INIT_ASSET: &str = include_str!("assets/hermes/__init__.py");
 const HERMES_INTEGRATION_VERSION: u32 = 3;
-const QODERCLI_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
-    "zynk-agent-state.ps1"
-} else {
-    "zynk-agent-state.sh"
-};
-const QODERCLI_HOOK_ASSET: &str = if cfg!(windows) {
-    include_str!("assets/qodercli/zynk-agent-state.ps1")
-} else {
-    include_str!("assets/qodercli/zynk-agent-state.sh")
-};
+const QODERCLI_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
+const QODERCLI_HOOK_ASSET: &str = include_str!("assets/qodercli/zynk-agent-state.sh");
 const QODERCLI_INTEGRATION_VERSION: u32 = 2;
 const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
 const QODERCLI_HOOK_EVENTS: [(&str, &str); 1] = [("SessionStart", "session")];
@@ -509,13 +461,6 @@ pub(crate) fn install_target(
 }
 
 fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Result<Vec<String>> {
-    if !integration_target_supported(target) {
-        return Err(io::Error::other(format!(
-            "{} integration is not supported on Windows",
-            integration_target_label(target)
-        )));
-    }
-
     let version_warning = match agent_version_requirement(target) {
         Some(requirement) => enforce_agent_version(&requirement)?,
         None => None,
@@ -1059,44 +1004,13 @@ fn cursor_command_names() -> &'static [&'static str] {
     &["cursor-agent"]
 }
 
-fn integration_target_supported(target: crate::api::schema::IntegrationTarget) -> bool {
-    #[cfg(windows)]
-    {
-        matches!(
-            target,
-            crate::api::schema::IntegrationTarget::Claude
-                | crate::api::schema::IntegrationTarget::Codex
-                | crate::api::schema::IntegrationTarget::Copilot
-                | crate::api::schema::IntegrationTarget::Droid
-                | crate::api::schema::IntegrationTarget::Kimi
-                | crate::api::schema::IntegrationTarget::Qodercli
-        )
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = target;
-        true
-    }
-}
-
 fn integration_target_available(target: crate::api::schema::IntegrationTarget) -> bool {
-    if !integration_target_supported(target) {
-        return false;
-    }
-
     integration_target_command_names(target)
         .iter()
         .any(|command| command_available(command))
         || integration_target_install_layout_available(target)
 }
 
-#[cfg(windows)]
-fn qodercli_command_names() -> &'static [&'static str] {
-    &["qodercli", "qoder", "qoderclicn", "qodercn"]
-}
-
-#[cfg(not(windows))]
 fn qodercli_command_names() -> &'static [&'static str] {
     &["qodercli"]
 }
@@ -1123,25 +1037,7 @@ fn command_available(command: &str) -> bool {
 }
 
 fn command_path_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {
-    let base = dir.join(command);
-
-    #[cfg(not(windows))]
-    {
-        vec![base]
-    }
-
-    #[cfg(windows)]
-    {
-        if Path::new(command).extension().is_some() {
-            return vec![base];
-        }
-
-        let mut candidates = vec![base];
-        for extension in [".exe", ".cmd", ".bat", ".ps1"] {
-            candidates.push(dir.join(format!("{command}{extension}")));
-        }
-        candidates
-    }
+    vec![dir.join(command)]
 }
 
 fn executable_file_exists(path: &Path) -> bool {
@@ -1152,16 +1048,8 @@ fn executable_file_exists(path: &Path) -> bool {
         return false;
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
 }
 
 fn codex_standalone_binary_available() -> bool {
@@ -1180,44 +1068,17 @@ fn codex_standalone_binary_available() -> bool {
 }
 
 fn codex_executable_name() -> &'static str {
-    if cfg!(windows) {
-        "codex.exe"
-    } else {
-        "codex"
-    }
+    "codex"
 }
 
 fn hermes_install_layout_available() -> bool {
-    #[cfg(windows)]
-    {
-        let Some(local_app_data) =
-            std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
-        else {
-            return false;
-        };
-        let dir = PathBuf::from(local_app_data).join("hermes");
-        [
-            dir.join("hermes.exe"),
-            dir.join("bin").join("hermes.exe"),
-            dir.join("Scripts").join("hermes.exe"),
-        ]
-        .into_iter()
-        .any(|path| executable_file_exists(&path))
-    }
-
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    false
 }
 
 pub(crate) fn installed_integration_statuses() -> Vec<IntegrationStatus> {
     integration_specs()
         .into_iter()
         .filter_map(|(target, path, expected_version)| {
-            if !integration_target_supported(target) {
-                return None;
-            }
             Some(integration_status_at(target, path.ok()?, expected_version))
         })
         .collect()
@@ -1227,9 +1088,6 @@ pub(crate) fn integration_recommendations() -> Vec<IntegrationRecommendation> {
     integration_specs()
         .into_iter()
         .filter_map(|(target, path, expected_version)| {
-            if !integration_target_supported(target) {
-                return None;
-            }
             let path = path.ok()?;
             let status = integration_status_at(target, path.clone(), expected_version);
             Some(IntegrationRecommendation {
@@ -2693,11 +2551,7 @@ fn ensure_direct_command_hook(
 }
 
 fn direct_command_field() -> &'static str {
-    if cfg!(windows) {
-        "powershell"
-    } else {
-        "bash"
-    }
+    "bash"
 }
 
 fn is_matching_direct_command_entry(entry: &Value, command: &str) -> bool {
@@ -2850,14 +2704,6 @@ fn hook_command_variants(hook_path: &Path, action: Option<&str>) -> Vec<String> 
     let mut commands = vec![hook_command(hook_path, action)];
     push_unique_command(&mut commands, legacy_bash_hook_command(hook_path, action));
 
-    #[cfg(windows)]
-    {
-        push_unique_command(
-            &mut commands,
-            legacy_bash_hook_command(&legacy_bash_hook_path(hook_path), action),
-        );
-    }
-
     commands
 }
 
@@ -2880,29 +2726,6 @@ fn remove_file_if_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-#[cfg(windows)]
-fn legacy_bash_hook_path(hook_path: &Path) -> PathBuf {
-    hook_path.with_file_name("zynk-agent-state.sh")
-}
-
-#[cfg(windows)]
-fn remove_legacy_bash_hook_file(hook_path: &Path) -> io::Result<bool> {
-    let legacy_path = legacy_bash_hook_path(hook_path);
-    let content = match fs::read_to_string(&legacy_path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err),
-    };
-
-    if content.contains("ZYNK_INTEGRATION_ID=") {
-        fs::remove_file(legacy_path)?;
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-#[cfg(not(windows))]
 fn remove_legacy_bash_hook_file(_hook_path: &Path) -> io::Result<bool> {
     Ok(false)
 }
@@ -3386,28 +3209,12 @@ fn shell_single_quote(value: &str) -> String {
 
 fn hook_command(hook_path: &Path, action: Option<&str>) -> String {
     let path = hook_path.display().to_string();
-    #[cfg(windows)]
-    {
-        let mut command = format!(
-            "powershell -NoProfile -ExecutionPolicy Bypass -File {}",
-            windows_command_quote(&path)
-        );
-        if let Some(action) = action {
-            command.push(' ');
-            command.push_str(action);
-        }
-        command
+    let mut command = format!("bash {}", shell_single_quote(&path));
+    if let Some(action) = action {
+        command.push(' ');
+        command.push_str(action);
     }
-
-    #[cfg(not(windows))]
-    {
-        let mut command = format!("bash {}", shell_single_quote(&path));
-        if let Some(action) = action {
-            command.push(' ');
-            command.push_str(action);
-        }
-        command
-    }
+    command
 }
 
 fn legacy_bash_hook_command(hook_path: &Path, action: Option<&str>) -> String {
@@ -3422,20 +3229,12 @@ fn legacy_bash_hook_command(hook_path: &Path, action: Option<&str>) -> String {
     command
 }
 
-#[cfg(windows)]
-fn windows_command_quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\\\""))
-}
+fn make_executable(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
 
-fn make_executable(_path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut perms = fs::metadata(_path)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(_path, perms)?;
-    }
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms)?;
 
     Ok(())
 }
@@ -3589,7 +3388,6 @@ mod tests {
         assert!(warning.contains("0.14.0"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn enforce_agent_version_rejects_old_version() {
         let requirement = AgentVersionRequirement {
@@ -3606,7 +3404,6 @@ mod tests {
         assert!(message.contains("upgrade"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn enforce_agent_version_accepts_current_version() {
         let requirement = AgentVersionRequirement {
@@ -3669,122 +3466,7 @@ mod tests {
         ))
     }
 
-    #[cfg(windows)]
     #[test]
-    fn home_dir_uses_userprofile_when_home_is_missing() {
-        let _lock = integration_env_lock();
-        let base = unique_base();
-        let previous_home = std::env::var_os("HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        std::env::remove_var("HOME");
-        std::env::set_var("USERPROFILE", &base);
-
-        assert_eq!(home_dir().unwrap(), base);
-
-        if let Some(home) = previous_home {
-            std::env::set_var("HOME", home);
-        }
-        if let Some(userprofile) = previous_userprofile {
-            std::env::set_var("USERPROFILE", userprofile);
-        } else {
-            std::env::remove_var("USERPROFILE");
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_supports_only_cli_hook_integrations() {
-        use crate::api::schema::IntegrationTarget;
-
-        assert!(!integration_target_supported(IntegrationTarget::Pi));
-        assert!(!integration_target_supported(IntegrationTarget::Omp));
-        assert!(!integration_target_supported(IntegrationTarget::Opencode));
-        assert!(!integration_target_supported(IntegrationTarget::Kilo));
-        assert!(!integration_target_supported(IntegrationTarget::Hermes));
-        assert!(!integration_target_supported(IntegrationTarget::Cursor));
-        assert!(!integration_target_supported(IntegrationTarget::Devin));
-
-        assert!(integration_target_supported(IntegrationTarget::Claude));
-        assert!(integration_target_supported(IntegrationTarget::Codex));
-        assert!(integration_target_supported(IntegrationTarget::Copilot));
-        assert!(integration_target_supported(IntegrationTarget::Droid));
-        assert!(integration_target_supported(IntegrationTarget::Kimi));
-        assert!(integration_target_supported(IntegrationTarget::Qodercli));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_does_not_offer_unsupported_integrations_even_when_commands_exist() {
-        use crate::api::schema::IntegrationTarget;
-
-        let _lock = integration_env_lock();
-        let base = unique_base();
-        let bin = base.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", &bin);
-
-        fs::write(bin.join("pi.cmd"), "@echo off\r\n").unwrap();
-        fs::write(bin.join("omp.cmd"), "@echo off\r\n").unwrap();
-        fs::write(bin.join("opencode.cmd"), "@echo off\r\n").unwrap();
-        fs::write(bin.join("kilo.cmd"), "@echo off\r\n").unwrap();
-        fs::write(bin.join("hermes.exe"), "").unwrap();
-        fs::write(bin.join("cursor-agent.cmd"), "@echo off\r\n").unwrap();
-        fs::write(bin.join("devin.cmd"), "@echo off\r\n").unwrap();
-
-        assert!(!integration_target_available(IntegrationTarget::Pi));
-        assert!(!integration_target_available(IntegrationTarget::Omp));
-        assert!(!integration_target_available(IntegrationTarget::Opencode));
-        assert!(!integration_target_available(IntegrationTarget::Kilo));
-        assert!(!integration_target_available(IntegrationTarget::Hermes));
-        assert!(!integration_target_available(IntegrationTarget::Cursor));
-        assert!(!integration_target_available(IntegrationTarget::Devin));
-
-        if let Some(path) = original_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
-        let _ = fs::remove_dir_all(base);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_install_rejects_unsupported_integration_before_config_lookup() {
-        use crate::api::schema::IntegrationTarget;
-
-        let _lock = integration_env_lock();
-        let original_home = std::env::var_os("HOME");
-        let original_userprofile = std::env::var_os("USERPROFILE");
-        let original_homedrive = std::env::var_os("HOMEDRIVE");
-        let original_homepath = std::env::var_os("HOMEPATH");
-        std::env::remove_var("HOME");
-        std::env::remove_var("USERPROFILE");
-        std::env::remove_var("HOMEDRIVE");
-        std::env::remove_var("HOMEPATH");
-
-        let err = install_target(IntegrationTarget::Pi).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "pi integration is not supported on Windows"
-        );
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        }
-        if let Some(userprofile) = original_userprofile {
-            std::env::set_var("USERPROFILE", userprofile);
-        }
-        if let Some(homedrive) = original_homedrive {
-            std::env::set_var("HOMEDRIVE", homedrive);
-        }
-        if let Some(homepath) = original_homepath {
-            std::env::set_var("HOMEPATH", homepath);
-        }
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn command_available_requires_executable_file_on_path() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -3803,88 +3485,6 @@ mod tests {
         fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(command_available("claude"));
 
-        if let Some(path) = original_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
-        let _ = fs::remove_dir_all(base);
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn command_available_finds_windows_command_shims_on_path() {
-        let _lock = integration_env_lock();
-        let base = unique_base();
-        let bin = base.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", &bin);
-
-        fs::write(bin.join("claude.cmd"), "@echo off\r\n").unwrap();
-        assert!(command_available("claude"));
-
-        fs::write(bin.join("codex.exe"), "").unwrap();
-        assert!(command_available("codex"));
-
-        assert!(!command_available("missing-agent"));
-
-        if let Some(path) = original_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
-        let _ = fs::remove_dir_all(base);
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn qodercli_availability_checks_windows_aliases() {
-        let _lock = integration_env_lock();
-        let base = unique_base();
-        let bin = base.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", &bin);
-
-        fs::write(bin.join("qoder.cmd"), "@echo off\r\n").unwrap();
-
-        assert!(integration_target_available(
-            crate::api::schema::IntegrationTarget::Qodercli
-        ));
-
-        if let Some(path) = original_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
-        let _ = fs::remove_dir_all(base);
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn hermes_layout_can_exist_without_making_unsupported_target_available() {
-        let _lock = integration_env_lock();
-        let base = unique_base();
-        let local_app_data = base.join("local-app-data");
-        let hermes_bin = local_app_data.join("hermes").join("bin");
-        fs::create_dir_all(&hermes_bin).unwrap();
-        fs::write(hermes_bin.join("hermes.exe"), "").unwrap();
-        let original_local_app_data = std::env::var_os("LOCALAPPDATA");
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("LOCALAPPDATA", &local_app_data);
-        std::env::set_var("PATH", "");
-
-        assert!(hermes_install_layout_available());
-        assert!(!integration_target_available(
-            crate::api::schema::IntegrationTarget::Hermes
-        ));
-
-        if let Some(local_app_data) = original_local_app_data {
-            std::env::set_var("LOCALAPPDATA", local_app_data);
-        } else {
-            std::env::remove_var("LOCALAPPDATA");
-        }
         if let Some(path) = original_path {
             std::env::set_var("PATH", path);
         } else {

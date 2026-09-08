@@ -737,7 +737,6 @@ impl App {
         }
     }
 
-    #[cfg(unix)]
     pub fn new_from_handoff(
         config: &Config,
         config_diagnostic: Option<String>,
@@ -807,12 +806,10 @@ impl App {
         Ok(app)
     }
 
-    #[cfg(unix)]
     pub fn unpause_handoff_readers(&self) {
         self.terminal_runtimes.set_handoff_readers_paused(false);
     }
 
-    #[cfg(unix)]
     pub fn assume_handoff_ownership(&mut self) {
         self.terminal_runtimes.assume_handoff_ownership();
     }
@@ -1673,12 +1670,6 @@ mod tests {
         )
     }
 
-    #[cfg(windows)]
-    fn exiting_test_command() -> &'static str {
-        "C:\\Windows\\System32\\whoami.exe"
-    }
-
-    #[cfg(not(windows))]
     fn exiting_test_command() -> &'static str {
         "/usr/bin/true"
     }

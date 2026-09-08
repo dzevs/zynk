@@ -296,7 +296,6 @@ impl PaneTerminal {
         self.ghostty.keyboard_protocol().unwrap_or(fallback)
     }
 
-    #[cfg(unix)]
     pub fn kitty_keyboard_state_ansi(&self) -> Option<String> {
         self.ghostty
             .kitty_keyboard_state_ansi()
@@ -679,7 +678,6 @@ impl GhosttyPaneTerminal {
         }
     }
 
-    #[cfg(unix)]
     pub fn seed_handoff_input_state(&self, input_state: InputState) {
         let Ok(mut core) = self.core.lock() else {
             return;
@@ -751,7 +749,6 @@ impl GhosttyPaneTerminal {
         }
     }
 
-    #[cfg(unix)]
     pub fn seed_keyboard_protocol_flags(&self, flags: u16) {
         if flags == 0 {
             return;
@@ -759,7 +756,6 @@ impl GhosttyPaneTerminal {
         self.seed_keyboard_protocol_ansi(&format!("\x1b[>{flags}u"));
     }
 
-    #[cfg(unix)]
     pub fn seed_keyboard_protocol_ansi(&self, ansi: &str) {
         if ansi.is_empty() {
             return;
@@ -891,7 +887,6 @@ impl GhosttyPaneTerminal {
         ))
     }
 
-    #[cfg(unix)]
     pub fn kitty_keyboard_state_ansi(&self) -> Option<String> {
         let core = self.core.lock().ok()?;
         core.kitty_keyboard.replay_ansi()
@@ -2263,32 +2258,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
-    fn cursor_state_holds_pty_position_change_until_settle_window() {
-        let (tx, _rx) = mpsc::channel(4);
-        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
-        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
-        let pane_id = PaneId::from_raw(1);
-
-        pane.process_pty_bytes(pane_id, 0, b"x", &tx);
-        assert_eq!(
-            pane.cursor_state()
-                .map(|cursor| (cursor.x, cursor.y, cursor.visible)),
-            Some((1, 0, true))
-        );
-
-        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b[6;21H", &tx);
-
-        assert_eq!(result.render_delay, Some(CURSOR_POSITION_SETTLE));
-        assert_eq!(
-            pane.cursor_state()
-                .map(|cursor| (cursor.x, cursor.y, cursor.visible)),
-            Some((1, 0, true))
-        );
-    }
-
-    #[test]
-    #[cfg(not(windows))]
     fn cursor_state_uses_live_position_when_settle_policy_disabled() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
@@ -2545,7 +2514,6 @@ mod tests {
         assert_eq!(encoded, b"\x1bOA");
     }
 
-    #[cfg(unix)]
     #[test]
     fn ghostty_seed_handoff_input_state_restores_input_modes() {
         let (tx, _rx) = mpsc::channel(4);
@@ -2656,7 +2624,6 @@ mod tests {
         assert_eq!(encoded, b"\x1b[13;2u");
     }
 
-    #[cfg(unix)]
     #[test]
     fn ghostty_seed_keyboard_protocol_flags_restores_shift_enter_encoding() {
         let (tx, _rx) = mpsc::channel(4);
@@ -2674,7 +2641,6 @@ mod tests {
         assert_eq!(encoded, b"\x1b[13;2u");
     }
 
-    #[cfg(unix)]
     #[test]
     fn ghostty_keyboard_protocol_state_replays_nested_stack() {
         let (tx, _rx) = mpsc::channel(4);

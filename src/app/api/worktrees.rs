@@ -798,12 +798,6 @@ mod tests {
         App::new(&Config::default(), true, None, api_rx, event_hub)
     }
 
-    #[cfg(windows)]
-    fn test_shell() -> &'static str {
-        "C:\\Windows\\System32\\whoami.exe"
-    }
-
-    #[cfg(not(windows))]
     fn test_shell() -> &'static str {
         "/usr/bin/true"
     }
