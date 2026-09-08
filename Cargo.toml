@@ -18,11 +18,9 @@ readme = "README.md"
 # emits Zig output into `$OUT_DIR` (so `cargo package --verify` never sees a build-modified source tree).
 # `cargo install zynk --locked` builds from source: it needs Zig 0.15.2 AND network during the build
 # (libghostty-vt's Zig deps are fetched into Zig's global cache; `--offline` is unsupported, so the build is not
-# hermetic). NOTE: `cargo package` strips `[patch.crates-io]` and excludes the nested `vendor/portable-pty`
-# source, so a crates.io-SOURCE build links the registry `portable-pty` — on Windows that means no ConPTY patch;
-# the Git-source build, the release binaries, Homebrew and Nix ship the vendored copy. `publish = ["crates-io"]`
-# enables `cargo publish` (and `--dry-run`) to crates.io ONLY; the actual publish, the GitHub release, and the
-# Homebrew tap bump are separate operator-gated steps run from the tagged release commit (WORKFLOW.md).
+# hermetic). `publish = ["crates-io"]` enables `cargo publish` (and `--dry-run`) to crates.io ONLY; the actual
+# publish, the GitHub release, and the Homebrew tap bump are separate operator-gated steps run from the tagged
+# release commit (WORKFLOW.md).
 publish = ["crates-io"]
 include = [
     "/src/**/*",
@@ -32,9 +30,6 @@ include = [
     "/vendor/libghostty-vt.vendor.json",
     "/vendor/libghostty-vt.patches.md",
     "/vendor/patches/libghostty-vt/**/*",
-    "/vendor/portable-pty/**/*",
-    "/vendor/portable-pty.patches.md",
-    "/vendor/patches/portable-pty/**/*",
     "/migrations/**/*",
     "/SKILL.md",
     "/Cargo.lock",
@@ -92,24 +87,3 @@ fastembed = { version = "5", optional = true }
 # (cfg(feature = "fastembed")) is inert in the default build either way.
 default = []
 fastembed = ["dep:fastembed"]
-
-# Vendored portable-pty (force system ConPTY on Windows, ADR-aligned vendor model
-# mirroring vendor/libghostty-vt). The vendored Unix source is byte-identical to
-# crates.io 0.9.0; only src/win/psuedocon.rs carries the local patch (see
-# vendor/portable-pty.patches.md). Pin to =0.9.0 so the patch base stays exact.
-[patch.crates-io]
-portable-pty = { path = "vendor/portable-pty" }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = [
-    "Wdk_System_Threading",
-    "Win32_Foundation",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Console",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_Kernel",
-    "Win32_System_Threading",
-    "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
-] }
