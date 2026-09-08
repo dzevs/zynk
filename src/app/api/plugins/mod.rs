@@ -2601,15 +2601,9 @@ command = ["run.bat"]
         let root = unique_temp_path("plugin-platform-reject");
         std::fs::create_dir_all(&root).unwrap();
 
-        // Declare only platforms that are NOT the current build target so the
-        // invoke is guaranteed to be rejected regardless of which OS this runs on.
-        let excluded_platforms = if cfg!(target_os = "linux") {
-            r#"platforms = ["macos", "windows"]"#
-        } else if cfg!(target_os = "macos") {
-            r#"platforms = ["linux", "windows"]"#
-        } else {
-            r#"platforms = ["linux", "macos"]"#
-        };
+        // Declare only platforms that are NOT the Linux build target so the
+        // invoke is guaranteed to be rejected.
+        let excluded_platforms = r#"platforms = ["macos", "windows"]"#;
 
         std::fs::write(
             root.join("zynk-plugin.toml"),
@@ -2667,14 +2661,8 @@ command = ["act"]
         let root = unique_temp_path("plugin-platform-action-override");
         std::fs::create_dir_all(&root).unwrap();
 
-        // Plugin declares all platforms; action declares only the non-current platforms.
-        let excluded_platforms = if cfg!(target_os = "linux") {
-            r#"platforms = ["macos", "windows"]"#
-        } else if cfg!(target_os = "macos") {
-            r#"platforms = ["linux", "windows"]"#
-        } else {
-            r#"platforms = ["linux", "macos"]"#
-        };
+        // Plugin declares all platforms; action declares only the non-Linux platforms.
+        let excluded_platforms = r#"platforms = ["macos", "windows"]"#;
 
         std::fs::write(
             root.join("zynk-plugin.toml"),

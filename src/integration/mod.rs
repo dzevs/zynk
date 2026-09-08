@@ -1293,7 +1293,7 @@ fn hook_has_herdr_residue(content: &str) -> bool {
 /// True when the hook content is a genuine zynk-native hook for `expected_id`: it
 /// declares the matching `ZYNK_INTEGRATION_ID=<expected_id>` marker and carries no
 /// Herdr residue. Marker parsing mirrors `parse_integration_version` (comment-prefix
-/// stripping) so it works uniformly across `.sh`/`.ps1`/`.ts`/`.js`/`.py` hooks.
+/// stripping) so it works uniformly across `.sh`/`.ts`/`.js`/`.py` hooks.
 fn hook_is_native(content: &str, expected_id: &str) -> bool {
     if hook_has_herdr_residue(content) {
         return false;
@@ -1447,7 +1447,6 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         10,
         Some("*"),
     )?;
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
@@ -1498,7 +1497,6 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         10,
         None,
     )?;
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
 
@@ -1546,7 +1544,6 @@ pub(crate) fn install_kimi() -> io::Result<KimiInstallPaths> {
     if new_config != existing_config {
         fs::write(&config_path, new_config)?;
     }
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     Ok(KimiInstallPaths {
         hook_path,
@@ -1598,7 +1595,6 @@ pub(crate) fn install_copilot() -> io::Result<CopilotInstallPaths> {
     for event in COPILOT_HOOK_EVENTS {
         ensure_direct_command_hook(hooks, event, command.clone(), 10, None)?;
     }
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
@@ -1654,7 +1650,6 @@ pub(crate) fn install_devin() -> io::Result<DevinInstallPaths> {
             None,
         )?;
     }
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
@@ -1714,7 +1709,6 @@ pub(crate) fn install_droid() -> io::Result<DroidInstallPaths> {
             None,
         )?;
     }
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
@@ -1894,8 +1888,7 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(ClaudeUninstallResult {
         hook_path,
@@ -1941,8 +1934,7 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(CodexUninstallResult {
         hook_path,
@@ -1968,8 +1960,7 @@ pub(crate) fn uninstall_kimi() -> io::Result<KimiUninstallResult> {
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(KimiUninstallResult {
         hook_path,
@@ -2013,8 +2004,7 @@ pub(crate) fn uninstall_copilot() -> io::Result<CopilotUninstallResult> {
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(CopilotUninstallResult {
         hook_path,
@@ -2058,8 +2048,7 @@ pub(crate) fn uninstall_devin() -> io::Result<DevinUninstallResult> {
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(DevinUninstallResult {
         hook_path,
@@ -2130,8 +2119,7 @@ pub(crate) fn uninstall_droid() -> io::Result<DroidUninstallResult> {
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(DroidUninstallResult {
         hook_path,
@@ -2243,7 +2231,6 @@ pub(crate) fn install_qodercli() -> io::Result<QodercliInstallPaths> {
             Some("*"),
         )?;
     }
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
@@ -2345,8 +2332,7 @@ pub(crate) fn uninstall_qodercli() -> io::Result<QodercliUninstallResult> {
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(QodercliUninstallResult {
         hook_path,
@@ -2724,10 +2710,6 @@ fn remove_file_if_exists(path: &Path) -> io::Result<bool> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(err),
     }
-}
-
-fn remove_legacy_bash_hook_file(_hook_path: &Path) -> io::Result<bool> {
-    Ok(false)
 }
 
 fn remove_dir_all_if_exists(path: &Path) -> io::Result<bool> {

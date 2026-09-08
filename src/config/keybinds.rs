@@ -1072,7 +1072,7 @@ pub fn format_key_combo(binding: KeyCombo) -> String {
         parts.push("shift".to_string());
     }
     if modifiers.contains(KeyModifiers::SUPER) {
-        parts.push(super_modifier_label().to_string());
+        parts.push("super".to_string());
     }
     if modifiers.contains(KeyModifiers::HYPER) {
         parts.push("hyper".to_string());
@@ -1107,14 +1107,6 @@ pub fn format_key_combo(binding: KeyCombo) -> String {
 
     parts.push(key);
     parts.join("+")
-}
-
-fn super_modifier_label() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "super"
-    }
 }
 
 fn parse_modifier_token(token: &str) -> Option<KeyModifiers> {
