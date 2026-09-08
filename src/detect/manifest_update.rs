@@ -627,7 +627,7 @@ contains = ["{contains}"]
     #[test]
     fn process_agent_manifest_commits_newer_manifest_atomically() {
         with_state_dir("commit-newer", || {
-            let content = remote_manifest("2026.06.10.3", "ready");
+            let content = remote_manifest("9999.01.01.1", "ready");
             let commit = process_agent_manifest(Agent::Codex, &content, 1)
                 .unwrap()
                 .unwrap();
@@ -635,7 +635,7 @@ contains = ["{contains}"]
             assert_eq!(commit.agent, Agent::Codex);
             assert_eq!(
                 commit.version,
-                ManifestVersion::parse("2026.06.10.3").unwrap()
+                ManifestVersion::parse("9999.01.01.1").unwrap()
             );
             assert_eq!(
                 fs::read_to_string(remote_manifest_path(Agent::Codex)).unwrap(),
@@ -665,7 +665,7 @@ path = "codex.toml"
             .unwrap();
             fs::write(
                 web_dir.join("codex.toml"),
-                remote_manifest("2026.06.10.3", "auto-update-ready"),
+                remote_manifest("9999.01.01.1", "auto-update-ready"),
             )
             .unwrap();
             std::env::set_var(
@@ -725,10 +725,10 @@ path = "codex.toml"
     #[test]
     fn process_agent_manifest_rejects_downgrade_and_keeps_cached_manifest() {
         with_state_dir("reject-downgrade", || {
-            let current = remote_manifest("2026.06.10.4", "current");
+            let current = remote_manifest("9999.01.01.1", "current");
             process_agent_manifest(Agent::Codex, &current, 1).unwrap();
 
-            let older = remote_manifest("2026.06.10.3", "older");
+            let older = remote_manifest("9999.01.01.0", "older");
             assert!(process_agent_manifest(Agent::Codex, &older, 2).is_err());
             assert_eq!(
                 fs::read_to_string(remote_manifest_path(Agent::Codex)).unwrap(),
@@ -740,10 +740,10 @@ path = "codex.toml"
     #[test]
     fn process_agent_manifest_rejects_equal_version_content_change() {
         with_state_dir("reject-equal-change", || {
-            let current = remote_manifest("2026.06.10.3", "current");
+            let current = remote_manifest("9999.01.01.1", "current");
             process_agent_manifest(Agent::Codex, &current, 1).unwrap();
 
-            let changed = remote_manifest("2026.06.10.3", "changed");
+            let changed = remote_manifest("9999.01.01.1", "changed");
             assert!(process_agent_manifest(Agent::Codex, &changed, 2).is_err());
             assert_eq!(
                 fs::read_to_string(remote_manifest_path(Agent::Codex)).unwrap(),
@@ -755,7 +755,7 @@ path = "codex.toml"
     #[test]
     fn process_agent_manifest_skips_same_version_same_content() {
         with_state_dir("skip-same", || {
-            let current = remote_manifest("2026.06.10.3", "current");
+            let current = remote_manifest("9999.01.01.1", "current");
             process_agent_manifest(Agent::Codex, &current, 1).unwrap();
 
             let result = process_agent_manifest(Agent::Codex, &current, 2).unwrap();

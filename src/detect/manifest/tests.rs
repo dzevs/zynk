@@ -156,7 +156,7 @@ line_regex = ["^exact line$"]
 #[test]
 fn remote_manifest_loads_between_local_override_and_bundled() {
     with_manifest_dirs("remote-source", || {
-        write_remote_codex(&remote_manifest("2026.06.10.3", "blocked", "remote-ready"));
+        write_remote_codex(&remote_manifest("9999.01.01.1", "blocked", "remote-ready"));
 
         let explain = explain(Agent::Codex, "remote-ready");
 
@@ -165,10 +165,10 @@ fn remote_manifest_loads_between_local_override_and_bundled() {
             explain.source,
             Some(ManifestSource::Remote { .. })
         ));
-        assert_eq!(explain.manifest_version.as_deref(), Some("2026.06.10.3"));
+        assert_eq!(explain.manifest_version.as_deref(), Some("9999.01.01.1"));
         assert_eq!(
             explain.cached_remote_version.as_deref(),
-            Some("2026.06.10.3")
+            Some("9999.01.01.1")
         );
     });
 }
@@ -176,7 +176,7 @@ fn remote_manifest_loads_between_local_override_and_bundled() {
 #[test]
 fn fallback_explain_preserves_active_manifest_version() {
     with_manifest_dirs("fallback-version", || {
-        write_remote_codex(&remote_manifest("2026.06.10.3", "blocked", "remote-ready"));
+        write_remote_codex(&remote_manifest("9999.01.01.1", "blocked", "remote-ready"));
 
         let explain = explain(Agent::Codex, "ordinary prompt text");
 
@@ -185,7 +185,7 @@ fn fallback_explain_preserves_active_manifest_version() {
             explain.fallback_reason.as_deref(),
             Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
         );
-        assert_eq!(explain.manifest_version.as_deref(), Some("2026.06.10.3"));
+        assert_eq!(explain.manifest_version.as_deref(), Some("9999.01.01.1"));
         assert!(matches!(
             explain.source,
             Some(ManifestSource::Remote { .. })
@@ -216,7 +216,7 @@ fn older_cached_remote_manifest_does_not_shadow_newer_bundled_manifest() {
 #[test]
 fn local_override_shadows_cached_remote_manifest() {
     with_manifest_dirs("local-shadows-remote", || {
-        write_remote_codex(&remote_manifest("2026.06.10.3", "blocked", "remote-ready"));
+        write_remote_codex(&remote_manifest("9999.01.01.1", "blocked", "remote-ready"));
         write_local_codex(&local_manifest("idle", "local-ready"));
 
         let explain = explain(Agent::Codex, "local-ready");
@@ -226,7 +226,7 @@ fn local_override_shadows_cached_remote_manifest() {
         assert!(explain.local_override_shadowing_remote);
         assert_eq!(
             explain.cached_remote_version.as_deref(),
-            Some("2026.06.10.3")
+            Some("9999.01.01.1")
         );
     });
 }
@@ -234,7 +234,7 @@ fn local_override_shadows_cached_remote_manifest() {
 #[test]
 fn invalid_local_override_falls_back_to_cached_remote_manifest() {
     with_manifest_dirs("invalid-local-remote-fallback", || {
-        write_remote_codex(&remote_manifest("2026.06.10.3", "blocked", "remote-ready"));
+        write_remote_codex(&remote_manifest("9999.01.01.1", "blocked", "remote-ready"));
         write_local_codex("id = ");
 
         let explain = explain(Agent::Codex, "remote-ready");
@@ -251,7 +251,7 @@ fn invalid_local_override_falls_back_to_cached_remote_manifest() {
 #[test]
 fn detection_uses_cached_manifest_until_explicit_reload() {
     with_manifest_dirs("cache-boundary", || {
-        write_remote_codex(&remote_manifest("2026.06.10.3", "blocked", "cached-ready"));
+        write_remote_codex(&remote_manifest("9999.01.01.1", "blocked", "cached-ready"));
 
         let cached = explain(Agent::Codex, "cached-ready");
         assert_eq!(cached.state, AgentState::Blocked);
@@ -261,7 +261,7 @@ fn detection_uses_cached_manifest_until_explicit_reload() {
             Some("test")
         );
 
-        write_remote_codex_without_reload(&remote_manifest("2026.06.10.4", "working", "new-ready"));
+        write_remote_codex_without_reload(&remote_manifest("9999.01.01.2", "working", "new-ready"));
 
         let unchanged = explain(Agent::Codex, "new-ready");
         assert_eq!(unchanged.state, AgentState::Idle);
@@ -271,7 +271,7 @@ fn detection_uses_cached_manifest_until_explicit_reload() {
         );
         assert_eq!(
             unchanged.cached_remote_version.as_deref(),
-            Some("2026.06.10.3")
+            Some("9999.01.01.1")
         );
 
         reload_manifests();
@@ -280,7 +280,7 @@ fn detection_uses_cached_manifest_until_explicit_reload() {
         assert_eq!(reloaded.state, AgentState::Working);
         assert_eq!(
             reloaded.cached_remote_version.as_deref(),
-            Some("2026.06.10.4")
+            Some("9999.01.01.2")
         );
         assert_eq!(
             reloaded.matched_rule.as_ref().map(|rule| rule.id.as_str()),
@@ -1096,6 +1096,35 @@ fn codex_osc_title_braille_spinner_is_working() {
 }
 
 #[test]
+fn codex_osc_title_spinner_away_from_the_title_start_is_working() {
+    // Fork-only. Upstream `4800ff54` unanchored the spinner class because Codex
+    // moved the braille cell off the front of the title, but shipped no test for
+    // it. Under the old `^[\x{2800}-\x{28FF}] ` regex neither the working rule
+    // nor `osc_title_idle`'s `not` gate matched these titles, so a working pane
+    // reported Idle.
+    for title in ["llm-proxy \u{2838}", "codex \u{2839} llm-proxy"] {
+        let result = osc_explain(Agent::Codex, "", title, "");
+        assert_eq!(result.state, AgentState::Working, "title {title:?}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|r| r.id.as_str()),
+            Some("osc_title_working"),
+            "title {title:?}"
+        );
+        assert!(result.visible_working, "title {title:?}");
+    }
+
+    // The class is an explicit frame list, not the whole braille block, and it
+    // still needs a space or an edge on both sides: a braille cell welded into a
+    // word is not a spinner.
+    let not_a_spinner = osc_explain(Agent::Codex, "", "llm\u{280b}proxy", "");
+    assert_eq!(not_a_spinner.state, AgentState::Idle);
+    assert_eq!(
+        not_a_spinner.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("osc_title_idle")
+    );
+}
+
+#[test]
 fn codex_osc_title_action_required_is_blocked() {
     let result = osc_explain(Agent::Codex, "", "[ . ] Action Required | llm-proxy", "");
     assert_eq!(result.state, AgentState::Blocked);
@@ -1132,6 +1161,126 @@ fn codex_background_terminal_screen_does_not_override_osc_idle() {
 }
 
 #[test]
+fn codex_screen_working_fallback_handles_static_osc_title() {
+    let screen = "• I’ll run it and wait for completion.\n\n\
+        ◦ Working (1m 16s • esc to interrupt) · 1 background…\n\n\
+        › Use /skills to list available skills\n\n\
+        gpt-5.6-sol default · /work\n";
+    let result = osc_explain(Agent::Codex, screen, "project", "");
+
+    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("screen_working_fallback")
+    );
+    assert!(result.visible_working);
+}
+
+#[test]
+fn codex_osc_working_remains_preferred_over_screen_fallback() {
+    let screen = "• Working (4s • esc to interrupt)\n\n\
+        › Use /skills to list available skills\n\n\
+        gpt-5.6-sol default · /work\n";
+    let result = osc_explain(Agent::Codex, screen, "⠸ project", "");
+
+    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("osc_title_working")
+    );
+    assert!(result.visible_working);
+}
+
+#[test]
+fn codex_screen_blocker_outranks_working_fallback() {
+    let screen = "• Working (4s • esc to interrupt)\n\
+        › 1. Yes, proceed\n\
+        Press enter to confirm or esc to cancel\n";
+    let result = osc_explain(Agent::Codex, screen, "project", "");
+
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_strong_blocker")
+    );
+    assert!(result.visible_blocker);
+    assert!(!result.visible_working);
+}
+
+#[test]
+fn codex_weak_blocker_outranks_working_fallback() {
+    let screen = "• Working (4s • esc to interrupt)\n\
+        do you want to continue? [y/n]\n\
+        › Use /skills to list available skills\n";
+    let result = osc_explain(Agent::Codex, screen, "project", "");
+
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("weak_blocker")
+    );
+    assert!(!result.visible_working);
+}
+
+#[test]
+fn codex_transcript_viewer_outranks_working_fallback() {
+    let screen = "• Working (4s • esc to interrupt)\n\
+        › transcript\n\
+        ↑/↓ to scroll · pgup/pgdn to move · home/end to jump · q to quit · esc to edit prev\n";
+    let result = osc_explain(Agent::Codex, screen, "project", "");
+
+    assert_eq!(result.state, AgentState::Unknown);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("transcript_viewer")
+    );
+    assert!(result.skip_state_update);
+    assert!(!result.visible_working);
+}
+
+#[test]
+fn codex_screen_working_fallback_ignores_stale_and_prompt_text() {
+    let screens = [
+        "◦ Working (1m 16s • esc to interrupt)\n\
+         ■ Conversation interrupted\n\
+         › Use /skills to list available skills\n\
+         gpt-5.6-sol default · /work\n",
+        "› Explain the text ◦ Working (1m 16s • esc to interrupt)\n\
+         gpt-5.6-sol default · /work\n",
+        "  ◦ Working (1m 16s • esc to interrupt)\n\
+         › Use /skills to list available skills\n\
+         gpt-5.6-sol default · /work\n",
+    ];
+
+    for screen in screens {
+        let result = osc_explain(Agent::Codex, screen, "project", "");
+        assert_eq!(result.state, AgentState::Idle);
+        assert_eq!(
+            result.matched_rule.as_ref().map(|r| r.id.as_str()),
+            Some("osc_title_idle")
+        );
+        assert!(result.visible_idle);
+        assert!(!result.visible_working);
+    }
+}
+
+#[test]
+fn codex_screen_working_fallback_ignores_interrupted_short_terminal() {
+    let screen = "◦ Working (1m 16s • esc to interrupt)\n\
+        ■ Conversation interrupted\n\
+        ›\n";
+    let result = osc_explain(Agent::Codex, screen, "project", "");
+
+    assert_eq!(result.state, AgentState::Idle);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("osc_title_idle")
+    );
+    assert!(result.visible_idle);
+    assert!(!result.visible_working);
+}
+
+#[test]
 fn codex_osc_working_beats_weak_blocker_screen() {
     // A stale [y/n] on screen triggers weak_blocker at priority 600, but an
     // active braille spinner in the OSC title is priority 1050 — OSC wins.
@@ -1142,4 +1291,70 @@ fn codex_osc_working_beats_weak_blocker_screen() {
         result.matched_rule.as_ref().map(|r| r.id.as_str()),
         Some("osc_title_working")
     );
+}
+
+// --- Amp OSC + status-footer rules ---
+
+#[test]
+fn amp_manifest_detects_osc_states_and_the_status_footer() {
+    // Fork-only. Upstream `b03f033d` added all four rules below without a test.
+    // Amp's title carries the turn state, and its status footer is the only
+    // evidence when the title is static.
+    let blocked = osc_explain(
+        Agent::Amp,
+        "",
+        "Plugin confirmation needed - amp - zynk",
+        "",
+    );
+    assert_eq!(blocked.state, AgentState::Blocked);
+    assert_eq!(
+        blocked.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("osc_title_plugin_confirmation_blocked")
+    );
+    assert!(blocked.visible_blocker);
+    assert!(!blocked.visible_idle);
+
+    // A braille spinner outranks the idle title, and the idle rule's `not` gate
+    // keeps it quiet even though the title still carries " - amp - ".
+    let working_title = osc_explain(Agent::Amp, "", "\u{2802} - amp - zynk", "");
+    assert_eq!(working_title.state, AgentState::Working);
+    assert_eq!(
+        working_title.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("osc_title_working")
+    );
+    assert!(working_title.visible_working);
+
+    // Static title, working footer: `status_footer_working` (200) is the only
+    // working evidence and it must beat `osc_title_idle` (50).
+    for verb in ["thinking", "streaming", "running tools", "waiting"] {
+        let screen = format!("  \u{2570} \u{2838} {verb} \u{2500}\u{2500}\u{2500}\n");
+        let result = osc_explain(Agent::Amp, &screen, " - amp - zynk", "");
+        assert_eq!(result.state, AgentState::Working, "verb {verb:?}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|r| r.id.as_str()),
+            Some("status_footer_working"),
+            "verb {verb:?}"
+        );
+        assert!(result.visible_working, "verb {verb:?}");
+    }
+
+    // Static title, no footer: idle.
+    let idle = osc_explain(Agent::Amp, "ready\n", " - amp - zynk", "");
+    assert_eq!(idle.state, AgentState::Idle);
+    assert_eq!(
+        idle.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("osc_title_idle")
+    );
+    assert!(idle.visible_idle);
+
+    // The footer is bounded to the bottom five non-empty lines, so a footer
+    // stranded above newer output is stale scrollback, not a live turn.
+    let stale = osc_explain(
+        Agent::Amp,
+        "  \u{2570} \u{2838} thinking \u{2500}\u{2500}\u{2500}\none\ntwo\nthree\nfour\nfive\n",
+        " - amp - zynk",
+        "",
+    );
+    assert_eq!(stale.state, AgentState::Idle);
+    assert!(!stale.visible_working);
 }
