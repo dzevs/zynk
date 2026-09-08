@@ -1,6 +1,5 @@
 use std::fs;
 use std::io;
-#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
@@ -9,58 +8,25 @@ pub(crate) type LocalStream = interprocess::local_socket::Stream;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SocketFileIdentity {
-    #[cfg(unix)]
     dev: u64,
-    #[cfg(unix)]
     ino: u64,
-    #[cfg(windows)]
-    marker: Vec<u8>,
 }
 
 pub(crate) fn connect_local_stream(path: &Path) -> io::Result<LocalStream> {
-    #[cfg(unix)]
-    {
-        use interprocess::local_socket::{prelude::*, GenericFilePath};
+    use interprocess::local_socket::{prelude::*, GenericFilePath};
 
-        let name = path.to_fs_name::<GenericFilePath>()?;
-        LocalStream::connect(name)
-    }
-
-    #[cfg(windows)]
-    {
-        use interprocess::local_socket::{prelude::*, GenericNamespaced};
-
-        let name = path.to_string_lossy().to_string();
-        let name = name.to_ns_name::<GenericNamespaced>()?;
-        LocalStream::connect(name)
-    }
+    let name = path.to_fs_name::<GenericFilePath>()?;
+    LocalStream::connect(name)
 }
 
 pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
-    #[cfg(unix)]
-    {
-        use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
+    use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
 
-        let name = path.to_fs_name::<GenericFilePath>()?;
-        ListenerOptions::new()
-            .name(name)
-            .reclaim_name(false)
-            .create_sync()
-    }
-
-    #[cfg(windows)]
-    {
-        use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
-
-        let name = path.to_string_lossy().to_string();
-        let name = name.to_ns_name::<GenericNamespaced>()?;
-        let listener = ListenerOptions::new()
-            .name(name)
-            .reclaim_name(false)
-            .create_sync()?;
-        fs::write(path, windows_socket_marker())?;
-        Ok(listener)
-    }
+    let name = path.to_fs_name::<GenericFilePath>()?;
+    ListenerOptions::new()
+        .name(name)
+        .reclaim_name(false)
+        .create_sync()
 }
 
 pub(crate) fn prepare_socket_path(
@@ -96,25 +62,15 @@ fn stale_socket_connect_error(kind: io::ErrorKind) -> bool {
     matches!(
         kind,
         io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound | io::ErrorKind::TimedOut
-    ) || (cfg!(windows) && kind == io::ErrorKind::WouldBlock)
+    )
 }
 
 pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity> {
-    #[cfg(windows)]
-    {
-        Ok(SocketFileIdentity {
-            marker: fs::read(path)?,
-        })
-    }
-
-    #[cfg(unix)]
-    {
-        let metadata = fs::metadata(path)?;
-        Ok(SocketFileIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        })
-    }
+    let metadata = fs::metadata(path)?;
+    Ok(SocketFileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
 }
 
 pub(crate) fn remove_socket_file_if_owned(
@@ -138,63 +94,21 @@ pub(crate) fn remove_socket_file_if_owned(
     }
 }
 
-#[cfg(windows)]
-fn windows_socket_marker() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("{}:{now}", std::process::id())
-}
-
-#[cfg(unix)]
 pub(crate) fn restrict_socket_permissions(path: &Path, mode: u32) -> io::Result<()> {
     let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_mode(mode);
     fs::set_permissions(path, permissions)
 }
 
-#[cfg(windows)]
-pub(crate) fn restrict_socket_permissions(_path: &Path, _mode: u32) -> io::Result<()> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(windows)]
-    use std::path::PathBuf;
 
     #[test]
     fn stale_socket_connect_errors_keep_unix_would_block_strict() {
         assert!(stale_socket_connect_error(io::ErrorKind::ConnectionRefused));
         assert!(stale_socket_connect_error(io::ErrorKind::NotFound));
         assert!(stale_socket_connect_error(io::ErrorKind::TimedOut));
-        assert_eq!(
-            stale_socket_connect_error(io::ErrorKind::WouldBlock),
-            cfg!(windows)
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn remove_socket_file_if_owned_compares_windows_marker_contents() {
-        let path = temp_socket_marker_path("same-len-marker");
-        let _ = fs::remove_file(&path);
-
-        fs::write(&path, b"marker-aa").expect("write first marker");
-        let identity = socket_file_identity(&path).expect("read first identity");
-        fs::write(&path, b"marker-bb").expect("replace with same-length marker");
-
-        remove_socket_file_if_owned(&path, &identity).expect("remove owned marker");
-
-        assert!(path.exists(), "same-length replacement marker must survive");
-
-        let _ = fs::remove_file(&path);
-    }
-
-    #[cfg(windows)]
-    fn temp_socket_marker_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("zynk-{name}-{}.sock", std::process::id()))
+        assert!(!stale_socket_connect_error(io::ErrorKind::WouldBlock));
     }
 }

@@ -72,10 +72,7 @@ fn sanitize_extension(extension: &str) -> &'static str {
 }
 
 fn staging_dir() -> PathBuf {
-    #[cfg(unix)]
     let user_id = unsafe { libc::geteuid() };
-    #[cfg(windows)]
-    let user_id = std::process::id();
     std::env::temp_dir().join(format!("zynk-clipboard-images-{user_id}"))
 }
 
@@ -93,26 +90,16 @@ fn ensure_staging_dir() -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-#[cfg(unix)]
 fn restrict_file_options(options: &mut fs::OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
     options.mode(0o600);
 }
 
-#[cfg(windows)]
-fn restrict_file_options(_options: &mut fs::OpenOptions) {}
-
-#[cfg(unix)]
 fn restrict_dir_permissions(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(windows)]
-fn restrict_dir_permissions(_dir: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 fn cleanup_stale(dir: &Path) {

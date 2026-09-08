@@ -23,9 +23,6 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyModifiers, MouseEventKind};
 use interprocess::local_socket::traits::Listener as _;
-#[cfg(windows)]
-use interprocess::local_socket::traits::Stream as _;
-#[cfg(unix)]
 use interprocess::local_socket::ListenerNonblockingMode;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
@@ -46,7 +43,6 @@ use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
     MAX_GRAPHICS_FRAME_SIZE,
 };
-#[cfg(unix)]
 use crate::server::client_accept::{
     accept_pending_client_connections, reject_pending_client_connections,
 };
@@ -191,16 +187,12 @@ const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// The headless server — runs the zynk event loop without a real terminal.
 pub struct HeadlessServer {
     app: app::App,
-    #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
-    #[cfg(unix)]
     api_server: Option<api::ServerHandle>,
-    #[cfg(unix)]
     client_listener: LocalListener,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
-    #[cfg(unix)]
     next_client_id: u64,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
     foreground_client_id: Option<u64>,
@@ -222,7 +214,6 @@ pub struct HeadlessServer {
     /// Flag set while exporting live PTYs to a replacement server.
     handoff_in_progress: bool,
     /// Imported panes get one app-safe resize nudge after the first client attaches.
-    #[cfg(unix)]
     pending_handoff_repaint_nudge: bool,
     /// Flag set by Ctrl+C or `server stop` signal.
     should_quit: Arc<AtomicBool>,
@@ -305,51 +296,6 @@ fn apply_terminal_attach_input(
         .map_err(|err| format!("terminal attach input failed: {err}"))
 }
 
-#[cfg(windows)]
-fn spawn_windows_client_accept_thread(
-    listener: LocalListener,
-    should_quit: Arc<AtomicBool>,
-    server_event_tx: mpsc::Sender<ServerEvent>,
-) {
-    std::thread::spawn(move || {
-        let mut next_client_id = 1_u64;
-        while !should_quit.load(Ordering::Acquire) {
-            let stream = match listener.accept() {
-                Ok(stream) => stream,
-                Err(err) => {
-                    if should_quit.load(Ordering::Acquire) {
-                        break;
-                    }
-                    error!(err = %err, "client listener accept failed");
-                    std::thread::sleep(Duration::from_millis(50));
-                    continue;
-                }
-            };
-
-            let client_id = next_client_id;
-            next_client_id = next_client_id.saturating_add(1);
-
-            if let Err(err) = stream.set_nonblocking(true) {
-                warn!(err = %err, "failed to set client stream nonblocking");
-                continue;
-            }
-
-            let should_quit = should_quit.clone();
-            let server_event_tx = server_event_tx.clone();
-            std::thread::spawn(move || {
-                if let Err(err) = crate::server::client_transport::handle_client_handshake(
-                    stream,
-                    client_id,
-                    &server_event_tx,
-                    &should_quit,
-                ) {
-                    debug!(client_id, err = %err, "client handshake failed");
-                }
-            });
-        }
-    });
-}
-
 impl HeadlessServer {
     /// Creates and starts the headless server.
     ///
@@ -371,35 +317,26 @@ impl HeadlessServer {
         let client_socket_identity = socket_file_identity(&client_path)?;
         info!(path = %client_path.display(), "client protocol socket listening");
 
-        // Set non-blocking on Unix so we can poll it from the event loop.
-        #[cfg(unix)]
+        // Non-blocking so we can poll it from the event loop.
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
         let should_quit = Arc::new(AtomicBool::new(false));
 
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
-        #[cfg(windows)]
-        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
 
         let server_keybindings = app_keybindings(&app);
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
             server_config_diagnostic_summaries(config_diagnostics);
-        #[cfg(not(unix))]
-        let _ = (&api_tx, &api_server);
 
         Ok(Self {
             app,
-            #[cfg(unix)]
             api_tx,
-            #[cfg(unix)]
             api_server,
-            #[cfg(unix)]
             client_listener: listener,
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
-            #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
             server_keybindings,
@@ -410,7 +347,6 @@ impl HeadlessServer {
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
             handoff_in_progress: false,
-            #[cfg(unix)]
             pending_handoff_repaint_nudge: false,
             should_quit,
             server_event_rx,
@@ -801,7 +737,6 @@ impl HeadlessServer {
         self.app.set_host_terminal_theme(host_terminal_theme);
     }
 
-    #[cfg(unix)]
     fn perform_live_handoff(
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
@@ -1043,14 +978,6 @@ impl HeadlessServer {
         Ok(())
     }
 
-    #[cfg(not(unix))]
-    fn perform_live_handoff(
-        &mut self,
-        _params: crate::api::schema::ServerLiveHandoffParams,
-    ) -> io::Result<()> {
-        Err(io::Error::other("live handoff is only supported on Unix"))
-    }
-
     fn sync_visible_server_config_diagnostic(&mut self, uses_local_keybindings: bool) {
         let visible = if uses_local_keybindings {
             &self.server_config_diagnostic_without_keybindings
@@ -1064,7 +991,6 @@ impl HeadlessServer {
         }
     }
 
-    #[cfg(unix)]
     fn restore_public_sockets_after_failed_handoff(&mut self) -> io::Result<()> {
         let api_tx = self
             .api_tx
@@ -1086,7 +1012,6 @@ impl HeadlessServer {
         Ok(())
     }
 
-    #[cfg(unix)]
     fn wait_then_restore_public_sockets_after_failed_handoff(&mut self) -> io::Result<()> {
         let timeout = crate::server::handoff::COMMIT_TIMEOUT + Duration::from_secs(2);
         wait_for_old_public_sockets_to_close(timeout)?;
@@ -1096,7 +1021,6 @@ impl HeadlessServer {
     /// Bounded pause of both DB workers at the START of a live handoff (see
     /// `handoff_worker_idle_deadline`); `false` = one of them is still inside a unit of work past
     /// the deadline.
-    #[cfg(unix)]
     fn pause_db_workers_for_handoff(&mut self, deadline: Duration) -> bool {
         let started = std::time::Instant::now();
         let embedding_idle = self
@@ -1114,7 +1038,6 @@ impl HeadlessServer {
     }
 
     /// Every pre-commit rollback: the paused workers own their jobs again.
-    #[cfg(unix)]
     fn resume_db_workers(&mut self) {
         if let Some(worker) = self.app.zynk_embedding_worker.as_ref() {
             worker.resume();
@@ -1129,7 +1052,6 @@ impl HeadlessServer {
     /// immediate: no coupling with the replacement's 30 s "committed" wait. (A receipt job still
     /// queued would DRAIN on drop — the handle releases the pause before joining — never be
     /// cancelled.)
-    #[cfg(unix)]
     fn quiesce_db_workers_for_handoff(&mut self) {
         let _ = self.app.zynk_receipt_worker.take();
         let _ = self.app.zynk_embedding_worker.take();
@@ -1138,13 +1060,11 @@ impl HeadlessServer {
 
     /// Rollback restoration after a failed commit: this server keeps serving, so it needs its
     /// workers back (fresh threads; startup recovery finds nothing running).
-    #[cfg(unix)]
     fn restore_db_workers_after_failed_handoff(&mut self) {
         install_db_workers(&mut self.app);
         info!("zynk db workers restored after failed handoff");
     }
 
-    #[cfg(unix)]
     fn rollback_handoff_before_commit(
         &mut self,
         socket_path: &Path,
@@ -1160,7 +1080,6 @@ impl HeadlessServer {
         let _ = std::fs::remove_file(socket_path);
     }
 
-    #[cfg(unix)]
     fn nudge_handoff_panes_on_first_client_attach(&mut self) {
         if !self.pending_handoff_repaint_nudge {
             return;
@@ -1170,9 +1089,6 @@ impl HeadlessServer {
             .terminal_runtimes
             .nudge_child_redraw_after_handoff();
     }
-
-    #[cfg(not(unix))]
-    fn nudge_handoff_panes_on_first_client_attach(&mut self) {}
 
     fn reload_server_config(&mut self, notify_success: bool) -> crate::config::ConfigReloadReport {
         let server_keybindings = self.server_keybindings.clone();
@@ -1346,7 +1262,6 @@ impl HeadlessServer {
     }
 
     /// Accepts pending client connections from the non-blocking listener.
-    #[cfg(unix)]
     fn accept_client_connections(&mut self) -> io::Result<()> {
         if self.handoff_in_progress {
             return reject_pending_client_connections(&self.client_listener);
@@ -1357,13 +1272,6 @@ impl HeadlessServer {
             &self.should_quit,
             &self.server_event_tx,
         )
-    }
-
-    /// Windows named-pipe clients can block in connect unless the server has a
-    /// pending blocking accept. The dedicated accept thread handles that path.
-    #[cfg(windows)]
-    fn accept_client_connections(&mut self) -> io::Result<()> {
-        Ok(())
     }
 
     /// Drains server events from the dedicated channel.
@@ -2167,7 +2075,6 @@ impl HeadlessServer {
         }
     }
 
-    #[cfg(unix)]
     fn disconnect_all_clients_for_handoff(&mut self) {
         let client_ids = self.clients.keys().copied().collect::<Vec<_>>();
         for client_id in client_ids {
@@ -3866,8 +3773,7 @@ fn take_startup_cwd() -> Option<PathBuf> {
 #[derive(Clone, Copy)]
 enum DbPreflightRecovery {
     ColdStart,
-    /// Only the Unix live-handoff replacement validates without recovery.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// Only the live-handoff replacement validates without recovery.
     None,
 }
 
@@ -3916,10 +3822,8 @@ fn preflight_native_db(recovery: DbPreflightRecovery) -> Result<(), crate::zynk:
 /// How long a live handoff waits for the DB workers to reach an idle point before it withdraws any
 /// service (override: `ZYNK_HANDOFF_WORKER_IDLE_MS`). Well under the replacement's 30 s "committed"
 /// wait, which only starts after this succeeded.
-#[cfg(unix)]
 const HANDOFF_WORKER_IDLE_DEADLINE: Duration = Duration::from_secs(10);
 
-#[cfg(unix)]
 fn handoff_worker_idle_deadline() -> Duration {
     std::env::var("ZYNK_HANDOFF_WORKER_IDLE_MS")
         .ok()
@@ -3935,7 +3839,6 @@ fn install_db_workers(app: &mut app::App) {
     info!("zynk db workers installed");
 }
 
-#[cfg(unix)]
 fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
     let loaded_config = config::Config::load();
     let mut received = match crate::server::handoff::receive(socket_path, token) {
@@ -4024,7 +3927,6 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     result
 }
 
-#[cfg(unix)]
 fn wait_for_old_public_sockets_to_close(timeout: Duration) -> io::Result<()> {
     let deadline = Instant::now() + timeout;
     let api_socket = api::socket_path();
@@ -4042,11 +3944,6 @@ fn wait_for_old_public_sockets_to_close(timeout: Duration) -> io::Result<()> {
         io::ErrorKind::TimedOut,
         "old server sockets did not close before handoff import bind",
     ))
-}
-
-#[cfg(not(unix))]
-fn run_handoff_import_server(_socket_path: &Path, _token: &str) -> io::Result<()> {
-    Err(io::Error::other("live handoff is only supported on Unix"))
 }
 
 fn print_ready_message(api_socket: &Path, client_socket: &Path) {
@@ -4099,29 +3996,20 @@ mod tests {
         let listener = bind_local_listener(&socket_path).expect("bind test listener");
         let client_socket_identity =
             socket_file_identity(&socket_path).expect("test listener socket identity");
-        #[cfg(unix)]
         listener
             .set_nonblocking(ListenerNonblockingMode::Accept)
             .expect("set listener nonblocking");
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
-        #[cfg(windows)]
-        let should_quit = Arc::new(AtomicBool::new(false));
-        #[cfg(windows)]
-        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
         let server_keybindings = app_keybindings(&app);
 
         HeadlessServer {
             app,
-            #[cfg(unix)]
             api_tx: None,
-            #[cfg(unix)]
             api_server: None,
-            #[cfg(unix)]
             client_listener: listener,
             client_socket_path: socket_path,
             client_socket_identity,
             clients: HashMap::new(),
-            #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
             server_keybindings,
@@ -4132,12 +4020,8 @@ mod tests {
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
             handoff_in_progress: false,
-            #[cfg(unix)]
             pending_handoff_repaint_nudge: false,
-            #[cfg(unix)]
             should_quit: Arc::new(AtomicBool::new(false)),
-            #[cfg(windows)]
-            should_quit,
             server_event_rx,
             server_event_tx,
         }

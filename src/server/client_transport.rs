@@ -382,24 +382,6 @@ fn input_events_within_limits(events: &[ClientInputEvent]) -> bool {
     true
 }
 
-#[cfg(windows)]
-fn set_client_recv_timeout(
-    stream: &LocalStream,
-    timeout: Option<Duration>,
-    context: &'static str,
-    client_id: u64,
-) -> io::Result<()> {
-    match stream.set_recv_timeout(timeout) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-            debug!(client_id, err = %err, context, "client socket receive timeout unavailable");
-            Ok(())
-        }
-        Err(err) => Err(err),
-    }
-}
-
-#[cfg(not(windows))]
 fn set_client_recv_timeout(
     stream: &LocalStream,
     timeout: Option<Duration>,
@@ -761,15 +743,8 @@ mod tests {
             .unwrap()
             .as_nanos();
         let filename = format!("h{}-{nanos}.sock", std::process::id());
-        #[cfg(unix)]
-        {
-            let _ = name;
-            PathBuf::from("/tmp").join(filename)
-        }
-        #[cfg(windows)]
-        {
-            std::env::temp_dir().join(format!("zynk-{name}-{filename}"))
-        }
+        let _ = name;
+        PathBuf::from("/tmp").join(filename)
     }
 
     fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, TestSocketPath) {
@@ -911,9 +886,6 @@ mod tests {
     fn client_writer_closes_queue_after_socket_write_failure() {
         let (client_stream, server_stream, _path) =
             local_stream_pair("client-writer-socket-failure");
-        // upstream 3366121: windows named pipes don't support I/O send timeouts; skip this
-        // setup on windows (the closed-client socket-write-failure close path still runs).
-        #[cfg(not(windows))]
         server_stream
             .set_send_timeout(Some(Duration::from_millis(100)))
             .expect("set test send timeout");
