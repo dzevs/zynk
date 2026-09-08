@@ -8,7 +8,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
-    branches: [master, windows, main]
+    branches: [master, main]
     paths-ignore:
       - "website/**"
 
