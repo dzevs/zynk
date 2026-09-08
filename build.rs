@@ -40,7 +40,15 @@ pub fn archive_misaligned_members(bytes: &[u8]) -> Result<Vec<String>, String> {
     }
     let mut offset = MAGIC.len();
     let mut misaligned = Vec::new();
-    while offset + HEADER <= bytes.len() {
+    // Structural completeness is required, not just per-member plausibility: the rewritten archive is trusted
+    // only when every header, payload and pad byte lies inside the file and nothing trails the last member.
+    while offset < bytes.len() {
+        if bytes.len() - offset < HEADER {
+            return Err(format!(
+                "trailing {} bytes after the last member (partial header at offset {offset})",
+                bytes.len() - offset
+            ));
+        }
         let header = &bytes[offset..offset + HEADER];
         if &header[58..60] != b"`\n" {
             return Err(format!("bad member header at offset {offset}"));
@@ -52,17 +60,29 @@ pub fn archive_misaligned_members(bytes: &[u8]) -> Result<Vec<String>, String> {
             .trim()
             .parse()
             .map_err(|e| format!("bad member size at offset {offset}: {e}"))?;
-        let mut data = offset + HEADER;
+        let data_start = offset + HEADER;
+        let data_end = data_start
+            .checked_add(size)
+            .ok_or_else(|| format!("member size overflow at offset {offset}"))?;
+        if data_end > bytes.len() {
+            return Err(format!(
+                "member payload at offset {offset} extends beyond EOF ({data_end} > {})",
+                bytes.len()
+            ));
+        }
+        let mut data = data_start;
         let mut member = name.clone();
         if let Some(len) = name.strip_prefix("#1/") {
             let len: usize = len
                 .trim()
                 .parse()
                 .map_err(|e| format!("bad BSD name length at offset {offset}: {e}"))?;
-            let raw = bytes
-                .get(data..data + len)
-                .ok_or_else(|| format!("truncated BSD member name at offset {offset}"))?;
-            member = String::from_utf8_lossy(raw)
+            if len > size {
+                return Err(format!(
+                    "BSD name length {len} exceeds the member size {size} at offset {offset}"
+                ));
+            }
+            member = String::from_utf8_lossy(&bytes[data..data + len])
                 .trim_end_matches('\0')
                 .to_string();
             data += len;
@@ -70,7 +90,8 @@ pub fn archive_misaligned_members(bytes: &[u8]) -> Result<Vec<String>, String> {
         if !member.starts_with("__.SYMDEF") && !data.is_multiple_of(8) {
             misaligned.push(member);
         }
-        offset += HEADER + size + (size & 1);
+        // Members are padded to an even size; the final member may end exactly at EOF without its pad byte.
+        offset = (data_end + (size & 1)).min(bytes.len());
     }
     Ok(misaligned)
 }
