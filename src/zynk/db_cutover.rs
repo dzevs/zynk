@@ -144,9 +144,11 @@ fn entry_identity(path: &Path) -> Option<FileIdentity> {
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT,
     };
-    // Open the entry itself (a reparse point is not followed) without requiring data access.
+    // Open the entry itself (a reparse point is not followed) with a metadata-only access mask:
+    // querying file information needs no data-read permission, so an entry whose bytes this
+    // process may not read is still identifiable.
     let file = std::fs::OpenOptions::new()
-        .read(true)
+        .access_mode(0)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .ok()?;
@@ -463,9 +465,10 @@ fn relocate_bundle_with(
     }
     if !displaced.is_empty() {
         let custody = format!(
-            "a member of the backup slot is missing or was replaced by another writer after it was \
-             moved ({}); the original bytes of that member were displaced by that writer and are not \
-             in the backup",
+            "a member of the backup slot is missing, was replaced by another writer, or could not be \
+             identified after it was moved ({}); its original bytes are not known to be in the backup \
+             (a replaced member's bytes were displaced by that writer; an unreadable identity is an \
+             I/O condition, not proof of a writer)",
             displaced
                 .iter()
                 .map(|p| printable_path(p))
@@ -1692,8 +1695,7 @@ mod tests {
         };
         let err = relocate_bundle(&db, &mut mover).unwrap_err();
         assert!(
-            err.contains("missing or was replaced by another writer")
-                && err.contains("not moved back"),
+            err.contains("was replaced by another writer") && err.contains("not moved back"),
             "{err}"
         );
         let slot = db.with_file_name("zynk.db.wrapper-backup-0");
@@ -1770,8 +1772,7 @@ mod tests {
         };
         let err = relocate_bundle(&db, &mut mover).unwrap_err();
         assert!(
-            err.contains("missing or was replaced by another writer")
-                && err.contains("not moved back"),
+            err.contains("was replaced by another writer") && err.contains("not moved back"),
             "{err}"
         );
         assert!(!db.exists(), "the deleted member cannot be resurrected");
@@ -1812,8 +1813,7 @@ mod tests {
             };
             let err = relocate_bundle(&db, &mut mover).unwrap_err();
             assert!(
-                err.contains("missing or was replaced by another writer")
-                    && err.contains("not moved back"),
+                err.contains("was replaced by another writer") && err.contains("not moved back"),
                 "{variant}: the displaced member must be named: {err}"
             );
             assert!(

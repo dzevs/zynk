@@ -125,9 +125,9 @@ pub async fn append_received_event(
 }
 
 /// The durable identity a stored participant row offers, canonicalized: a COMPLETE hook session
-/// triple, else a terminal id, else nothing. A partial triple (a value without its source or kind)
-/// is treated as no session, so it never binds by value alone; combined with no terminal it is
-/// `None` and fails closed at the target.
+/// triple, else — with no session at all — a terminal id, else nothing. A partial triple (a value
+/// without its source or kind) is `Partial`: refused at the target, never bound by value alone; the
+/// sender-side self check falls back to the sender's terminal, then its stored pane, for such a row.
 enum StoredAnchor<'a> {
     Session {
         source: &'a str,

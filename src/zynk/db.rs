@@ -289,8 +289,9 @@ const MAX_SYMLINKS: usize = 100;
 /// so the main file, its `-journal`/`-wal`/`-shm` and the init lock already coincide through it, and
 /// the kernel applies the same resolution to the unresolved prefix on every open. Only a linked
 /// FINAL component moves the sidecars away from the configured name — that is what is resolved.
-/// An absent final target is returned as is (SQLite creates the database there). Windows' VFS does
-/// not follow links, so only the absolute form is taken there.
+/// An absent final target is returned as is (SQLite creates the database there). Windows' VFS follows
+/// a final link while zynk cannot resolve it there, so a final-component link is refused (item 25) and
+/// only the absolute form is taken.
 pub(crate) fn sqlite_effective_path(path: &Path) -> Result<PathBuf, DbError> {
     let io = |what: &str, err: std::io::Error| {
         DbError::new(
