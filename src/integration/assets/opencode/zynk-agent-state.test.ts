@@ -58,6 +58,13 @@ function waitForNextRequest(): Promise<void> {
   return new Promise((resolve) => requestWaiters.push(resolve));
 }
 
+test("stays disabled without the zynk socket environment", async () => {
+  delete process.env.ZYNK_SOCKET_PATH;
+
+  expect(await loadPlugin()).toEqual({});
+  expect(requests).toEqual([]);
+});
+
 test("serializes lifecycle reports", async () => {
   autoAcknowledge = false;
   const plugin = await loadPlugin();

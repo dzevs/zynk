@@ -2,7 +2,7 @@
 // managed by zynk; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // ZYNK_INTEGRATION_ID=kilo
-// ZYNK_INTEGRATION_VERSION=2
+// ZYNK_INTEGRATION_VERSION=3
 
 import net from "node:net";
 

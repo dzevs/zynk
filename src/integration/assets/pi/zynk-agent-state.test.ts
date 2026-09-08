@@ -74,9 +74,9 @@ describe("receiver/footer/receipt surface is fully removed (state-only)", () => 
 // ---------------------------------------------------------------------------
 
 describe("install markers + identity are preserved", () => {
-  test("integration id stays pi and version is bumped to 7", () => {
+  test("integration id stays pi and version is bumped to 8", () => {
     expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_ID=pi");
-    expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_VERSION=7");
+    expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_VERSION=8");
   });
 
   test("ZYNK_* env reads keep the ZYNK_* fallback", () => {

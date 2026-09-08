@@ -2,10 +2,10 @@
 // managed by zynk; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // ZYNK_INTEGRATION_ID=pi
-// ZYNK_INTEGRATION_VERSION=7
+// ZYNK_INTEGRATION_VERSION=8
 // @ts-nocheck
 
-import { createConnection } from "node:net";
+import net from "node:net";
 
 const zynkEnv = process.env.ZYNK_ENV ?? process.env.ZYNK_ENV;
 const socketPath = process.env.ZYNK_SOCKET_PATH ?? process.env.ZYNK_SOCKET_PATH;
@@ -34,7 +34,7 @@ function sendRequestAttempt(request: unknown, timeoutMs: number): Promise<boolea
       resolve(delivered);
     };
 
-    const socket = createConnection(socketPath!);
+    const socket = net.createConnection(socketPath!);
     socket.on("error", () => finish(false));
     socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on("data", () => finish(true));

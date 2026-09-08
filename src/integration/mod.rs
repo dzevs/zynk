@@ -22,11 +22,11 @@ pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, Integration
 
 pub(crate) const PI_EXTENSION_INSTALL_NAME: &str = "zynk-agent-state.ts";
 pub(crate) const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/zynk-agent-state.ts");
-pub(crate) const PI_INTEGRATION_VERSION: u32 = 7;
+pub(crate) const PI_INTEGRATION_VERSION: u32 = 8;
 pub(crate) const OMP_EXTENSION_INSTALL_NAME: &str = "zynk-omp-agent-state.ts";
 // Pre-rebrand on-disk name of the omp extension; uninstall strips it too.
 pub(crate) const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/zynk-agent-state.ts");
-pub(crate) const OMP_INTEGRATION_VERSION: u32 = 5;
+pub(crate) const OMP_INTEGRATION_VERSION: u32 = 6;
 pub(crate) const CLAUDE_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/zynk-agent-state.sh");
 pub(crate) const CLAUDE_INTEGRATION_VERSION: u32 = 7;
@@ -35,21 +35,39 @@ pub(crate) const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/zynk-agent-
 pub(crate) const CODEX_INTEGRATION_VERSION: u32 = 6;
 pub(crate) const KIMI_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const KIMI_HOOK_ASSET: &str = include_str!("assets/kimi/zynk-agent-state.sh");
-pub(crate) const KIMI_INTEGRATION_VERSION: u32 = 4;
+pub(crate) const KIMI_INTEGRATION_VERSION: u32 = 5;
 pub(crate) const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> zynk kimi integration";
 pub(crate) const KIMI_CONFIG_BLOCK_END: &str = "# <<< zynk kimi integration";
 // Pre-rebrand kimi config-block fences; removal strips them too (migration compat).
 pub(crate) const KIMI_MIN_VERSION: &str = "0.14.0";
-pub(crate) const KIMI_HOOK_EVENTS: [(&str, &str); 9] = [
-    ("SessionStart", "session"),
-    ("UserPromptSubmit", "working"),
-    ("PreToolUse", "working"),
-    ("SubagentStart", "working"),
-    ("PreCompact", "working"),
-    ("PermissionRequest", "blocked"),
-    ("PermissionResult", "working"),
-    ("Stop", "idle"),
-    ("Interrupt", "idle"),
+pub(crate) const KIMI_ASK_USER_QUESTION_MATCHER: &str = "^AskUserQuestion$";
+pub(crate) const KIMI_OTHER_TOOL_MATCHER: &str = "^(?!AskUserQuestion$).*$";
+// (event, tool matcher, reported state). A `None` matcher fires on every tool.
+pub(crate) const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 12] = [
+    ("SessionStart", None, "session"),
+    ("UserPromptSubmit", None, "working"),
+    ("PreToolUse", Some(KIMI_OTHER_TOOL_MATCHER), "working"),
+    (
+        "PreToolUse",
+        Some(KIMI_ASK_USER_QUESTION_MATCHER),
+        "blocked",
+    ),
+    (
+        "PostToolUse",
+        Some(KIMI_ASK_USER_QUESTION_MATCHER),
+        "working",
+    ),
+    (
+        "PostToolUseFailure",
+        Some(KIMI_ASK_USER_QUESTION_MATCHER),
+        "working",
+    ),
+    ("SubagentStart", None, "working"),
+    ("PreCompact", None, "working"),
+    ("PermissionRequest", None, "blocked"),
+    ("PermissionResult", None, "working"),
+    ("Stop", None, "idle"),
+    ("Interrupt", None, "idle"),
 ];
 pub(crate) const COPILOT_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const COPILOT_HOOK_ASSET: &str = include_str!("assets/copilot/zynk-agent-state.sh");
@@ -105,7 +123,7 @@ pub(crate) const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/zyn
 pub(crate) const OPENCODE_INTEGRATION_VERSION: u32 = 9;
 pub(crate) const KILO_PLUGIN_INSTALL_NAME: &str = "zynk-agent-state.js";
 pub(crate) const KILO_PLUGIN_ASSET: &str = include_str!("assets/kilo/zynk-agent-state.js");
-pub(crate) const KILO_INTEGRATION_VERSION: u32 = 2;
+pub(crate) const KILO_INTEGRATION_VERSION: u32 = 3;
 pub(crate) const HERMES_PLUGIN_INSTALL_NAME: &str = "zynk-agent-state";
 // Legacy hermes plugin name written by pre-rebrand installs; uninstall strips it
 // from the user's config + removes its plugin dir (bounded migration cleanup).

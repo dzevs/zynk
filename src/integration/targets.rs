@@ -43,14 +43,22 @@ use super::{
     QODERCLI_HOOK_INSTALL_NAME, QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS,
 };
 
+fn ensure_extension_dir(dir: &Path, agent: &str) -> io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    if dir.parent().is_some_and(|parent| parent.is_dir()) {
+        return fs::create_dir_all(dir);
+    }
+    Err(io::Error::other(format!(
+        "{agent} extension directory not found at {}. install {agent} first",
+        dir.display()
+    )))
+}
+
 pub(crate) fn install_pi() -> io::Result<PathBuf> {
     let dir = pi_extension_dir()?;
-    if !dir.is_dir() {
-        return Err(io::Error::other(format!(
-            "pi extension directory not found at {}. install pi and create the extensions directory first",
-            dir.display()
-        )));
-    }
+    ensure_extension_dir(&dir, "pi")?;
 
     let path = dir.join(PI_EXTENSION_INSTALL_NAME);
     fs::write(&path, PI_EXTENSION_ASSET)?;
@@ -59,23 +67,7 @@ pub(crate) fn install_pi() -> io::Result<PathBuf> {
 
 pub(crate) fn install_omp() -> io::Result<OmpInstallPaths> {
     let dir = omp_extension_dir()?;
-    if !dir.is_dir() {
-        if dir.parent().is_some_and(|parent| parent.is_dir()) {
-            fs::create_dir_all(&dir)?;
-        } else {
-            return Err(io::Error::other(format!(
-                "omp extension directory not found at {}. install omp and create the extensions directory first",
-                dir.display()
-            )));
-        }
-    }
-
-    if !dir.is_dir() {
-        return Err(io::Error::other(format!(
-            "omp extension directory not found at {}. install omp and create the extensions directory first",
-            dir.display()
-        )));
-    }
+    ensure_extension_dir(&dir, "omp")?;
 
     let removed_legacy_pi_extension = remove_legacy_pi_extension_from_omp_dir(&dir)?;
     let extension_path = dir.join(OMP_EXTENSION_INSTALL_NAME);

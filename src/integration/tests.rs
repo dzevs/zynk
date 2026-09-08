@@ -137,16 +137,23 @@ fn kimi_config_hooks(config: &str) -> Vec<toml::Value> {
         .unwrap_or_default()
 }
 
-fn assert_kimi_hook(config: &str, hook_path: &Path, event: &str, action: &str) {
+fn assert_kimi_hook(
+    config: &str,
+    hook_path: &Path,
+    event: &str,
+    matcher: Option<&str>,
+    action: &str,
+) {
     let command = kimi_hook_command(hook_path, action);
     let hooks = kimi_config_hooks(config);
     assert!(
         hooks.iter().any(|hook| {
             hook.get("event").and_then(toml::Value::as_str) == Some(event)
+                && hook.get("matcher").and_then(toml::Value::as_str) == matcher
                 && hook.get("command").and_then(toml::Value::as_str) == Some(command.as_str())
                 && hook.get("timeout").and_then(toml::Value::as_integer) == Some(10)
         }),
-        "missing kimi hook for {event} -> {action}"
+        "missing kimi hook for {event} ({matcher:?}) -> {action}"
     );
 }
 
@@ -302,6 +309,27 @@ fn install_pi_writes_embedded_asset_to_pi_extensions_dir() {
 
     assert_eq!(path, ext_dir.join(PI_EXTENSION_INSTALL_NAME));
     assert_eq!(content, PI_EXTENSION_ASSET);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_pi_creates_extensions_dir_when_agent_dir_exists() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let agent_dir = home.join(".pi/agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let path = install_pi().unwrap();
+
+    assert_eq!(
+        path,
+        agent_dir.join("extensions").join(PI_EXTENSION_INSTALL_NAME)
+    );
+    assert!(path.is_file());
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -1234,12 +1262,32 @@ fn install_kimi_writes_hook_and_updates_config() {
     assert!(config.contains("command = \"echo keep\""));
     assert!(config.contains(KIMI_CONFIG_BLOCK_BEGIN));
     assert!(config.contains(KIMI_CONFIG_BLOCK_END));
-    for (event, action) in KIMI_HOOK_EVENTS {
-        assert_kimi_hook(&config, &installed.hook_path, event, action);
+    for (event, matcher, action) in KIMI_HOOK_EVENTS {
+        assert_kimi_hook(&config, &installed.hook_path, event, matcher, action);
     }
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn kimi_question_hooks_report_blocked_until_the_question_finishes() {
+    assert!(KIMI_HOOK_EVENTS.contains(&(
+        "PreToolUse",
+        Some(KIMI_ASK_USER_QUESTION_MATCHER),
+        "blocked",
+    )));
+    assert!(KIMI_HOOK_EVENTS.contains(&(
+        "PostToolUse",
+        Some(KIMI_ASK_USER_QUESTION_MATCHER),
+        "working",
+    )));
+    assert!(KIMI_HOOK_EVENTS.contains(&(
+        "PostToolUseFailure",
+        Some(KIMI_ASK_USER_QUESTION_MATCHER),
+        "working",
+    )));
+    assert!(KIMI_HOOK_EVENTS.contains(&("PreToolUse", Some(KIMI_OTHER_TOOL_MATCHER), "working",)));
 }
 
 #[test]
@@ -2555,8 +2603,8 @@ fn pi_asset_is_state_only_no_receiver() {
     assert!(PI_EXTENSION_ASSET.contains("pane.report_agent_session"));
     assert!(PI_EXTENSION_ASSET.contains("pane.release_agent"));
 
-    // the asset version marker is bumped to the session-reanchor revision.
-    assert_eq!(parse_integration_version(PI_EXTENSION_ASSET), Some(7));
+    // the asset version marker is bumped to the portable-extension-path revision.
+    assert_eq!(parse_integration_version(PI_EXTENSION_ASSET), Some(8));
 }
 
 #[test]
