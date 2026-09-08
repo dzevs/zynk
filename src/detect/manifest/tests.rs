@@ -1405,3 +1405,279 @@ fn amp_manifest_detects_osc_states_and_the_status_footer() {
     assert_eq!(stale.state, AgentState::Idle);
     assert!(!stale.visible_working);
 }
+
+// --- Grok OSC + screen chrome rules ---
+
+#[test]
+fn grok_option_dialog_and_footer_hints_are_blocked() {
+    // Fork-only. Upstream `b04c6496` and `b42c6e66` rebuilt Grok detection
+    // without tests. The gutter option list is the strongest screen blocker;
+    // the two footer-hint rules are what answer when it is not drawn.
+    let dialog = explain(
+        Agent::Grok,
+        "Grok wants to run npm test\n\n\u{2503}  1 (\u{25cf}) Yes, proceed\n\u{2503}  2 (\u{25cb}) No, reject\n\n1/3:select \u{2502} Ctrl+o:yolo \u{2502} Ctrl+c:cancel",
+    );
+    assert_eq!(dialog.state, AgentState::Blocked);
+    assert_eq!(
+        dialog.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("option_dialog_blocked")
+    );
+    assert!(dialog.visible_blocker);
+
+    // Without the gutter list the permission footer is the only evidence, and
+    // it carries the blocker on its own.
+    let permission_footer = explain(
+        Agent::Grok,
+        "Grok wants to run npm test\n\n1/3:select \u{2502} Ctrl+o:yolo \u{2502} Ctrl+c:cancel",
+    );
+    assert_eq!(permission_footer.state, AgentState::Blocked);
+    assert_eq!(
+        permission_footer
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("permission_hints_blocked")
+    );
+    assert!(permission_footer.visible_blocker);
+
+    // The ask-user-question dialog swaps the footer for its own hints. Note
+    // `Esc:unselect` does not contain the `:select` needle above, so the two
+    // footer rules cannot answer for each other.
+    let question_footer = explain(
+        Agent::Grok,
+        "Which module should I edit?\n\nEsc:unselect \u{2502} Tab:scrollback \u{2502} Shift+x:dismiss",
+    );
+    assert_eq!(question_footer.state, AgentState::Blocked);
+    assert_eq!(
+        question_footer
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("question_dialog_hints_blocked")
+    );
+    assert!(question_footer.visible_blocker);
+
+    // Both footer rules read `bottom_non_empty_lines(2)`, so a footer left
+    // behind above newer output is stale scrollback, not a live prompt.
+    let stale = explain(
+        Agent::Grok,
+        "1/3:select \u{2502} Ctrl+o:yolo \u{2502} Ctrl+c:cancel\nApproved.\nWrote src/lib.rs",
+    );
+    assert!(!stale.visible_blocker);
+    assert!(stale.matched_rule.is_none());
+}
+
+#[test]
+fn grok_spinner_status_and_cancel_hints_are_working() {
+    // The live status line is anchored on the trailing `[stop]` chip, not on a
+    // bare spinner glyph.
+    let status_line = explain(
+        Agent::Grok,
+        "\u{2827} Waiting on subagent\u{2026} 2.8s   13s \u{21e3}29.7k [stop]",
+    );
+    assert_eq!(status_line.state, AgentState::Working);
+    assert_eq!(
+        status_line
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("spinner_status_working")
+    );
+    assert!(status_line.visible_working);
+
+    // Grok keeps the shortcuts hint in the footer through a whole turn and
+    // only adds `Esc:cancel`, so this rule and `prompt_hints_idle`'s `not`
+    // gate are the same boundary read from both sides.
+    let cancel_footer = explain(
+        Agent::Grok,
+        "Thinking\u{2026}\n\nEsc:cancel \u{2502} Ctrl+.:shortcuts",
+    );
+    assert_eq!(cancel_footer.state, AgentState::Working);
+    assert_eq!(
+        cancel_footer
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("esc_cancel_hints_working")
+    );
+    assert!(cancel_footer.visible_working);
+    assert!(!cancel_footer.visible_idle);
+
+    // `b04c6496` narrowed the braille class to U+2801-U+28FF. The blank cell
+    // U+2800 that the startup splash paints its logo with is no longer a
+    // spinner frame, so a splash row cannot read as a running tool.
+    let live_tool = explain(Agent::Grok, "\u{2839} Read src/lib.rs");
+    assert_eq!(live_tool.state, AgentState::Working);
+    assert_eq!(
+        live_tool.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("waiting_tool_working")
+    );
+    assert!(live_tool.visible_working);
+
+    let blank_braille = explain(Agent::Grok, "\u{2800} Read src/lib.rs");
+    assert!(!blank_braille.visible_working);
+    assert!(blank_braille.matched_rule.is_none());
+}
+
+#[test]
+fn grok_prompt_hints_are_idle_only_without_a_cancel_hint() {
+    let idle = explain(Agent::Grok, "Done. Updated 2 files.\n\nCtrl+.:shortcuts");
+    assert_eq!(idle.state, AgentState::Idle);
+    assert_eq!(
+        idle.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("prompt_hints_idle")
+    );
+    assert!(idle.visible_idle);
+
+    // The same shortcuts hint next to a cancel hint is a running turn. The
+    // `not` gate is the only thing keeping it out of the idle verdict.
+    let cancelable = explain(
+        Agent::Grok,
+        "Running npm test\n\nCtrl+c:cancel \u{2502} Ctrl+.:shortcuts",
+    );
+    assert!(!cancelable.visible_idle);
+    assert!(cancelable.matched_rule.is_none());
+}
+
+#[test]
+fn grok_osc_title_and_progress_carry_the_turn_state() {
+    // `b42c6e66`: Grok Build 0.2.101 emits OSC 0 titles and OSC 9;4 progress.
+    for title in ["grok", "zynk - grok"] {
+        let idle = osc_explain(Agent::Grok, "", title, "");
+        assert_eq!(idle.state, AgentState::Idle, "title {title:?}");
+        assert_eq!(
+            idle.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("osc_title_idle"),
+            "title {title:?}"
+        );
+        assert!(idle.visible_idle, "title {title:?}");
+    }
+
+    // A spinner in the title drops `osc_title_idle` through its braille `not`
+    // gate, and the catch-all below it answers instead.
+    let working_title = osc_explain(Agent::Grok, "", "\u{2827} zynk - grok", "");
+    assert_eq!(working_title.state, AgentState::Working);
+    assert_eq!(
+        working_title
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("osc_title_working")
+    );
+    assert!(working_title.visible_working);
+
+    // The `Action Required` prefix blinks while the terminal is unfocused, and
+    // the blink-on title still ends in ` - grok`. Only the 1300 seat keeps the
+    // idle title rule from answering for a permission prompt.
+    let blocked_title = osc_explain(Agent::Grok, "", "\u{26a0} Action Required - grok", "");
+    assert_eq!(blocked_title.state, AgentState::Blocked);
+    assert_eq!(
+        blocked_title
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("osc_title_blocked")
+    );
+    assert!(blocked_title.visible_blocker);
+
+    let busy_progress = osc_explain(Agent::Grok, "", "", "4;1;-1");
+    assert_eq!(busy_progress.state, AgentState::Working);
+    assert_eq!(
+        busy_progress
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("osc_progress_working")
+    );
+    assert!(busy_progress.visible_working);
+
+    let done_progress = osc_explain(Agent::Grok, "", "", "4;0;0");
+    assert_eq!(done_progress.state, AgentState::Idle);
+    assert_eq!(
+        done_progress
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("osc_progress_idle")
+    );
+    assert!(done_progress.visible_idle);
+
+    // Both progress rules are fully anchored, so any other payload is not
+    // evidence either way.
+    let other_progress = osc_explain(Agent::Grok, "", "", "4;3;50");
+    assert!(other_progress.matched_rule.is_none());
+    assert!(!other_progress.visible_working);
+    assert!(!other_progress.visible_idle);
+}
+
+#[test]
+fn grok_screen_blockers_outrank_the_generic_non_idle_title() {
+    // `b42c6e66` re-seated every screen blocker into the 1180-1200 band
+    // because its new `osc_title_working` (1000) matches any title that is not
+    // a known idle one. At the old priorities -- 320, 310, 305 and 300 -- a
+    // permission prompt under a custom title would have reported working.
+    for (screen, rule_id) in [
+        (
+            "\u{2503}  1 (\u{25cf}) Yes, proceed\n\u{2503}  2 (\u{25cb}) No, reject",
+            "option_dialog_blocked",
+        ),
+        (
+            "Grok wants to run npm test\n\n1/3:select \u{2502} Ctrl+o:yolo \u{2502} Ctrl+c:cancel",
+            "permission_hints_blocked",
+        ),
+        (
+            "Which module should I edit?\n\nEsc:unselect \u{2502} Tab:scrollback \u{2502} Shift+x:dismiss",
+            "question_dialog_hints_blocked",
+        ),
+        // Pre-0.2.x scope selector, kept for older Grok Build releases.
+        (
+            "Yes, proceed\nNo, reject\n\n\u{2190}/\u{2192}:scope",
+            "permission_scope_selector",
+        ),
+    ] {
+        let result = osc_explain(Agent::Grok, screen, "running npm test", "");
+        assert_eq!(result.state, AgentState::Blocked, "rule {rule_id}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some(rule_id),
+            "rule {rule_id}"
+        );
+        assert!(result.visible_blocker, "rule {rule_id}");
+        assert!(!result.visible_working, "rule {rule_id}");
+    }
+}
+
+#[test]
+fn grok_background_work_chip_is_working_from_the_pinned_top_row() {
+    // `99760f77`: Grok clears both OSC signals while background work runs, so
+    // the animated task-count chip in the first non-empty row of pinned
+    // chrome is the only remaining evidence -- which is what the engine-3
+    // `top_non_empty_lines(1)` region exists to address.
+    let running = explain(
+        Agent::Grok,
+        "\u{2e2c} 2 \u{2502} grok 0.2.101\n\nWrote src/lib.rs\n",
+    );
+    assert_eq!(running.state, AgentState::Working);
+    assert_eq!(
+        running.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("background_work_chip_working")
+    );
+    assert!(running.visible_working);
+
+    // The count is the chip: zero running tasks is not background work.
+    let zero = explain(
+        Agent::Grok,
+        "\u{2e2c} 0 \u{2502} grok 0.2.101\n\nWrote src/lib.rs\n",
+    );
+    assert!(!zero.visible_working);
+    assert!(zero.matched_rule.is_none());
+
+    // The region is the first non-empty row only, so the same chip one row
+    // lower is ordinary output rather than pinned chrome.
+    let below = explain(
+        Agent::Grok,
+        "grok 0.2.101\n\u{2e2c} 2 \u{2502} background\n",
+    );
+    assert!(!below.visible_working);
+    assert!(below.matched_rule.is_none());
+}
