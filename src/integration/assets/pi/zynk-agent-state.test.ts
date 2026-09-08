@@ -178,8 +178,6 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     process.env.ZYNK_ENV = "1";
     process.env.ZYNK_SOCKET_PATH = sink.sockPath;
     process.env.ZYNK_PANE_ID = "pane-test-1";
-    // Make idle debounce immediate so the idle report is observable quickly.
-    process.env.ZYNK_PI_IDLE_DEBOUNCE_MS = "0";
     const mod = await import(`./zynk-agent-state.ts?live=${Date.now()}`);
     factory = mod.default;
   });
@@ -189,7 +187,6 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     delete process.env.ZYNK_ENV;
     delete process.env.ZYNK_SOCKET_PATH;
     delete process.env.ZYNK_PANE_ID;
-    delete process.env.ZYNK_PI_IDLE_DEBOUNCE_MS;
   });
 
   test("registers the expected state-only hooks and NO input receiver", () => {
@@ -197,7 +194,10 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     factory(fake.pi);
     expect(fake.has("session_start")).toBe(true);
     expect(fake.has("agent_start")).toBe(true);
-    expect(fake.has("agent_end")).toBe(true);
+    // Pi publishes idle from its own settlement event; the hand-rolled idle
+    // debounce that hung off `agent_end` is gone, and so is the handler.
+    expect(fake.has("agent_settled")).toBe(true);
+    expect(fake.has("agent_end")).toBe(false);
     // root-agent restore: a root-session shutdown releases the agent.
     expect(fake.has("session_shutdown")).toBe(true);
     // The receiver hook is gone.
@@ -227,7 +227,13 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     fake.emit("agent_start", {}, rootSessionContext());
   }
 
-  test("session_start reports the session ref; agent_start->working; agent_end->idle", async () => {
+  // `agent_settled` only publishes when the runtime confirms the agent is idle;
+  // a settlement raised while it is still busy is stale and must be ignored.
+  function settleAgent(fake: ReturnType<typeof makeFakePi>, idle: boolean) {
+    fake.emit("agent_settled", {}, { ...rootSessionContext(), isIdle: () => idle });
+  }
+
+  test("session_start reports the session ref; agent_start->working; agent_settled->idle", async () => {
     const fake = makeFakePi();
     factory(fake.pi);
 
@@ -249,8 +255,8 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
         .some((r) => r.method === "pane.report_agent" && r.params?.state === "working"),
     );
 
-    // agent_end with no retryable error -> idle (debounce is 0ms in this suite)
-    fake.emit("agent_end", { messages: [] });
+    // a settlement the runtime confirms as idle -> idle
+    settleAgent(fake, true);
     await waitFor(() =>
       sink.requests
         .slice(before)
@@ -336,7 +342,7 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     expect(released).toBe(false);
   });
 
-  test("retryable provider error at agent_end holds working (not idle)", async () => {
+  test("a settlement while the agent is still busy does not publish idle", async () => {
     const fake = makeFakePi();
     factory(fake.pi);
     startRootSession(fake);
@@ -349,17 +355,10 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     const before = sink.requests.length;
 
     startAgent(fake);
-    fake.emit("agent_end", {
-      messages: [
-        {
-          role: "assistant",
-          stopReason: "error",
-          errorMessage: "provider returned error: overloaded",
-        },
-      ],
-    });
+    settleAgent(fake, false);
 
-    // The retry hold keeps the pane Working; assert no idle report follows for a beat.
+    // The stale settlement is dropped, so the pane stays Working; assert no idle
+    // report follows for a beat.
     await waitFor(() =>
       sink.requests.slice(before).some(
         (r) => r.method === "pane.report_agent" && r.params?.state === "working",

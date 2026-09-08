@@ -2669,6 +2669,12 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(PI_EXTENSION_ASSET.contains("agent_session_path: currentAgentSessionPath"));
     assert!(PI_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
     assert!(PI_EXTENSION_ASSET.contains("publishState(true)"));
+    // Pi settles through its own `agent_settled` event; the hand-rolled idle
+    // debounce behind `agent_end` is gone. omp still registers `agent_end`, so the
+    // negative assertion has to stay pi-scoped.
+    assert!(PI_EXTENSION_ASSET.contains("pi.on(\"agent_settled\""));
+    assert!(!PI_EXTENSION_ASSET.contains("pi.on(\"agent_end\""));
+    assert!(OMP_EXTENSION_ASSET.contains("pi.on(\"agent_end\""));
     assert!(OMP_EXTENSION_ASSET.contains("agent_session_path: currentAgentSessionPath"));
     assert!(OMP_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
     assert!(OMP_EXTENSION_ASSET.contains("publishState(true)"));
@@ -2683,10 +2689,11 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(CODEX_HOOK_ASSET.contains("pane.report_agent_session"));
     assert!(!CODEX_HOOK_ASSET.contains("\"state\": action"));
     assert!(!CODEX_HOOK_ASSET.contains("pane.release_agent"));
-    assert!(KIMI_HOOK_ASSET.contains("source = \"zynk:kimi\""));
+    assert!(KIMI_HOOK_ASSET.contains("source\": \"zynk:kimi"));
     assert!(KIMI_HOOK_ASSET.contains("agent_session_id"));
-    assert!(KIMI_HOOK_ASSET.contains("pane.report_agent_session"));
-    assert!(KIMI_HOOK_ASSET.contains("\"state\": action"));
+    assert!(KIMI_HOOK_ASSET.contains("method = \"pane.report_agent_session\""));
+    assert!(KIMI_HOOK_ASSET.contains("method = \"pane.report_agent\""));
+    assert!(KIMI_HOOK_ASSET.contains("params[\"state\"] = action"));
     assert!(!KIMI_HOOK_ASSET.contains("pane.release_agent"));
     assert!(COPILOT_HOOK_ASSET.contains("agent_session_id"));
     assert!(COPILOT_HOOK_ASSET.contains("pane.report_agent_session"));
@@ -2718,12 +2725,12 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
     assert!(HERMES_PLUGIN_INIT_ASSET.contains("pane.report_agent\","));
     assert!(!HERMES_PLUGIN_INIT_ASSET.contains("pane.release_agent"));
-    assert!(QODERCLI_HOOK_ASSET.contains("ZYNK_HOOK_INPUT_FILE"));
-    assert!(QODERCLI_HOOK_ASSET.contains("agent_session_id"));
-    assert!(QODERCLI_HOOK_ASSET.contains("pane.report_agent_session"));
-    assert!(!QODERCLI_HOOK_ASSET.contains("\"state\": action"));
-    assert!(!QODERCLI_HOOK_ASSET.contains("pane.release_agent"));
-    assert!(!QODERCLI_HOOK_ASSET.contains("QODER_HOOK_EVENT"));
+    assert!(QODERCLI_HOOK_ASSET.contains("ZYNK_PANE_ID"));
+    assert!(QODERCLI_HOOK_ASSET.contains("session_id"));
+    assert!(QODERCLI_HOOK_ASSET.contains("report-agent-session"));
+    assert!(QODERCLI_HOOK_ASSET.contains("--agent-session-id"));
+    assert!(!QODERCLI_HOOK_ASSET.contains("report-agent\""));
+    assert!(!QODERCLI_HOOK_ASSET.contains("release-agent"));
     assert!(CURSOR_HOOK_ASSET.contains("ZYNK_INTEGRATION_ID=cursor"));
     assert!(CURSOR_HOOK_ASSET.contains("conversation_id"));
     assert!(CURSOR_HOOK_ASSET.contains("conversationId"));

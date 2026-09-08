@@ -59,10 +59,6 @@ type QueuedState = {
   seq: number;
 };
 
-const idleDebounceMs = parseDurationEnv("ZYNK_PI_IDLE_DEBOUNCE_MS", 250);
-const retryGraceMs = parseDurationEnv("ZYNK_PI_RETRY_GRACE_MS", 2500);
-const retryableErrorPattern =
-  /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
 let reportSeq = Date.now() * 1000;
 let currentAgentSessionId: string | undefined;
 let currentAgentSessionPath: string | undefined;
@@ -70,18 +66,6 @@ let currentAgentSessionPath: string | undefined;
 function nextReportSeq(): number {
   reportSeq += 1;
   return reportSeq;
-}
-
-function parseDurationEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) {
-    return fallback;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return fallback;
-  }
-  return parsed;
 }
 
 function updateSessionRef(ctx: any): void {
@@ -209,74 +193,23 @@ async function drainStateQueue(): Promise<void> {
   }
 }
 
-function lastAssistantMessage(messages: unknown[]): any | undefined {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i] as any;
-    if (message?.role === "assistant") {
-      return message;
-    }
-  }
-  return undefined;
-}
-
-function retryableErrorMessage(event: any): string | undefined {
-  const messages = Array.isArray(event?.messages) ? event.messages : [];
-  const assistant = lastAssistantMessage(messages);
-  if (assistant?.stopReason !== "error") {
-    return undefined;
-  }
-
-  const errorMessage = String(assistant.errorMessage ?? "");
-  if (!retryableErrorPattern.test(errorMessage)) {
-    return undefined;
-  }
-  return errorMessage || "retryable provider error";
-}
-
 export default function (pi) {
   if (!enabled()) {
     return;
   }
 
   let agentActive = false;
-  let retryHoldActive = false;
-  let failureBlocked = false;
-  let failureMessage: string | undefined;
   let blockedCount = 0;
   let blockedMessage: string | undefined;
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
-  let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let rootSession = false;
-
-  function clearTimer(timer: ReturnType<typeof setTimeout> | undefined) {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  }
-
-  function clearPendingTimers() {
-    clearTimer(idleTimer);
-    clearTimer(retryTimer);
-    idleTimer = undefined;
-    retryTimer = undefined;
-  }
-
-  function clearFailureState() {
-    retryHoldActive = false;
-    failureBlocked = false;
-    failureMessage = undefined;
-  }
 
   function desiredState() {
     if (blockedCount > 0) {
       return { state: "blocked" as const, message: blockedMessage };
     }
-    if (failureBlocked) {
-      return { state: "blocked" as const, message: failureMessage };
-    }
-    if (agentActive || retryHoldActive) {
+    if (agentActive) {
       return { state: "working" as const, message: undefined };
     }
     return { state: "idle" as const, message: undefined };
@@ -292,32 +225,6 @@ export default function (pi) {
     queueState(next.state, next.message);
   }
 
-  function scheduleIdle() {
-    clearPendingTimers();
-    clearFailureState();
-    idleTimer = setTimeout(() => {
-      idleTimer = undefined;
-      publishState();
-    }, idleDebounceMs);
-    idleTimer.unref?.();
-  }
-
-  function holdForRetry(message: string) {
-    clearPendingTimers();
-    retryHoldActive = true;
-    failureBlocked = false;
-    failureMessage = message;
-    publishState();
-
-    retryTimer = setTimeout(() => {
-      retryTimer = undefined;
-      retryHoldActive = false;
-      failureBlocked = true;
-      publishState();
-    }, retryGraceMs);
-    retryTimer.unref?.();
-  }
-
   pi.events.on("zynk:blocked", (data) => {
     if (!rootSession) {
       return;
@@ -331,7 +238,6 @@ export default function (pi) {
       return;
     }
 
-    clearPendingTimers();
     blockedCount += 1;
     blockedMessage = data.label;
     publishState();
@@ -355,39 +261,23 @@ export default function (pi) {
     }
     updateSessionRef(ctx);
     void reportSession();
-    clearPendingTimers();
-    clearFailureState();
     agentActive = true;
     publishState();
   });
 
-  pi.on("agent_end", (event) => {
-    if (!rootSession) {
-      return;
-    }
-    if (!agentActive) {
-      // Pi can emit duplicate/late end events while auto-retry is already
-      // holding the pane in Working. Do not let an unqualified duplicate end
-      // cancel the retry hold and publish a false Idle.
+  pi.on("agent_settled", (_event, ctx) => {
+    if (!rootSession || ctx?.isIdle?.() !== true) {
       return;
     }
 
     agentActive = false;
-
-    const retryableMessage = retryableErrorMessage(event);
-    if (retryableMessage) {
-      holdForRetry(retryableMessage);
-      return;
-    }
-
-    scheduleIdle();
+    publishState();
   });
 
   pi.on("session_shutdown", async (event) => {
     if (!rootSession) {
       return;
     }
-    clearPendingTimers();
     if (shouldReleaseOnSessionShutdown(event)) {
       await releaseAgent();
     }
