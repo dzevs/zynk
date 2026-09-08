@@ -239,6 +239,23 @@ class OptionalTargets(unittest.TestCase):
             self.assertTrue(m["ok"])
             self.assertEqual(status(m, "linux-aarch64"), "BUILT_UNVERIFIED")
 
+    def test_rosetta_executed_intel_macos_is_never_eligible(self):
+        # Gate-3 INSPECTOR-675-001: a successful Rosetta run on the native ARM64 runner is execution evidence
+        # only; without an Intel-native test job the target stays BUILT_UNVERIFIED and out of SHA256SUMS.
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("build-macos-x86_64", artifact_id="781")
+            f.artifact("macos-x86_64", exec_status="ran", exec_output="zynk 3.1.0\n")
+            m = f.evaluate(optional_targets="all")
+            self.assertTrue(m["ok"])
+            self.assertEqual(status(m, "macos-x86_64"), "BUILT_UNVERIFIED")
+            self.assertTrue(any("no applicable hosted test job" in r for r in m["targets"]["macos-x86_64"]["reasons"]))
+            self.assertEqual(m["targets"]["macos-x86_64"]["producer_runner"], "macOS/ARM64")
+            sums = release_manifest.render_sha256sums(m)
+            self.assertNotIn("macos-x86_64", sums)
+            self.assertEqual(sums.count("\n"), 1)
+
     def test_unexecuted_binary_is_built_unverified(self):
         with tempfile.TemporaryDirectory() as tmp:
             f = Fixture(tmp)
