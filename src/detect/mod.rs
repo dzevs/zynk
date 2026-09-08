@@ -176,7 +176,7 @@ fn lookup_agent(name: &str) -> Option<Agent> {
         "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
-        "opencode" | "open-code" => Some(Agent::OpenCode),
+        "opencode" | "opencode2" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
         "kimi" | "kimi-code" | "kimi code" => Some(Agent::Kimi),
         "kiro" | "kiro-cli" => Some(Agent::Kiro),
@@ -352,11 +352,11 @@ fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> Stri
 
 fn wrapped_agent_name_from_runtime_argv(runtime: &str, argv: Option<&[String]>) -> Option<String> {
     let argv = argv?;
-    let runtime = normalized_agent_lookup_name(path_basename(runtime));
+    let runtime_name = normalized_agent_lookup_name(path_basename(runtime));
 
-    match runtime.as_str() {
+    match runtime_name.as_str() {
         "node" | "bun" => script_arg_agent_name(argv, &["-e", "--eval", "-p", "--print"], &[]),
-        "python" | "python3" => script_arg_agent_name(argv, &["-c"], &["-m"]),
+        name if is_python_runtime(name) => script_arg_agent_name(argv, &["-c"], &["-m"]),
         "sh" | "bash" | "zsh" | "fish" => script_arg_agent_name(argv, &["-c"], &[]),
         "cmd" => windows_cmd_arg_agent_name(argv),
         "powershell" | "pwsh" => powershell_arg_agent_name(argv),
@@ -596,20 +596,29 @@ fn process_priority(process: &crate::platform::ForegroundProcess, normalized_nam
 
 fn is_generic_runtime_or_shell(name: &str) -> bool {
     let name = normalized_agent_lookup_name(path_basename(name));
-    matches!(
-        name.as_str(),
-        "sh" | "bash"
-            | "zsh"
-            | "fish"
-            | "tmux"
-            | "node"
-            | "bun"
-            | "python"
-            | "python3"
-            | "cmd"
-            | "powershell"
-            | "pwsh"
-    )
+    is_python_runtime(&name)
+        || matches!(
+            name.as_str(),
+            "sh" | "bash"
+                | "zsh"
+                | "fish"
+                | "tmux"
+                | "node"
+                | "bun"
+                | "cmd"
+                | "powershell"
+                | "pwsh"
+        )
+}
+
+fn is_python_runtime(name: &str) -> bool {
+    name == "python"
+        || name.strip_prefix("python").is_some_and(|version| {
+            !version.is_empty()
+                && version
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +682,8 @@ mod tests {
         assert_eq!(identify_agent("cline"), Some(Agent::Cline));
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("opencode.exe"), Some(Agent::OpenCode));
+        assert_eq!(identify_agent("opencode2"), Some(Agent::OpenCode));
+        assert_eq!(identify_agent("opencode2.exe"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
         assert_eq!(identify_agent("Kimi Code"), Some(Agent::Kimi));
         assert_eq!(identify_agent("kiro"), Some(Agent::Kiro));
@@ -811,6 +822,28 @@ mod tests {
     }
 
     #[test]
+    fn identify_agent_in_job_detects_python_version_wrapped_hermes() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "python3.12",
+                &[
+                    "/nix/store/example/bin/python3.12",
+                    "/nix/store/example/bin/hermes",
+                    "--resume",
+                    "session-id",
+                ],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Hermes, "hermes".to_string()))
+        );
+    }
+
+    #[test]
     fn identify_agent_in_job_detects_nix_wrapped_codex_from_cmdline_argv0() {
         let job = crate::platform::ForegroundJob {
             process_group_id: 123,
@@ -940,6 +973,23 @@ mod tests {
         assert_eq!(
             identify_agent_in_job(&job),
             Some((Agent::Claude, "claude".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_opencode2_as_opencode() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "opencode2",
+                &["opencode2", "--standalone"],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::OpenCode, "opencode2".to_string()))
         );
     }
 
