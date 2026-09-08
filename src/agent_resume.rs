@@ -196,6 +196,13 @@ fn canonical_resume_argv(
         ("zynk:kimi", "kimi", AgentSessionRefKind::Id) => {
             vec!["kimi".into(), "--session".into(), session_ref.value.clone()]
         }
+        ("zynk:mastracode", "mastracode", AgentSessionRefKind::Id) => {
+            vec![
+                "mastracode".into(),
+                "--thread".into(),
+                session_ref.value.clone(),
+            ]
+        }
         ("zynk:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
         }
@@ -258,6 +265,7 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("zynk:droid", "droid")
             | ("zynk:kimi", "kimi")
             | ("zynk:omp", "omp")
+            | ("zynk:mastracode", "mastracode")
             | ("zynk:pi", "pi")
             | ("zynk:hermes", "hermes")
             | ("zynk:opencode", "opencode")
@@ -1178,6 +1186,17 @@ mod tests {
         );
         assert_eq!(
             plan(
+                "zynk:mastracode",
+                "mastracode",
+                &AgentSessionRef::id("mastracode-session").unwrap(),
+                None,
+            )
+            .unwrap()
+            .argv,
+            vec!["mastracode", "--thread", "mastracode-session"]
+        );
+        assert_eq!(
+            plan(
                 "zynk:pi",
                 "pi",
                 &AgentSessionRef::path(&pi_session).unwrap(),
@@ -1360,6 +1379,16 @@ mod tests {
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "kimi-id");
 
+        let session_ref = session_ref_from_report(
+            "zynk:mastracode",
+            "mastracode",
+            Some("mastracode-id".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "mastracode-id");
+
         let session_ref =
             session_ref_from_report("zynk:kilo", "kilo", Some("kilo-id".into()), None).unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
@@ -1479,6 +1508,13 @@ mod tests {
             None,
         )
         .is_none());
+        assert!(session_ref_from_snapshot(
+            "zynk:mastracode",
+            "mastracode",
+            AgentSessionRefKind::Id,
+            "mastracode-session"
+        )
+        .is_some());
         assert!(session_ref_from_snapshot(
             "zynk:hermes",
             "hermes",

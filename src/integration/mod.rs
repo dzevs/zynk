@@ -135,6 +135,25 @@ pub(crate) const QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 12] = [
 pub(crate) const CURSOR_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const CURSOR_HOOK_ASSET: &str = include_str!("assets/cursor/zynk-agent-state.sh");
 pub(crate) const CURSOR_INTEGRATION_VERSION: u32 = 1;
+pub(crate) const MASTRACODE_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
+pub(crate) const MASTRACODE_HOOK_ASSET: &str =
+    include_str!("assets/mastracode/zynk-agent-state.sh");
+pub(crate) const MASTRACODE_INTEGRATION_VERSION: u32 = 1;
+pub(crate) const MASTRACODE_HOOK_TIMEOUT_MS: u64 = 10_000;
+pub(crate) const MASTRACODE_HOOK_EVENTS: [(&str, &str); 12] = [
+    ("SessionStart", "idle"),
+    ("UserPromptSubmit", "working"),
+    ("AgentStart", "working"),
+    ("PreToolUse", "working"),
+    ("PermissionRequest", "blocked"),
+    ("PermissionResult", "working"),
+    ("SubagentStart", "working"),
+    ("SubagentEnd", "working"),
+    ("Interrupt", "idle"),
+    ("AgentEnd", "idle"),
+    ("Stop", "idle"),
+    ("SessionEnd", "release"),
+];
 pub(crate) const INTEGRATION_VERSION_MARKER: &str = "ZYNK_INTEGRATION_VERSION=";
 // Pre-rebrand installs embedded `ZYNK_INTEGRATION_VERSION=`. status() still
 // recognizes it (legacy installs surface as Outdated → prompt reinstall) and

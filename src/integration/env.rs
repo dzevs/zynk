@@ -102,6 +102,10 @@ pub(crate) fn cursor_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CURSOR_CONFIG_DIR_ENV_VAR, &[".cursor"])
 }
 
+pub(crate) fn mastracode_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".mastracode"))
+}
+
 #[cfg(test)]
 pub(crate) fn integration_env_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

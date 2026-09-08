@@ -21,6 +21,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
         crate::api::schema::IntegrationTarget::Cursor => "cursor",
+        crate::api::schema::IntegrationTarget::Mastracode => "mastracode",
     }
 }
 
@@ -47,6 +48,7 @@ pub(crate) fn integration_target_command_names(
         crate::api::schema::IntegrationTarget::Hermes => &["hermes"],
         crate::api::schema::IntegrationTarget::Qodercli => qodercli_command_names(),
         crate::api::schema::IntegrationTarget::Cursor => cursor_command_names(),
+        crate::api::schema::IntegrationTarget::Mastracode => &["mastracode"],
     }
 }
 
@@ -164,7 +166,7 @@ pub(crate) fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 13] {
+); 14] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -233,6 +235,11 @@ pub(crate) fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Cursor,
             cursor_dir().map(|dir| dir.join(super::CURSOR_HOOK_INSTALL_NAME)),
             super::CURSOR_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Mastracode,
+            mastracode_dir().map(|dir| dir.join("hooks").join(super::MASTRACODE_HOOK_INSTALL_NAME)),
+            super::MASTRACODE_INTEGRATION_VERSION,
         ),
     ]
 }
@@ -384,5 +391,6 @@ pub(crate) fn expected_integration_id(
         IntegrationTarget::Hermes => "hermes",
         IntegrationTarget::Qodercli => "qodercli",
         IntegrationTarget::Cursor => "cursor",
+        IntegrationTarget::Mastracode => "mastracode",
     }
 }

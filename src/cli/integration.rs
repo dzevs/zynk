@@ -108,13 +108,13 @@ fn parse_integration_target(
 ) -> std::io::Result<Option<IntegrationTarget>> {
     let Some(target) = args.first().map(|arg| arg.as_str()) else {
         eprintln!(
-            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor>"
+            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor|mastracode>"
         );
         return Ok(None);
     };
     if args.len() != 1 {
         eprintln!(
-            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor>"
+            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor|mastracode>"
         );
         return Ok(None);
     }
@@ -133,10 +133,11 @@ fn parse_integration_target(
         "hermes" => IntegrationTarget::Hermes,
         "qodercli" => IntegrationTarget::Qodercli,
         "cursor" => IntegrationTarget::Cursor,
+        "mastracode" => IntegrationTarget::Mastracode,
         _ => {
             eprintln!("unknown integration target: {target}");
             eprintln!(
-                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, cursor"
+                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, cursor, mastracode"
             );
             return Ok(None);
         }
@@ -160,6 +161,7 @@ fn print_integration_help() {
     eprintln!("  zynk integration install hermes");
     eprintln!("  zynk integration install qodercli");
     eprintln!("  zynk integration install cursor");
+    eprintln!("  zynk integration install mastracode");
     eprintln!("  zynk integration uninstall pi");
     eprintln!("  zynk integration uninstall omp");
     eprintln!("  zynk integration uninstall claude");
@@ -173,5 +175,6 @@ fn print_integration_help() {
     eprintln!("  zynk integration uninstall hermes");
     eprintln!("  zynk integration uninstall qodercli");
     eprintln!("  zynk integration uninstall cursor");
+    eprintln!("  zynk integration uninstall mastracode");
     eprintln!("  zynk integration status [--outdated-only]");
 }
