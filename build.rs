@@ -1,18 +1,12 @@
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn zig_target(target: &str) -> &str {
     match target {
         "x86_64-unknown-linux-gnu" => "x86_64-linux-gnu",
-        "aarch64-unknown-linux-gnu" => "aarch64-linux-gnu",
         "x86_64-unknown-linux-musl" => "x86_64-linux-musl",
-        "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
-        "x86_64-apple-darwin" => "x86_64-macos",
-        "aarch64-apple-darwin" => "aarch64-macos",
-        "x86_64-pc-windows-msvc" => "x86_64-windows-msvc",
-        "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
         other => panic!("unsupported target for libghostty-vt build: {other}"),
     }
 }
@@ -29,171 +23,6 @@ fn env_bool(name: &str) -> Option<bool> {
     }
 }
 
-/// Names of the archive members whose data does not start on an 8-byte boundary (the `__.SYMDEF*` table of
-/// contents is not a Mach-O member and is skipped). Understands the BSD layout Zig writes (`#1/<len>` names
-/// stored in front of the member data, counted in the member size) and the plain 16-byte names.
-pub fn archive_misaligned_members(bytes: &[u8]) -> Result<Vec<String>, String> {
-    const MAGIC: &[u8] = b"!<arch>\n";
-    const HEADER: usize = 60;
-    if !bytes.starts_with(MAGIC) {
-        return Err("not an ar archive (missing !<arch> magic)".into());
-    }
-    let mut offset = MAGIC.len();
-    let mut misaligned = Vec::new();
-    // Structural completeness is required, not just per-member plausibility: the rewritten archive is trusted
-    // only when every header, payload and pad byte lies inside the file (a missing pad byte is an error even for
-    // the final member) and nothing trails the last member.
-    while offset < bytes.len() {
-        if bytes.len() - offset < HEADER {
-            return Err(format!(
-                "trailing {} bytes after the last member (partial header at offset {offset})",
-                bytes.len() - offset
-            ));
-        }
-        let header = &bytes[offset..offset + HEADER];
-        if &header[58..60] != b"`\n" {
-            return Err(format!("bad member header at offset {offset}"));
-        }
-        let name = String::from_utf8_lossy(&header[..16])
-            .trim_end()
-            .to_string();
-        let size: usize = String::from_utf8_lossy(&header[48..58])
-            .trim()
-            .parse()
-            .map_err(|e| format!("bad member size at offset {offset}: {e}"))?;
-        let data_start = offset + HEADER;
-        let data_end = data_start
-            .checked_add(size)
-            .ok_or_else(|| format!("member size overflow at offset {offset}"))?;
-        if data_end > bytes.len() {
-            return Err(format!(
-                "member payload at offset {offset} extends beyond EOF ({data_end} > {})",
-                bytes.len()
-            ));
-        }
-        let mut data = data_start;
-        let mut member = name.clone();
-        if let Some(len) = name.strip_prefix("#1/") {
-            let len: usize = len
-                .trim()
-                .parse()
-                .map_err(|e| format!("bad BSD name length at offset {offset}: {e}"))?;
-            if len > size {
-                return Err(format!(
-                    "BSD name length {len} exceeds the member size {size} at offset {offset}"
-                ));
-            }
-            member = String::from_utf8_lossy(&bytes[data..data + len])
-                .trim_end_matches('\0')
-                .to_string();
-            data += len;
-        }
-        if !member.starts_with("__.SYMDEF") && !data.is_multiple_of(8) {
-            misaligned.push(member);
-        }
-        // Members are padded to an even size; the pad byte is part of the structure and must be present even
-        // for the final member (Gate-3 SENT-R7-BUILD-001: no EOF-without-pad tolerance).
-        let padded_end = data_end
-            .checked_add(size & 1)
-            .ok_or_else(|| format!("member padding overflow at offset {offset}"))?;
-        if padded_end > bytes.len() {
-            return Err(format!(
-                "member at offset {offset} is missing its alignment pad byte (needs {padded_end} bytes, file has {})",
-                bytes.len()
-            ));
-        }
-        // The pad slot must hold the canonical ar padding byte (0x0A); any other value is a malformed archive.
-        if padded_end > data_end && bytes[data_end] != b'\n' {
-            return Err(format!(
-                "member at offset {offset} has a non-canonical pad byte 0x{:02x} at {data_end}",
-                bytes[data_end]
-            ));
-        }
-        offset = padded_end;
-    }
-    Ok(misaligned)
-}
-
-/// The static archive to hand to the Apple linker. Zig 0.15's archive writer pads members to 2 bytes, but
-/// Apple's linker (ld-prime, Xcode 15+) refuses a 64-bit Mach-O member whose data is not 8-byte aligned
-/// ("ld: 64-bit mach-o member 'compiler_rt.o' not 8-byte aligned"). Whether a member lands aligned depends
-/// on the sizes of the members before it: with `LIBGHOSTTY_VT_SIMD=false` the aarch64 archive misaligns
-/// `compiler_rt.o` and the x86_64 archive misaligns the main object, while the SIMD build aligns both by
-/// chance. A misaligned archive is rewritten on a macOS host with Apple's `libtool -static`, which lays
-/// members out on 8-byte boundaries and regenerates the table of contents; the result is verified before it
-/// is used. `LIBGHOSTTY_VT_LIBTOOL` names the tool to run (default: `xcrun libtool`, then `libtool`). On any
-/// other host the archive is left as is (nothing there links it with Apple's linker).
-pub fn darwin_link_archive(static_lib: &Path, lib_dir: &Path) -> PathBuf {
-    let bytes = fs::read(static_lib)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", static_lib.display()));
-    let misaligned = archive_misaligned_members(&bytes)
-        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", static_lib.display()));
-    if misaligned.is_empty() {
-        return static_lib.to_path_buf();
-    }
-    let members = misaligned.join(", ");
-    if !cfg!(target_os = "macos") {
-        println!(
-            "cargo:warning=libghostty-vt.a has members Apple's linker rejects as not 8-byte aligned ({members}); \
-             it is normalized only when built on macOS"
-        );
-        return static_lib.to_path_buf();
-    }
-    let aligned = lib_dir.join("libghostty-vt-aligned.a");
-    let candidates: Vec<Vec<String>> = match env::var("LIBGHOSTTY_VT_LIBTOOL") {
-        Ok(tool) => vec![tool.split_whitespace().map(str::to_string).collect()],
-        Err(_) => vec![
-            vec!["xcrun".into(), "libtool".into()],
-            vec!["libtool".into()],
-        ],
-    };
-    let mut attempts = Vec::new();
-    for candidate in candidates {
-        let (program, args) = match candidate.split_first() {
-            Some((program, args)) if !program.is_empty() => (program.clone(), args.to_vec()),
-            _ => continue,
-        };
-        let _ = fs::remove_file(&aligned);
-        let mut command = Command::new(&program);
-        command
-            .args(&args)
-            .arg("-static")
-            .arg("-o")
-            .arg(&aligned)
-            .arg(static_lib);
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                let rewritten = fs::read(&aligned)
-                    .unwrap_or_else(|e| panic!("failed to read {}: {e}", aligned.display()));
-                match archive_misaligned_members(&rewritten) {
-                    Ok(still) if still.is_empty() => return aligned,
-                    Ok(still) => attempts.push(format!(
-                        "{}: output still has misaligned members ({})",
-                        candidate.join(" "),
-                        still.join(", ")
-                    )),
-                    Err(e) => {
-                        attempts.push(format!("{}: unreadable output: {e}", candidate.join(" ")))
-                    }
-                }
-            }
-            Ok(output) => attempts.push(format!(
-                "{}: {} ({})",
-                candidate.join(" "),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )),
-            Err(e) => attempts.push(format!("{}: {e}", candidate.join(" "))),
-        }
-    }
-    panic!(
-        "libghostty-vt.a has members Apple's linker rejects as not 8-byte aligned ({members}) and no \
-         `libtool -static` rewrite succeeded ({}); install the Xcode Command Line Tools or point \
-         LIBGHOSTTY_VT_LIBTOOL at Apple's libtool",
-        attempts.join("; ")
-    );
-}
-
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
@@ -206,7 +35,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_OPTIMIZE");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SIMD");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_ZIG_SYSTEM_DIR");
-    println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_LIBTOOL");
     println!("cargo:rerun-if-env-changed=ZYNK_BUILD_CHANNEL");
     println!("cargo:rerun-if-env-changed=ZYNK_BUILD_ID");
     println!("cargo:rerun-if-env-changed=ZYNK_BUILD_COMMIT");
@@ -264,13 +92,5 @@ fn main() {
 
     let lib_dir = zig_prefix.join("lib");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    if target.contains("apple-darwin") {
-        let static_lib = lib_dir.join("libghostty-vt.a");
-        let link_lib = darwin_link_archive(&static_lib, &lib_dir);
-        println!("cargo:rustc-link-arg={}", link_lib.display());
-    } else if target.contains("windows-msvc") {
-        println!("cargo:rustc-link-lib=static=ghostty-vt-static");
-    } else {
-        println!("cargo:rustc-link-lib=static=ghostty-vt");
-    }
+    println!("cargo:rustc-link-lib=static=ghostty-vt");
 }
