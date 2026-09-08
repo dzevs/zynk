@@ -95,6 +95,9 @@ config key is removed (see **Changed**).
   the root agent and adopting new sessions; the idle client writer blocks instead of busy-polling; remote
   handshakes get a 60 s budget (local stays 5 s).
 - Self-update messages now say accurately that self-update is unavailable; the updater remains fail-closed.
+- Claude Code 2.1.228 and newer spin with half-circle frames in the terminal title; a working Claude was
+  detected as idle. The title rule now recognizes those frames, and a current permission or selection form
+  outranks a retained busy title so a pane that needs your input reads as blocked, not working.
 - Source builds on macOS: the vendored libghostty-vt static archive is normalized for Apple's linker.
   Zig 0.15's archive writer pads members to 2 bytes and Apple's `ld` (Xcode 15+) rejects a 64-bit Mach-O
   member that is not 8-byte aligned (`64-bit mach-o member 'compiler_rt.o' not 8-byte aligned`); whether a
