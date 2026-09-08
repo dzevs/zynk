@@ -653,6 +653,67 @@ fn claude_osc_title_half_circle_frames_are_working() {
 }
 
 #[test]
+fn claude_current_blocker_form_outranks_a_retained_busy_title() {
+    // Gate-3 ARB-4FDA-OSC-PRECEDENCE-001: Claude keeps its busy spinner title while a permission or
+    // selection form waits for the user (upstream issue #3467). The current form must win, or a pane that
+    // needs input reads as working for hours.
+    let form =
+        "──────────\n  1. Yes\n  2. No\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n";
+    for title in [
+        "\u{25D0} Initial conversation with Claude",
+        "\u{25D3} Initial conversation with Claude",
+        "\u{25D1} Reading files",
+        "\u{25D2} Reading files",
+        "\u{280B} Thinking",
+    ] {
+        let result = osc_explain(Agent::Claude, form, title, "");
+        assert_eq!(result.state, AgentState::Blocked, "title {title}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("live_blocked_form"),
+            "title {title}"
+        );
+        assert!(result.visible_blocker, "title {title}");
+        assert!(!result.visible_working, "title {title}");
+    }
+}
+
+#[test]
+fn claude_busy_title_still_outranks_the_idle_prompt_box_and_stale_scrollback() {
+    // The spinner must keep beating weak evidence: the idle prompt box (a working Claude keeps its input box
+    // visible) and a stale permission prompt left in scrollback.
+    let prompt_box = "❯ \n";
+    let stale_scrollback = "do you want to proceed?\n\
+        bash command: ls\n\
+        ❯ 1. Yes\n   2. No\n\n\
+        Esc to cancel · Tab to amend · ctrl+e to explain\n";
+    for screen in [prompt_box, stale_scrollback] {
+        let result = osc_explain(Agent::Claude, screen, "\u{25D0} Reading files", "");
+        assert_eq!(result.state, AgentState::Working, "screen {screen:?}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("osc_title_working"),
+            "screen {screen:?}"
+        );
+        assert!(result.visible_working, "screen {screen:?}");
+    }
+}
+
+#[test]
+fn claude_osc_title_adjacent_code_points_are_not_busy_frames() {
+    // The frame class is exactly U+25D0..U+25D3 followed by a space.
+    for title in ["\u{25CF} Claude", "\u{25D4} Claude", "\u{25D0}Claude"] {
+        let result = osc_explain(Agent::Claude, "", title, "");
+        assert_ne!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("osc_title_working"),
+            "title {title}"
+        );
+        assert!(!result.visible_working, "title {title}");
+    }
+}
+
+#[test]
 fn claude_osc_title_static_prefix_is_idle() {
     // "✳" is U+2733, static prefix when Claude is not working
     let result = osc_explain(Agent::Claude, "", "✳ Claude Code", "");

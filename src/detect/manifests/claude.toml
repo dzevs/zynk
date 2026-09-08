@@ -1,5 +1,5 @@
 id = "claude"
-version = "2026.09.08.1"
+version = "2026.09.08.2"
 min_engine_version = 2
 updated_at = "2026-09-08T00:00:00Z"
 aliases = ["claude-code"]
@@ -7,7 +7,10 @@ aliases = ["claude-code"]
 [[rules]]
 id = "osc_title_working"
 state = "working"
-priority = 1100
+# 970: above the idle prompt box (950) and stale scrollback blockers (<= 850) but BELOW the current blocker
+# forms (980): Claude keeps its busy title while a permission or selection form waits for the user, and that
+# form must win (upstream issue #3467).
+priority = 970
 region = "osc_title"
 visible_working = true
 # Braille frames cover Claude Code <= 2.1.227; half-circle frames (U+25D0..U+25D3) are the >= 2.1.228 busy
