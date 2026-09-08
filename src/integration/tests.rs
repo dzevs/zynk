@@ -584,6 +584,36 @@ fn outdated_integrations_detect_previous_pi_version() {
 }
 
 #[test]
+fn outdated_integrations_detect_previous_omp_version() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let ext_dir = home.join(".omp/agent/extensions");
+    fs::create_dir_all(&ext_dir).unwrap();
+    let extension_path = ext_dir.join(OMP_EXTENSION_INSTALL_NAME);
+    fs::write(
+        &extension_path,
+        "// ZYNK_INTEGRATION_ID=omp\n// ZYNK_INTEGRATION_VERSION=4\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    let outdated = outdated_installed_integrations();
+
+    assert_eq!(outdated.len(), 1);
+    assert_eq!(
+        outdated[0].target,
+        crate::api::schema::IntegrationTarget::Omp
+    );
+    assert_eq!(outdated[0].path, extension_path);
+    assert_eq!(outdated[0].installed_version, Some(4));
+    assert_eq!(outdated[0].expected_version, OMP_INTEGRATION_VERSION);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
 fn outdated_integrations_accept_current_version_marker() {
     let _lock = integration_env_lock();
     let base = unique_base();
@@ -2525,8 +2555,8 @@ fn pi_asset_is_state_only_no_receiver() {
     assert!(PI_EXTENSION_ASSET.contains("pane.report_agent_session"));
     assert!(PI_EXTENSION_ASSET.contains("pane.release_agent"));
 
-    // the asset version marker is bumped to the root-session-protected revision.
-    assert_eq!(parse_integration_version(PI_EXTENSION_ASSET), Some(6));
+    // the asset version marker is bumped to the session-reanchor revision.
+    assert_eq!(parse_integration_version(PI_EXTENSION_ASSET), Some(7));
 }
 
 #[test]
@@ -2768,9 +2798,12 @@ fn omp_extension_refreshes_session_ref_before_agent_start_state() {
 
 #[test]
 fn pi_and_omp_extensions_restore_working_state_on_reload() {
+    // The two assets no longer share a session_start signature: pi awaits its
+    // session report (see `pi_extension_reports_the_session_start_source`) and so
+    // takes the event, omp still ignores it. Anchor on the registration itself.
     for (name, asset) in [("pi", PI_EXTENSION_ASSET), ("omp", OMP_EXTENSION_ASSET)] {
         let session_start = asset
-            .find("pi.on(\"session_start\", (_event, ctx)")
+            .find("pi.on(\"session_start\",")
             .unwrap_or_else(|| panic!("{name} extension registers session_start handler"));
         let handler = &asset[session_start..];
         let restore = handler
@@ -2784,6 +2817,58 @@ fn pi_and_omp_extensions_restore_working_state_on_reload() {
 
         assert!(restore < publish_state);
     }
+}
+
+#[test]
+fn pi_extension_reports_the_session_start_source() {
+    // A pi session replacement (/new, /resume, /fork) has to reach the pane as a
+    // session report CARRYING its reason: `session_start_source` is what
+    // `TerminalState::session_start_source_allows_session_replacement` gates the
+    // re-anchor on, so a report without it can never replace the stale session.
+    let report_session = PI_EXTENSION_ASSET
+        .find("function reportSession(sessionStartSource?: string): Promise<void>")
+        .expect("pi extension should take the session start source");
+    assert!(
+        PI_EXTENSION_ASSET[report_session..].contains("session_start_source: sessionStartSource,"),
+        "pi extension should forward the session start source on the wire"
+    );
+
+    let session_start = PI_EXTENSION_ASSET
+        .find("pi.on(\"session_start\", async (event, ctx)")
+        .expect("pi extension should receive the session_start event");
+    let handler = &PI_EXTENSION_ASSET[session_start..];
+    let reported = handler
+        .find("await reportSession(event?.reason);")
+        .expect("pi extension should report the session with its start reason");
+    let publish_state = handler
+        .find("publishState(true);")
+        .expect("pi extension publishes state after the session is reported");
+
+    // Ordering is the point: state published before the replacement session is
+    // acknowledged would still be attributed to the session it replaced.
+    assert!(reported < publish_state);
+}
+
+#[test]
+fn omp_extension_retries_an_unanswered_state_report() {
+    // The omp mirror of `pi_extension_retries_an_unanswered_state_report`: a
+    // first attempt the socket accepts but never answers is retried once with a
+    // longer timeout before the queue moves on to the next report.
+    let attempt = OMP_EXTENSION_ASSET
+        .find("function sendRequestAttempt(request: unknown, timeoutMs: number): Promise<boolean>")
+        .expect("omp extension should report a per-attempt delivery result");
+    let sender = OMP_EXTENSION_ASSET
+        .find("async function sendRequestNow(request: unknown): Promise<void>")
+        .expect("omp extension should wrap the attempt in a retrying sender");
+    let first_attempt = OMP_EXTENSION_ASSET[sender..]
+        .find("if (await sendRequestAttempt(request, 500))")
+        .expect("omp extension should return once the first attempt is delivered");
+    let retry_attempt = OMP_EXTENSION_ASSET[sender..]
+        .find("await sendRequestAttempt(request, 1500);")
+        .expect("omp extension should retry an undelivered report with a longer timeout");
+
+    assert!(attempt < sender);
+    assert!(first_attempt < retry_attempt);
 }
 
 fn omp_handler(event: &str) -> &'static str {
