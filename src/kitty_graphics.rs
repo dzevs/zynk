@@ -281,6 +281,7 @@ fn encode_graphics_update(
     sources.retain(|source, _| current_sources.contains(source));
 
     let mut current_placements = HashSet::new();
+    let mut superseded_images = Vec::new();
     for placement in placements {
         let clipped = clipped_placement(placement);
         tracing::debug!(
@@ -330,15 +331,13 @@ fn encode_graphics_update(
             }
         }
 
-        release_superseded_source_image(
-            bytes,
-            sources,
-            host_images,
-            host_placements,
-            &mut current_placements,
-            (placement.pane_id, placement.placement.image_id),
-            host_id,
-        );
+        if let Some(previous) =
+            sources.insert((placement.pane_id, placement.placement.image_id), host_id)
+        {
+            if previous != host_id {
+                superseded_images.push(previous);
+            }
+        }
 
         // A different view can repaint the same cells with text or overlays and
         // leave the host-side Kitty placement state out of sync with this cache.
@@ -368,6 +367,22 @@ fn encode_graphics_update(
         }
     }
 
+    // A source superseded early in this frame can be the very image a later
+    // source in the same frame still points at: `collect_visible_placements`
+    // reads the pre-update cache, so that later source carries no payload and
+    // could not re-upload an image freed mid-loop. Free a superseded image only
+    // once every source in the frame has been registered.
+    for previous in superseded_images {
+        release_superseded_image(
+            bytes,
+            sources,
+            host_images,
+            host_placements,
+            &mut current_placements,
+            previous,
+        );
+    }
+
     let mut stale_placements = Vec::new();
     for key in host_placements.keys() {
         if current_placements.contains(key) {
@@ -381,25 +396,24 @@ fn encode_graphics_update(
     }
 }
 
-/// Records that `source` is now backed by `host_id` and deletes the host
-/// image it previously pointed at once no other source references it.
-fn release_superseded_source_image(
+/// Deletes a host image a source moved away from, once no source in the
+/// current frame references it any more.
+fn release_superseded_image(
     bytes: &mut Vec<u8>,
-    sources: &mut HashMap<(PaneId, u32), u32>,
+    sources: &HashMap<(PaneId, u32), u32>,
     host_images: &mut HashMap<u32, ImageSignature>,
     host_placements: &mut HashMap<(u32, u32), PlacementSignature>,
     current_placements: &mut HashSet<(u32, u32)>,
-    source: (PaneId, u32),
-    host_id: u32,
+    previous: u32,
 ) {
-    let Some(previous) = sources.insert(source, host_id) else {
+    if sources.values().any(|id| *id == previous) {
         return;
-    };
-    if previous == host_id || sources.values().any(|id| *id == previous) {
+    }
+    // Already freed by an earlier supersede in this same frame.
+    if host_images.remove(&previous).is_none() {
         return;
     }
     encode_delete_image(bytes, previous);
-    host_images.remove(&previous);
     // The `d=I` delete also removes the image's placements host-side.
     host_placements.retain(|(image_id, placement_id), _| {
         if *image_id == previous {
@@ -1139,6 +1153,94 @@ mod tests {
         assert!(reused.contains("a=p"));
         assert_eq!(images.len(), 1);
         assert_eq!(placements.len(), 1);
+    }
+
+    #[test]
+    fn new_source_keeps_image_needed_later_in_the_same_update() {
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+        let first = test_placement(0, 0);
+        let old_host_id = host_image_id(first.pane_id, &first.placement);
+        encode_graphics_update(
+            &mut bytes,
+            &[first],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        let mut changed = test_placement(0, 0);
+        changed.placement.data_fingerprint = 43;
+        let mut new_source = test_placement(5, 5);
+        new_source.placement.image_id = 8;
+        new_source.placement.placement_id = 4;
+        // Production collects against the pre-update cache and omits data
+        // for a signature already uploaded to the host.
+        assert!(images.contains_key(&host_image_id(new_source.pane_id, &new_source.placement)));
+        new_source.placement.data.clear();
+        bytes.clear();
+        encode_graphics_update(
+            &mut bytes,
+            &[changed, new_source],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        assert!(
+            images.contains_key(&old_host_id),
+            "a later visible source still needs this image"
+        );
+        assert_eq!(placements.len(), 2, "both placements must remain visible");
+    }
+
+    #[test]
+    fn new_source_order_does_not_change_superseded_image_handling() {
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+        let first = test_placement(0, 0);
+        let old_host_id = host_image_id(first.pane_id, &first.placement);
+        encode_graphics_update(
+            &mut bytes,
+            &[first],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        // Mirror of `new_source_keeps_image_needed_later_in_the_same_update`:
+        // the new source that still needs the old image comes first, and the
+        // source that supersedes it comes second.
+        let mut new_source = test_placement(5, 5);
+        new_source.placement.image_id = 8;
+        new_source.placement.placement_id = 4;
+        new_source.placement.data.clear();
+        let mut changed = test_placement(0, 0);
+        changed.placement.data_fingerprint = 43;
+        bytes.clear();
+        encode_graphics_update(
+            &mut bytes,
+            &[new_source, changed],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        let update = String::from_utf8_lossy(&bytes);
+        assert!(
+            !update.contains(&format!("a=d,d=I,i={old_host_id}")),
+            "a live source still references the old image"
+        );
+        assert!(images.contains_key(&old_host_id));
+        assert_eq!(placements.len(), 2, "both placements must remain visible");
     }
 
     #[test]

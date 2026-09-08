@@ -90,6 +90,8 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 - Terminal/render: wide-character cells in pane text, border intersections use the active pane color, Kitty
   file/temp/shared-memory image media, split host-color replies, duplicate release-key input, focus after
   temporary pane commands.
+- Kitty graphics: replacing one pane image no longer makes a second image drawn in the same frame vanish. The
+  image a source moved away from is now freed only once nothing else on screen still references it.
 - Agents/remote: Devin hook on Python 3.9; Copilot `ask_user` accept prompt detected; OpenCode hook scoped to
   the root agent and adopting new sessions; the idle client writer blocks instead of busy-polling; remote
   handshakes get a 60 s budget (local stays 5 s).
