@@ -377,6 +377,9 @@ impl TerminalState {
         seq: Option<u64>,
         now: Instant,
     ) -> Option<TerminalStateMutation> {
+        if crate::detect::session_identity_only_integration(&source, &agent_label) {
+            return None;
+        }
         if self.full_lifecycle_hook_report_is_suppressed(&source, &agent_label, &session_ref) {
             return None;
         }
@@ -837,7 +840,8 @@ impl TerminalState {
                 "zynk:codex",
                 "codex",
                 Some("startup" | "clear" | "resume" | "compact")
-            ) | ("zynk:opencode", "opencode", Some("new"))
+            ) | ("zynk:hermes", "hermes", Some("startup" | "new" | "resume"))
+                | ("zynk:opencode", "opencode", Some("new"))
         )
     }
 
@@ -871,6 +875,31 @@ impl TerminalState {
             return None;
         }
         if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
+            return None;
+        }
+        // A session-identity-only integration holds no lifecycle authority, so a
+        // claim that repoints an established anchor is only trustworthy while its
+        // process is the detected agent. Otherwise a stale or background report
+        // would silently rewrite the pane's session identity.
+        let replacing_identity_only_session =
+            crate::detect::session_identity_only_integration(&source, &agent_label)
+                && Self::session_start_source_allows_session_replacement(
+                    &source,
+                    &agent_label,
+                    session_start_source.as_deref(),
+                )
+                && self.current_session_identity_for_persistence().is_some_and(
+                    |(current_source, current_agent, current_kind, current_value)| {
+                        current_source == source
+                            && current_agent == agent_label
+                            && current_kind == crate::agent_resume::AgentSessionRefKind::Id
+                            && session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+                            && current_value != session_ref.value
+                    },
+                );
+        let process_present = crate::detect::parse_agent_label(&agent_label)
+            .is_some_and(|known_agent| self.detected_agent == Some(known_agent));
+        if replacing_identity_only_session && !process_present {
             return None;
         }
         if self.current_session_owner_conflicts(&source, &agent_label)
@@ -2348,6 +2377,105 @@ mod tests {
     }
 
     #[test]
+    fn hermes_session_claim_leaves_state_to_detection() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("hermes-root").unwrap();
+
+        let session = terminal.set_agent_session_ref_for_session_start(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            Some(session_ref.clone()),
+            Some(10),
+            Some("startup".into()),
+        );
+
+        assert!(session.is_some());
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&session_ref)
+        );
+
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Working);
+
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+
+        let replacement_ref =
+            crate::agent_resume::AgentSessionRef::id("hermes-replacement").unwrap();
+        let replacement = terminal.set_agent_session_ref_for_session_start(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            Some(replacement_ref.clone()),
+            Some(11),
+            Some("startup".into()),
+        );
+
+        assert!(replacement.is_some());
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&replacement_ref)
+        );
+
+        let legacy_state = terminal.set_hook_authority_with_session_ref(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(replacement_ref.clone()),
+            Some(12),
+        );
+        assert!(legacy_state.is_none());
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+
+        terminal.set_detected_state(None, AgentState::Unknown);
+        let background_replacement = terminal.set_agent_session_ref_for_session_start(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("hermes-background"),
+            Some(13),
+            Some("resume".into()),
+        );
+        assert!(background_replacement.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&replacement_ref)
+        );
+
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        let retried_ref = crate::agent_resume::AgentSessionRef::id("hermes-background").unwrap();
+        let retried_replacement = terminal.set_agent_session_ref_for_session_start(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            Some(retried_ref.clone()),
+            Some(14),
+            Some("resume".into()),
+        );
+        assert!(retried_replacement.is_some());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&retried_ref)
+        );
+    }
+
+    #[test]
     fn different_owner_session_ref_does_not_replace_existing_session_ref() {
         let mut terminal = test_terminal();
         terminal
@@ -2822,10 +2950,10 @@ mod tests {
     fn visible_working_does_not_override_full_lifecycle_hook_idle() {
         let now = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
         terminal.set_hook_authority_with_custom_status_at(
-            "zynk:hermes".into(),
-            "hermes".into(),
+            "zynk:kimi".into(),
+            "kimi".into(),
             AgentState::Idle,
             None,
             None,
@@ -2835,7 +2963,7 @@ mod tests {
         );
 
         let change = terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Hermes),
+            Some(Agent::Kimi),
             AgentState::Working,
             false,
             false,
@@ -3668,14 +3796,14 @@ mod tests {
     #[test]
     fn detected_agent_disappearance_does_not_clear_full_lifecycle_hook_session_ref() {
         let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
         terminal.set_hook_authority_with_session_ref(
-            "zynk:hermes".into(),
-            "hermes".into(),
+            "zynk:kimi".into(),
+            "kimi".into(),
             AgentState::Working,
             None,
             None,
-            crate::agent_resume::AgentSessionRef::id("hermes-session"),
+            crate::agent_resume::AgentSessionRef::id("kimi-session"),
             Some(20),
         );
 
@@ -3684,7 +3812,7 @@ mod tests {
         assert!(!mutation.session_ref_changed);
         assert!(terminal.hook_authority.is_some());
         assert!(terminal.persisted_agent_session.is_none());
-        assert_eq!(terminal.effective_agent_label(), Some("hermes"));
+        assert_eq!(terminal.effective_agent_label(), Some("kimi"));
     }
 
     #[test]

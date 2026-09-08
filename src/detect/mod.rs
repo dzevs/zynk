@@ -311,11 +311,16 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
         ("zynk:pi", "pi")
             | ("zynk:omp", "omp")
             | ("zynk:mastracode", "mastracode")
-            | ("zynk:hermes", "hermes")
             | ("zynk:opencode", "opencode")
             | ("zynk:kilo", "kilo")
             | ("zynk:kimi", "kimi")
     )
+}
+
+/// Integrations that report session identity only and leave lifecycle state to
+/// screen detection. Their hook reports must never take hook authority.
+pub(crate) fn session_identity_only_integration(source: &str, agent_label: &str) -> bool {
+    (source, agent_label) == ("zynk:hermes", "hermes")
 }
 
 // ---------------------------------------------------------------------------
@@ -788,6 +793,13 @@ mod tests {
         ));
         assert!(!Agent::SCREEN_MANIFEST_AGENTS.contains(&Agent::Mastracode));
         assert!(Agent::ALL.contains(&Agent::Mastracode));
+    }
+
+    #[test]
+    fn hermes_session_integration_leaves_state_to_screen_detection() {
+        assert!(!full_lifecycle_hook_authority("zynk:hermes", "hermes"));
+        assert!(session_identity_only_integration("zynk:hermes", "hermes"));
+        assert!(Agent::SCREEN_MANIFEST_AGENTS.contains(&Agent::Hermes));
     }
 
     #[test]
