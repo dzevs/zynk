@@ -115,11 +115,13 @@ jobs:
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Run checks
-        run: just ci 'all()'
+      # `just check` = lint + TS + nextest + the Python maintenance/release-evidence tests. `just ci` is only
+      # the fast subset (lint + TS + nextest) — never use it as the CI gate.
+      - name: Run the full check
+        run: just check
 ```
 
-> **Note:** The bundled `libghostty-vt` is built with Zig, so CI must install Zig 0.15.2; the TS asset test needs Bun. Pin action versions (ideally by commit SHA) for supply-chain safety.
+> **Note:** The bundled `libghostty-vt` is built with Zig, so CI must install Zig 0.15.2; the TS asset test needs Bun; the gitleaks maintenance tests need the `gitleaks` binary (install it as `ci.yml` does, or those tests skip). Pin action versions (ideally by commit SHA) for supply-chain safety.
 
 ### Required and optional platform tiers (ADR 0012)
 

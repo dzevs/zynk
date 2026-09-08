@@ -1,6 +1,6 @@
 # Changelog
 
-## [3.1.0] — 2026-09-07
+## [3.1.0] — unreleased (pre-tag; the date is set when the immutable tag is cut)
 
 The **herdr v0.7.1 port** (36 upstream changes re-applied on top of the Zynk identity — see
 `docs/zynk/fork-patch-ledger.md`, *v0.7.1 PORT LEDGER*) plus a hardened single public repo. No wire/protocol
