@@ -667,29 +667,4 @@ mod tests {
         );
         std::env::remove_var(crate::config::HEADER_VERBOSE_ENV_VAR);
     }
-
-    #[test]
-    fn experiments_renders_switch_ascii_input_source_row() {
-        let mut app = AppState::test_new();
-        app.switch_ascii_input_source_in_prefix = true;
-        app.settings.section = SettingsSection::Experiments;
-        app.settings.list.selected = 1;
-        app.mode = Mode::Settings;
-
-        let mut terminal =
-            Terminal::new(TestBackend::new(80, 24)).expect("test terminal should initialize");
-        terminal
-            .draw(|frame| render_settings_overlay(&app, frame, Rect::new(0, 0, 80, 24)))
-            .expect("settings overlay should render");
-
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(rendered.contains("switch to ascii input source in prefix (macOS) [✓]"));
-    }
 }

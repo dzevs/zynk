@@ -8,6 +8,9 @@ use crossterm::event::{
 use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("zynk supports Linux only (docs/zynk/decisions/0013-linux-only-platform-scope.md)");
+
 /// Zynk host-protocol env var (ADR 0010 — full rebrand): the env var the binary
 /// sets for its hooks to mark "running inside zynk".
 pub(crate) const ZYNK_ENV_VAR: &str = "ZYNK_ENV";
@@ -350,11 +353,6 @@ const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # kitty_graphics = false
 # Save recent pane screen history across full server restarts.
 pane_history = false
-# While prefix mode is active, temporarily switch the macOS host input
-# source to an ASCII-capable keyboard layout so prefix commands register
-# even when a CJK IME is active, then restore the previous input source
-# when prefix mode exits. macOS only; best-effort. Default: false.
-# switch_ascii_input_source_in_prefix = false
 # Expose the focused pane's cursor to the outer terminal so macOS input
 # methods keep tracking the candidate window when TUIs paint their own
 # cursor (Claude Code, pi, codex). Trade-off: extra cursor visible for

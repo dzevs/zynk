@@ -20,7 +20,6 @@ pub(super) enum SettingsAction {
     SaveHeaderVerbose(bool),
     SaveHeaderMaxWidth(usize),
     SavePaneHistory(bool),
-    SaveSwitchAsciiInputSourceInPrefix(bool),
     InstallRecommendedIntegrations,
 }
 
@@ -30,11 +29,6 @@ fn experiment_toggle_action(state: &AppState, idx: usize) -> Option<SettingsActi
         ExperimentSetting::PaneHistory => Some(SettingsAction::SavePaneHistory(
             !ExperimentSetting::PaneHistory.enabled(state),
         )),
-        ExperimentSetting::SwitchAsciiInputSourceInPrefix => {
-            Some(SettingsAction::SaveSwitchAsciiInputSourceInPrefix(
-                !ExperimentSetting::SwitchAsciiInputSourceInPrefix.enabled(state),
-            ))
-        }
     }
 }
 
@@ -53,9 +47,6 @@ impl App {
                 SettingsAction::SaveHeaderMaxWidth(width) => self.save_header_max_width(width),
                 SettingsAction::SavePaneHistory(enabled) => {
                     self.save_pane_history_persistence(enabled)
-                }
-                SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
-                    self.save_switch_ascii_input_source_in_prefix(enabled)
                 }
                 SettingsAction::InstallRecommendedIntegrations => {
                     self.install_recommended_integrations()
@@ -648,30 +639,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_experiments_down_then_toggle_switches_ascii_input_source() {
-        let mut state = state_with_workspaces(&["test"]);
-        state.switch_ascii_input_source_in_prefix = false;
-        open_settings_at(&mut state, SettingsSection::Experiments);
-
-        update_settings_state(
-            &mut state,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
-        );
-        assert_eq!(state.settings.list.selected, 1);
-
-        let action = update_settings_state(
-            &mut state,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-        );
-
-        assert_eq!(
-            action,
-            Some(SettingsAction::SaveSwitchAsciiInputSourceInPrefix(true))
-        );
-        assert_eq!(state.mode, Mode::Settings);
-    }
-
-    #[test]
     fn settings_section_all_includes_header() {
         assert!(SettingsSection::ALL.contains(&SettingsSection::Header));
     }
@@ -950,26 +917,6 @@ mod tests {
 
         assert_eq!(action, Some(SettingsAction::SavePaneHistory(true)));
         assert_eq!(app.state.settings.list.selected, 0);
-    }
-
-    #[test]
-    fn settings_mouse_click_toggles_switch_ascii_input_source_row() {
-        let mut app = app_for_mouse_test();
-        app.state.switch_ascii_input_source_in_prefix = false;
-        open_settings_at(&mut app.state, SettingsSection::Experiments);
-
-        let area = app.state.settings_content_rect();
-        let action = app.state.handle_settings_mouse(mouse(
-            MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            area.x + 2,
-            area.y + 4,
-        ));
-
-        assert_eq!(
-            action,
-            Some(SettingsAction::SaveSwitchAsciiInputSourceInPrefix(true))
-        );
-        assert_eq!(app.state.settings.list.selected, 1);
     }
 
     #[test]

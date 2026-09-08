@@ -61,7 +61,6 @@ impl App {
         &mut self,
         msg: crate::api::ApiRequestMessage,
     ) -> bool {
-        let previous_mode = self.state.mode;
         let mut changed = crate::api::request_changes_ui(&msg.request);
         let skip_default_workspace = matches!(
             &msg.request.method,
@@ -82,7 +81,6 @@ impl App {
             if !skip_default_workspace {
                 changed |= self.ensure_default_workspace();
             }
-            self.sync_prefix_input_source(previous_mode);
             return changed | deferred_changed;
         }
         let response = self.handle_api_request(msg.request);
@@ -90,7 +88,6 @@ impl App {
             changed |= self.ensure_default_workspace();
         }
         let _ = msg.respond_to.send(response);
-        self.sync_prefix_input_source(previous_mode);
         changed
     }
 
@@ -118,7 +115,6 @@ impl App {
         &mut self,
         event: crate::raw_input::RawInputEvent,
     ) -> bool {
-        let previous_mode = self.state.mode;
         let changed = match event {
             crate::raw_input::RawInputEvent::Key(key) => {
                 let key_id = repeat_key_identity(&key);
@@ -182,7 +178,6 @@ impl App {
             }
             crate::raw_input::RawInputEvent::Unsupported => false,
         };
-        self.sync_prefix_input_source(previous_mode);
         self.shutdown_detached_terminal_runtimes();
         changed
     }
@@ -619,7 +614,7 @@ impl App {
                 break;
             };
             had_event = true;
-            self.handle_internal_event_with_prefix_sync(ev);
+            self.handle_internal_event(ev);
         }
         had_event
     }

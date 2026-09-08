@@ -335,13 +335,22 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
 /// Removed config keys that are still likely to be present in older config files. Serde ignores
 /// unknown keys, so without this the removal would be silent; the diagnostic makes the migration
 /// visible (3.1.0 policy: documented keys may be removed in a minor with a changelog note + this).
-const REMOVED_CONFIG_KEYS: &[(&str, &str, &str)] = &[(
-    "ui",
-    "agent_panel_scope",
-    "ui.agent_panel_scope is no longer supported (removed in 3.1.0); the agent panel shows all \
-     workspaces. ui.agent_panel_sort controls ordering only and does not restore current-workspace \
-     filtering; ignoring key",
-)];
+const REMOVED_CONFIG_KEYS: &[(&str, &str, &str)] = &[
+    (
+        "ui",
+        "agent_panel_scope",
+        "ui.agent_panel_scope is no longer supported (removed in 3.1.0); the agent panel shows all \
+         workspaces. ui.agent_panel_sort controls ordering only and does not restore \
+         current-workspace filtering; ignoring key",
+    ),
+    (
+        "experimental",
+        "switch_ascii_input_source_in_prefix",
+        "experimental.switch_ascii_input_source_in_prefix is no longer supported (removed in \
+         3.1.0); it switched the macOS host input source during prefix mode and zynk targets \
+         Linux only; ignoring key",
+    ),
+];
 
 fn removed_config_key_diagnostics_from_str(content: &str) -> Vec<String> {
     content
@@ -775,6 +784,29 @@ agent_panel_sort = "priority"
             loaded.config.ui.agent_panel_sort,
             super::super::AgentPanelSortConfig::Priority
         );
+    }
+
+    #[test]
+    fn load_live_config_warns_about_removed_switch_ascii_input_source_key() {
+        let loaded = load_live_config_from_str(
+            r#"
+[experimental]
+switch_ascii_input_source_in_prefix = true
+pane_history = true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            loaded.diagnostics,
+            vec![
+                "experimental.switch_ascii_input_source_in_prefix is no longer supported (removed \
+                 in 3.1.0); it switched the macOS host input source during prefix mode and zynk \
+                 targets Linux only; ignoring key"
+            ]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+        assert!(loaded.config.experimental.pane_history);
     }
 
     #[test]
