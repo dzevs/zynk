@@ -195,8 +195,11 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
     if prov["runner_os"] != runner["os"] or prov["runner_arch"] != runner["arch"]:
         bad.append(f"producer runner {entry['producer_runner']} is not the target's native runner "
                    f"{runner['os']}/{runner['arch']}")
-    if prov["tree_clean"] is not True:
-        bad.append(f"producer's tracked tree was not clean after the build: {prov['tree_status'] or '(no status)'}")
+    # Raw-vs-derived: the derived flag is never trusted over the raw `git status` text (Codex P2 at c628f63).
+    raw_status = prov["tree_status"].lstrip("\ufeff").strip()
+    if prov["tree_clean"] is not True or raw_status:
+        bad.append(f"producer's tracked tree was not clean after the build: "
+                   f"tree_clean={prov['tree_clean']!r}, status={raw_status or '(empty)'}")
     if prov["run_attempt"] > int(ctx["run_attempt"]):
         bad.append(f"sidecar run_attempt {prov['run_attempt']} is later than this manifest's attempt {ctx['run_attempt']}")
     archive_bytes = archive.read_bytes()

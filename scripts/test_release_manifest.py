@@ -864,6 +864,52 @@ class TreeCleanliness(unittest.TestCase):
             f.artifact("linux-x86_64", mutate=lambda ev: ev["provenance"].pop("tree_clean"))
             self.assertEqual(status(f.evaluate(optional_targets="none"), "linux-x86_64"), "INCONSISTENT")
 
+    def test_tree_clean_true_with_a_non_empty_status_is_inconsistent(self):
+        # Codex in-flight P2 at c628f63: the derived flag must not be trusted over the raw status.
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", mutate=lambda ev: ev["provenance"].update(tree_clean=True, tree_status=" M src/main.rs"))
+            m = f.evaluate(optional_targets="none")
+            self.assertFalse(m["ok"])
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+            self.assertEqual(release_manifest.render_sha256sums(m), "")
+
+    def test_optional_tree_contradiction_excludes_only_that_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("test-windows-x86_64")
+            f.job("build-windows-x86_64", artifact_id="779")
+            f.artifact("windows-x86_64", mutate=lambda ev: ev["provenance"].update(tree_clean=True, tree_status="?? junk\n M a"))
+            m = f.evaluate()
+            self.assertTrue(m["ok"])
+            self.assertEqual(status(m, "windows-x86_64"), "INCONSISTENT")
+            self.assertEqual(status(m, "linux-x86_64"), "ELIGIBLE")
+            self.assertEqual(release_manifest.render_sha256sums(m).count("\n"), 1)
+
+    def test_cli_tree_contradiction_fails_with_empty_sums(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", mutate=lambda ev: ev["provenance"].update(tree_clean=True, tree_status=" M src/main.rs"))
+            out = pathlib.Path(tmp, "out")
+            proc = f.cli(out, optional_targets="none")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("result=FAIL", (out / "RELEASE_MANIFEST.txt").read_text())
+            self.assertEqual((out / "SHA256SUMS").read_text(), "")
+
+    def test_empty_status_with_true_flag_is_the_positive_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", mutate=lambda ev: ev["provenance"].update(tree_clean=True, tree_status="  \n"))
+            m = f.evaluate(optional_targets="none")
+            self.assertEqual(status(m, "linux-x86_64"), "ELIGIBLE")
+
     def test_tree_clean_string_true_is_not_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
             f = Fixture(tmp)
