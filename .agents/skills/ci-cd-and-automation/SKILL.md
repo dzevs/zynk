@@ -144,7 +144,8 @@ The candidate workflow has fixed per-target job ids (`test-linux`, `build-linux-
 `build-macos-aarch64`, `test-windows-x86_64`, `build-windows-x86_64`, and the build-only `build-linux-aarch64` /
 `build-macos-x86_64`), an `optional_targets: none | eligible | all` input, and a `manifest` job that downloads only by
 immutable artifact id, verifies each producer's hash-bound `EVIDENCE.json` (for the eligible-capable targets the
-packaged binary executed on its native runner — build-only targets record `not_run` and stay BUILT_UNVERIFIED;
+packaged binary executed on its native runner — the build-only targets stay BUILT_UNVERIFIED because they have no
+native test job, whether they record `not_run` (linux-aarch64) or a Rosetta `ran` (macos-x86_64);
 archive/binary sha256, `GITHUB_SHA`, clean tracked tree, version, CPU/ABI, producer runner and run id/attempt) and writes
 `RELEASE_MANIFEST.txt` + `SHA256SUMS` over **ELIGIBLE** targets only. A required-target failure means no release
 candidate; an optional failure is `OMITTED` / `BUILT_UNVERIFIED` / `INCONSISTENT` and never blocks Linux. Never use

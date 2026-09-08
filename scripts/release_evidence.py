@@ -3,9 +3,10 @@
 archive to the CI checkout provenance of the job that built it.
 
 Runs in the producing job after it packaged the archive and — for the eligible-capable targets, on their native
-runner — executed the actual packaged binary (`zynk --version`); build-only targets pass `not_run`. The execution
-result, the native tool output, and the tracked-tree status are passed in; everything else is read from the
-archive bytes and the GitHub environment.
+runner — executed the actual packaged binary (`zynk --version`). Build-only targets have no native test job and stay
+BUILT_UNVERIFIED whatever they record: linux-aarch64 passes `not_run`, macos-x86_64 may record `ran` after a
+Rosetta execution. The execution result, the native tool output, and the tracked-tree status are passed in;
+everything else is read from the archive bytes and the GitHub environment.
 `zynk --version` prints only the version — no commit is embedded in the binary — so `git_sha`/`checkout_head`
 here are checkout provenance, not a binary self-report."""
 from __future__ import annotations

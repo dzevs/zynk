@@ -73,15 +73,20 @@ fn symdef_is_never_reported_and_plain_names_work() {
 
 #[test]
 fn an_aligned_archive_reports_nothing() {
-    let a = plain_member("a.o", &[0u8; 20]); // payload at 68 -> misaligned
+    // A single BSD member with a 4-byte name: payload at 8 + 60 + 4 = 72, aligned -> Ok([]) (positive control).
+    let aligned = bsd_member("ab.o", &[0u8; 16]);
     let result =
-        archive_misaligned_members(&archive(std::slice::from_ref(&a))).expect("well-formed");
+        archive_misaligned_members(&archive(std::slice::from_ref(&aligned))).expect("well-formed");
+    assert_eq!(result, Vec::<String>::new());
+    // Two BSD members whose payloads both land on 8-byte boundaries: 72, then 8+60+20+60+4 = 152.
+    let second = bsd_member("cd.o", &[0u8; 8]);
+    let result = archive_misaligned_members(&archive(&[aligned, second])).expect("well-formed");
+    assert_eq!(result, Vec::<String>::new());
+    // A plain-name member's payload at 68 is misaligned and is reported.
+    let plain = plain_member("a.o", &[0u8; 20]);
+    let result =
+        archive_misaligned_members(&archive(std::slice::from_ref(&plain))).expect("well-formed");
     assert_eq!(result, vec!["a.o".to_string()]);
-    // A 16-byte payload after a 4-byte-shifted name puts the next payload at 8+60+16+60 = 144 -> aligned.
-    let b = plain_member("b.o", &[0u8; 16]);
-    let result = archive_misaligned_members(&archive(&[plain_member("x", &[0u8; 16]), b]))
-        .expect("well-formed");
-    assert_eq!(result, vec!["x".to_string()]);
 }
 
 #[test]
