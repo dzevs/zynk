@@ -110,6 +110,9 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 - That reported identity is also retired for good when the agent ends. After the integration releases the
   pane, clears it, or its process exits, a late hook callback can no longer restore the receipt authority of
   the finished session; a genuinely new session, or a freshly observed process, anchors the pane again.
+- Resuming that finished session anchors the pane again too, because an agent that resumes keeps its session
+  id. The integration's own resume report is accepted once the agent's process has been seen running again;
+  a resume with nothing observed since, or any ordinary late callback, still cannot revive the session.
 
 **Removed**
 

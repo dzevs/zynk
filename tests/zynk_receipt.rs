@@ -929,6 +929,61 @@ fn retired_session_must_not_receipt_after_a_late_report() {
 }
 
 #[test]
+fn a_bare_same_session_resume_must_not_receipt_for_a_retired_session() {
+    // Codex Gate-2 M3 extension finding (msg_5fe4c9a3eff5f1a8): the same-session resume
+    // that fresh process evidence admits must NOT be admitted on the reason alone. A
+    // released owner replaying `SessionStart:resume` for the session it just retired,
+    // with no process observed since, is the late callback the retirement refuses.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "resumed-identity");
+    start_detected_hermes(&fixture, &pane);
+    report_session(
+        &fixture.socket_path,
+        &pane,
+        "zynk:hermes",
+        "hermes",
+        "hermes-1",
+    );
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "message for the original session"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let sent = parse_outcome(&out);
+    let released = send_json(
+        &fixture.socket_path,
+        &serde_json::json!({
+            "id": "release", "method": "pane.release_agent", "params": {
+                "pane_id": pane, "source": "zynk:hermes", "agent": "hermes", "seq": 21
+            }
+        })
+        .to_string(),
+    );
+    assert!(released.get("error").is_none(), "{released}");
+
+    let resumed = send_json(
+        &fixture.socket_path,
+        &serde_json::json!({
+            "id": "resume", "method": "pane.report_agent_session", "params": {
+                "pane_id": pane, "source": "zynk:hermes", "agent": "hermes", "seq": 22,
+                "agent_session_id": "hermes-1", "session_start_source": "resume"
+            }
+        })
+        .to_string(),
+    );
+    assert!(resumed.get("error").is_none(), "{resumed}");
+
+    let after = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    fixture.cleanup();
+    assert_eq!(
+        after["error"]["code"], "receiver_identity_unverified",
+        "a bare resume report restored a retired session's receipt authority: {after}"
+    );
+}
+
+#[test]
 fn both_report_shapes_bind_the_addressed_session_only() {
     // Positive control for the retirement guards: both reporter shapes still anchor a
     // live receipt on the addressed pane, and a same-label pane with a different

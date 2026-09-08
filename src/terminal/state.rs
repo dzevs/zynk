@@ -61,6 +61,13 @@ enum HookSuppressionReason {
 struct StaleHookSession {
     agent_label: String,
     session_ref: crate::agent_resume::AgentSessionRef,
+    /// Whether this owner's process was OBSERVED AGAIN after the retirement that made
+    /// this session stale. It is the same "fresh process" evidence the restart path
+    /// already requires, and it is what separates a genuine resume from a late
+    /// callback: only with it may an explicit session-start report reclaim this
+    /// session id (`explicit_session_start_reclaims_stale_session`). Every new
+    /// retirement clears it, so only an observation after the LATEST retirement counts.
+    fresh_process_evidence: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,7 +427,7 @@ impl TerminalState {
                 now,
             );
         }
-        if !self.hook_report_survives_retirement(&source, &agent_label, &session_ref) {
+        if !self.hook_report_survives_retirement(&source, &agent_label, &session_ref, None) {
             return None;
         }
         if !self.accept_hook_report(&source, seq) {
@@ -449,7 +456,11 @@ impl TerminalState {
             return None;
         }
         if session_ref.is_some() {
-            self.retire_suppressed_session_after_accepting(&source);
+            self.retire_suppressed_session_after_accepting(
+                &source,
+                &agent_label,
+                session_ref.as_ref(),
+            );
         }
         // Owner coherence: the two identity representations must never name different
         // owners at once. An accepted full-lifecycle owner supersedes any identity-only
@@ -522,8 +533,9 @@ impl TerminalState {
     ) -> Option<TerminalStateMutation> {
         // Retirement is shared with the full-lifecycle path: a clear, a release or a
         // process exit retires this owner until a genuinely NEW session or fresh
-        // process evidence arrives. A higher sequence alone is not a new session.
-        if !self.hook_report_survives_retirement(&source, &agent_label, &session_ref) {
+        // process evidence arrives. A higher sequence alone is not a new session, and
+        // this shape carries no session-start reason, so it can never reclaim one.
+        if !self.hook_report_survives_retirement(&source, &agent_label, &session_ref, None) {
             return None;
         }
         if !self.accept_hook_report(&source, seq) {
@@ -542,7 +554,11 @@ impl TerminalState {
                 .unwrap_or(session_ref)
         });
         if session_ref.is_some() {
-            self.retire_suppressed_session_after_accepting(&source);
+            self.retire_suppressed_session_after_accepting(
+                &source,
+                &agent_label,
+                session_ref.as_ref(),
+            );
         }
         let previous_session = self.current_session_identity_for_persistence();
         let identity_changed = self
@@ -596,16 +612,39 @@ impl TerminalState {
     ///
     /// `false` means this owner is still retired. A genuinely new session, or fresh
     /// process evidence, re-anchors the sequence instead of banning the owner.
+    ///
+    /// `session_start_source` is the reason the agent gave for starting a session, when
+    /// the report carries one (`pane.report_agent_session`). It is what admits the one
+    /// legitimate report that names an already-retired session — an explicit resume of
+    /// the SAME session, which the Hermes resume command deliberately produces by
+    /// reusing `session_ref.value`. Callers that carry no reason pass `None`, so an
+    /// ordinary late callback is refused exactly as before.
     fn hook_report_survives_retirement(
         &mut self,
         source: &str,
         agent_label: &str,
         session_ref: &Option<crate::agent_resume::AgentSessionRef>,
+        session_start_source: Option<&str>,
     ) -> bool {
-        if self.hook_report_is_suppressed(source, agent_label, session_ref)
-            || self.hook_report_matches_stale_session(source, agent_label, session_ref)
-        {
+        if self.hook_report_is_suppressed(source, agent_label, session_ref) {
             return false;
+        }
+        if self.hook_report_matches_stale_session(source, agent_label, session_ref) {
+            if !self.explicit_session_start_reclaims_stale_session(
+                source,
+                agent_label,
+                session_ref,
+                session_start_source,
+            ) {
+                return false;
+            }
+            // A reclaim opens a new generation of the same session, so the sequence
+            // anchor is dropped the way it is for a brand-new session. The stale entry
+            // itself is only dropped once the report is ACCEPTED
+            // (`retire_suppressed_session_after_accepting`): a report this gate lets
+            // through but a later check refuses must leave the session retired.
+            self.hook_report_sequences.remove(source);
+            return true;
         }
         if self.hook_report_has_fresh_session_after_suppression(source, agent_label, session_ref)
             || self.hook_report_has_fresh_session_after_stale_session(
@@ -619,18 +658,47 @@ impl TerminalState {
         true
     }
 
-    /// Consume this owner's suppression once a report carrying a session is accepted:
-    /// the suppressed session becomes a STALE session, so the retired session stays
-    /// retired while the new one anchors.
-    fn retire_suppressed_session_after_accepting(&mut self, source: &str) {
+    /// Consume this owner's retirement bookkeeping once a report carrying a session is
+    /// accepted: the suppressed session becomes a STALE session, so the retired session
+    /// stays retired while the new one anchors, and the accepted session — which the
+    /// gate only admits as an explicit reclaim — stops being stale, so this owner's
+    /// ordinary reports for it are no longer refused as retired.
+    fn retire_suppressed_session_after_accepting(
+        &mut self,
+        source: &str,
+        agent_label: &str,
+        accepted_session_ref: Option<&crate::agent_resume::AgentSessionRef>,
+    ) {
         if let Some(suppressed) = self.suppressed_hook_reports.remove(source) {
             if let Some(suppressed_ref) = suppressed.session_ref {
                 self.remember_stale_hook_session(
                     source.to_string(),
                     suppressed.agent_label,
                     suppressed_ref,
+                    false,
                 );
             }
+        }
+        if let Some(accepted_ref) = accepted_session_ref {
+            self.forget_stale_hook_session(source, agent_label, accepted_ref);
+        }
+    }
+
+    /// Drop a reclaimed session from this owner's stale list: it anchors identity
+    /// again, so refusing its later reports would retire a session that is live.
+    fn forget_stale_hook_session(
+        &mut self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) {
+        let Some(stale_sessions) = self.stale_hook_sessions.get_mut(source) else {
+            return;
+        };
+        stale_sessions
+            .retain(|stale| stale.agent_label != agent_label || &stale.session_ref != session_ref);
+        if stale_sessions.is_empty() {
+            self.stale_hook_sessions.remove(source);
         }
     }
 
@@ -760,6 +828,17 @@ impl TerminalState {
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         reason: HookSuppressionReason,
     ) {
+        // Evidence is scoped to the LATEST retirement: a process observed before this
+        // one proves nothing about a session retired now, so a resume must wait for a
+        // new observation.
+        if let Some(stale_sessions) = self.stale_hook_sessions.get_mut(&source) {
+            for stale in stale_sessions
+                .iter_mut()
+                .filter(|stale| stale.agent_label == agent_label)
+            {
+                stale.fresh_process_evidence = false;
+            }
+        }
         self.suppressed_hook_reports.insert(
             source,
             SuppressedHookReport {
@@ -863,6 +942,48 @@ impl TerminalState {
             })
     }
 
+    /// The ONE way back into a session this owner retired.
+    ///
+    /// Two things must hold. The report must be an explicit session-start report whose
+    /// reason this owner actually starts on — the same set
+    /// `session_start_source_allows_session_replacement` already trusts to repoint an
+    /// established anchor — which is the shape `pane.report_agent_session` carries and
+    /// an ordinary state callback never does. And the named session must carry fresh
+    /// process evidence: the owner's process was observed again AFTER the retirement,
+    /// the same bar the restart path applies to a brand-new session id. A resume that
+    /// arrives with no process seen since the retirement is still suppressed, and a
+    /// late callback with no session-start reason is still stale, however fresh the
+    /// process is. WHY this exists at all: the Hermes resume command reuses
+    /// `session_ref.value` (`src/agent_resume.rs`), so a new id would be a NEW session
+    /// — a real resume can only ever name the retired one.
+    fn explicit_session_start_reclaims_stale_session(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &Option<crate::agent_resume::AgentSessionRef>,
+        session_start_source: Option<&str>,
+    ) -> bool {
+        if !Self::session_start_source_allows_session_replacement(
+            source,
+            agent_label,
+            session_start_source,
+        ) {
+            return false;
+        }
+        let Some(incoming_ref) = session_ref.as_ref() else {
+            return false;
+        };
+        self.stale_hook_sessions
+            .get(source)
+            .is_some_and(|stale_sessions| {
+                stale_sessions.iter().any(|stale| {
+                    stale.agent_label == agent_label
+                        && &stale.session_ref == incoming_ref
+                        && stale.fresh_process_evidence
+                })
+            })
+    }
+
     fn live_full_lifecycle_hook_authority_conflicts_with_session(
         &self,
         source: &str,
@@ -906,21 +1027,19 @@ impl TerminalState {
                 if let Some(session_ref) = suppressed.session_ref.clone() {
                     stale_sessions.push((
                         source.clone(),
-                        StaleHookSession {
-                            agent_label: suppressed.agent_label.clone(),
-                            session_ref,
-                        },
+                        suppressed.agent_label.clone(),
+                        session_ref,
                     ));
                 }
             }
             !should_clear
         });
-        for (source, stale_session) in stale_sessions {
-            self.remember_stale_hook_session(
-                source,
-                stale_session.agent_label,
-                stale_session.session_ref,
-            );
+        // Reaching here IS the fresh process observation: this owner was retired, and
+        // its agent is the detected process again. The session it anchored stays stale
+        // — a late callback must not resurrect it — but the observation is recorded on
+        // it, so the agent's own explicit resume of that session can reclaim it.
+        for (source, agent_label, session_ref) in stale_sessions {
+            self.remember_stale_hook_session(source, agent_label, session_ref, true);
         }
         self.hook_report_sequences
             .retain(|source, _| !Self::hook_report_retirement_applies(source, detected_label));
@@ -931,18 +1050,20 @@ impl TerminalState {
         source: String,
         agent_label: String,
         session_ref: crate::agent_resume::AgentSessionRef,
+        fresh_process_evidence: bool,
     ) {
-        let stale_session = StaleHookSession {
+        let source_stale_sessions = self.stale_hook_sessions.entry(source).or_default();
+        if let Some(existing) = source_stale_sessions.iter_mut().find(|existing| {
+            existing.agent_label == agent_label && existing.session_ref == session_ref
+        }) {
+            existing.fresh_process_evidence |= fresh_process_evidence;
+            return;
+        }
+        source_stale_sessions.push(StaleHookSession {
             agent_label,
             session_ref,
-        };
-        let source_stale_sessions = self.stale_hook_sessions.entry(source).or_default();
-        if !source_stale_sessions
-            .iter()
-            .any(|existing| existing == &stale_session)
-        {
-            source_stale_sessions.push(stale_session);
-        }
+            fresh_process_evidence,
+        });
     }
 
     fn detected_state_observed_before_release_suppression(
@@ -1075,6 +1196,7 @@ impl TerminalState {
                 &source,
                 &agent_label,
                 &Some(session_ref.clone()),
+                session_start_source.as_deref(),
             )
         {
             return None;
@@ -1127,7 +1249,11 @@ impl TerminalState {
         if crate::detect::session_identity_only_integration(&source, &agent_label) {
             // For these integrations the session report IS the identity report: the
             // agent named it over its own hook, so it anchors identity (never state).
-            self.retire_suppressed_session_after_accepting(&source);
+            self.retire_suppressed_session_after_accepting(
+                &source,
+                &agent_label,
+                Some(&session_ref),
+            );
             self.hook_identity = Some(HookIdentity {
                 source: source.clone(),
                 agent_label: agent_label.clone(),
@@ -3235,6 +3361,212 @@ mod tests {
                 .map(|session| session.session_ref.value.as_str()),
             Some("hermes-2")
         );
+    }
+
+    /// Report the identity-only owner's session the way `pane.report_agent_session`
+    /// does, with an explicit session-start reason.
+    fn identity_session_start(
+        terminal: &mut TerminalState,
+        session: &str,
+        seq: u64,
+        session_start_source: &str,
+    ) -> Option<TerminalStateMutation> {
+        terminal.set_agent_session_ref_for_session_start(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id(session),
+            Some(seq),
+            Some(session_start_source.into()),
+        )
+    }
+
+    /// Retire the identity-only owner's session, either by its own release or by an
+    /// observed process exit, then observe its process AGAIN — the fresh
+    /// post-retirement process evidence the restart path already relies on.
+    fn retire_then_observe_a_fresh_process(
+        terminal: &mut TerminalState,
+        observed: Instant,
+        process_exit: bool,
+    ) {
+        if process_exit {
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Hermes),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                true,
+                observed + Duration::from_secs(1),
+            );
+        } else {
+            terminal.release_agent_with_mutation("zynk:hermes", "hermes", Some(21));
+        }
+        assert!(
+            terminal.hook_identity.is_none(),
+            "retirement dropped nothing"
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_secs(2),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_secs(3),
+        );
+    }
+
+    fn same_session_resume_after_retirement(process_exit: bool) {
+        // Codex Gate-2 M3 extension finding (msg_5fe4c9a3eff5f1a8): the Hermes resume
+        // command deliberately REUSES `session_ref.value` (`src/agent_resume.rs`), so a
+        // new id would be a new session, not a resume. An explicit `resume` naming the
+        // retired session, made after the agent's process was observed again, is the
+        // legitimate reclaim — the same evidence bar the restart path applies.
+        let mut terminal = test_terminal();
+        let observed = Instant::now();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+
+        retire_then_observe_a_fresh_process(&mut terminal, observed, process_exit);
+
+        let resumed = identity_session_start(&mut terminal, "existing-session", 30, "resume");
+
+        assert!(
+            resumed.is_some(),
+            "an explicit same-session resume backed by fresh process evidence was refused"
+        );
+        assert!(terminal.hook_identity.is_some());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("existing-session")
+        );
+        // Reclaimed, not merely waved through once: the session is live again, so this
+        // owner's ordinary reports for it are no longer refused as stale.
+        assert!(
+            !terminal.hook_report_matches_stale_session(
+                "zynk:hermes",
+                "hermes",
+                &crate::agent_resume::AgentSessionRef::id("existing-session"),
+            ),
+            "the reclaimed session stayed retired, so its ordinary reports would still be refused"
+        );
+    }
+
+    #[test]
+    fn identity_same_session_resume_after_release_with_fresh_process_evidence() {
+        same_session_resume_after_retirement(false);
+    }
+
+    #[test]
+    fn identity_same_session_resume_after_process_exit_with_fresh_process_evidence() {
+        same_session_resume_after_retirement(true);
+    }
+
+    fn same_session_resume_without_fresh_process_evidence(process_exit: bool) {
+        // The other half of the rule: the explicit reason alone proves nothing. Without
+        // a process observation AFTER the retirement, a `resume` naming the retired
+        // session is exactly the late callback the retirement exists to refuse.
+        let mut terminal = test_terminal();
+        let observed = Instant::now();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+        if process_exit {
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Hermes),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                true,
+                observed + Duration::from_secs(1),
+            );
+        } else {
+            terminal.release_agent_with_mutation("zynk:hermes", "hermes", Some(21));
+        }
+        assert!(terminal.hook_identity.is_none());
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_none(),
+            "a bare resume with no fresh process evidence restored a retired session"
+        );
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn identity_same_session_resume_after_release_without_fresh_process_evidence_stays_retired() {
+        same_session_resume_without_fresh_process_evidence(false);
+    }
+
+    #[test]
+    fn identity_same_session_resume_after_process_exit_without_fresh_process_evidence_stays_retired(
+    ) {
+        same_session_resume_without_fresh_process_evidence(true);
+    }
+
+    #[test]
+    fn identity_late_callback_after_fresh_process_evidence_stays_retired() {
+        // Fresh process evidence admits ONLY the explicit session-start shape. An
+        // ordinary late callback naming the retired session — the shipped state report,
+        // a session report with no reason, or a reason this owner never starts on —
+        // stays retired however fresh the process is.
+        let mut terminal = test_terminal();
+        let observed = Instant::now();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+
+        retire_then_observe_a_fresh_process(&mut terminal, observed, false);
+
+        // The shipped `pane.report_agent` shape: lifecycle state plus the session.
+        assert!(
+            terminal
+                .record_identity_only_hook_report(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("existing-session"),
+                    Some(30),
+                )
+                .is_none(),
+            "a late state callback reclaimed a retired session"
+        );
+        assert!(terminal.hook_identity.is_none());
+
+        // `pane.report_agent_session` carrying no session-start reason at all.
+        assert!(
+            terminal
+                .set_agent_session_ref(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("existing-session"),
+                    Some(31),
+                )
+                .is_none(),
+            "a reason-less session report reclaimed a retired session"
+        );
+        assert!(terminal.hook_identity.is_none());
+
+        // A reason that is real for another owner but not a session start for this one.
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 32, "compact").is_none(),
+            "a non-session-start reason reclaimed a retired session"
+        );
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
     }
 
     #[test]
