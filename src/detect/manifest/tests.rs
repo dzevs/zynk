@@ -1174,6 +1174,153 @@ fn claude_historical_dialog_above_a_later_divider_is_working() {
 }
 
 #[test]
+fn claude_btw_overlay_is_working_under_a_static_title() {
+    // upstream a47bc3e0 (refs #1366): Claude stops spinning its title while the /btw overlay is open, so the
+    // pane read the retained static title as idle even though the turn was still running. The overlay itself
+    // is the evidence, so it must beat that title.
+    let overlay = "/btw the tests are flaky on CI\n\
+        Claude will see this after the current turn\n\n\
+        Esc to close\n";
+    for title in ["", "\u{2733} Claude"] {
+        let result = osc_explain(Agent::Claude, overlay, title, "");
+        assert_eq!(result.state, AgentState::Working, "title {title:?}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("btw_overlay_working"),
+            "title {title:?}"
+        );
+        assert!(result.visible_working, "title {title:?}");
+    }
+
+    // Both line patterns are load-bearing: neither half of the overlay claims the pane on its own.
+    for (label, partial) in [
+        (
+            "no footer",
+            "/btw the tests are flaky on CI\nClaude will see this after the current turn\n",
+        ),
+        (
+            "no command",
+            "Claude will see this after the current turn\n\nEsc to close\n",
+        ),
+    ] {
+        let result = osc_explain(Agent::Claude, partial, "\u{2733} Claude", "");
+        assert_eq!(result.state, AgentState::Idle, "{label}");
+        assert_ne!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("btw_overlay_working"),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn claude_confirmation_after_a_rule_is_blocked_through_both_grammar_branches() {
+    // upstream 4473e391 (refs #2268): the newer confirmation prints "Enter to confirm" with no option list and
+    // no navigate hint, so a mandatory "Enter to select" left a blocked Claude reading as idle. Both branches
+    // must claim a footer that has scrolled out of the current-dialog window but is still the last thing
+    // printed after the divider.
+    let trailing = "  ⏵⏵ accept edits on (shift+tab to cycle)\n";
+    for (label, dialog) in [
+        (
+            "option list",
+            "──────\nWhich file should I edit?\n\
+             ❯ 1. src/main.rs\n  2. src/lib.rs\n\n\
+             Enter to select · ↑/↓ to navigate · Esc to cancel\n",
+        ),
+        (
+            "bare confirmation",
+            "──────\nContinue with the plan?\n\
+             Enter to confirm · Esc to cancel\n",
+        ),
+    ] {
+        let screen = format!("{dialog}{trailing}");
+        let result = osc_explain(Agent::Claude, &screen, "", "");
+        assert_eq!(result.state, AgentState::Blocked, "{label}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("live_blocked_form"),
+            "{label}"
+        );
+        assert!(result.visible_blocker, "{label}");
+    }
+}
+
+#[test]
+fn claude_selection_hint_without_a_navigate_hint_is_not_a_blocked_form() {
+    // Loosening the mandatory gate to "Esc to cancel" alone must not turn every remnant into a blocker: the
+    // option-list branch still requires an explicit navigate hint, because after_last_horizontal_rule is a
+    // suffix selector that matches stale scrollback as readily as a live form.
+    let stale = "──────\nSelected: 1. Yes\n\
+        Enter to select · Esc to cancel\nReading src/main.rs\n";
+    let result = osc_explain(Agent::Claude, stale, "", "");
+    assert_ne!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("live_blocked_form")
+    );
+    assert_ne!(result.state, AgentState::Blocked);
+    assert!(!result.visible_blocker);
+
+    // Control: the same remnant with a navigate hint restored is a live form again.
+    let live = "──────\nSelected: 1. Yes\n\
+        Enter to select · ↑/↓ to navigate · Esc to cancel\nReading src/main.rs\n";
+    let result = osc_explain(Agent::Claude, live, "", "");
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("live_blocked_form")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_btw_overlay_loses_to_a_blocked_form_and_beats_the_prompt_box() {
+    // 955 re-seats upstream's 975 inside the fork's compressed band, so both upstream relations have to hold
+    // here: a genuinely blocked form (960) still wins, and the idle prompt box (950) still loses.
+    let blocked = "──────\n/btw the tests are flaky on CI\n\
+        Enter to confirm · Esc to cancel\nEsc to close\n";
+    let result = osc_explain(Agent::Claude, blocked, "", "");
+    assert!(
+        result
+            .evaluated_rules
+            .iter()
+            .any(|rule| rule.id == "btw_overlay_working" && rule.matched),
+        "the fixture must exercise btw_overlay_working: {:?}",
+        result
+            .evaluated_rules
+            .iter()
+            .map(|rule| (rule.id.as_str(), rule.matched))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("live_blocked_form")
+    );
+    assert!(result.visible_blocker && !result.visible_working);
+
+    let idle_box = format!("/btw the tests are flaky on CI\nEsc to close\n{CLAUDE_PROMPT_BOX}");
+    let result = osc_explain(Agent::Claude, &idle_box, "", "");
+    assert!(
+        result
+            .evaluated_rules
+            .iter()
+            .any(|rule| rule.id == "live_prompt_box" && rule.matched),
+        "the fixture must exercise live_prompt_box: {:?}",
+        result
+            .evaluated_rules
+            .iter()
+            .map(|rule| (rule.id.as_str(), rule.matched))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("btw_overlay_working")
+    );
+    assert!(result.visible_working && !result.visible_idle);
+}
+
+#[test]
 fn claude_busy_title_outranks_a_matched_idle_prompt_box() {
     // Gate-3 ARB-EE13-PROMPT-TEST-001: a REAL two-border prompt box must match live_prompt_box (proved from
     // evaluated_rules) and still lose to the busy title; with a static title the same box is Idle.

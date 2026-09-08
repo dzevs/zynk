@@ -1,5 +1,5 @@
 id = "claude"
-version = "2026.09.09.1"
+version = "2026.09.09.2"
 min_engine_version = 3
 updated_at = "2026-09-09T00:00:00Z"
 aliases = ["claude-code"]
@@ -79,13 +79,21 @@ state = "blocked"
 priority = 960
 region = "after_last_horizontal_rule"
 visible_blocker = true
-contains = ["enter to select", "esc to cancel"]
+# "Esc to cancel" is the only token every confirmation shares: the newer dialog offers "Enter to confirm" with
+# no option list and no navigate hint, so requiring "Enter to select" up front read a blocked Claude as idle.
+# The discriminating evidence moves into the branches — and the option-list branch keeps the explicit navigate
+# list rather than a bare "to navigate", because this region is a suffix selector and a loose token would let
+# stale scrollback match.
+contains = ["esc to cancel"]
 any = [
-  { contains = ["tab/arrow keys to navigate"] },
-  { contains = ["arrow keys to navigate"] },
-  { contains = ["arrows to navigate"] },
-  { contains = ["↑/↓ to navigate"] },
-  { contains = ["↑↓ to navigate"] },
+  { contains = ["enter to confirm"] },
+  { contains = ["enter to select"], any = [
+    { contains = ["tab/arrow keys to navigate"] },
+    { contains = ["arrow keys to navigate"] },
+    { contains = ["arrows to navigate"] },
+    { contains = ["↑/↓ to navigate"] },
+    { contains = ["↑↓ to navigate"] },
+  ] },
 ]
 
 [[rules]]
@@ -97,6 +105,21 @@ priority = 960
 region = "whole_recent"
 visible_blocker = true
 contains = ["run a dynamic workflow?", "esc to cancel"]
+
+[[rules]]
+# Claude drops its spinner title while the /btw overlay is open, so without this rule an agent that is still
+# working reads as idle off the overlay's prompt box. 955, not upstream's 975: it must beat the idle prompt box
+# (950) yet stay under the blocked band (960) so a genuinely blocked form still wins. It cannot collide with the
+# current-dialog rules (990) either — the overlay footer says "Esc to close", never "Esc to cancel".
+id = "btw_overlay_working"
+state = "working"
+priority = 955
+region = "bottom_non_empty_lines(5)"
+visible_working = true
+line_regex = [
+  '^\s*/btw(?:\s|$)',
+  '(?i)esc to close\s*$',
+]
 
 [[rules]]
 id = "live_prompt_box"
