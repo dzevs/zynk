@@ -56,6 +56,9 @@ class Fixture:
         tdir.mkdir(exist_ok=True)
         archive = tdir / spec["archive"].format(version=version)
         (write_zip if archive.suffix == ".zip" else write_targz)(archive, member, binary)
+        if sidecar and native_tool_output is None and spec["format"] == "elf":
+            info = release_binary.inspect_binary(binary)
+            native_tool_output = "".join(f"GLIBC_{v}\n" for v in info["abi"]["glibc_versions"]) or None
         if sidecar:
             ev = release_evidence.build_evidence(
                 target=target, version=version, archive=archive, exec_status=exec_status,
@@ -74,21 +77,32 @@ class Fixture:
         self.job("build-linux-x86_64")
         self.artifact("linux-x86_64")
 
-    def evaluate(self, downloads=None, **ctx_overrides):
+    def default_downloads(self):
+        """Explicit outcomes: success for every producer that succeeded, skipped otherwise (as the workflow records)."""
+        out = {}
+        for target, spec in release_binary.TARGETS.items():
+            job = self.producers.get(spec["build_job"]) or {}
+            out[target] = "success" if job.get("result") == "success" else "skipped"
+        return out
+
+    def evaluate(self, downloads="default", **ctx_overrides):
         ctx = dict(CTX, **ctx_overrides)
+        if downloads == "default":
+            downloads = self.default_downloads()
         return release_manifest.evaluate(ctx, self.producers, self.dist, cargo_toml=self.cargo, downloads=downloads)
 
-    def cli(self, out, optional_targets="eligible", downloads=None, run_attempt="1"):
+    def cli(self, out, optional_targets="eligible", downloads="default", run_attempt="1", downloads_text=None):
         producers = pathlib.Path(self.dist.parent, "producers.json")
         producers.write_text(json.dumps(self.producers))
+        dl = pathlib.Path(self.dist.parent, "downloads.json")
+        if downloads_text is not None:
+            dl.write_text(downloads_text)
+        else:
+            dl.write_text(json.dumps(self.default_downloads() if downloads == "default" else downloads))
         args = [sys.executable, str(ROOT / "scripts" / "release_manifest.py"), "--version", "3.1.0", "--sha", SHA,
                 "--run-id", "1001", "--run-attempt", run_attempt, "--optional-targets", optional_targets,
                 "--producers", str(producers), "--dist", str(self.dist), "--cargo-toml", str(self.cargo),
-                "--out", str(out)]
-        if downloads is not None:
-            dl = pathlib.Path(self.dist.parent, "downloads.json")
-            dl.write_text(json.dumps(downloads))
-            args += ["--downloads", str(dl)]
+                "--downloads", str(dl), "--out", str(out)]
         return subprocess.run(args, capture_output=True, text=True)
 
 
@@ -604,6 +618,12 @@ class GlibcContract(unittest.TestCase):
             self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
             self.assertTrue(any("GLIBC" in r for r in m["targets"]["linux-x86_64"]["reasons"]))
 
+    def test_missing_native_objdump_evidence_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.linux_with(Fixture(tmp), native_tool_output="ELF 64-bit LSB pie executable\n")
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+            self.assertTrue(any("native" in r for r in m["targets"]["linux-x86_64"]["reasons"]))
+
     def test_native_objdump_evidence_must_agree_with_the_measured_floor(self):
         with tempfile.TemporaryDirectory() as tmp:
             m = self.linux_with(Fixture(tmp), native_tool_output="GLIBC_2.17\nGLIBC_2.34\n")
@@ -612,6 +632,94 @@ class GlibcContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             m = self.linux_with(Fixture(tmp), native_tool_output="ELF 64-bit\nGLIBC_2.17\nGLIBC_2.30\n")
             self.assertEqual(status(m, "linux-x86_64"), "ELIGIBLE")
+
+
+class DownloadEvidence(unittest.TestCase):
+    """Codex Gate-2 R2 #1: download-outcome evidence is mandatory; null/non-object evidence fails closed."""
+
+    def complete_looking(self, f):
+        f.required_ok()
+        f.job("test-windows-x86_64")
+        f.job("build-windows-x86_64", artifact_id="779")
+        f.artifact("windows-x86_64")
+
+    def test_missing_or_non_object_download_evidence_fails_closed_without_reading_artifacts(self):
+        for bad in (None, [], "success", 1):
+            with tempfile.TemporaryDirectory() as tmp:
+                f = Fixture(tmp)
+                self.complete_looking(f)
+                m = f.evaluate(downloads=bad)
+                self.assertFalse(m["ok"], repr(bad))
+                self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT", repr(bad))
+                self.assertEqual(status(m, "windows-x86_64"), "INCONSISTENT", repr(bad))
+                self.assertIsNone(m["targets"]["linux-x86_64"]["sha256"], "artifacts must not be read")
+                self.assertEqual(release_manifest.render_sha256sums(m), "")
+
+    def test_cli_null_downloads_file_fails_with_empty_sums(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            self.complete_looking(f)
+            out = pathlib.Path(tmp, "out")
+            proc = f.cli(out, downloads_text="null")
+            self.assertNotEqual(proc.returncode, 0)
+            text = (out / "RELEASE_MANIFEST.txt").read_text()
+            self.assertIn("result=FAIL", text)
+            self.assertIn("target=linux-x86_64 tier=required status=INCONSISTENT", text)
+            self.assertEqual((out / "SHA256SUMS").read_text(), "")
+
+    def test_cli_absent_optional_outcome_excludes_only_the_optional_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            self.complete_looking(f)
+            out = pathlib.Path(tmp, "out")
+            proc = f.cli(out, downloads={"linux-x86_64": "success"})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            text = (out / "RELEASE_MANIFEST.txt").read_text()
+            self.assertIn("target=linux-x86_64 tier=required status=ELIGIBLE", text)
+            self.assertIn("target=windows-x86_64 tier=optional status=INCONSISTENT", text)
+            sums = (out / "SHA256SUMS").read_text()
+            self.assertEqual(sums.count("\n"), 1)
+            self.assertIn("linux-x86_64", sums)
+
+    def test_cli_requires_the_downloads_argument(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            producers = pathlib.Path(tmp, "producers.json")
+            producers.write_text(json.dumps(f.producers))
+            proc = subprocess.run([sys.executable, str(ROOT / "scripts" / "release_manifest.py"), "--version", "3.1.0",
+                                   "--sha", SHA, "--run-id", "1001", "--run-attempt", "1", "--optional-targets", "none",
+                                   "--producers", str(producers), "--dist", str(f.dist), "--cargo-toml", str(f.cargo),
+                                   "--out", str(pathlib.Path(tmp, "out"))], capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("--downloads", proc.stderr)
+
+    def test_non_string_outcome_is_not_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            m = f.evaluate(downloads={"linux-x86_64": True}, optional_targets="none")
+            self.assertFalse(m["ok"])
+
+
+class ArtifactIdBound(unittest.TestCase):
+    """Codex R2 nonblocking: ids beyond JavaScript's safe-integer range are not exact in the pinned action."""
+
+    def test_ids_beyond_the_safe_integer_bound_are_rejected(self):
+        for bad in ("9007199254740993", "0", "00", "99999999999999999999"):
+            with tempfile.TemporaryDirectory() as tmp:
+                f = Fixture(tmp)
+                f.job("test-linux")
+                f.job("build-linux-x86_64", artifact_id=bad)
+                f.artifact("linux-x86_64")
+                m = f.evaluate(optional_targets="none")
+                self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT", bad)
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64", artifact_id="9007199254740991")
+            f.artifact("linux-x86_64")
+            self.assertEqual(status(f.evaluate(optional_targets="none"), "linux-x86_64"), "ELIGIBLE")
 
 
 class Rendering(unittest.TestCase):
@@ -631,19 +739,14 @@ class Rendering(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             f = Fixture(tmp)
             f.required_ok()
-            producers = pathlib.Path(tmp, "producers.json")
-            producers.write_text(json.dumps(f.producers))
             out = pathlib.Path(tmp, "out")
-            args = [sys.executable, str(ROOT / "scripts" / "release_manifest.py"), "--version", "3.1.0", "--sha", SHA,
-                    "--run-id", "1001", "--run-attempt", "1", "--optional-targets", "none", "--producers",
-                    str(producers), "--dist", str(f.dist), "--cargo-toml", str(f.cargo), "--out", str(out)]
-            proc = subprocess.run(args, capture_output=True, text=True)
+            proc = f.cli(out, optional_targets="none")
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertTrue((out / "RELEASE_MANIFEST.txt").exists())
             self.assertTrue((out / "RELEASE_MANIFEST.json").exists())
             self.assertIn("linux-x86_64.tar.gz", (out / "SHA256SUMS").read_text())
             shutil.rmtree(f.dist / "linux-x86_64")
-            proc = subprocess.run(args, capture_output=True, text=True)
+            proc = f.cli(out, optional_targets="none")
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("result=FAIL", (out / "RELEASE_MANIFEST.txt").read_text())
 

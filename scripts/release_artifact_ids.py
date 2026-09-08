@@ -10,14 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
-import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from scripts import release_binary  # noqa: E402
 
-_NUMERIC_ID = re.compile(r"^[0-9]{1,20}$")
 
 
 def output_key(target: str) -> str:
@@ -34,9 +32,10 @@ def export_ids(producers: dict) -> dict:
             ids[target] = {"id": "", "valid": False, "reason": f"job {spec['build_job']} result={result}"}
         elif raw is None or raw == "":
             ids[target] = {"id": "", "valid": False, "reason": f"job {spec['build_job']} exported an empty artifact id"}
-        elif not isinstance(raw, str) or not _NUMERIC_ID.match(raw):
+        elif not release_binary.valid_artifact_id(raw):
             ids[target] = {"id": "", "valid": False,
-                           "reason": f"job {spec['build_job']} artifact id {raw!r} is not a single numeric id"}
+                           "reason": f"job {spec['build_job']} artifact id {raw!r} is not a single positive "
+                                     f"safe-integer id (1..{release_binary.MAX_ARTIFACT_ID})"}
         else:
             ids[target] = {"id": raw, "valid": True, "reason": ""}
     return ids

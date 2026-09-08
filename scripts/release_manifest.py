@@ -2,8 +2,9 @@
 """Consumer-side release manifest (ADR 0012). Reads the candidate run's producer results (`toJSON(needs)`), the
 archives downloaded by immutable artifact id, and each EVIDENCE.json sidecar; decides per target:
 
-  ELIGIBLE          test job passed, build passed, sidecar bound to the exact archive, binary executed, ABI within
-                    the published contract
+  ELIGIBLE          test job passed, build passed, download outcome recorded as success, sidecar bound to the
+                    exact archive, binary executed, ABI within the published contract (glibc floor measured from
+                    the version needs and matching the producer's native objdump evidence)
   BUILT_UNVERIFIED  built, but no applicable test job / test job failed / binary not executed
   OMITTED           not requested, or the build job did not succeed
   INCONSISTENT      evidence contradicts itself (hash, commit, run, version, target, packaging)
@@ -48,7 +49,6 @@ _SIDECAR_SCHEMA = {
     "toolchain": dict,
     "build_inputs": dict,
 }
-_NUMERIC_ID = re.compile(r"^[0-9]{1,20}$")
 
 
 def _check_shape(obj, schema, path, problems):
@@ -110,7 +110,7 @@ def _regular_file(path: pathlib.Path) -> bool:
 
 
 def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Path, cargo_version: str,
-            downloads: dict | None) -> dict:
+            downloads) -> dict:
     entry = {
         "tier": spec["tier"], "status": None, "reasons": [], "producer_job": spec["build_job"],
         "producer_run_id": None, "producer_run_attempt": None, "artifact_id": None,
@@ -138,15 +138,18 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
     entry["artifact_id"] = artifact_id or None
     if not artifact_id:
         bad.append(f"job {spec['build_job']} succeeded without an artifact id")
-    elif not isinstance(artifact_id, str) or not _NUMERIC_ID.match(artifact_id):
-        bad.append(f"artifact id {artifact_id!r} is not a single numeric id")
+    elif not release_binary.valid_artifact_id(artifact_id):
+        bad.append(f"artifact id {artifact_id!r} is not a single positive safe-integer id")
     if bad:
         return finish("INCONSISTENT", bad)
-    if downloads is not None:
-        outcome = downloads.get(name)
-        if outcome != "success":
-            # Files left by a failed or partial download are never read: nothing below runs.
-            return finish("INCONSISTENT", [f"artifact download outcome={outcome or 'not recorded'}; downloaded files ignored"])
+    # Download-outcome evidence is mandatory: without a typed outcome object nothing is read (ADR 0012 §4).
+    if not isinstance(downloads, dict):
+        return finish("INCONSISTENT", ["download outcome evidence missing or not a JSON object; artifact not read"])
+    outcome = downloads.get(name)
+    if outcome != "success":
+        # Files left by a failed or partial download are never read: nothing below runs.
+        shown = outcome if isinstance(outcome, str) and outcome else "not recorded"
+        return finish("INCONSISTENT", [f"artifact download outcome={shown}; downloaded files ignored"])
     tdir = dist / name
     archive = tdir / entry["archive"]
     sidecar_path = tdir / "EVIDENCE.json"
@@ -210,8 +213,11 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
                 bad.append("no GLIBC version requirements (.gnu.version_r) in the binary")
             elif not release_binary.glibc_within(floor, spec["glibc_max"]):
                 bad.append(f"glibc floor {floor} exceeds the published {spec['glibc_max']} contract")
+            # The producer's native `objdump -T` measurement is mandatory and must agree (ADR 0012 §4).
             native = (sidecar["binary"]["abi"] or {}).get("native_glibc_floor")
-            if native is not None and floor is not None and native != floor:
+            if not isinstance(native, str) or not native:
+                bad.append("no native objdump glibc evidence recorded by the producer")
+            elif floor is not None and native != floor:
                 bad.append(f"native objdump glibc floor {native} disagrees with the measured floor {floor}")
     if prov["git_sha"] != ctx["git_sha"]:
         bad.append(f"sidecar git_sha {prov['git_sha']!r} is not the candidate {ctx['git_sha']!r}")
@@ -246,8 +252,8 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
     return finish("ELIGIBLE", [])
 
 
-def evaluate(ctx: dict, producers: dict, dist: pathlib.Path, cargo_toml: pathlib.Path,
-             downloads: dict | None = None) -> dict:
+def evaluate(ctx: dict, producers: dict, dist: pathlib.Path, cargo_toml: pathlib.Path, downloads) -> dict:
+    """`downloads` is the per-target download-step outcome object; anything but a JSON object fails closed."""
     if ctx["optional_targets"] not in OPTIONAL_MODES:
         raise ValueError(f"optional_targets must be one of {OPTIONAL_MODES}")
     with open(cargo_toml, "rb") as handle:
@@ -260,6 +266,9 @@ def evaluate(ctx: dict, producers: dict, dist: pathlib.Path, cargo_toml: pathlib
     if cargo_version != ctx["version"]:
         manifest["manifest_reasons"].append(
             f"requested version {ctx['version']!r} is not the checkout's Cargo.toml version {cargo_version!r}")
+        manifest["ok"] = False
+    if not isinstance(downloads, dict):
+        manifest["manifest_reasons"].append("download outcome evidence missing or not a JSON object")
         manifest["ok"] = False
     dist = pathlib.Path(dist)
     for name, spec in release_binary.TARGETS.items():
@@ -333,14 +342,17 @@ def main(argv=None) -> int:
     parser.add_argument("--producers", required=True, type=pathlib.Path, help="JSON: the run's `needs` context")
     parser.add_argument("--dist", required=True, type=pathlib.Path, help="dir with one subdir per target")
     parser.add_argument("--cargo-toml", required=True, type=pathlib.Path)
-    parser.add_argument("--downloads", type=pathlib.Path,
-                        help="JSON: per-target download step outcome (success|failure|skipped|cancelled)")
+    parser.add_argument("--downloads", required=True, type=pathlib.Path,
+                        help="JSON object: per-target download step outcome (success|failure|skipped|cancelled)")
     parser.add_argument("--out", required=True, type=pathlib.Path)
     args = parser.parse_args(argv)
     ctx = {"version": args.version, "git_sha": args.sha, "run_id": args.run_id, "run_attempt": args.run_attempt,
            "optional_targets": args.optional_targets}
     producers = json.loads(args.producers.read_text())
-    downloads = json.loads(args.downloads.read_text()) if args.downloads else None
+    try:
+        downloads = json.loads(args.downloads.read_text())
+    except (OSError, ValueError):
+        downloads = None  # evaluate() fails closed on anything that is not an object
     manifest = evaluate(ctx, producers, args.dist, args.cargo_toml, downloads=downloads)
     write_outputs(manifest, args.out)
     sys.stdout.write(render_text(manifest))

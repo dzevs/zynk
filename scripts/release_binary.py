@@ -12,6 +12,16 @@ import zipfile
 
 LINUX_GLIBC_MAX = "2.30"  # the published compatibility floor (README: "glibc >= 2.30")
 
+# GitHub artifact ids are integers; the pinned download action parses them with JavaScript, so anything beyond
+# Number.MAX_SAFE_INTEGER (2^53 - 1) is not represented exactly. Exporter and consumer share this bound.
+MAX_ARTIFACT_ID = 9007199254740991
+_ARTIFACT_ID = re.compile(r"^[1-9][0-9]{0,15}$")
+
+
+def valid_artifact_id(value) -> bool:
+    """Exactly one positive artifact id that the pinned download action represents exactly."""
+    return isinstance(value, str) and bool(_ARTIFACT_ID.match(value)) and int(value) <= MAX_ARTIFACT_ID
+
 # target -> tier, applicable test job (None = no hosted test evidence), build job, archive/member names, header facts.
 TARGETS = {
     "linux-x86_64": {

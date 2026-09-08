@@ -44,8 +44,19 @@ class ExportIds(unittest.TestCase):
             self.assertFalse(ids[target]["valid"], target)
             self.assertEqual(ids[target]["id"], "", target)
         self.assertIn("empty", ids["linux-x86_64"]["reason"])
-        self.assertIn("numeric", ids["windows-x86_64"]["reason"])
+        self.assertIn("safe-integer", ids["windows-x86_64"]["reason"])
         self.assertIn("result=failure", ids["linux-aarch64"]["reason"])
+
+    def test_ids_are_bounded_to_the_safe_integer_range(self):
+        ids = release_artifact_ids.export_ids(producers(**{
+            "build-linux-x86_64": ("success", "9007199254740991"),
+            "build-windows-x86_64": ("success", "9007199254740993"),
+            "build-macos-aarch64": ("success", "0"),
+        }))
+        self.assertTrue(ids["linux-x86_64"]["valid"])
+        self.assertFalse(ids["windows-x86_64"]["valid"])
+        self.assertFalse(ids["macos-aarch64"]["valid"])
+        self.assertIn("safe", ids["windows-x86_64"]["reason"])
 
     def test_cli_writes_github_outputs_and_a_summary(self):
         with tempfile.TemporaryDirectory() as tmp:

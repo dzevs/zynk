@@ -54,7 +54,12 @@ manifest in run attempt 2 may legitimately consume an artifact a successful prod
    any gap is INCONSISTENT, files from a failed or partial download are never read, and a decoding error on
    one target never aborts the manifest. The Linux glibc floor is measured from the binary's `.gnu.version_r`
    version needs (not from strings in the file) and must agree with the producer's native `objdump -T`
-   evidence; a binary that is not glibc-dynamic, or has no version needs, is INCONSISTENT.
+   evidence, which the producer must record; a binary that is not glibc-dynamic, has no version needs, or
+   lacks that native evidence is INCONSISTENT. Download-outcome evidence is mandatory too: the manifest
+   refuses anything but a typed outcome object and reads no artifact without a recorded `success`. Artifact
+   ids are bounded to JavaScript's safe-integer range shared by the exporter and the consumer. Each download
+   step carries its own timeout, and the manifest job's timeout leaves a documented reserve after the
+   worst-case download total, so a slow optional download cannot cancel the job before the manifest exists.
 5. **Required checks** (a failure stops the release; never bypassed): conventional commits; the private-content
    gates; `check-required` (CI, `just check` on Ubuntu); the Nix flake check **including** its `--all-systems
    --no-build` evaluation — a transitional exception: an evaluation failure on a non-Linux system would still
