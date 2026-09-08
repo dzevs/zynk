@@ -1,5 +1,10 @@
 name: CI
 
+# Per-push CI runs the REQUIRED tier only (ADR 0012): `just check` on Ubuntu (lint, TS tests, nextest, and the
+# maintenance unittests) plus the conventional-commit check. Optional-tier platforms (macOS Apple silicon,
+# Windows) are tested and built on demand by the candidate-evidence workflow (release-dryrun.yml), whose manifest
+# decides which optional artifacts are ELIGIBLE for a release.
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -34,22 +39,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: python3 scripts/conventional_commits.py "${{ github.event.pull_request.title }}"
 
-  check:
-    name: check (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            kind: unix
-            nextest_filter: all()
-          - os: macos-latest
-            kind: unix
-            nextest_filter: not binary(live_handoff)
-          - os: windows-latest
-            kind: windows
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+  check-required:
+    name: check-required (ubuntu, just check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -57,87 +50,30 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        if: matrix.kind == 'unix'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Install Rust
-        if: matrix.kind == 'windows'
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: x86_64-pc-windows-msvc
 
       - name: Install Rust tools
-        if: matrix.kind == 'unix'
-        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
+        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
         with:
           tool: just,cargo-nextest
 
       - name: Install Zig
-        if: runner.os != 'macOS'
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.15.2
 
-      # upstream 5981ba4: mlugg/setup-zig's prebuilt zig fails to link libSystem on the
-      # macos-latest runner; use Homebrew's macOS-patched zig@0.15 there instead.
-      - name: Restore Homebrew Zig cache (macOS)
-        if: runner.os == 'macOS'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/Library/Caches/Homebrew/downloads
-          key: homebrew-zig-0.15-${{ runner.os }}-${{ runner.arch }}
-          restore-keys: |
-            homebrew-zig-0.15-${{ runner.os }}-
-
-      - name: Install patched Zig on macOS
-        if: runner.os == 'macOS'
-        run: |
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
-          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
-          "$(brew --prefix zig@0.15)/bin/zig" version
-
       - name: Install Bun
-        if: matrix.kind == 'unix'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
-
-      - name: Install macOS build tools
-        if: runner.os == 'macOS'
-        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
-          key: ${{ matrix.os }}
+          key: ubuntu-latest
 
-      - name: Run checks
-        if: matrix.kind == 'unix'
-        run: just ci '${{ matrix.nextest_filter }}'
-
-      - name: Run Windows checks
-        if: matrix.kind == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          function Invoke-Checked {
-            param([string]$Command, [string[]]$Arguments)
-            & $Command @Arguments
-            if ($LASTEXITCODE -ne 0) {
-              throw "command failed with exit code $LASTEXITCODE`: $Command $($Arguments -join ' ')"
-            }
-          }
-          Invoke-Checked cargo @("fmt", "--check")
-          Invoke-Checked cargo @("clippy", "--bin", "zynk", "--locked", "--target", "x86_64-pc-windows-msvc", "--", "-D", "warnings")
-          Invoke-Checked cargo @("test", "--locked", "--target", "x86_64-pc-windows-msvc", "--bin", "zynk", "windows_")
-          Invoke-Checked cargo @("test", "--locked", "--target", "x86_64-pc-windows-msvc", "--bin", "zynk", "server::client_transport::tests")
-          Invoke-Checked cargo @("build", "--locked", "--target", "x86_64-pc-windows-msvc")
-
-      - name: Smoke ConPTY pane
-        if: matrix.kind == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\zynk.exe"
-          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+      # `just check` = lint + TS tests + nextest + the maintenance unittests; `just ci` alone skips the
+      # maintenance unittests, so hosted Ubuntu never ran them before ADR 0012.
+      - name: Run the required suite
+        run: just check
