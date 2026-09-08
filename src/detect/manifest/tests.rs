@@ -399,6 +399,91 @@ fn copilot_manifest_detects_ask_user_accept_prompt_and_ignores_bare_cancel_hint(
 }
 
 #[test]
+fn maki_manifest_detects_idle_working_and_blocked_states() {
+    // Maki paints a persistent one-line status bar on the bottom row: the bare
+    // mode label is idle, a leading braille spinner cell is working. It sets no
+    // OSC title and no OSC 9;4 progress, so these screen rules are the only
+    // evidence the manifest has.
+    let idle = explain(
+        Agent::Maki,
+        "\u{23fa} Updated src/main.rs\n\n [BUILD] gpt-5.5 \u{b7} ready \u{b7} ctrl-c quit",
+    );
+    assert_eq!(idle.state, AgentState::Idle);
+    assert!(idle.visible_idle);
+    assert_eq!(
+        idle.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("status_bar_idle")
+    );
+
+    let working = explain(
+        Agent::Maki,
+        "\u{23fa} Reading src/main.rs\n\n \u{2839} [BUILD] gpt-5.5 \u{b7} 42s \u{b7} ctrl-c stop",
+    );
+    assert_eq!(working.state, AgentState::Working);
+    assert!(working.visible_working);
+    assert_eq!(
+        working.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("status_bar_spinner_working")
+    );
+
+    // The permission panel replaces the input box above a status bar that still
+    // reads idle, so the blocker has to outrank `status_bar_idle`.
+    let permission_prompt = explain(
+        Agent::Maki,
+        "Permission Required\n\n  Run: rm -rf build\n\n  y Allow   n Deny   esc Cancel\n\n [BASH] gpt-5.5 \u{b7} waiting",
+    );
+    assert_eq!(permission_prompt.state, AgentState::Blocked);
+    assert!(permission_prompt.visible_blocker);
+    assert_eq!(
+        permission_prompt
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("permission_prompt")
+    );
+
+    let plan_complete = explain(
+        Agent::Maki,
+        "Plan complete\n\n  1. Add the parser\n  2. Wire the CLI\n\n  space toggle parallel \u{b7} enter confirm\n\n [PLAN] gpt-5.5 \u{b7} review",
+    );
+    assert_eq!(plan_complete.state, AgentState::Blocked);
+    assert!(plan_complete.visible_blocker);
+    assert_eq!(
+        plan_complete
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("plan_complete_form")
+    );
+
+    // On a narrow pane the right side of the status bar overwrites the mode
+    // label, so idle falls back to the prompt chevron.
+    let narrow_idle = explain(
+        Agent::Maki,
+        "\u{23fa} Done.\n\n\u{276f} add a test\n ctx 12k \u{b7} gpt-5.5",
+    );
+    assert_eq!(narrow_idle.state, AgentState::Idle);
+    assert!(narrow_idle.visible_idle);
+    assert_eq!(
+        narrow_idle
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("prompt_box_idle")
+    );
+
+    // The same narrow pane while streaming: the chevron is still there, so the
+    // two `not` gates -- the queue placeholder and a spinner row -- are what
+    // keep a working pane from reading as idle.
+    let narrow_streaming = explain(
+        Agent::Maki,
+        "\u{276f} queue another prompt\n \u{280b} working",
+    );
+    assert!(!narrow_streaming.visible_idle);
+    assert!(narrow_streaming.matched_rule.is_none());
+}
+
+#[test]
 fn manifest_validation_rejects_unknown_fields_empty_rules_invalid_regions_and_regexes() {
     assert!(parse_manifest(
         r#"

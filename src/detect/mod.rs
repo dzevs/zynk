@@ -49,6 +49,7 @@ pub enum Agent {
     Devin,
     Antigravity,
     Cline,
+    Mastracode,
     OpenCode,
     GithubCopilot,
     Kimi,
@@ -59,6 +60,7 @@ pub enum Agent {
     Hermes,
     Kilo,
     Qodercli,
+    Maki,
 }
 
 impl Agent {
@@ -71,14 +73,14 @@ impl Agent {
     // Every production path here resolves a single label through
     // `parse_agent_label`; nothing enumerates the roster, so the manifest cache
     // moving to `SCREEN_MANIFEST_AGENTS` leaves this constant read only by the
-    // identity tests. Its first iterating caller is M3-02's
-    // `every_agent_label_round_trips_through_canonical_and_alias_parsers`, and
-    // M3-04 (mastracode) is where it first diverges from
-    // `SCREEN_MANIFEST_AGENTS`. Upstream's two production readers (the clap
-    // agent-kind value list and `metadata_report_agent`) have no counterpart in
-    // this fork, so the allow stays until a fork surface needs the roster.
+    // identity tests -- the round-trip loop over every label, the subset check
+    // against `SCREEN_MANIFEST_AGENTS`, and the mastracode test that pins
+    // `Mastracode` as the member making this roster a strict superset.
+    // Upstream's two production readers (the clap agent-kind value list and
+    // `metadata_report_agent`) have no counterpart in this fork, so the allow
+    // stays until a fork surface needs the roster.
     #[allow(dead_code)]
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
@@ -87,6 +89,7 @@ impl Agent {
         Self::Devin,
         Self::Antigravity,
         Self::Cline,
+        Self::Mastracode,
         Self::OpenCode,
         Self::GithubCopilot,
         Self::Kimi,
@@ -97,6 +100,7 @@ impl Agent {
         Self::Hermes,
         Self::Kilo,
         Self::Qodercli,
+        Self::Maki,
     ];
 
     /// The agents that ship a bundled screen manifest -- exactly the agents the
@@ -105,8 +109,10 @@ impl Agent {
     /// manifest-less agent listed here fails the suite instead of silently
     /// caching a `None` manifest nobody notices.
     ///
-    /// A subset of [`Agent::ALL`], currently equal to it.
-    pub const SCREEN_MANIFEST_AGENTS: [Self; 18] = [
+    /// A strict subset of [`Agent::ALL`]: every identity-only agent -- one
+    /// whose state arrives from a hook rather than from the screen -- is in
+    /// `ALL` and absent here.
+    pub const SCREEN_MANIFEST_AGENTS: [Self; 19] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
@@ -125,6 +131,7 @@ impl Agent {
         Self::Hermes,
         Self::Kilo,
         Self::Qodercli,
+        Self::Maki,
     ];
 }
 
@@ -138,6 +145,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Devin => "devin",
         Agent::Antigravity => "agy",
         Agent::Cline => "cline",
+        Agent::Mastracode => "mastracode",
         Agent::OpenCode => "opencode",
         Agent::GithubCopilot => "copilot",
         Agent::Kimi => "kimi",
@@ -148,6 +156,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Hermes => "hermes",
         Agent::Kilo => "kilo",
         Agent::Qodercli => "qodercli",
+        Agent::Maki => "maki",
     }
 }
 
@@ -176,6 +185,7 @@ fn lookup_agent(name: &str) -> Option<Agent> {
         "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
+        "mastracode" | "mastra-code" | "mastra code" => Some(Agent::Mastracode),
         "opencode" | "opencode2" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
         "kimi" | "kimi-code" | "kimi code" => Some(Agent::Kimi),
@@ -186,6 +196,7 @@ fn lookup_agent(name: &str) -> Option<Agent> {
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
         "kilo" | "kilo-code" | "kilo code" => Some(Agent::Kilo),
         "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
+        "maki" => Some(Agent::Maki),
         _ => None,
     }
 }
@@ -294,6 +305,7 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
         (source, agent_label),
         ("zynk:pi", "pi")
             | ("zynk:omp", "omp")
+            | ("zynk:mastracode", "mastracode")
             | ("zynk:hermes", "hermes")
             | ("zynk:opencode", "opencode")
             | ("zynk:kilo", "kilo")
@@ -680,6 +692,8 @@ mod tests {
         assert_eq!(identify_agent("agy"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("antigravity-cli"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("cline"), Some(Agent::Cline));
+        assert_eq!(identify_agent("mastracode"), Some(Agent::Mastracode));
+        assert_eq!(identify_agent("mastra-code"), Some(Agent::Mastracode));
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("opencode.exe"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("opencode2"), Some(Agent::OpenCode));
@@ -696,6 +710,7 @@ mod tests {
         assert_eq!(identify_agent("hermes-agent"), Some(Agent::Hermes));
         assert_eq!(identify_agent("kilo"), Some(Agent::Kilo));
         assert_eq!(identify_agent("kilo-code"), Some(Agent::Kilo));
+        assert_eq!(identify_agent("maki"), Some(Agent::Maki));
     }
 
     #[test]
@@ -706,6 +721,8 @@ mod tests {
         assert_eq!(parse_agent_label("devin-cli"), Some(Agent::Devin));
         assert_eq!(parse_agent_label("agy"), Some(Agent::Antigravity));
         assert_eq!(parse_agent_label("antigravity"), Some(Agent::Antigravity));
+        assert_eq!(parse_agent_label("mastracode"), Some(Agent::Mastracode));
+        assert_eq!(parse_agent_label("mastra code"), Some(Agent::Mastracode));
         assert_eq!(parse_agent_label("opencode.exe"), Some(Agent::OpenCode));
         assert_eq!(parse_agent_label("copilot"), Some(Agent::GithubCopilot));
         assert_eq!(parse_agent_label("kimi-code"), Some(Agent::Kimi));
@@ -717,6 +734,7 @@ mod tests {
         assert_eq!(parse_agent_label("kiro-cli"), Some(Agent::Kiro));
         assert_eq!(parse_agent_label("grok-build"), Some(Agent::Grok));
         assert_eq!(parse_agent_label("hermes-agent"), Some(Agent::Hermes));
+        assert_eq!(parse_agent_label("maki"), Some(Agent::Maki));
         assert_eq!(parse_agent_label("kilo-code"), Some(Agent::Kilo));
     }
 
@@ -755,6 +773,16 @@ mod tests {
             );
         }
         assert!(Agent::SCREEN_MANIFEST_AGENTS.len() <= Agent::ALL.len());
+    }
+
+    #[test]
+    fn mastracode_is_hook_authority_without_screen_manifest() {
+        assert!(full_lifecycle_hook_authority(
+            "zynk:mastracode",
+            "mastracode"
+        ));
+        assert!(!Agent::SCREEN_MANIFEST_AGENTS.contains(&Agent::Mastracode));
+        assert!(Agent::ALL.contains(&Agent::Mastracode));
     }
 
     #[test]
