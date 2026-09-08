@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
 import tomllib
 
@@ -23,6 +24,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import release_binary  # noqa: E402
 
 OPTIONAL_MODES = ("none", "eligible", "all")
+SIDECAR_SCHEMA_VERSION = 1
 STATUSES = ("ELIGIBLE", "BUILT_UNVERIFIED", "OMITTED", "INCONSISTENT")
 
 
@@ -32,103 +34,204 @@ def _requested(spec: dict, mode: str) -> bool:
     return mode == "all" or (mode == "eligible" and spec["test_job"] is not None)
 
 
-def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Path, cargo_version: str) -> dict:
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+
+# Mandatory EVIDENCE.json shape (schema 1). Every key must exist with the given type; nested dicts recurse.
+_SIDECAR_SCHEMA = {
+    "schema": int, "target": str, "tier": str, "version_input": str, "cargo_version": str,
+    "archive": {"name": str, "sha256": str, "size": int},
+    "binary": {"member": str, "sha256": str, "size": int, "format": str, "cpu": str, "os": str, "abi": dict},
+    "exec": {"status": str, "output": str},
+    "provenance": {"git_sha": str, "checkout_head": str, "repository": str, "run_id": str, "run_attempt": int,
+                   "job": str, "runner_os": str, "runner_arch": str},
+    "toolchain": dict,
+    "build_inputs": dict,
+}
+_NUMERIC_ID = re.compile(r"^[0-9]{1,20}$")
+
+
+def _check_shape(obj, schema, path, problems):
+    for key, typ in schema.items():
+        if key not in obj:
+            problems.append(f"EVIDENCE.json missing {path}{key}")
+            continue
+        value = obj[key]
+        if isinstance(typ, dict):
+            if not isinstance(value, dict):
+                problems.append(f"EVIDENCE.json {path}{key} is not an object")
+            else:
+                _check_shape(value, typ, f"{path}{key}.", problems)
+        elif typ is int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                problems.append(f"EVIDENCE.json {path}{key} is not an integer")
+        elif not isinstance(value, typ):
+            problems.append(f"EVIDENCE.json {path}{key} is not a {typ.__name__}")
+
+
+def _validate_sidecar(sidecar, name: str, spec: dict, expected_archive: str) -> list[str]:
+    """Structural + schema validation that must pass before any content check or eligibility decision."""
+    if not isinstance(sidecar, dict):
+        return ["EVIDENCE.json is not a JSON object"]
+    problems: list[str] = []
+    _check_shape(sidecar, _SIDECAR_SCHEMA, "", problems)
+    if problems:
+        return problems
+    if sidecar["schema"] != SIDECAR_SCHEMA_VERSION:
+        problems.append(f"EVIDENCE.json schema {sidecar['schema']!r} is not {SIDECAR_SCHEMA_VERSION}")
+    if sidecar["target"] != name:
+        problems.append(f"sidecar target {sidecar['target']!r} is not {name!r}")
+    if sidecar["tier"] != spec["tier"]:
+        problems.append(f"sidecar tier {sidecar['tier']!r} is not {spec['tier']!r}")
+    if sidecar["archive"]["name"] != expected_archive:
+        problems.append(f"sidecar archive name {sidecar['archive']['name']!r} is not {expected_archive!r}")
+    if sidecar["binary"]["member"] != spec["member"]:
+        problems.append(f"sidecar binary member {sidecar['binary']['member']!r} is not {spec['member']!r}")
+    for path, value in (("archive.sha256", sidecar["archive"]["sha256"]), ("binary.sha256", sidecar["binary"]["sha256"])):
+        if not _HEX64.match(value):
+            problems.append(f"sidecar {path} is not a sha256 hex digest")
+    if sidecar["exec"]["status"] not in ("ran", "not_run"):
+        problems.append(f"sidecar exec status {sidecar['exec']['status']!r} is not ran/not_run")
+    prov = sidecar["provenance"]
+    for key in ("git_sha", "checkout_head"):
+        if not _HEX40.match(prov[key]):
+            problems.append(f"sidecar provenance.{key} is not a 40-hex commit")
+    if prov["run_attempt"] < 1:
+        problems.append(f"sidecar provenance.run_attempt {prov['run_attempt']!r} is not >= 1")
+    if not prov["run_id"]:
+        problems.append("sidecar provenance.run_id is empty")
+    if prov["job"] != spec["build_job"]:
+        problems.append(f"sidecar provenance.job {prov['job']!r} is not the producer job {spec['build_job']!r}")
+    return problems
+
+
+def _regular_file(path: pathlib.Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
+def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Path, cargo_version: str,
+            downloads: dict | None) -> dict:
     entry = {
         "tier": spec["tier"], "status": None, "reasons": [], "producer_job": spec["build_job"],
         "producer_run_id": None, "producer_run_attempt": None, "artifact_id": None,
         "archive": spec["archive"].format(version=ctx["version"]), "sha256": None,
     }
-    bad: list[str] = []      # inconsistencies
-    unverified: list[str] = []
 
     def finish(status, reasons):
         entry["status"] = status
         entry["reasons"] = list(reasons)
+        if status == "ELIGIBLE" and not isinstance(entry["sha256"], str):
+            raise ValueError(f"{name}: ELIGIBLE without an archive hash")
         return entry
 
+    # ---- phase 0: request + producer result -------------------------------------------------------------
     if not _requested(spec, ctx["optional_targets"]):
         return finish("OMITTED", [f"not requested (optional_targets={ctx['optional_targets']})"])
     build = producers.get(spec["build_job"]) or {}
     result = build.get("result", "missing")
     if result != "success":
         return finish("OMITTED", [f"job {spec['build_job']} result={result}"])
+
+    # ---- phase 1: mandatory structure (any gap is INCONSISTENT before anything else is trusted) ------------
+    bad: list[str] = []
     artifact_id = (build.get("outputs") or {}).get("artifact-id", "")
     entry["artifact_id"] = artifact_id or None
     if not artifact_id:
         bad.append(f"job {spec['build_job']} succeeded without an artifact id")
-
+    elif not isinstance(artifact_id, str) or not _NUMERIC_ID.match(artifact_id):
+        bad.append(f"artifact id {artifact_id!r} is not a single numeric id")
+    if bad:
+        return finish("INCONSISTENT", bad)
+    if downloads is not None:
+        outcome = downloads.get(name)
+        if outcome != "success":
+            # Files left by a failed or partial download are never read: nothing below runs.
+            return finish("INCONSISTENT", [f"artifact download outcome={outcome or 'not recorded'}; downloaded files ignored"])
     tdir = dist / name
-    files = sorted(p.name for p in tdir.iterdir()) if tdir.is_dir() else []
     archive = tdir / entry["archive"]
-    if entry["archive"] not in files:
-        bad.append(f"archive {entry['archive']} missing from the downloaded artifact")
-    extra = sorted(set(files) - {entry["archive"], "EVIDENCE.json"})
+    sidecar_path = tdir / "EVIDENCE.json"
+    if not tdir.is_dir():
+        bad.append(f"no downloaded artifact directory for {name}")
+        return finish("INCONSISTENT", bad)
+    names = sorted(p.name for p in tdir.iterdir())
+    extra = sorted(set(names) - {entry["archive"], "EVIDENCE.json"})
     if extra:
-        bad.append(f"unexpected files in the artifact: {extra}")
-    sidecar = None
-    if "EVIDENCE.json" not in files:
-        bad.append("EVIDENCE.json missing from the artifact")
-    else:
-        try:
-            sidecar = json.loads((tdir / "EVIDENCE.json").read_text())
-        except (OSError, ValueError) as err:
-            bad.append(f"EVIDENCE.json unreadable: {err}")
+        bad.append(f"unexpected entries in the artifact: {extra}")
+    for label, path in (("archive", archive), ("EVIDENCE.json", sidecar_path)):
+        if path.name not in names:
+            bad.append(f"{label} {path.name} missing from the downloaded artifact")
+        elif not _regular_file(path):
+            bad.append(f"{label} {path.name} is not a regular file")
+    if bad:
+        return finish("INCONSISTENT", bad)
+    try:
+        sidecar = json.loads(sidecar_path.read_text())
+    except (OSError, ValueError) as err:
+        return finish("INCONSISTENT", [f"EVIDENCE.json unreadable: {err}"])
+    problems = _validate_sidecar(sidecar, name, spec, entry["archive"])
+    if problems:
+        return finish("INCONSISTENT", problems)
+    prov = sidecar["provenance"]
+    entry["producer_run_id"] = prov["run_id"]
+    entry["producer_run_attempt"] = prov["run_attempt"]
 
-    if archive.is_file():
-        archive_sha = release_binary.sha256_file(archive)
+    # ---- phase 2: content binding -----------------------------------------------------------------------
+    archive_sha = release_binary.sha256_file(archive)
+    entry["sha256"] = archive_sha
+    if sidecar["archive"]["sha256"] != archive_sha:
+        bad.append("archive sha256 differs from the sidecar (archive changed after the evidence was written)")
+    try:
+        member, binary = release_binary.extract_single_member(archive)
+    except (OSError, ValueError) as err:
+        member, binary = None, None
+        bad.append(f"archive not a single-member archive: {err}")
+    if member is not None and member != spec["member"]:
+        bad.append(f"archive member {member!r} is not the expected {spec['member']!r}")
+    info = None
+    if binary is not None:
+        if sidecar["binary"]["sha256"] != release_binary.sha256_bytes(binary):
+            bad.append("binary sha256 differs from the sidecar")
         try:
-            member, binary = release_binary.extract_single_member(archive)
-        except (OSError, ValueError) as err:
-            member, binary = None, None
-            bad.append(f"archive not a single-member archive: {err}")
-        if member is not None and member != spec["member"]:
-            bad.append(f"archive member {member!r} is not the expected {spec['member']!r}")
-        info = None
-        if binary is not None:
-            try:
-                info = release_binary.inspect_binary(binary)
-            except ValueError as err:
-                bad.append(f"binary header unreadable: {err}")
-        if info is not None:
-            for key in ("format", "cpu", "os"):
-                if info[key] != spec[key]:
-                    bad.append(f"binary {key} {info[key]!r} does not match the target's {spec[key]!r}")
-            floor = info["abi"].get("glibc_floor") if info["format"] == "elf" else None
-            if spec["glibc_max"] and floor and not release_binary.glibc_within(floor, spec["glibc_max"]):
+            info = release_binary.inspect_binary(binary)
+        except ValueError as err:
+            bad.append(f"binary header unreadable: {err}")
+    if info is not None:
+        for key in ("format", "cpu", "os"):
+            if info[key] != spec[key]:
+                bad.append(f"binary {key} {info[key]!r} does not match the target's {spec[key]!r}")
+            if sidecar["binary"][key] != info[key]:
+                bad.append(f"sidecar binary {key} differs from the downloaded binary")
+        if spec["glibc_max"] and info["format"] == "elf":
+            libc = info["abi"].get("libc")
+            floor = info["abi"].get("glibc_floor")
+            if libc != "glibc":
+                bad.append(f"not a glibc-dynamic binary (libc={libc}); the published contract is GNU/glibc dynamic")
+            elif floor is None:
+                bad.append("no GLIBC version requirements (.gnu.version_r) in the binary")
+            elif not release_binary.glibc_within(floor, spec["glibc_max"]):
                 bad.append(f"glibc floor {floor} exceeds the published {spec['glibc_max']} contract")
-        if sidecar is not None:
-            prov = sidecar.get("provenance") or {}
-            entry["producer_run_id"] = prov.get("run_id")
-            entry["producer_run_attempt"] = prov.get("run_attempt")
-            if sidecar.get("target") != name:
-                bad.append(f"sidecar target {sidecar.get('target')!r} is not {name!r}")
-            if (sidecar.get("archive") or {}).get("sha256") != archive_sha:
-                bad.append("archive sha256 differs from the sidecar (archive changed after the evidence was written)")
-            if binary is not None and (sidecar.get("binary") or {}).get("sha256") != release_binary.sha256_bytes(binary):
-                bad.append("binary sha256 differs from the sidecar")
-            if info is not None:
-                for key in ("format", "cpu"):
-                    if (sidecar.get("binary") or {}).get(key) != info[key]:
-                        bad.append(f"sidecar binary {key} differs from the downloaded binary")
-            if prov.get("git_sha") != ctx["git_sha"]:
-                bad.append(f"sidecar git_sha {prov.get('git_sha')!r} is not the candidate {ctx['git_sha']!r}")
-            if prov.get("checkout_head") != ctx["git_sha"]:
-                bad.append(f"sidecar checkout_head {prov.get('checkout_head')!r} is not the candidate {ctx['git_sha']!r}")
-            if str(prov.get("run_id")) != str(ctx["run_id"]):
-                bad.append(f"sidecar run_id {prov.get('run_id')!r} is not this run {ctx['run_id']!r}")
-            if sidecar.get("version_input") != ctx["version"]:
-                bad.append(f"sidecar version_input {sidecar.get('version_input')!r} is not {ctx['version']!r}")
-            if sidecar.get("cargo_version") != cargo_version:
-                bad.append(f"sidecar cargo_version {sidecar.get('cargo_version')!r} is not {cargo_version!r}")
-            exec_info = sidecar.get("exec") or {}
-            if exec_info.get("status") == "ran":
-                expected = f"zynk {ctx['version']}"
-                if exec_info.get("output", "").strip() != expected:
-                    bad.append(f"executed binary printed {exec_info.get('output')!r}, expected {expected!r}")
-            else:
-                unverified.append("binary was not executed on the producing runner")
-        entry["sha256"] = archive_sha
+            native = (sidecar["binary"]["abi"] or {}).get("native_glibc_floor")
+            if native is not None and floor is not None and native != floor:
+                bad.append(f"native objdump glibc floor {native} disagrees with the measured floor {floor}")
+    if prov["git_sha"] != ctx["git_sha"]:
+        bad.append(f"sidecar git_sha {prov['git_sha']!r} is not the candidate {ctx['git_sha']!r}")
+    if prov["checkout_head"] != ctx["git_sha"]:
+        bad.append(f"sidecar checkout_head {prov['checkout_head']!r} is not the candidate {ctx['git_sha']!r}")
+    if str(prov["run_id"]) != str(ctx["run_id"]):
+        bad.append(f"sidecar run_id {prov['run_id']!r} is not this run {ctx['run_id']!r}")
+    if sidecar["version_input"] != ctx["version"]:
+        bad.append(f"sidecar version_input {sidecar['version_input']!r} is not {ctx['version']!r}")
+    if sidecar["cargo_version"] != cargo_version:
+        bad.append(f"sidecar cargo_version {sidecar['cargo_version']!r} is not {cargo_version!r}")
+    unverified: list[str] = []
+    if sidecar["exec"]["status"] == "ran":
+        expected = f"zynk {ctx['version']}"
+        if sidecar["exec"]["output"].strip() != expected:
+            bad.append(f"executed binary printed {sidecar['exec']['output']!r}, expected {expected!r}")
+    else:
+        unverified.append("binary was not executed on the producing runner")
 
+    # ---- phase 3: applicable test evidence --------------------------------------------------------------
     if spec["test_job"] is None:
         unverified.append("no applicable hosted test job for this target")
     else:
@@ -143,7 +246,8 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
     return finish("ELIGIBLE", [])
 
 
-def evaluate(ctx: dict, producers: dict, dist: pathlib.Path, cargo_toml: pathlib.Path) -> dict:
+def evaluate(ctx: dict, producers: dict, dist: pathlib.Path, cargo_toml: pathlib.Path,
+             downloads: dict | None = None) -> dict:
     if ctx["optional_targets"] not in OPTIONAL_MODES:
         raise ValueError(f"optional_targets must be one of {OPTIONAL_MODES}")
     with open(cargo_toml, "rb") as handle:
@@ -159,7 +263,15 @@ def evaluate(ctx: dict, producers: dict, dist: pathlib.Path, cargo_toml: pathlib
         manifest["ok"] = False
     dist = pathlib.Path(dist)
     for name, spec in release_binary.TARGETS.items():
-        entry = _decide(name, spec, ctx, producers, dist, cargo_version)
+        try:
+            entry = _decide(name, spec, ctx, producers, dist, cargo_version, downloads)
+        except Exception as err:  # noqa: BLE001 — one target must never abort the whole manifest
+            entry = {
+                "tier": spec["tier"], "status": "INCONSISTENT",
+                "reasons": [f"evaluation error: {type(err).__name__}: {err}"], "producer_job": spec["build_job"],
+                "producer_run_id": None, "producer_run_attempt": None, "artifact_id": None,
+                "archive": spec["archive"].format(version=ctx["version"]), "sha256": None,
+            }
         manifest["targets"][name] = entry
         if spec["tier"] == "required" and entry["status"] != "ELIGIBLE":
             manifest["ok"] = False
@@ -167,9 +279,17 @@ def evaluate(ctx: dict, producers: dict, dist: pathlib.Path, cargo_toml: pathlib
 
 
 def render_sha256sums(manifest: dict) -> str:
+    """ELIGIBLE archives only; nothing at all when the manifest failed; an ELIGIBLE entry without a real hash is
+    a programming error, never a published line."""
     if not manifest["ok"]:
         return ""
-    lines = [f"{e['sha256']}  {e['archive']}" for e in manifest["targets"].values() if e["status"] == "ELIGIBLE"]
+    lines = []
+    for name, e in manifest["targets"].items():
+        if e["status"] != "ELIGIBLE":
+            continue
+        if not isinstance(e["sha256"], str) or not _HEX64.match(e["sha256"]):
+            raise ValueError(f"{name}: ELIGIBLE entry without a sha256 digest")
+        lines.append(f"{e['sha256']}  {e['archive']}")
     return "".join(line + "\n" for line in sorted(lines, key=lambda l: l.split("  ", 1)[1]))
 
 
@@ -213,12 +333,15 @@ def main(argv=None) -> int:
     parser.add_argument("--producers", required=True, type=pathlib.Path, help="JSON: the run's `needs` context")
     parser.add_argument("--dist", required=True, type=pathlib.Path, help="dir with one subdir per target")
     parser.add_argument("--cargo-toml", required=True, type=pathlib.Path)
+    parser.add_argument("--downloads", type=pathlib.Path,
+                        help="JSON: per-target download step outcome (success|failure|skipped|cancelled)")
     parser.add_argument("--out", required=True, type=pathlib.Path)
     args = parser.parse_args(argv)
     ctx = {"version": args.version, "git_sha": args.sha, "run_id": args.run_id, "run_attempt": args.run_attempt,
            "optional_targets": args.optional_targets}
     producers = json.loads(args.producers.read_text())
-    manifest = evaluate(ctx, producers, args.dist, args.cargo_toml)
+    downloads = json.loads(args.downloads.read_text()) if args.downloads else None
+    manifest = evaluate(ctx, producers, args.dist, args.cargo_toml, downloads=downloads)
     write_outputs(manifest, args.out)
     sys.stdout.write(render_text(manifest))
     return 0 if manifest["ok"] else 1

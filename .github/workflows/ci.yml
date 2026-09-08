@@ -73,6 +73,14 @@ jobs:
           cache-bin: false
           key: ubuntu-latest
 
+      # The gitleaks maintenance unittests skip without the binary; install it so every test executes.
+      - name: Install gitleaks 8.30.0
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_x64.tar.gz -o /tmp/gitleaks.tgz
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
       # `just check` = lint + TS tests + nextest + the maintenance unittests; `just ci` alone skips the
       # maintenance unittests, so hosted Ubuntu never ran them before ADR 0012.
       - name: Run the required suite

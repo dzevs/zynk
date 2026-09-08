@@ -13,8 +13,9 @@ The team runs zynk on Fedora and Ubuntu on Intel/AMD hardware, and the priority 
 internal productivity. Before this decision every hosted platform job and every release artifact was an
 implicit release blocker: the 3.1.0 candidate at 246a901 was held by a macOS static-archive alignment failure,
 an aarch64 cross-link failure and a Nix crate-download failure while the Linux artifact itself was fine. The
-cross-platform code and the fixes for those failures pass review and stay; what changes is what a release
-**requires** versus what it **may include**.
+cross-platform code stays, and the fixes for those failures stay once they pass their own review (the pre-tag
+fixes at `dfe864b` were still under Codex Gate-2 review when this ADR was written); what changes is what a
+release **requires** versus what it **may include**.
 
 Two facts shape the evidence design. `zynk --version` prints only `zynk <version>` (`src/build_info.rs`,
 `src/main.rs`): no commit is embedded and none is added, so commit provenance is CI **checkout** provenance
@@ -46,7 +47,14 @@ manifest in run attempt 2 may legitimately consume an artifact a successful prod
    only by the immutable artifact id its `needs` context names, keeps each producer's real attempt, allows
    same-SHA reuse across attempts, and rejects an artifact from another run or another commit. Unreferenced or
    stray retained artifacts are never read. The release-archive sha256 (what `SHA256SUMS` publishes and users
-   verify) is distinct from upload-artifact's outer artifact digest.
+   verify) is distinct from upload-artifact's outer artifact digest. The manifest validates structure before
+   it decides anything: the artifact directory must hold exactly the expected archive and sidecar as regular
+   files, the sidecar must match the typed evidence schema (producer job, attempt, archive name, member,
+   digests), the artifact id must be a single numeric id, and the download step's outcome must be `success` —
+   any gap is INCONSISTENT, files from a failed or partial download are never read, and a decoding error on
+   one target never aborts the manifest. The Linux glibc floor is measured from the binary's `.gnu.version_r`
+   version needs (not from strings in the file) and must agree with the producer's native `objdump -T`
+   evidence; a binary that is not glibc-dynamic, or has no version needs, is INCONSISTENT.
 5. **Required checks** (a failure stops the release; never bypassed): conventional commits; the private-content
    gates; `check-required` (CI, `just check` on Ubuntu); the Nix flake check **including** its `--all-systems
    --no-build` evaluation — a transitional exception: an evaluation failure on a non-Linux system would still

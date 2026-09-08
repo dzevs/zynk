@@ -18,10 +18,55 @@ sys.path.insert(0, str(ROOT))
 from scripts import release_binary, release_evidence  # noqa: E402
 
 
-def fake_elf(machine=0x3E, glibc=(b"GLIBC_2.17", b"GLIBC_2.30"), interp=b"/lib64/ld-linux-x86-64.so.2"):
-    ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\0" * 8
-    header = ident + struct.pack("<HH", 2, machine) + b"\0" * 44
-    return header + b"\0".join(glibc) + b"\0" + interp + b"\0" + b"\0" * 32
+def fake_elf(machine=0x3E, glibc=("GLIBC_2.17", "GLIBC_2.30"), interp=b"/lib64/ld-linux-x86-64.so.2", body=b""):
+    """A minimal but structurally real ELF64: a PT_INTERP program header and, when `glibc` names versions,
+    a .gnu.version_r (verneed) section for libc.so.6 with those entries — the metadata objdump -T reports."""
+    ehdr_size, phdr_size, shdr_size = 64, 56, 64
+    versions = list(glibc)
+    # .dynstr: "\0libc.so.6\0<versions...>\0"
+    dynstr = b"\0libc.so.6\0" + b"".join(v.encode() + b"\0" for v in versions)
+    off_libname = 1
+    off_versions = []
+    cursor = len(b"\0libc.so.6\0")
+    for v in versions:
+        off_versions.append(cursor)
+        cursor += len(v) + 1
+    verneed = b""
+    if versions:
+        aux = b""
+        for i, name_off in enumerate(off_versions):
+            vna_next = 16 if i + 1 < len(off_versions) else 0
+            aux += struct.pack("<IHHII", 0, 0, 2 + i, name_off, vna_next)
+        verneed = struct.pack("<HHIII", 1, len(versions), off_libname, 16, 0) + aux
+    shstrtab = b"\0.interp\0.dynstr\0.gnu.version_r\0.shstrtab\0"
+    phoff = ehdr_size
+    interp_off = phoff + phdr_size
+    interp_blob = (interp or b"") + b"\0"
+    dynstr_off = interp_off + len(interp_blob)
+    verneed_off = dynstr_off + len(dynstr)
+    body_off = verneed_off + len(verneed)
+    shstr_off = body_off + len(body)
+    shoff = shstr_off + len(shstrtab)
+    shoff += (-shoff) % 8
+    sections = [
+        (0, 0, 0, 0, 0, 0, 0, 0),  # null
+        (shstrtab.index(b".interp"), 1, 2, 0, interp_off, len(interp_blob), 0, 0),
+        (shstrtab.index(b".dynstr"), 3, 2, 0, dynstr_off, len(dynstr), 0, 0),
+        (shstrtab.index(b".gnu.version_r"), 0x6FFFFFFE, 2, 0, verneed_off, len(verneed), 2, 1 if versions else 0),
+        (shstrtab.index(b".shstrtab"), 3, 0, 0, shstr_off, len(shstrtab), 0, 0),
+    ]
+    if not versions:
+        sections.pop(3)
+    shstrndx = len(sections) - 1
+    phnum = 1 if interp else 0
+    ehdr = struct.pack("<16sHHIQQQIHHHHHH", b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\0" * 8, 3, machine, 1, 0,
+                       phoff if phnum else 0, shoff, 0, ehdr_size, phdr_size, phnum, shdr_size, len(sections), shstrndx)
+    phdr = struct.pack("<IIQQQQQQ", 3, 4, interp_off, 0, 0, len(interp_blob), len(interp_blob), 1) if phnum else b"\0" * phdr_size
+    blob = ehdr + phdr + interp_blob + dynstr + verneed + body + shstrtab
+    blob += b"\0" * (shoff - len(blob))
+    for (name, typ, flags, addr, offset, size, link, info) in sections:
+        blob += struct.pack("<IIQQQQIIQQ", name, typ, flags, addr, offset, size, link, info, 1, 0)
+    return blob
 
 
 def fake_macho(cputype=0x0100000C, minos=(11, 0, 0), sdk=(15, 0, 0)):
@@ -64,6 +109,8 @@ PRODUCER_ENV = {
     "GITHUB_REPOSITORY": "dzevs/zynk",
     "RUNNER_OS": "Linux",
     "RUNNER_ARCH": "X64",
+    "LIBGHOSTTY_VT_OPTIMIZE": "ReleaseFast",
+    "LIBGHOSTTY_VT_SIMD": "false",
 }
 
 
@@ -79,6 +126,33 @@ class InspectBinary(unittest.TestCase):
         self.assertEqual(info["cpu"], "aarch64")
         self.assertEqual(info["abi"]["libc"], "musl")
         self.assertIsNone(info["abi"]["glibc_floor"])
+
+    def test_glibc_floor_comes_from_version_needs_not_from_strings(self):
+        # A harmless "GLIBC_99.99" string in the program body must not become the floor (Codex Gate-2 #5).
+        info = release_binary.inspect_binary(fake_elf(glibc=("GLIBC_2.2.5", "GLIBC_2.17"), body=b"log: GLIBC_99.99 seen\0"))
+        self.assertEqual(info["abi"]["glibc_floor"], "2.17")
+        self.assertEqual(info["abi"]["glibc_versions"], ["2.2.5", "2.17"])
+
+    def test_patch_versions_are_kept_and_ordered_numerically(self):
+        info = release_binary.inspect_binary(fake_elf(glibc=("GLIBC_2.2.5",)))
+        self.assertEqual(info["abi"]["glibc_floor"], "2.2.5")
+        self.assertTrue(release_binary.glibc_within("2.2.5", "2.30"))
+        self.assertFalse(release_binary.glibc_within("2.30.1", "2.30"))
+
+    def test_glibc_interpreter_without_version_needs_reports_no_floor(self):
+        info = release_binary.inspect_binary(fake_elf(glibc=()))
+        self.assertEqual(info["abi"]["libc"], "glibc")
+        self.assertIsNone(info["abi"]["glibc_floor"])
+
+    def test_static_elf_has_no_interpreter(self):
+        info = release_binary.inspect_binary(fake_elf(glibc=(), interp=None))
+        self.assertEqual(info["abi"]["libc"], "static")
+        self.assertIsNone(info["abi"]["interpreter"])
+
+    def test_truncated_headers_raise_value_error_not_struct_error(self):
+        for blob in (fake_elf()[:100], fake_macho()[:40], fake_pe()[:0x90]):
+            with self.assertRaises(ValueError):
+                release_binary.inspect_binary(blob)
 
     def test_macho_reports_arch_and_min_os(self):
         info = release_binary.inspect_binary(fake_macho())
@@ -113,6 +187,16 @@ class SingleMemberArchive(unittest.TestCase):
             write_zip(zp, "zynk.exe", b"pe-bytes")
             self.assertEqual(release_binary.extract_single_member(zp), ("zynk.exe", b"pe-bytes"))
 
+    def test_corrupt_archives_raise_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_zip = pathlib.Path(tmp, "bad.zip")
+            bad_zip.write_bytes(b"PK\x03\x04 not really a zip")
+            bad_tgz = pathlib.Path(tmp, "bad.tar.gz")
+            bad_tgz.write_bytes(b"\x1f\x8b garbage")
+            for path in (bad_zip, bad_tgz):
+                with self.assertRaises(ValueError):
+                    release_binary.extract_single_member(path)
+
     def test_two_members_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             tgz = pathlib.Path(tmp, "a.tar.gz")
@@ -137,7 +221,8 @@ class Sidecar(unittest.TestCase):
             ev = release_evidence.build_evidence(
                 target="linux-x86_64", version="3.1.0", archive=archive, exec_status="ran",
                 exec_output="zynk 3.1.0\n", cargo_version="3.1.0", checkout_head="a" * 40,
-                env=PRODUCER_ENV, toolchain={"rustc": "rustc 1.98.1"}, native_tool_output="ELF 64-bit",
+                env=PRODUCER_ENV, toolchain={"rustc": "rustc 1.98.1"},
+                native_tool_output="ELF 64-bit LSB pie executable\nGLIBC_2.17\nGLIBC_2.30\n",
             )
             self.assertEqual(ev["schema"], 1)
             self.assertEqual(ev["target"], "linux-x86_64")
@@ -152,6 +237,19 @@ class Sidecar(unittest.TestCase):
             self.assertEqual(ev["provenance"]["run_attempt"], 1)
             self.assertEqual(ev["provenance"]["job"], "build-linux-x86_64")
             self.assertEqual(ev["toolchain"], {"rustc": "rustc 1.98.1"})
+            self.assertEqual(ev["build_inputs"], {"libghostty_optimize": "ReleaseFast", "libghostty_simd": "false"})
+            self.assertEqual(ev["binary"]["abi"]["native_glibc_floor"], "2.30")
+
+    def test_native_tool_output_disagreeing_with_the_headers_is_recorded_as_is(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self.make_archive(tmp)
+            ev = release_evidence.build_evidence(
+                target="linux-x86_64", version="3.1.0", archive=archive, exec_status="ran",
+                exec_output="zynk 3.1.0", cargo_version="3.1.0", checkout_head="a" * 40, env=PRODUCER_ENV,
+                toolchain={}, native_tool_output="GLIBC_2.17\nGLIBC_2.34\n",
+            )
+            self.assertEqual(ev["binary"]["abi"]["glibc_floor"], "2.30")
+            self.assertEqual(ev["binary"]["abi"]["native_glibc_floor"], "2.34")
 
     def test_not_run_is_recorded_without_output(self):
         with tempfile.TemporaryDirectory() as tmp:

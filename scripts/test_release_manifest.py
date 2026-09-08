@@ -41,7 +41,8 @@ class Fixture:
         self.producers[name] = entry
 
     def artifact(self, target, binary=None, version="3.1.0", exec_status="ran", exec_output=None, env=None,
-                 sidecar=True, member=None, cargo_version="3.1.0", checkout_head=SHA, extra_file=None):
+                 sidecar=True, member=None, cargo_version="3.1.0", checkout_head=SHA, extra_file=None,
+                 native_tool_output=None):
         spec = release_binary.TARGETS[target]
         if binary is None:
             if spec["format"] == "elf":
@@ -61,6 +62,7 @@ class Fixture:
                 exec_output=exec_output if exec_output is not None else f"zynk {version}\n",
                 cargo_version=cargo_version, checkout_head=checkout_head,
                 env=env or producer_env(spec["build_job"]), toolchain={"rustc": "rustc 1.98.1"},
+                native_tool_output=native_tool_output,
             )
             (tdir / "EVIDENCE.json").write_text(json.dumps(ev))
         if extra_file:
@@ -72,9 +74,22 @@ class Fixture:
         self.job("build-linux-x86_64")
         self.artifact("linux-x86_64")
 
-    def evaluate(self, **ctx_overrides):
+    def evaluate(self, downloads=None, **ctx_overrides):
         ctx = dict(CTX, **ctx_overrides)
-        return release_manifest.evaluate(ctx, self.producers, self.dist, cargo_toml=self.cargo)
+        return release_manifest.evaluate(ctx, self.producers, self.dist, cargo_toml=self.cargo, downloads=downloads)
+
+    def cli(self, out, optional_targets="eligible", downloads=None, run_attempt="1"):
+        producers = pathlib.Path(self.dist.parent, "producers.json")
+        producers.write_text(json.dumps(self.producers))
+        args = [sys.executable, str(ROOT / "scripts" / "release_manifest.py"), "--version", "3.1.0", "--sha", SHA,
+                "--run-id", "1001", "--run-attempt", run_attempt, "--optional-targets", optional_targets,
+                "--producers", str(producers), "--dist", str(self.dist), "--cargo-toml", str(self.cargo),
+                "--out", str(out)]
+        if downloads is not None:
+            dl = pathlib.Path(self.dist.parent, "downloads.json")
+            dl.write_text(json.dumps(downloads))
+            args += ["--downloads", str(dl)]
+        return subprocess.run(args, capture_output=True, text=True)
 
 
 def status(manifest, target):
@@ -127,7 +142,7 @@ class RequiredTarget(unittest.TestCase):
             f = Fixture(tmp)
             f.job("test-linux")
             f.job("build-linux-x86_64")
-            f.artifact("linux-x86_64", binary=fake_elf(glibc=(b"GLIBC_2.17", b"GLIBC_2.34")))
+            f.artifact("linux-x86_64", binary=fake_elf(glibc=("GLIBC_2.17", "GLIBC_2.34")))
             m = f.evaluate(optional_targets="none")
             self.assertFalse(m["ok"])
             self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
@@ -302,6 +317,301 @@ class Inconsistencies(unittest.TestCase):
             self.assertFalse(m["ok"])
             self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
             self.assertEqual(release_manifest.render_sha256sums(m).strip(), "", "nothing is published on failure")
+
+
+class StrictStructure(unittest.TestCase):
+    """Codex Gate-2 P1 at 0ece9be: absent or malformed structure must be INCONSISTENT, never silently ELIGIBLE."""
+
+    def required_with_sidecar_text(self, f, text):
+        f.job("test-linux")
+        f.job("build-linux-x86_64")
+        f.artifact("linux-x86_64")
+        (f.dist / "linux-x86_64" / "EVIDENCE.json").write_text(text)
+
+    def assert_required_inconsistent(self, m, needle=None):
+        self.assertFalse(m["ok"])
+        self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+        self.assertEqual(release_manifest.render_sha256sums(m), "")
+        if needle:
+            self.assertTrue(any(needle in r for r in m["targets"]["linux-x86_64"]["reasons"]),
+                            m["targets"]["linux-x86_64"]["reasons"])
+
+    def test_null_sidecar_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            self.required_with_sidecar_text(f, "null")
+            m = f.evaluate(optional_targets="none")
+            self.assert_required_inconsistent(m, "not a JSON object")
+            self.assertIsNone(m["targets"]["linux-x86_64"]["producer_run_attempt"])
+
+    def test_non_object_sidecar_is_inconsistent(self):
+        for text in ("[]", '"evidence"', "42"):
+            with tempfile.TemporaryDirectory() as tmp:
+                f = Fixture(tmp)
+                self.required_with_sidecar_text(f, text)
+                self.assert_required_inconsistent(f.evaluate(optional_targets="none"), "not a JSON object")
+
+    def test_sidecar_missing_mandatory_fields_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            path = f.dist / "linux-x86_64" / "EVIDENCE.json"
+            ev = json.loads(path.read_text())
+            del ev["provenance"]
+            path.write_text(json.dumps(ev))
+            self.assert_required_inconsistent(f.evaluate(optional_targets="none"), "provenance")
+
+    def test_sidecar_with_wrong_job_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", env=producer_env("build-windows-x86_64"))
+            self.assert_required_inconsistent(f.evaluate(optional_targets="none"), "job")
+
+    def test_sidecar_with_non_integer_attempt_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            path = f.dist / "linux-x86_64" / "EVIDENCE.json"
+            ev = json.loads(path.read_text())
+            ev["provenance"]["run_attempt"] = "1"
+            path.write_text(json.dumps(ev))
+            self.assert_required_inconsistent(f.evaluate(optional_targets="none"), "run_attempt")
+            ev["provenance"]["run_attempt"] = 0
+            path.write_text(json.dumps(ev))
+            self.assert_required_inconsistent(f.evaluate(optional_targets="none"), "run_attempt")
+
+    def test_sidecar_archive_name_mismatch_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            path = f.dist / "linux-x86_64" / "EVIDENCE.json"
+            ev = json.loads(path.read_text())
+            ev["archive"]["name"] = "zynk-v3.1.0-linux-x86_64-old.tar.gz"
+            path.write_text(json.dumps(ev))
+            self.assert_required_inconsistent(f.evaluate(optional_targets="none"), "archive name")
+
+    def test_directory_in_place_of_the_archive_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            archive = f.dist / "linux-x86_64" / "zynk-v3.1.0-linux-x86_64.tar.gz"
+            archive.unlink()
+            archive.mkdir()
+            m = f.evaluate(optional_targets="none")
+            self.assert_required_inconsistent(m, "regular file")
+            self.assertIsNone(m["targets"]["linux-x86_64"]["sha256"])
+
+    def test_symlinked_archive_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            tdir = f.dist / "linux-x86_64"
+            archive = tdir / "zynk-v3.1.0-linux-x86_64.tar.gz"
+            real = pathlib.Path(tmp, "elsewhere.tar.gz")
+            archive.rename(real)
+            archive.symlink_to(real)
+            self.assert_required_inconsistent(f.evaluate(optional_targets="none"), "regular file")
+
+    def test_directory_in_place_of_the_sidecar_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            sidecar = f.dist / "linux-x86_64" / "EVIDENCE.json"
+            sidecar.unlink()
+            sidecar.mkdir()
+            self.assert_required_inconsistent(f.evaluate(optional_targets="none"), "regular file")
+
+    def test_eligible_entries_always_carry_a_string_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            m = f.evaluate(optional_targets="none")
+            for e in m["targets"].values():
+                if e["status"] == "ELIGIBLE":
+                    self.assertIsInstance(e["sha256"], str)
+                    self.assertEqual(len(e["sha256"]), 64)
+            m["targets"]["linux-x86_64"]["sha256"] = None
+            with self.assertRaises(ValueError):
+                release_manifest.render_sha256sums(m)
+
+
+class OptionalStructure(unittest.TestCase):
+    """Codex Gate-2 #1/#2: optional-target structure or decoding problems are INCONSISTENT for that target only."""
+
+    def test_null_sidecar_on_an_optional_target_is_inconsistent_and_linux_still_ships(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("test-windows-x86_64")
+            f.job("build-windows-x86_64", artifact_id="779")
+            f.artifact("windows-x86_64")
+            (f.dist / "windows-x86_64" / "EVIDENCE.json").write_text("[]")
+            m = f.evaluate()
+            self.assertTrue(m["ok"])
+            self.assertEqual(status(m, "windows-x86_64"), "INCONSISTENT")
+            self.assertEqual(release_manifest.render_sha256sums(m).count("\n"), 1)
+
+    def test_corrupt_optional_zip_is_contained(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("test-windows-x86_64")
+            f.job("build-windows-x86_64", artifact_id="779")
+            archive = f.artifact("windows-x86_64")
+            archive.write_bytes(b"PK\x03\x04 definitely not a zip")
+            m = f.evaluate()
+            self.assertTrue(m["ok"])
+            self.assertEqual(status(m, "windows-x86_64"), "INCONSISTENT")
+            self.assertTrue(any("archive" in r for r in m["targets"]["windows-x86_64"]["reasons"]))
+
+    def test_truncated_binary_inside_a_valid_archive_is_contained(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("test-windows-x86_64")
+            f.job("build-windows-x86_64", artifact_id="779")
+            archive = f.artifact("windows-x86_64")
+            write_zip(archive, "zynk.exe", fake_pe()[:0x90])
+            m = f.evaluate()
+            self.assertTrue(m["ok"])
+            self.assertEqual(status(m, "windows-x86_64"), "INCONSISTENT")
+
+    def test_cli_with_a_corrupt_optional_archive_still_writes_the_manifest_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("test-windows-x86_64")
+            f.job("build-windows-x86_64", artifact_id="779")
+            archive = f.artifact("windows-x86_64")
+            archive.write_bytes(b"\x00garbage")
+            out = pathlib.Path(tmp, "out")
+            proc = f.cli(out)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            text = (out / "RELEASE_MANIFEST.txt").read_text()
+            self.assertIn("target=windows-x86_64 tier=optional status=INCONSISTENT", text)
+            self.assertIn("result=OK", text)
+            self.assertEqual((out / "SHA256SUMS").read_text().count("\n"), 1)
+
+    def test_cli_with_a_corrupt_required_archive_writes_a_failing_manifest_and_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            archive = f.artifact("linux-x86_64")
+            archive.write_bytes(b"\x1f\x8b broken gzip")
+            out = pathlib.Path(tmp, "out")
+            proc = f.cli(out, optional_targets="none")
+            self.assertNotEqual(proc.returncode, 0)
+            text = (out / "RELEASE_MANIFEST.txt").read_text()
+            self.assertIn("target=linux-x86_64 tier=required status=INCONSISTENT", text)
+            self.assertIn("result=FAIL", text)
+            self.assertEqual((out / "SHA256SUMS").read_text(), "")
+
+
+class DownloadOutcomes(unittest.TestCase):
+    """Codex Gate-2 #3: a failed download is a visible exclusion, never a crash and never a source of files."""
+
+    def test_optional_download_failure_excludes_the_target_and_ignores_partial_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("test-windows-x86_64")
+            f.job("build-windows-x86_64", artifact_id="779")
+            f.artifact("windows-x86_64")  # a complete-looking directory left behind by a failed download
+            downloads = {"linux-x86_64": "success", "windows-x86_64": "failure"}
+            m = f.evaluate(downloads=downloads)
+            self.assertTrue(m["ok"])
+            self.assertEqual(status(m, "windows-x86_64"), "INCONSISTENT")
+            self.assertTrue(any("download" in r for r in m["targets"]["windows-x86_64"]["reasons"]))
+            self.assertIsNone(m["targets"]["windows-x86_64"]["sha256"])
+            self.assertEqual(release_manifest.render_sha256sums(m).count("\n"), 1)
+
+    def test_required_download_failure_fails_the_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            m = f.evaluate(downloads={"linux-x86_64": "failure"}, optional_targets="none")
+            self.assertFalse(m["ok"])
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+
+    def test_missing_download_record_for_a_built_target_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("test-windows-x86_64")
+            f.job("build-windows-x86_64", artifact_id="779")
+            f.artifact("windows-x86_64")
+            m = f.evaluate(downloads={"linux-x86_64": "success"})
+            self.assertTrue(m["ok"])
+            self.assertEqual(status(m, "windows-x86_64"), "INCONSISTENT")
+
+    def test_cli_downloads_file_is_honoured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("test-windows-x86_64")
+            f.job("build-windows-x86_64", artifact_id="779")
+            f.artifact("windows-x86_64")
+            out = pathlib.Path(tmp, "out")
+            proc = f.cli(out, downloads={"linux-x86_64": "success", "windows-x86_64": "failure"})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("target=windows-x86_64 tier=optional status=INCONSISTENT", (out / "RELEASE_MANIFEST.txt").read_text())
+
+
+class ArtifactIds(unittest.TestCase):
+    """Codex Gate-2 #4: an artifact id must be a single numeric id; anything else is INCONSISTENT."""
+
+    def test_non_numeric_artifact_id_is_inconsistent(self):
+        for bad in ("abc", "12 34", "../x", "12,13", ""):
+            with tempfile.TemporaryDirectory() as tmp:
+                f = Fixture(tmp)
+                f.job("test-linux")
+                f.job("build-linux-x86_64", artifact_id=bad)
+                f.artifact("linux-x86_64")
+                m = f.evaluate(optional_targets="none")
+                self.assertFalse(m["ok"], bad)
+                self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT", bad)
+
+
+class GlibcContract(unittest.TestCase):
+    """Codex Gate-2 #5: the floor is an ELF version-need measurement, cross-checked with the native objdump evidence."""
+
+    def linux_with(self, f, **kw):
+        f.job("test-linux")
+        f.job("build-linux-x86_64")
+        f.artifact("linux-x86_64", **kw)
+        return f.evaluate(optional_targets="none")
+
+    def test_harmless_glibc_looking_string_does_not_reject(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.linux_with(Fixture(tmp), binary=fake_elf(body=b"seen GLIBC_99.99 in a log line\0"))
+            self.assertTrue(m["ok"], m["targets"]["linux-x86_64"]["reasons"])
+            self.assertEqual(status(m, "linux-x86_64"), "ELIGIBLE")
+
+    def test_musl_or_static_binary_violates_the_glibc_dynamic_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.linux_with(Fixture(tmp), binary=fake_elf(glibc=(), interp=b"/lib/ld-musl-x86_64.so.1"))
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.linux_with(Fixture(tmp), binary=fake_elf(glibc=(), interp=None))
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+
+    def test_glibc_binary_without_version_needs_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.linux_with(Fixture(tmp), binary=fake_elf(glibc=()))
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+            self.assertTrue(any("GLIBC" in r for r in m["targets"]["linux-x86_64"]["reasons"]))
+
+    def test_native_objdump_evidence_must_agree_with_the_measured_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.linux_with(Fixture(tmp), native_tool_output="GLIBC_2.17\nGLIBC_2.34\n")
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+            self.assertTrue(any("native" in r for r in m["targets"]["linux-x86_64"]["reasons"]))
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.linux_with(Fixture(tmp), native_tool_output="ELF 64-bit\nGLIBC_2.17\nGLIBC_2.30\n")
+            self.assertEqual(status(m, "linux-x86_64"), "ELIGIBLE")
 
 
 class Rendering(unittest.TestCase):

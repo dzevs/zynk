@@ -35,6 +35,9 @@ def build_evidence(*, target, version, archive, exec_status, exec_output, cargo_
     archive_bytes = archive.read_bytes()
     member, binary = release_binary.extract_single_member(archive)
     info = release_binary.inspect_binary(binary)
+    abi = dict(info["abi"])
+    if info["format"] == "elf":
+        abi["native_glibc_floor"] = release_binary.native_glibc_floor(native_tool_output)
     evidence = {
         "schema": SCHEMA,
         "target": target,
@@ -44,7 +47,9 @@ def build_evidence(*, target, version, archive, exec_status, exec_output, cargo_
         "archive": {"name": archive.name, "sha256": release_binary.sha256_bytes(archive_bytes),
                     "size": len(archive_bytes)},
         "binary": {"member": member, "sha256": release_binary.sha256_bytes(binary), "size": len(binary),
-                   "format": info["format"], "cpu": info["cpu"], "os": info["os"], "abi": info["abi"]},
+                   "format": info["format"], "cpu": info["cpu"], "os": info["os"], "abi": abi},
+        "build_inputs": {"libghostty_optimize": env.get("LIBGHOSTTY_VT_OPTIMIZE", ""),
+                         "libghostty_simd": env.get("LIBGHOSTTY_VT_SIMD", "")},
         "exec": {"status": exec_status, "output": (exec_output or "").strip()},
         "provenance": {
             "git_sha": env.get("GITHUB_SHA", ""),

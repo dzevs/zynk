@@ -84,6 +84,13 @@ jobs:
         with:
           cache-bin: false
           key: candidate-test-linux
+      # The gitleaks maintenance unittests skip without the binary; install it so every test executes.
+      - name: Install gitleaks 8.30.0
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_x64.tar.gz -o /tmp/gitleaks.tgz
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
       - name: Run the required suite (lint, TS, nextest, maintenance unittests)
         run: just check
 
@@ -516,46 +523,90 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      # Downloads happen ONLY by the immutable artifact id each successful producer exported. A failed or
-      # skipped producer has no id and nothing is fetched for it; a stray or retained artifact is never read.
-      - name: Download linux-x86_64 (required)
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          artifact-ids: ${{ needs.build-linux-x86_64.outputs.artifact-id }}
-          path: dist/linux-x86_64
-          merge-multiple: true
-      - name: Download macos-aarch64
-        if: ${{ needs.build-macos-aarch64.result == 'success' && needs.build-macos-aarch64.outputs.artifact-id != '' }}
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          artifact-ids: ${{ needs.build-macos-aarch64.outputs.artifact-id }}
-          path: dist/macos-aarch64
-          merge-multiple: true
-      - name: Download windows-x86_64
-        if: ${{ needs.build-windows-x86_64.result == 'success' && needs.build-windows-x86_64.outputs.artifact-id != '' }}
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          artifact-ids: ${{ needs.build-windows-x86_64.outputs.artifact-id }}
-          path: dist/windows-x86_64
-          merge-multiple: true
-      - name: Download linux-aarch64
-        if: ${{ needs.build-linux-aarch64.result == 'success' && needs.build-linux-aarch64.outputs.artifact-id != '' }}
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          artifact-ids: ${{ needs.build-linux-aarch64.outputs.artifact-id }}
-          path: dist/linux-aarch64
-          merge-multiple: true
-      - name: Download macos-x86_64
-        if: ${{ needs.build-macos-x86_64.result == 'success' && needs.build-macos-x86_64.outputs.artifact-id != '' }}
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          artifact-ids: ${{ needs.build-macos-x86_64.outputs.artifact-id }}
-          path: dist/macos-x86_64
-          merge-multiple: true
       - name: Record producer results
         env:
           PRODUCERS: ${{ toJSON(needs) }}
         run: printf '%s\n' "$PRODUCERS" > producers.json
+      # Only a single numeric artifact id from a successful producer is ever handed to the download action: an
+      # empty `artifact-ids` would make the pinned action download EVERY artifact of the run (unreferenced and
+      # retained ones included). An absent or malformed id exports nothing, so the target's download step is
+      # skipped and the manifest records the gap as INCONSISTENT.
+      - name: Validate artifact ids
+        id: ids
+        run: python3 scripts/release_artifact_ids.py --producers producers.json --github-output "$GITHUB_OUTPUT" --summary artifact-ids.json
+      # Downloads happen ONLY by the validated immutable ids. A download failure must not abort the manifest —
+      # the required manifest is still generated, and the failed target is excluded visibly — so the download
+      # steps continue-on-error and their outcomes are recorded for the manifest; files left by a failed or
+      # partial download are never read (the manifest ignores that target's directory, and it is removed).
+      - name: Download linux-x86_64 (required)
+        id: dl-linux-x86_64
+        if: ${{ steps.ids.outputs.id_linux_x86_64 != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ steps.ids.outputs.id_linux_x86_64 }}
+          path: dist/linux-x86_64
+          merge-multiple: true
+      - name: Download macos-aarch64
+        id: dl-macos-aarch64
+        if: ${{ steps.ids.outputs.id_macos_aarch64 != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ steps.ids.outputs.id_macos_aarch64 }}
+          path: dist/macos-aarch64
+          merge-multiple: true
+      - name: Download windows-x86_64
+        id: dl-windows-x86_64
+        if: ${{ steps.ids.outputs.id_windows_x86_64 != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ steps.ids.outputs.id_windows_x86_64 }}
+          path: dist/windows-x86_64
+          merge-multiple: true
+      - name: Download linux-aarch64
+        id: dl-linux-aarch64
+        if: ${{ steps.ids.outputs.id_linux_aarch64 != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ steps.ids.outputs.id_linux_aarch64 }}
+          path: dist/linux-aarch64
+          merge-multiple: true
+      - name: Download macos-x86_64
+        id: dl-macos-x86_64
+        if: ${{ steps.ids.outputs.id_macos_x86_64 != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ steps.ids.outputs.id_macos_x86_64 }}
+          path: dist/macos-x86_64
+          merge-multiple: true
+      - name: Record download outcomes (partial downloads are discarded)
+        env:
+          DL_LINUX_X86_64: ${{ steps.dl-linux-x86_64.outcome }}
+          DL_MACOS_AARCH64: ${{ steps.dl-macos-aarch64.outcome }}
+          DL_WINDOWS_X86_64: ${{ steps.dl-windows-x86_64.outcome }}
+          DL_LINUX_AARCH64: ${{ steps.dl-linux-aarch64.outcome }}
+          DL_MACOS_X86_64: ${{ steps.dl-macos-x86_64.outcome }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, shutil
+          outcomes = {
+              "linux-x86_64": os.environ["DL_LINUX_X86_64"],
+              "macos-aarch64": os.environ["DL_MACOS_AARCH64"],
+              "windows-x86_64": os.environ["DL_WINDOWS_X86_64"],
+              "linux-aarch64": os.environ["DL_LINUX_AARCH64"],
+              "macos-x86_64": os.environ["DL_MACOS_X86_64"],
+          }
+          for target, outcome in outcomes.items():
+              if outcome != "success":
+                  shutil.rmtree(os.path.join("dist", target), ignore_errors=True)
+          json.dump(outcomes, open("downloads.json", "w"), indent=2)
+          print(json.dumps(outcomes, indent=2))
+          PY
       - name: Build the manifest (fails unless linux-x86_64 is ELIGIBLE)
         env:
           OPTIONAL_TARGETS: ${{ inputs.optional_targets }}
@@ -563,13 +614,17 @@ jobs:
           set -euo pipefail
           python3 scripts/release_manifest.py --version "$VERSION" --sha "$GITHUB_SHA" \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --optional-targets "$OPTIONAL_TARGETS" --producers producers.json \
+            --optional-targets "$OPTIONAL_TARGETS" --producers producers.json --downloads downloads.json \
             --dist dist --cargo-toml Cargo.toml --out out
       - name: Upload manifest (also when it FAILED, so the gate can read why)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-manifest
-          path: out/
+          path: |
+            out/
+            producers.json
+            artifact-ids.json
+            downloads.json
           if-no-files-found: error
           retention-days: 7

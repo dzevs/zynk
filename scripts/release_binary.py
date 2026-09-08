@@ -67,26 +67,82 @@ def _version_triple(value: int) -> str:
     return f"{value >> 16}.{(value >> 8) & 0xFF}.{value & 0xFF}"
 
 
+_GLIBC_VERSION = re.compile(r"^GLIBC_(\d+(?:\.\d+)+)$")
+_GLIBC_TOKEN = re.compile(r"GLIBC_(\d+(?:\.\d+)+)")
+_SHT_GNU_VERNEED = 0x6FFFFFFE
+_PT_INTERP = 3
+
+
+def _cstring(data: bytes, offset: int) -> str:
+    end = data.find(b"\0", offset)
+    if offset < 0 or offset > len(data) or end < 0:
+        raise ValueError("string table entry out of bounds")
+    return data[offset:end].decode("utf-8", errors="replace")
+
+
 def _inspect_elf(data: bytes) -> dict:
+    """ELF64 facts from the real metadata: CPU from e_machine, the interpreter from PT_INTERP, and the glibc
+    requirement from the .gnu.version_r (verneed) entries — never from strings found in the file body."""
     if len(data) < 64:
         raise ValueError("ELF header truncated")
-    elf_class = {1: "ELF32", 2: "ELF64"}.get(data[4])
+    if data[4] != 2:
+        raise ValueError(f"only ELF64 release binaries are expected (class byte {data[4]})")
     endian = {1: "<", 2: ">"}.get(data[5])
-    if elf_class is None or endian is None:
-        raise ValueError("unknown ELF class or byte order")
-    (machine,) = struct.unpack_from(endian + "H", data, 18)
-    floors = {m.decode() for m in re.findall(rb"GLIBC_(\d+\.\d+)", data)}
-    floor = max(floors, key=_glibc_key) if floors else None
-    if b"/ld-musl" in data:
+    if endian is None:
+        raise ValueError("unknown ELF byte order")
+    (_, machine, _, _, phoff, shoff, _, _, phentsize, phnum, shentsize, shnum, _) = struct.unpack_from(
+        endian + "HHIQQQIHHHHHH", data, 16)
+    interpreter = None
+    for i in range(phnum):
+        p_type, _, p_offset, _, _, p_filesz, _, _ = struct.unpack_from(endian + "IIQQQQQQ", data, phoff + i * phentsize)
+        if p_type == _PT_INTERP:
+            if p_offset + p_filesz > len(data):
+                raise ValueError("PT_INTERP out of bounds")
+            interpreter = data[p_offset:p_offset + p_filesz].split(b"\0", 1)[0].decode("utf-8", errors="replace")
+    sections = [struct.unpack_from(endian + "IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+    versions: list[str] = []
+    for (_, sh_type, _, _, sh_offset, _, sh_link, sh_info, _, _) in sections:
+        if sh_type != _SHT_GNU_VERNEED:
+            continue
+        if sh_link >= len(sections):
+            raise ValueError("verneed string table link out of range")
+        str_offset = sections[sh_link][4]
+        offset = sh_offset
+        for _ in range(sh_info):
+            _, vn_cnt, _, vn_aux, vn_next = struct.unpack_from(endian + "HHIII", data, offset)
+            aux = offset + vn_aux
+            for _ in range(vn_cnt):
+                _, _, _, vna_name, vna_next = struct.unpack_from(endian + "IHHII", data, aux)
+                versions.append(_cstring(data, str_offset + vna_name))
+                if vna_next == 0:
+                    break
+                aux += vna_next
+            if vn_next == 0:
+                break
+            offset += vn_next
+    glibc = [m.group(1) for m in (_GLIBC_VERSION.match(v) for v in versions) if m]
+    floor = max(glibc, key=_glibc_key) if glibc else None
+    if interpreter is None:
+        libc = "static"
+    elif "ld-musl" in interpreter:
         libc = "musl"
-    elif b"/ld-linux" in data:
+    elif "ld-linux" in interpreter:
         libc = "glibc"
     else:
-        libc = "static"
+        libc = "unknown"
     return {
         "format": "elf", "cpu": _ELF_MACHINES.get(machine, f"0x{machine:x}"), "os": "linux",
-        "abi": {"class": elf_class, "libc": libc, "glibc_floor": floor},
+        "abi": {"class": "ELF64", "libc": libc, "interpreter": interpreter, "glibc_versions": glibc,
+                "glibc_floor": floor},
     }
+
+
+def native_glibc_floor(text: str | None) -> str | None:
+    """The highest GLIBC_x.y[.z] token in native tool output (`objdump -T` lines), or None when there is none."""
+    if not text:
+        return None
+    found = _GLIBC_TOKEN.findall(text)
+    return max(found, key=_glibc_key) if found else None
 
 
 def _inspect_macho(data: bytes) -> dict:
@@ -101,6 +157,8 @@ def _inspect_macho(data: bytes) -> dict:
         cmd, size = struct.unpack_from("<II", data, offset)
         if size < 8:
             raise ValueError("Mach-O load command with zero size")
+        if offset + size > len(data):
+            raise ValueError("Mach-O load command truncated")
         if cmd == 0x32 and offset + 20 <= len(data):  # LC_BUILD_VERSION
             platform, minos_raw, sdk_raw = struct.unpack_from("<III", data, offset + 8)
             min_os, sdk = _version_triple(minos_raw), _version_triple(sdk_raw)
@@ -137,30 +195,37 @@ def _inspect_pe(data: bytes) -> dict:
 
 
 def inspect_binary(data: bytes) -> dict:
-    """Format, CPU, OS and ABI facts read from the executable's headers. Never executes anything."""
-    if data[:4] == b"\x7fELF":
-        return _inspect_elf(data)
-    if data[:4] == b"\xcf\xfa\xed\xfe":
-        return _inspect_macho(data)
-    if data[:2] == b"MZ":
-        return _inspect_pe(data)
+    """Format, CPU, OS and ABI facts read from the executable's headers. Never executes anything; every decoding
+    failure surfaces as ValueError so a caller can contain it per target."""
+    try:
+        if data[:4] == b"\x7fELF":
+            return _inspect_elf(data)
+        if data[:4] == b"\xcf\xfa\xed\xfe":
+            return _inspect_macho(data)
+        if data[:2] == b"MZ":
+            return _inspect_pe(data)
+    except (struct.error, IndexError, KeyError, UnicodeDecodeError) as err:
+        raise ValueError(f"malformed executable header: {err}") from err
     raise ValueError("not an ELF, Mach-O 64-bit or PE executable")
 
 
 def extract_single_member(path: pathlib.Path) -> tuple[str, bytes]:
     """The archive's one regular file (name, bytes); anything else is a packaging error."""
     path = pathlib.Path(path)
-    if path.suffix == ".zip":
-        with zipfile.ZipFile(path) as zf:
-            names = [n for n in zf.namelist() if not n.endswith("/")]
-            if len(names) != 1:
-                raise ValueError(f"expected exactly one member in {path.name}, found {names}")
-            return names[0], zf.read(names[0])
-    with tarfile.open(path, "r:gz") as tar:
-        members = [m for m in tar.getmembers() if m.isfile()]
-        if len(members) != 1 or len(tar.getmembers()) != 1:
-            raise ValueError(f"expected exactly one member in {path.name}, found {[m.name for m in tar.getmembers()]}")
-        handle = tar.extractfile(members[0])
-        if handle is None:
-            raise ValueError(f"unreadable member in {path.name}")
-        return members[0].name, handle.read()
+    try:
+        if path.suffix == ".zip":
+            with zipfile.ZipFile(path) as zf:
+                names = [n for n in zf.namelist() if not n.endswith("/")]
+                if len(names) != 1:
+                    raise ValueError(f"expected exactly one member in {path.name}, found {names}")
+                return names[0], zf.read(names[0])
+        with tarfile.open(path, "r:gz") as tar:
+            members = [m for m in tar.getmembers() if m.isfile()]
+            if len(members) != 1 or len(tar.getmembers()) != 1:
+                raise ValueError(f"expected exactly one member in {path.name}, found {[m.name for m in tar.getmembers()]}")
+            handle = tar.extractfile(members[0])
+            if handle is None:
+                raise ValueError(f"unreadable member in {path.name}")
+            return members[0].name, handle.read()
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, tarfile.TarError, EOFError, OSError) as err:
+        raise ValueError(f"{path.name}: unreadable archive: {err}") from err
