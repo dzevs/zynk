@@ -335,8 +335,14 @@ impl App {
 
     /// Resolve the AUTHORITATIVE (hook-derived, never detection) receiver identity
     /// for a public pane id, for M3a receipt validation. Returns `None` when the
-    /// pane does not resolve OR has no hook authority — a detection-only label is
-    /// NOT receipt-capable, so the caller treats `None` as `receiver_identity_unverified`.
+    /// pane does not resolve OR no hook reported an identity for it — a detection-only
+    /// label is NOT receipt-capable, so the caller treats `None` as
+    /// `receiver_identity_unverified`.
+    ///
+    /// Two hook shapes carry identity. A full-lifecycle integration carries it on
+    /// `hook_authority` (identity + lifecycle). A session-identity-only integration
+    /// carries it on `hook_identity`: its lifecycle stays screen-detected, but its
+    /// label and session came from its own hook, so they anchor receipts just the same.
     pub(crate) fn authoritative_receiver_identity(
         &self,
         public_pane_id: &str,
@@ -345,18 +351,27 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane = ws.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
-        // Hook authority ONLY — never `effective_agent_label()`'s detection fallback.
-        let authority = terminal.hook_authority.as_ref()?;
+        // Hook-reported identity ONLY — never `effective_agent_label()`'s detection fallback.
+        let agent_label = terminal
+            .hook_authority
+            .as_ref()
+            .map(|authority| authority.agent_label.as_str())
+            .or_else(|| {
+                terminal
+                    .hook_identity
+                    .as_ref()
+                    .map(|identity| identity.agent_label.as_str())
+            })?;
         // Owner coherence: a persisted session is part of this receiver's identity only when it
-        // was reported for the SAME agent the hook authority names; a session another owner
+        // was reported for the SAME agent the hook identity names; a session another owner
         // persisted on this terminal must not anchor a receipt (Codex Gate-2 R13).
         let agent_session = terminal_agent_session_info(terminal)
-            .filter(|info| info.agent == authority.agent_label)
+            .filter(|info| info.agent == agent_label)
             .and_then(|info| serde_json::to_value(info).ok());
         Some(crate::zynk::receipt::AuthoritativeReceiver {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             terminal_id: terminal.id.to_string(),
-            agent_label: authority.agent_label.clone(),
+            agent_label: agent_label.to_string(),
             agent_session,
         })
     }

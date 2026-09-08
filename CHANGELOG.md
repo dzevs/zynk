@@ -104,6 +104,9 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   *Logical* means soft wraps are joined first, so a pane too narrow to hold the footer on one row (below
   roughly 48 columns) still reports blocked instead of hiding the approval as working. One line of output
   printed below the footer already ends the match and the busy title wins again.
+- An agent whose integration reports only its session identity (Hermes) keeps that identity. Its pane still
+  shows the session the integration reported, and it can record receipt of a message addressed to it, while
+  its status stays screen-detected. A pane carrying a merely detected agent still cannot record a receipt.
 
 **Removed**
 

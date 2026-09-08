@@ -432,6 +432,68 @@ fn agent_send_codex(fixture: &Fixture, body: &str) -> Value {
     v
 }
 
+/// Run a process whose argv[0] is `hermes` in `pane` and wait until DETECTION
+/// reports it. A session-identity-only integration leaves lifecycle to the screen,
+/// so its tests need a really-detected process rather than a hook state report.
+fn start_detected_hermes(fixture: &Fixture, pane: &str) {
+    let out = run_cli(
+        fixture,
+        None,
+        &[
+            "pane",
+            "run",
+            pane,
+            "--",
+            "stty -echo 2>/dev/null; exec bash -c 'exec -a hermes cat'",
+        ],
+    );
+    assert_eq!(out.code, 0, "start hermes pane: stderr={}", out.stderr);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let got = send_json(
+            &fixture.socket_path,
+            &format!(
+                "{{\"id\":\"get\",\"method\":\"pane.get\",\"params\":{{\"pane_id\":\"{pane}\"}}}}"
+            ),
+        );
+        if got.pointer("/result/pane/agent").and_then(Value::as_str) == Some("hermes") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the hermes process was never detected: {got}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Report through the SHIPPED session-identity-only reporter shape: one
+/// `pane.report_agent` carrying BOTH a lifecycle `state` and `agent_session_id`, the
+/// call `src/integration/assets/hermes/__init__.py` makes from every hook it registers
+/// (including `on_session_start`).
+fn report_identity_only_agent(socket_path: &Path, pane_id: &str, state: &str, session: &str) {
+    let response = send_json(
+        socket_path,
+        &format!(
+            "{{\"id\":\"hook\",\"method\":\"pane.report_agent\",\"params\":{{\"pane_id\":\"{pane_id}\",\"source\":\"zynk:hermes\",\"agent\":\"hermes\",\"state\":\"{state}\",\"agent_session_id\":\"{session}\"}}}}"
+        ),
+    );
+    assert!(
+        response.get("error").is_none(),
+        "pane.report_agent: {response}"
+    );
+}
+
+/// Read `pane.get` for `pane_id` on this fixture's isolated socket.
+fn pane_get(socket_path: &Path, pane_id: &str) -> Value {
+    send_json(
+        socket_path,
+        &format!(
+            "{{\"id\":\"get\",\"method\":\"pane.get\",\"params\":{{\"pane_id\":\"{pane_id}\"}}}}"
+        ),
+    )
+}
+
 /// Build the raw `zynk.message_received` socket request from an F4 send outcome,
 /// receipted by `receiver_pane`.
 fn receipt_request(sent: &Value, receiver_pane: &str) -> String {
@@ -803,6 +865,239 @@ fn receipt_from_pane_without_hook_authority_is_unverified() {
         response["error"].get("context").is_none(),
         "error body must have no context field: {response}"
     );
+
+    fixture.cleanup();
+}
+
+#[test]
+fn identity_only_hook_report_keeps_its_session_identity() {
+    // Codex Gate-2 M3 finding (msg_34f2e9b655927aaf): a session-identity-only
+    // integration reports lifecycle state AND `agent_session_id` through the one
+    // `pane.report_agent` call. Only the LIFECYCLE half is dropped — the reported
+    // session is hook-derived IDENTITY, so `pane.get` must still surface it.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "identity-only-session");
+    start_passive_cat(&fixture, &pane);
+
+    let report = send_json(
+        &fixture.socket_path,
+        &format!(
+            "{{\"id\":\"hook\",\"method\":\"pane.report_agent\",\"params\":{{\"pane_id\":\"{pane}\",\"source\":\"zynk:hermes\",\"agent\":\"hermes\",\"state\":\"idle\",\"agent_session_id\":\"hermes-session-1\"}}}}"
+        ),
+    );
+    assert!(report.get("error").is_none(), "pane.report_agent: {report}");
+
+    let got = pane_get(&fixture.socket_path, &pane);
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/value")
+            .and_then(Value::as_str),
+        Some("hermes-session-1"),
+        "the identity-only hook report lost its session identity: {got}"
+    );
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/agent")
+            .and_then(Value::as_str),
+        Some("hermes"),
+        "{got}"
+    );
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/source")
+            .and_then(Value::as_str),
+        Some("zynk:hermes"),
+        "{got}"
+    );
+    // The lifecycle half IS dropped: the pane runs a plain `cat`, so the reported
+    // `idle` must never become the pane's state.
+    assert_eq!(
+        got.pointer("/result/pane/agent_status")
+            .and_then(Value::as_str),
+        Some("unknown"),
+        "the reported lifecycle state must stay screen-detected: {got}"
+    );
+
+    fixture.cleanup();
+}
+
+#[test]
+fn identity_only_hook_session_anchors_its_own_receipt() {
+    // The same finding on the receipt path: a detected session-identity-only agent
+    // that reported its session over `pane.report_agent_session` IS hook-identified,
+    // so it can receipt the message addressed to it. Before the identity/authority
+    // split this returned `receiver_identity_unverified`.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "identity-only-receipt");
+    start_detected_hermes(&fixture, &pane);
+    report_session(
+        &fixture.socket_path,
+        &pane,
+        "zynk:hermes",
+        "hermes",
+        "hermes-session-1",
+    );
+
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "for the hook-identified session"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send: stderr={} {sent}", out.stderr);
+    assert_eq!(sent["delivery_status"], "submitted", "{sent}");
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let receipt = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    assert!(
+        receipt.get("error").is_none(),
+        "the hook-identified addressee could not receipt its own message: {receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["delivery_status"], "received",
+        "{receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["receiver_agent_label"], "hermes",
+        "{receipt}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "received");
+
+    fixture.cleanup();
+}
+
+#[test]
+fn identity_only_shipped_reporter_path_anchors_its_receipt() {
+    // The SHIPPED reporter path end to end: the asset sends state AND
+    // `agent_session_id` in ONE `pane.report_agent`, never `pane.report_agent_session`.
+    // That single call must leave the pane receipt-capable while its status stays
+    // screen-detected.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "identity-only-shipped");
+    start_detected_hermes(&fixture, &pane);
+    report_identity_only_agent(&fixture.socket_path, &pane, "idle", "hermes-shipped-1");
+
+    let got = pane_get(&fixture.socket_path, &pane);
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/value")
+            .and_then(Value::as_str),
+        Some("hermes-shipped-1"),
+        "{got}"
+    );
+
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "via the shipped reporter"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send: stderr={} {sent}", out.stderr);
+    assert_eq!(sent["delivery_status"], "submitted", "{sent}");
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let receipt = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    assert!(
+        receipt.get("error").is_none(),
+        "the shipped reporter path could not receipt its own message: {receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["delivery_status"], "received",
+        "{receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["receiver_agent_label"], "hermes",
+        "{receipt}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "received");
+
+    fixture.cleanup();
+}
+
+#[test]
+fn a_same_label_identity_only_pane_with_another_session_cannot_receipt() {
+    // Owner coherence and the stored target triple are UNWEAKENED by the identity
+    // split: two panes both detected as the same identity-only agent, each with its own
+    // reported session. Only the addressed session may receipt; the same-label impostor
+    // is refused on the stored (source, kind, value) triple.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let target = create_root_pane(&fixture.socket_path, "identity-only-target");
+    let impostor = create_root_pane(&fixture.socket_path, "identity-only-impostor");
+    start_detected_hermes(&fixture, &target);
+    start_detected_hermes(&fixture, &impostor);
+    report_identity_only_agent(&fixture.socket_path, &target, "idle", "hermes-target-1");
+    report_identity_only_agent(&fixture.socket_path, &impostor, "idle", "hermes-impostor-2");
+
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &target, "--", "bound to the target session"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send: stderr={} {sent}", out.stderr);
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let wrong = send_json(&fixture.socket_path, &receipt_request(&sent, &impostor));
+    assert_eq!(
+        wrong["error"]["code"], "receiver_identity_mismatch",
+        "a same-label pane holding another session must not receipt: {wrong}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
+
+    let right = send_json(&fixture.socket_path, &receipt_request(&sent, &target));
+    assert!(
+        right.get("error").is_none(),
+        "the addressed session's own receipt failed: {right}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "received");
+
+    fixture.cleanup();
+}
+
+#[test]
+fn a_detection_only_agent_pane_is_still_not_receipt_capable() {
+    // The negative half of the split: a REALLY DETECTED agent process that never
+    // reported through any hook has a detection-derived label only, which is still
+    // not receipt-capable. Detection must never manufacture receipt identity.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "detection-only-receipt");
+    start_detected_hermes(&fixture, &pane);
+
+    let got = pane_get(&fixture.socket_path, &pane);
+    assert_eq!(
+        got.pointer("/result/pane/agent").and_then(Value::as_str),
+        Some("hermes"),
+        "precondition: the pane carries a detection-only label: {got}"
+    );
+    assert!(
+        got.pointer("/result/pane/agent_session").is_none()
+            || got
+                .pointer("/result/pane/agent_session")
+                .map(Value::is_null)
+                == Some(true),
+        "precondition: no hook reported a session: {got}"
+    );
+
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "to a detected-only pane"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send: stderr={} {sent}", out.stderr);
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let receipt = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    assert!(
+        receipt.get("result").is_none(),
+        "a detection-only pane must not receipt: {receipt}"
+    );
+    assert_eq!(
+        receipt["error"]["code"], "receiver_identity_unverified",
+        "{receipt}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
 
     fixture.cleanup();
 }

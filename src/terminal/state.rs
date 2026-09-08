@@ -27,6 +27,18 @@ pub struct HookAuthority {
     pub session_ref: Option<crate::agent_resume::AgentSessionRef>,
 }
 
+/// Hook-reported IDENTITY for a `crate::detect::session_identity_only_integration`.
+///
+/// These integrations name their own agent (and, when they report one, their
+/// session) over the hook, but hold NO lifecycle authority — their state stays
+/// screen-detected. Identity is still hook-derived here, so unlike a
+/// detection-only label it may anchor receipts and awareness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookIdentity {
+    pub source: String,
+    pub agent_label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SuppressedFullLifecycleHookReport {
     agent_label: String,
@@ -78,6 +90,7 @@ pub struct TerminalState {
     fallback_visible_blocker: bool,
     fallback_observed_at: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
+    pub hook_identity: Option<HookIdentity>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     pub manual_label: Option<String>,
@@ -104,6 +117,7 @@ impl TerminalState {
             fallback_visible_blocker: false,
             fallback_observed_at: None,
             hook_authority: None,
+            hook_identity: None,
             agent_metadata: HashMap::new(),
             persisted_agent_session: None,
             manual_label: None,
@@ -272,6 +286,18 @@ impl TerminalState {
         {
             self.persisted_agent_session = None;
         }
+        // A session-identity-only integration lives and dies with its process: it
+        // holds no lifecycle authority to arbitrate, so its identity is dropped on
+        // the same evidence that drops its session, and whenever the detected agent
+        // contradicts the label the hook reported.
+        if (process_exited
+            && self.hook_identity.as_ref().is_some_and(|identity| {
+                crate::detect::parse_agent_label(&identity.agent_label) == agent
+            }))
+            || self.hook_identity_conflicts_with_detected_agent(agent)
+        {
+            self.hook_identity = None;
+        }
         if self.hook_authority_not_newer_than(now)
             && (self.hook_authority_conflicts_with_detected_agent(agent)
                 || (previous_detected_agent.is_some()
@@ -378,7 +404,7 @@ impl TerminalState {
         now: Instant,
     ) -> Option<TerminalStateMutation> {
         if crate::detect::session_identity_only_integration(&source, &agent_label) {
-            return None;
+            return self.record_identity_only_hook_report(source, agent_label, session_ref, seq);
         }
         if self.full_lifecycle_hook_report_is_suppressed(&source, &agent_label, &session_ref) {
             return None;
@@ -462,6 +488,62 @@ impl TerminalState {
         })
     }
 
+    /// Record a hook report from a `crate::detect::session_identity_only_integration`.
+    ///
+    /// Identity and lifecycle authority are SPLIT here. The reported `source`,
+    /// `agent_label` and `session_ref` are hook-derived IDENTITY and are kept, so
+    /// `pane.get` still surfaces the session and a receipt can anchor on it. The
+    /// reported `state`/`message`/`custom_status` are dropped: screen detection
+    /// stays the only lifecycle authority for these integrations, and the report
+    /// never takes `hook_authority`, so no lifecycle arbitration runs.
+    ///
+    /// The App-side `HookStateReported` dispatch calls this directly so the routing
+    /// is visible where the report arrives; the funnel above keeps the same guard so
+    /// no other caller can route around the split.
+    pub fn record_identity_only_hook_report(
+        &mut self,
+        source: String,
+        agent_label: String,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        seq: Option<u64>,
+    ) -> Option<TerminalStateMutation> {
+        if !self.accept_hook_report(&source, seq) {
+            return None;
+        }
+        if self.known_agent_label_conflicts_with_detected_agent(&agent_label)
+            || self.current_session_owner_conflicts(&source, &agent_label)
+        {
+            return None;
+        }
+        // The same clamp the full-lifecycle path applies: a same-owner report that
+        // repoints an established anchor without a session-start reason keeps the
+        // anchor it already has (the M3-11 replacement guard).
+        let session_ref = session_ref.map(|session_ref| {
+            self.conflicting_same_owner_session_ref(&source, &agent_label, &session_ref, None)
+                .unwrap_or(session_ref)
+        });
+        let previous_session = self.current_session_identity_for_persistence();
+        let identity = HookIdentity {
+            source: source.clone(),
+            agent_label: agent_label.clone(),
+        };
+        let identity_changed = self.hook_identity.as_ref() != Some(&identity);
+        self.hook_identity = Some(identity);
+        if let Some(session_ref) = session_ref {
+            self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
+                source,
+                agent: agent_label,
+                session_ref,
+            });
+        }
+        let session_ref_changed =
+            previous_session != self.current_session_identity_for_persistence();
+        (identity_changed || session_ref_changed).then_some(TerminalStateMutation {
+            effective_state_change: None,
+            session_ref_changed,
+        })
+    }
+
     fn hook_authority_not_newer_than(&self, observed_at: Instant) -> bool {
         self.hook_authority
             .as_ref()
@@ -481,6 +563,16 @@ impl TerminalState {
         };
         self.hook_authority.as_ref().is_some_and(|authority| {
             crate::detect::parse_agent_label(&authority.agent_label)
+                .is_some_and(|hook_agent| hook_agent != detected_agent)
+        })
+    }
+
+    fn hook_identity_conflicts_with_detected_agent(&self, detected_agent: Option<Agent>) -> bool {
+        let Some(detected_agent) = detected_agent else {
+            return false;
+        };
+        self.hook_identity.as_ref().is_some_and(|identity| {
+            crate::detect::parse_agent_label(&identity.agent_label)
                 .is_some_and(|hook_agent| hook_agent != detected_agent)
         })
     }
@@ -916,6 +1008,14 @@ impl TerminalState {
         }
 
         let previous_session = self.current_session_identity_for_persistence();
+        if crate::detect::session_identity_only_integration(&source, &agent_label) {
+            // For these integrations the session report IS the identity report: the
+            // agent named it over its own hook, so it anchors identity (never state).
+            self.hook_identity = Some(HookIdentity {
+                source: source.clone(),
+                agent_label: agent_label.clone(),
+            });
+        }
         self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
             source,
             agent: agent_label,
@@ -985,18 +1085,36 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
-        let should_clear = self
+        let should_clear_authority = self
             .hook_authority
             .as_ref()
             .is_some_and(|authority| source.is_none_or(|source| authority.source == source));
-        if !should_clear {
+        // A session-identity-only integration never holds `hook_authority`, so its
+        // own clear has to be able to drop the identity it DID record.
+        let should_clear_identity = self
+            .hook_identity
+            .as_ref()
+            .is_some_and(|identity| source.is_none_or(|source| identity.source == source));
+        if !should_clear_authority && !should_clear_identity {
             return None;
         }
         self.suppress_current_full_lifecycle_hook_authority(
             FullLifecycleHookSuppressionReason::HookClear,
         );
-        self.hook_authority = None;
-        self.persisted_agent_session = None;
+        let cleared_identity = if should_clear_identity {
+            self.hook_identity.take()
+        } else {
+            None
+        };
+        if should_clear_authority {
+            self.hook_authority = None;
+            self.persisted_agent_session = None;
+        } else if let Some(identity) = cleared_identity {
+            // Only the session this identity anchored goes; another owner's stays.
+            if self.persisted_agent_session_matches(&identity.source, &identity.agent_label) {
+                self.persisted_agent_session = None;
+            }
+        }
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1005,7 +1123,8 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session.is_some(),
+            session_ref_changed: previous_session
+                != self.current_session_identity_for_persistence(),
         })
     }
 
@@ -1035,10 +1154,22 @@ impl TerminalState {
         }) {
             return None;
         }
+        // Symmetric guard for a session-identity-only integration: a release from
+        // another owner must not drop the identity this one recorded.
+        if self.hook_identity.as_ref().is_some_and(|identity| {
+            identity.agent_label != agent_label || identity.source != source
+        }) {
+            return None;
+        }
 
         let matches_current_agent = self.effective_agent_label() == Some(agent_label);
         let matches_persisted_session = self.persisted_agent_session_matches(source, agent_label);
-        if !matches_current_agent && !matches_persisted_session {
+        // An identity-only integration can hold identity with no session and no
+        // detected process; its own release still applies to it.
+        let matches_hook_identity = self.hook_identity.as_ref().is_some_and(|identity| {
+            identity.source == source && identity.agent_label == agent_label
+        });
+        if !matches_current_agent && !matches_persisted_session && !matches_hook_identity {
             return None;
         }
         let preserve_foreign_persisted_session = self
@@ -1062,6 +1193,7 @@ impl TerminalState {
         self.fallback_visible_blocker = false;
         self.fallback_observed_at = None;
         self.hook_authority = None;
+        self.hook_identity = None;
         if !preserve_foreign_persisted_session {
             self.persisted_agent_session = None;
         }
@@ -1139,6 +1271,7 @@ impl TerminalState {
         self.fallback_visible_blocker = false;
         self.fallback_observed_at = None;
         self.hook_authority = None;
+        self.hook_identity = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();
@@ -2473,6 +2606,242 @@ mod tests {
                 .map(|session| &session.session_ref),
             Some(&retried_ref)
         );
+    }
+
+    #[test]
+    fn identity_only_hook_report_keeps_identity_without_taking_lifecycle_authority() {
+        // Codex Gate-2 M3 finding (msg_34f2e9b655927aaf): the single report a
+        // session-identity-only integration sends carries BOTH a lifecycle state and
+        // its session id. Only the LIFECYCLE half is dropped.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("hermes-1").unwrap();
+
+        let mutation = terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                AgentState::Blocked,
+                Some("ignored message".into()),
+                Some("ignored status".into()),
+                Some(session_ref.clone()),
+                Some(1),
+            )
+            .expect("an identity report that records a session is a mutation");
+
+        // Identity is kept: hook-reported source + label + session.
+        assert_eq!(
+            terminal.hook_identity,
+            Some(HookIdentity {
+                source: "zynk:hermes".into(),
+                agent_label: "hermes".into(),
+            })
+        );
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&session_ref)
+        );
+        assert!(mutation.session_ref_changed);
+
+        // Lifecycle is not: no authority, no state change, no custom status, and the
+        // screen keeps arbitrating afterwards.
+        assert!(terminal.hook_authority.is_none());
+        assert!(mutation.effective_state_change.is_none());
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(!terminal.full_lifecycle_hook_authority_active());
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Working);
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+        assert!(terminal.hook_identity.is_some());
+    }
+
+    #[test]
+    fn identity_only_hook_report_without_a_session_still_records_identity() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+
+        let mutation = terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some(1),
+            )
+            .expect("the first identity report is a mutation");
+
+        assert!(!mutation.session_ref_changed);
+        assert!(mutation.effective_state_change.is_none());
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(
+            terminal
+                .hook_identity
+                .as_ref()
+                .map(|identity| identity.agent_label.as_str()),
+            Some("hermes")
+        );
+        assert!(terminal.persisted_agent_session.is_none());
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn identity_only_report_does_not_repoint_an_established_session() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        let first = crate::agent_resume::AgentSessionRef::id("hermes-1").unwrap();
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(first.clone()),
+            Some(1),
+        );
+
+        // `pane.report_agent` carries no session-start reason, so a different id keeps
+        // the anchor the pane already has (the M3-11 replacement guard).
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("hermes-2"),
+            Some(2),
+        );
+
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&first)
+        );
+    }
+
+    #[test]
+    fn identity_only_hook_identity_ends_with_its_process() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("hermes-1"),
+            Some(1),
+        );
+        assert!(terminal.hook_identity.is_some());
+
+        terminal.set_detected_state_with_visible_blocker(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            true,
+        );
+
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn a_conflicting_detected_agent_drops_the_identity_only_hook_identity() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            Some(1),
+        );
+        assert!(terminal.hook_identity.is_some());
+
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        assert!(terminal.hook_identity.is_none());
+    }
+
+    #[test]
+    fn only_its_own_owner_clears_or_releases_an_identity_only_identity() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("hermes-1"),
+            Some(1),
+        );
+
+        terminal.clear_hook_authority_with_mutation(Some("zynk:pi"), Some(2));
+        terminal.release_agent_with_mutation("zynk:pi", "pi", Some(3));
+        assert!(terminal.hook_identity.is_some());
+        assert!(terminal.persisted_agent_session.is_some());
+
+        assert!(terminal
+            .clear_hook_authority_with_mutation(Some("zynk:hermes"), Some(4))
+            .is_some());
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn releasing_an_identity_only_integration_drops_its_identity() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("hermes-1"),
+            Some(1),
+        );
+
+        terminal.release_agent_with_mutation("zynk:hermes", "hermes", Some(2));
+
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn a_full_lifecycle_hook_report_records_authority_not_identity_only_identity() {
+        let mut terminal = test_terminal();
+        terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-1"),
+                Some(1),
+            )
+            .expect("a full-lifecycle report takes authority");
+
+        assert!(terminal.hook_identity.is_none());
+        assert_eq!(
+            terminal
+                .hook_authority
+                .as_ref()
+                .map(|authority| authority.agent_label.as_str()),
+            Some("pi")
+        );
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.full_lifecycle_hook_authority_active());
     }
 
     #[test]

@@ -2412,9 +2412,29 @@ impl AppState {
                 seq,
                 session_ref,
             } => {
+                // Three shapes arrive on this one event. A RESERVED-NATIVE source
+                // reports its session and nothing else — no identity, no lifecycle.
+                // A SESSION-IDENTITY-ONLY integration reports lifecycle AND session in
+                // the same call: the session, source and label are hook-derived
+                // identity and are kept, while the reported state/message/custom_status
+                // are dropped so the screen stays the only lifecycle authority. Every
+                // other source takes full hook authority. `TerminalState` enforces the
+                // same identity/lifecycle split internally, so a caller that reaches
+                // the hook-authority funnel directly cannot route around it.
                 if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label) {
                     self.update_terminal_state(pane_id, |terminal| {
                         terminal.set_agent_session_ref(source, agent_label, session_ref, seq)
+                    })
+                    .into_iter()
+                    .collect()
+                } else if crate::detect::session_identity_only_integration(&source, &agent_label) {
+                    self.update_terminal_state(pane_id, |terminal| {
+                        terminal.record_identity_only_hook_report(
+                            source,
+                            agent_label,
+                            session_ref,
+                            seq,
+                        )
                     })
                     .into_iter()
                     .collect()
@@ -4504,6 +4524,81 @@ mod tests {
         let toast = state.toast.as_ref().unwrap();
         assert_eq!(toast.kind, ToastKind::NeedsAttention);
         assert_eq!(toast.title, "codex needs attention");
+    }
+
+    #[test]
+    fn identity_only_state_report_records_identity_without_overriding_screen_state() {
+        // The sibling of `reserved_native_state_report_does_not_override_screen_state`
+        // for the third branch of the `HookStateReported` dispatch: the shipped
+        // reporter of a session-identity-only integration sends state AND
+        // `agent_session_id` in one `pane.report_agent`. The App must keep the session
+        // identity and leave the lifecycle to the screen (Gate-2 M3 finding
+        // msg_34f2e9b655927aaf).
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Zynk;
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Hermes),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "zynk:hermes".into(),
+            agent_label: "hermes".into(),
+            state: AgentState::Blocked,
+            message: None,
+            custom_status: None,
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("hermes-session"),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        // Lifecycle: the reported `blocked` is dropped, the screen keeps `working`.
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+        // Identity: source, label and session survive the report.
+        assert_eq!(
+            terminal
+                .hook_identity
+                .as_ref()
+                .map(|identity| (identity.source.as_str(), identity.agent_label.as_str())),
+            Some(("zynk:hermes", "hermes"))
+        );
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("hermes-session")
+        );
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Hermes),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal.hook_identity.is_some());
+        assert!(state.toast.is_none());
     }
 
     #[test]
