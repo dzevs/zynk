@@ -292,26 +292,52 @@ fn pane_recent_text(socket_path: &Path, pane_id: &str) -> String {
 fn start_passive_cat(fixture: &Fixture, pane: &str) {
     // The ready marker is shell-quote-split so the ECHOED command line does not contain it verbatim —
     // only the `printf` output (emitted just before `exec cat`) does.
-    let out = run_cli(
+    run_in_pane_until_ready(
         fixture,
-        None,
-        &[
-            "pane",
-            "run",
-            pane,
-            "--",
-            "stty -echo 2>/dev/null; printf '__zynk''_cat_ready__\\n'; exec cat",
-        ],
+        pane,
+        "passive cat",
+        "stty -echo 2>/dev/null; printf '__zynk''_cat_ready__\\n'; exec cat",
+        "__zynk_cat_ready__",
     );
-    assert_eq!(out.code, 0, "start passive cat: stderr={}", out.stderr);
-    assert!(
-        wait_for_pane_text(
-            &fixture.socket_path,
-            pane,
-            "__zynk_cat_ready__",
-            Duration::from_secs(10)
-        ),
-        "passive cat pane did not signal ready; pane text: {:?}",
+}
+
+/// Send `command` into a freshly created shell pane and wait until the shell has actually RUN it,
+/// proven by `marker` appearing in the pane text.
+///
+/// WHY a marker rather than the `pane run` exit code: `pane run` reports success as soon as the bytes
+/// are written to the pane PTY, which can be before that pane's shell has finished starting. A shell
+/// still initializing its line editor discards whatever is already queued on the tty (the editor's
+/// `tcsetattr` flushes pending input), so an early `pane run` can vanish leaving an `ok` result and a
+/// `submitted` delivery event behind while the command never runs at all. Every command passed here
+/// therefore `printf`s `marker` immediately before it starts its long-running process: the marker in the
+/// pane text is proof the shell both consumed and ran the line. A window without it means the input was
+/// dropped, and the only cure is to send it again — no later wait recovers a command the tty threw away.
+///
+/// The resend is safe. `marker` stays in the pane text, so a first send that merely landed late is
+/// picked up by the next wait; and a resend into an already-started reader costs one echoed line,
+/// which cannot fake readiness because the command spells the marker quote-split.
+fn run_in_pane_until_ready(fixture: &Fixture, pane: &str, what: &str, command: &str, marker: &str) {
+    const ATTEMPTS: usize = 3;
+    for attempt in 1..=ATTEMPTS {
+        // Resends lead with a newline so a partial line left behind by a half-delivered send is
+        // submitted on its own instead of being glued to the front of this command.
+        let text = if attempt == 1 {
+            command.to_string()
+        } else {
+            format!("\n{command}")
+        };
+        let out = run_cli(fixture, None, &["pane", "run", pane, "--", text.as_str()]);
+        assert_eq!(
+            out.code, 0,
+            "{what}: `pane run` failed on attempt {attempt}: stderr={}",
+            out.stderr
+        );
+        if wait_for_pane_text(&fixture.socket_path, pane, marker, Duration::from_secs(10)) {
+            return;
+        }
+    }
+    panic!(
+        "{what}: the pane shell never ran the command — ready marker {marker} absent after {ATTEMPTS} sends; pane text: {:?}",
         pane_recent_text(&fixture.socket_path, pane)
     );
 }
@@ -435,23 +461,36 @@ fn agent_send_codex(fixture: &Fixture, body: &str) -> Value {
 /// Run a process whose argv[0] is `hermes` in `pane` and wait until DETECTION
 /// reports it. A session-identity-only integration leaves lifecycle to the screen,
 /// so its tests need a really-detected process rather than a hook state report.
+///
+/// Two stages with separate failure messages: the pane shell must actually RUN the command
+/// (proven by `__zynk_hermes_ready__`), and only then can foreground detection report `hermes`.
+/// Keeping them apart is what identified the real cause of the ~1-in-5 failure under parallel suite
+/// load — the command always ran, so the deadline was never the problem.
 fn start_detected_hermes(fixture: &Fixture, pane: &str) {
-    let out = run_cli(
+    // The fake agent must run as a CHILD of the pane shell, never `exec` in place, because that is
+    // the only shape the server's process probe reliably notices. `should_probe_foreground_job`
+    // (`src/pane.rs`) re-probes a pane that has no agent yet only when the foreground PROCESS GROUP
+    // changes, or while the content-driven acquisition window (8 s from the pane's first output) is
+    // still open. An `exec`d agent inherits the pane shell's own process group and then, being a
+    // silent `cat`, emits nothing that could reopen that window: once it closed, the pane was never
+    // probed again and detection could never report `hermes` — which is why raising the deadline from
+    // 10 s to 30 s in the previous commit changed nothing. A forked child gets its OWN foreground
+    // process group, forcing the probe on the next tick, and it is also how a real agent starts.
+    //
+    // The ready marker is shell-quote-split so the ECHOED command line does not contain it verbatim —
+    // only the `printf` output (emitted just before the agent starts) does. The `bash -c` layer keeps
+    // argv[0] = `hermes` (what `identify_agent_in_job` reads) without assuming the pane's own shell
+    // implements `exec -a`.
+    run_in_pane_until_ready(
         fixture,
-        None,
-        &[
-            "pane",
-            "run",
-            pane,
-            "--",
-            "stty -echo 2>/dev/null; exec bash -c 'exec -a hermes cat'",
-        ],
+        pane,
+        "fake hermes",
+        "stty -echo 2>/dev/null; printf '__zynk''_hermes_ready__\\n'; bash -c 'exec -a hermes cat'",
+        "__zynk_hermes_ready__",
     );
-    assert_eq!(out.code, 0, "start hermes pane: stderr={}", out.stderr);
-    // Foreground-process detection is polled by the server; when the whole receipt
-    // suite runs in parallel (each test spawning its own server) a 10 s deadline was
-    // observed to expire (2/6 full runs on 2026-09-08) while the same test passed alone
-    // and on rerun. Detection latency is not what this test asserts, so give it room.
+    // The process is running in its own foreground process group. Detection is still polled by the
+    // server, so it keeps room under parallel suite load — but a timeout here now means detection,
+    // not a command the pane never ran.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let got = send_json(
@@ -465,7 +504,7 @@ fn start_detected_hermes(fixture: &Fixture, pane: &str) {
         }
         assert!(
             Instant::now() < deadline,
-            "the hermes process was never detected: {got}"
+            "the fake hermes process started (ready marker seen) but detection never reported it: {got}"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
