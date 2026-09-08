@@ -2019,3 +2019,145 @@ fn grok_background_work_chip_is_working_from_the_pinned_top_row() {
     assert!(!below.visible_working);
     assert!(below.matched_rule.is_none());
 }
+
+// --- Qwen OSC title + localized screen rules ---
+
+#[test]
+fn qwen_osc_title_states_outrank_the_always_visible_composer() {
+    // Qwen keeps its composer on screen while it answers, so `composer_idle`
+    // matches during a turn too. The status-prefixed titles are the primary
+    // signal precisely because they are locale-independent and outrank it.
+    const COMPOSER: &str = "Wrote src/main.rs\n\n> Type your message or @path/to/file";
+
+    let idle = explain(Agent::Qwen, COMPOSER);
+    assert_eq!(idle.state, AgentState::Idle);
+    assert!(idle.visible_idle);
+    assert_eq!(
+        idle.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("composer_idle")
+    );
+
+    // U+25D0 is the working prefix, U+2733 the blocked one; both tolerate the
+    // text-presentation selector U+FE0E that some terminals append.
+    let working = osc_explain(Agent::Qwen, COMPOSER, "\u{25d0} qwen \u{2013} zynk", "");
+    assert_eq!(working.state, AgentState::Working);
+    assert!(working.visible_working);
+    assert_eq!(
+        working.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("osc_title_working")
+    );
+
+    let blocked = osc_explain(
+        Agent::Qwen,
+        COMPOSER,
+        "\u{2733}\u{fe0e} qwen \u{2013} zynk",
+        "",
+    );
+    assert_eq!(blocked.state, AgentState::Blocked);
+    assert!(blocked.visible_blocker);
+    assert_eq!(
+        blocked.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("osc_title_blocked")
+    );
+}
+
+#[test]
+fn qwen_confirmation_wait_is_blocked_in_every_shipped_locale() {
+    // `ui.showStatusInTitle` is off by default, so the screen fallback still
+    // has to carry the confirmation wait. Qwen localizes that phrase, so the
+    // spinner row is the structural anchor and the phrase list is the gate.
+    for phrase in [
+        "Waiting for user confirmation...",
+        "\u{7b49}\u{5f85}\u{7528}\u{6237}\u{786e}\u{8ba4}...",
+        "\u{30e6}\u{30fc}\u{30b6}\u{30fc}\u{306e}\u{78ba}\u{8a8d}\u{3092}\u{5f85}\u{3063}\u{3066}\u{3044}\u{307e}\u{3059}...",
+    ] {
+        let screen = [
+            "Applying the patch\n\n  \u{280f} ",
+            phrase,
+            "\n\n> Type your message",
+        ]
+        .concat();
+        let waiting = explain(Agent::Qwen, &screen);
+        assert_eq!(waiting.state, AgentState::Blocked, "phrase {phrase:?}");
+        assert!(waiting.visible_blocker);
+        assert_eq!(
+            waiting.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("waiting_for_confirmation")
+        );
+    }
+
+    // The spinner row alone is any streaming status line, not a confirmation.
+    let streaming = explain(
+        Agent::Qwen,
+        "Applying the patch\n\n  \u{280f} Reading src/main.rs...\n\n> Type your message",
+    );
+    assert!(!streaming.visible_blocker);
+    assert_eq!(
+        streaming.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("composer_idle")
+    );
+}
+
+#[test]
+fn qwen_option_list_with_a_navigation_hint_is_blocked() {
+    // Both rows are required: a checkbox-or-plain numbered option under the
+    // cursor, and the arrow-key hint that says the list is awaiting a choice.
+    let dialog = explain(
+        Agent::Qwen,
+        "Apply this change?\n\n  \u{276f} [\u{2713}] 1. Yes\n    [ ] 2. No\n\n  \u{2191}/\u{2193} : navigate  Enter : select",
+    );
+    assert_eq!(dialog.state, AgentState::Blocked);
+    assert!(dialog.visible_blocker);
+    assert_eq!(
+        dialog.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("question_dialog")
+    );
+
+    // A numbered list with no navigation hint is ordinary transcript text.
+    let listing = explain(
+        Agent::Qwen,
+        "Plan\n\n  \u{276f} 1. Add the parser\n  2. Wire the CLI\n",
+    );
+    assert!(!listing.visible_blocker);
+    assert!(listing.matched_rule.is_none());
+}
+
+#[test]
+fn qwen_working_footer_requires_the_elapsed_time() {
+    // The footer reads `(<elapsed> <middle dot> esc to cancel)`. Anchoring on
+    // the elapsed time keeps a bare cancel hint -- which Qwen also paints on
+    // dialogs -- from reading as an active turn.
+    let spinner_footer = explain(
+        Agent::Qwen,
+        "Reading src/main.rs\n\n\u{280b} Thinking (12s \u{b7} esc to cancel)\n",
+    );
+    assert_eq!(spinner_footer.state, AgentState::Working);
+    assert!(spinner_footer.visible_working);
+    assert_eq!(
+        spinner_footer
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("cancel_hint_working")
+    );
+
+    // On a narrow pane the spinner and the label are dropped and only the
+    // timer row survives.
+    let narrow_footer = explain(
+        Agent::Qwen,
+        "Reading src/main.rs\n\n(1m 20s \u{b7} esc to cancel)\n",
+    );
+    assert_eq!(narrow_footer.state, AgentState::Working);
+    assert!(narrow_footer.visible_working);
+    assert_eq!(
+        narrow_footer
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("narrow_cancel_hint_working")
+    );
+
+    let bare_hint = explain(Agent::Qwen, "Reading src/main.rs\n\n(esc to cancel)\n");
+    assert!(!bare_hint.visible_working);
+    assert!(bare_hint.matched_rule.is_none());
+}
