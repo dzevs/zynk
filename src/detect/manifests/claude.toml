@@ -1,5 +1,5 @@
 id = "claude"
-version = "2026.09.08.2"
+version = "2026.09.08.3"
 min_engine_version = 2
 updated_at = "2026-09-08T00:00:00Z"
 aliases = ["claude-code"]
@@ -50,7 +50,9 @@ any = [
 [[rules]]
 id = "dynamic_workflow_prompt"
 state = "blocked"
-priority = 980
+# 960: this rule reads the whole recent screen, so a historical "Run a dynamic workflow?" in scrollback must stay
+# below an active busy title (970); a current dynamic prompt without a spinner still outranks the prompt box (950).
+priority = 960
 region = "whole_recent"
 visible_blocker = true
 contains = ["run a dynamic workflow?", "esc to cancel"]

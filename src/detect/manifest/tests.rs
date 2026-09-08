@@ -700,6 +700,29 @@ fn claude_busy_title_still_outranks_the_idle_prompt_box_and_stale_scrollback() {
 }
 
 #[test]
+fn claude_stale_dynamic_workflow_text_does_not_override_a_busy_title() {
+    // Codex Gate-2 on 7b5639f: `dynamic_workflow_prompt` matches the whole recent screen, so a historical
+    // "Run a dynamic workflow?" left in scrollback must stay below an active spinner, while a CURRENT dynamic
+    // workflow prompt without a busy title is still Blocked.
+    let stale = "Earlier prompt: Run a dynamic workflow?\nEsc to cancel\n\nSelected: yes\n\n\
+        ──────────\nReading src/main.rs\n❯ \n";
+    let result = osc_explain(Agent::Claude, stale, "\u{25D0} Reading files", "");
+    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("osc_title_working")
+    );
+    let current = "Run a dynamic workflow?\n  1. Yes\n  2. No\nEsc to cancel\n";
+    let result = osc_explain(Agent::Claude, current, "", "");
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("dynamic_workflow_prompt")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
 fn claude_osc_title_adjacent_code_points_are_not_busy_frames() {
     // The frame class is exactly U+25D0..U+25D3 followed by a space.
     for title in ["\u{25CF} Claude", "\u{25D4} Claude", "\u{25D0}Claude"] {
