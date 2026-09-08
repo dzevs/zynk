@@ -1041,19 +1041,22 @@ mod tests {
 
     // ---- Process identification (real PTY) ----
 
-    #[test]
-    fn foreground_job_detects_sleep() {
-        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
+    fn open_test_pty() -> portable_pty::PtyPair {
+        portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
                 rows: 24,
                 cols: 80,
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .expect("failed to open pty");
+            .expect("failed to open pty")
+    }
+
+    #[test]
+    fn foreground_job_detects_sleep() {
+        use portable_pty::CommandBuilder;
+
+        let pair = open_test_pty();
 
         // Spawn "sleep 999" — a known, deterministic process
         let mut cmd = CommandBuilder::new("sleep");
@@ -1082,18 +1085,10 @@ mod tests {
 
     #[test]
     fn foreground_job_detects_shell_running_command() {
-        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use portable_pty::CommandBuilder;
         use std::io::Write;
 
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("failed to open pty");
+        let pair = open_test_pty();
 
         // Spawn a shell, then run a command inside it
         let cmd = CommandBuilder::new("sh");
@@ -1121,6 +1116,45 @@ mod tests {
 
         child.kill().ok();
         child.wait().ok();
+    }
+
+    #[test]
+    fn foreground_job_detects_agent_behind_shell_wrapper() {
+        use portable_pty::CommandBuilder;
+
+        let pair = open_test_pty();
+
+        let mut cmd = CommandBuilder::new("bash");
+        cmd.arg("-c");
+        cmd.arg("bash -c 'exec -a codex sleep 999' & wait");
+        let mut child = pair.slave.spawn_command(cmd).expect("failed to spawn");
+        let pid = child.process_id().expect("no pid");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let job = foreground_job(pid);
+        let process_group_id = job.as_ref().map(|job| job.process_group_id).unwrap_or(pid);
+        unsafe {
+            libc::kill(-(process_group_id as i32), libc::SIGKILL);
+        }
+        child.wait().ok();
+
+        let job = job.expect("expected foreground job");
+        assert!(
+            job.processes.iter().any(|process| process.name == "bash")
+                && job.processes.iter().any(|process| {
+                    process.name == "sleep"
+                        && process
+                            .argv
+                            .as_deref()
+                            .and_then(|argv| argv.first())
+                            .is_some_and(|argv0| argv0 == "codex")
+                }),
+            "expected wrapper and agent child in {job:?}"
+        );
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Codex, "codex".to_string()))
+        );
     }
 
     #[test]
