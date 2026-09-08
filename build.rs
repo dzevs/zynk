@@ -41,7 +41,8 @@ pub fn archive_misaligned_members(bytes: &[u8]) -> Result<Vec<String>, String> {
     let mut offset = MAGIC.len();
     let mut misaligned = Vec::new();
     // Structural completeness is required, not just per-member plausibility: the rewritten archive is trusted
-    // only when every header, payload and pad byte lies inside the file and nothing trails the last member.
+    // only when every header, payload and pad byte lies inside the file (a missing pad byte is an error even for
+    // the final member) and nothing trails the last member.
     while offset < bytes.len() {
         if bytes.len() - offset < HEADER {
             return Err(format!(
@@ -90,8 +91,18 @@ pub fn archive_misaligned_members(bytes: &[u8]) -> Result<Vec<String>, String> {
         if !member.starts_with("__.SYMDEF") && !data.is_multiple_of(8) {
             misaligned.push(member);
         }
-        // Members are padded to an even size; the final member may end exactly at EOF without its pad byte.
-        offset = (data_end + (size & 1)).min(bytes.len());
+        // Members are padded to an even size; the pad byte is part of the structure and must be present even
+        // for the final member (Gate-3 SENT-R7-BUILD-001: no EOF-without-pad tolerance).
+        let padded_end = data_end
+            .checked_add(size & 1)
+            .ok_or_else(|| format!("member padding overflow at offset {offset}"))?;
+        if padded_end > bytes.len() {
+            return Err(format!(
+                "member at offset {offset} is missing its alignment pad byte (needs {padded_end} bytes, file has {})",
+                bytes.len()
+            ));
+        }
+        offset = padded_end;
     }
     Ok(misaligned)
 }

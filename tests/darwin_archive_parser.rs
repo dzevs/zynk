@@ -90,15 +90,25 @@ fn an_aligned_archive_reports_nothing() {
 }
 
 #[test]
-fn odd_payloads_are_padded_and_a_final_member_may_end_exactly_at_eof() {
-    let odd = plain_member("odd.o", &[7u8; 5]); // padded
-    assert!(
-        archive_misaligned_members(&archive(&[odd.clone(), plain_member("z.o", &[0u8; 2])]))
-            .is_ok()
-    );
-    let mut unpadded = archive(&[odd]);
-    unpadded.pop(); // drop the trailing pad byte: EOF exactly at the payload end is still complete
-    assert!(archive_misaligned_members(&unpadded).is_ok());
+fn odd_payloads_need_their_pad_byte_even_for_the_final_member() {
+    // Padded controls: an odd plain member and an odd BSD member, each followed by nothing, are complete.
+    let odd_plain = plain_member("odd.o", &[7u8; 5]);
+    assert!(archive_misaligned_members(&archive(std::slice::from_ref(&odd_plain))).is_ok());
+    let odd_bsd = bsd_member("ab.o", &[7u8; 1]); // size 5: four-byte name + one-byte body, padded to 6
+    assert!(archive_misaligned_members(&archive(std::slice::from_ref(&odd_bsd))).is_ok());
+    assert!(archive_misaligned_members(&archive(&[
+        odd_plain.clone(),
+        plain_member("z.o", &[0u8; 2])
+    ]))
+    .is_ok());
+    // Gate-3 SENT-R7-BUILD-001: the required alignment byte of an odd final member must be present.
+    for member in [odd_plain, odd_bsd] {
+        let mut unpadded = archive(std::slice::from_ref(&member));
+        unpadded.pop();
+        let err =
+            archive_misaligned_members(&unpadded).expect_err("missing pad byte must be rejected");
+        assert!(err.contains("pad"), "{err}");
+    }
 }
 
 #[test]

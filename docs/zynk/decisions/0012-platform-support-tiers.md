@@ -66,8 +66,9 @@ manifest in run attempt 2 may legitimately consume an artifact a successful prod
    the build and binds that status into the sidecar, which the manifest requires; the manifest refuses a
    symlinked dist root or target directory, sizes that differ from the downloaded bytes, and a producer attempt
    later than its own; an optional `candidate_sha` dispatch input makes the required jobs and the manifest refuse
-   any other commit. The `build.rs` archive parser accepts only structurally complete `ar` input (exact EOF,
-   payload and padding bounds, BSD name length within the member) and carries a tracked regression set.
+   any other commit. The `build.rs` archive parser accepts only structurally complete `ar` input (exact EOF, every payload
+   and pad byte inside the file — a missing pad byte is rejected even for the final member — BSD name length
+   within the member, checked arithmetic) and carries a tracked regression set.
 5. **Required checks** (a failure stops the release; never bypassed): conventional commits; the private-content
    gates; `check-required` (CI, `just check` on Ubuntu); the Nix flake check **including** its `--all-systems
    --no-build` evaluation — a transitional exception: an evaluation failure on a non-Linux system would still
