@@ -790,6 +790,53 @@ fn bottom_non_empty_lines_uses_bottom_occurrence_for_repeated_text() {
     );
 }
 
+#[test]
+fn top_non_empty_lines_uses_top_occurrence_for_repeated_text() {
+    let content = "\nmarker\nold\n\nmiddle\nmarker\nnew\n";
+
+    assert_eq!(
+        region(
+            DetectionInput {
+                screen: content,
+                osc_title: "",
+                osc_progress: "",
+            },
+            "top_non_empty_lines(2)"
+        ),
+        "\nmarker\nold\n"
+    );
+}
+
+#[test]
+fn top_non_empty_lines_requires_a_canonical_positive_bounded_count() {
+    let name = "top_non_empty_lines";
+    assert!(validate_region_name(&format!("{name}(1)")).is_ok());
+    assert!(validate_region_name(&format!("{name}({})", u16::MAX)).is_ok());
+    for count in ["0", "01", "+1", "65536", "999999999999999999999999"] {
+        assert!(
+            validate_region_name(&format!("{name}({count})")).is_err(),
+            "{name} accepted invalid count {count}"
+        );
+    }
+}
+
+#[test]
+fn top_non_empty_lines_requires_engine_three_when_declared() {
+    let manifest = r#"
+id = "grok"
+version = "1"
+min_engine_version = 2
+
+[[rules]]
+id = "background"
+state = "working"
+region = " top_non_empty_lines(1) "
+contains = ["active"]
+"#;
+
+    assert!(parse_manifest(manifest).is_err());
+}
+
 // ---------------------------------------------------------------------------
 // OSC rule tests — exercise the new osc_title / osc_progress regions against
 // the bundled Claude and Codex manifests.
