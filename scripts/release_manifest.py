@@ -45,9 +45,10 @@ _SIDECAR_SCHEMA = {
     "binary": {"member": str, "sha256": str, "size": int, "format": str, "cpu": str, "os": str, "abi": dict},
     "exec": {"status": str, "output": str},
     "provenance": {"git_sha": str, "checkout_head": str, "repository": str, "run_id": str, "run_attempt": int,
-                   "job": str, "runner_os": str, "runner_arch": str},
+                   "job": str, "runner_os": str, "runner_arch": str, "tree_status": str, "tree_clean": bool},
     "toolchain": dict,
     "build_inputs": dict,
+    "native_tool_output": str,
 }
 
 
@@ -62,6 +63,9 @@ def _check_shape(obj, schema, path, problems):
                 problems.append(f"EVIDENCE.json {path}{key} is not an object")
             else:
                 _check_shape(value, typ, f"{path}{key}.", problems)
+        elif typ is bool:
+            if not isinstance(value, bool):
+                problems.append(f"EVIDENCE.json {path}{key} is not a boolean")
         elif typ is int:
             if isinstance(value, bool) or not isinstance(value, int):
                 problems.append(f"EVIDENCE.json {path}{key} is not an integer")
@@ -102,6 +106,8 @@ def _validate_sidecar(sidecar, name: str, spec: dict, expected_archive: str) -> 
         problems.append("sidecar provenance.run_id is empty")
     if prov["job"] != spec["build_job"]:
         problems.append(f"sidecar provenance.job {prov['job']!r} is not the producer job {spec['build_job']!r}")
+    if not prov["runner_os"] or not prov["runner_arch"]:
+        problems.append("sidecar provenance.runner_os/runner_arch is empty")
     return problems
 
 
@@ -113,7 +119,7 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
             downloads) -> dict:
     entry = {
         "tier": spec["tier"], "status": None, "reasons": [], "producer_job": spec["build_job"],
-        "producer_run_id": None, "producer_run_attempt": None, "artifact_id": None,
+        "producer_run_id": None, "producer_run_attempt": None, "producer_runner": None, "artifact_id": None,
         "archive": spec["archive"].format(version=ctx["version"]), "sha256": None,
     }
 
@@ -150,9 +156,14 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
         # Files left by a failed or partial download are never read: nothing below runs.
         shown = outcome if isinstance(outcome, str) and outcome else "not recorded"
         return finish("INCONSISTENT", [f"artifact download outcome={shown}; downloaded files ignored"])
+    if dist.is_symlink() or not dist.is_dir():
+        return finish("INCONSISTENT", ["dist root is a symlink or not a directory; nothing read"])
     tdir = dist / name
     archive = tdir / entry["archive"]
     sidecar_path = tdir / "EVIDENCE.json"
+    if tdir.is_symlink():
+        # A symlinked target directory would let files outside the downloaded artifact stand in for it.
+        return finish("INCONSISTENT", [f"artifact directory {name} is a symlink; nothing read"])
     if not tdir.is_dir():
         bad.append(f"no downloaded artifact directory for {name}")
         return finish("INCONSISTENT", bad)
@@ -177,12 +188,24 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
     prov = sidecar["provenance"]
     entry["producer_run_id"] = prov["run_id"]
     entry["producer_run_attempt"] = prov["run_attempt"]
+    entry["producer_runner"] = f"{prov['runner_os']}/{prov['runner_arch']}"
 
     # ---- phase 2: content binding -----------------------------------------------------------------------
-    archive_sha = release_binary.sha256_file(archive)
+    runner = spec["runner"]
+    if prov["runner_os"] != runner["os"] or prov["runner_arch"] != runner["arch"]:
+        bad.append(f"producer runner {entry['producer_runner']} is not the target's native runner "
+                   f"{runner['os']}/{runner['arch']}")
+    if prov["tree_clean"] is not True:
+        bad.append(f"producer's tracked tree was not clean after the build: {prov['tree_status'] or '(no status)'}")
+    if prov["run_attempt"] > int(ctx["run_attempt"]):
+        bad.append(f"sidecar run_attempt {prov['run_attempt']} is later than this manifest's attempt {ctx['run_attempt']}")
+    archive_bytes = archive.read_bytes()
+    archive_sha = release_binary.sha256_bytes(archive_bytes)
     entry["sha256"] = archive_sha
     if sidecar["archive"]["sha256"] != archive_sha:
         bad.append("archive sha256 differs from the sidecar (archive changed after the evidence was written)")
+    if sidecar["archive"]["size"] != len(archive_bytes):
+        bad.append(f"sidecar archive size {sidecar['archive']['size']} is not the downloaded {len(archive_bytes)} bytes")
     try:
         member, binary = release_binary.extract_single_member(archive)
     except (OSError, ValueError) as err:
@@ -194,6 +217,8 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
     if binary is not None:
         if sidecar["binary"]["sha256"] != release_binary.sha256_bytes(binary):
             bad.append("binary sha256 differs from the sidecar")
+        if sidecar["binary"]["size"] != len(binary):
+            bad.append(f"sidecar binary size {sidecar['binary']['size']} is not the extracted {len(binary)} bytes")
         try:
             info = release_binary.inspect_binary(binary)
         except ValueError as err:
@@ -213,10 +238,17 @@ def _decide(name: str, spec: dict, ctx: dict, producers: dict, dist: pathlib.Pat
                 bad.append("no GLIBC version requirements (.gnu.version_r) in the binary")
             elif not release_binary.glibc_within(floor, spec["glibc_max"]):
                 bad.append(f"glibc floor {floor} exceeds the published {spec['glibc_max']} contract")
-            # The producer's native `objdump -T` measurement is mandatory and must agree (ADR 0012 §4).
+            # The producer's native `objdump -T` measurement is mandatory and must agree (ADR 0012 §4): the RAW
+            # tool output is re-derived here and must match both the sidecar's derived field and the ELF's
+            # own version needs.
             native = (sidecar["binary"]["abi"] or {}).get("native_glibc_floor")
+            raw_floor = release_binary.native_glibc_floor(sidecar["native_tool_output"])
             if not isinstance(native, str) or not native:
                 bad.append("no native objdump glibc evidence recorded by the producer")
+            elif raw_floor is None:
+                bad.append("raw native tool output carries no GLIBC version tokens to re-derive the floor from")
+            elif raw_floor != native:
+                bad.append(f"raw native output re-derives glibc floor {raw_floor}, sidecar claims {native}")
             elif floor is not None and native != floor:
                 bad.append(f"native objdump glibc floor {native} disagrees with the measured floor {floor}")
     if prov["git_sha"] != ctx["git_sha"]:
@@ -270,6 +302,9 @@ def evaluate(ctx: dict, producers: dict, dist: pathlib.Path, cargo_toml: pathlib
     if not isinstance(downloads, dict):
         manifest["manifest_reasons"].append("download outcome evidence missing or not a JSON object")
         manifest["ok"] = False
+    if pathlib.Path(dist).is_symlink() or not pathlib.Path(dist).is_dir():
+        manifest["manifest_reasons"].append("dist root is a symlink or not a directory")
+        manifest["ok"] = False
     dist = pathlib.Path(dist)
     for name, spec in release_binary.TARGETS.items():
         try:
@@ -278,7 +313,7 @@ def evaluate(ctx: dict, producers: dict, dist: pathlib.Path, cargo_toml: pathlib
             entry = {
                 "tier": spec["tier"], "status": "INCONSISTENT",
                 "reasons": [f"evaluation error: {type(err).__name__}: {err}"], "producer_job": spec["build_job"],
-                "producer_run_id": None, "producer_run_attempt": None, "artifact_id": None,
+                "producer_run_id": None, "producer_run_attempt": None, "producer_runner": None, "artifact_id": None,
                 "archive": spec["archive"].format(version=ctx["version"]), "sha256": None,
             }
         manifest["targets"][name] = entry
@@ -316,6 +351,7 @@ def render_text(manifest: dict) -> str:
         lines.append(
             f"target={name} tier={e['tier']} status={e['status']} producer_job={e['producer_job']} "
             f"producer_run_id={e['producer_run_id'] or '-'} producer_run_attempt={e['producer_run_attempt'] if e['producer_run_attempt'] is not None else '-'} "
+            f"producer_runner={e['producer_runner'] or '-'} "
             f"artifact_id={e['artifact_id'] or '-'} sha256={e['sha256'] or '-'} reasons={reasons}"
         )
     for reason in manifest["manifest_reasons"]:

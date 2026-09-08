@@ -19,9 +19,19 @@ SHA = "a" * 40
 CTX = {"version": "3.1.0", "git_sha": SHA, "run_id": "1001", "run_attempt": 1, "optional_targets": "eligible"}
 
 
-def producer_env(job, run_id="1001", attempt="1", sha=SHA):
+def runner_for(job):
+    """The native runner the target table expects for the producer job (ADR 0012: native execution)."""
+    for spec in release_binary.TARGETS.values():
+        if spec["build_job"] == job:
+            return spec["runner"]
+    raise KeyError(job)
+
+
+def producer_env(job, run_id="1001", attempt="1", sha=SHA, runner=None):
+    runner = runner or runner_for(job)
     return {"GITHUB_SHA": sha, "GITHUB_RUN_ID": run_id, "GITHUB_RUN_ATTEMPT": attempt, "GITHUB_JOB": job,
-            "GITHUB_REPOSITORY": "dzevs/zynk", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64"}
+            "GITHUB_REPOSITORY": "dzevs/zynk", "RUNNER_OS": runner["os"], "RUNNER_ARCH": runner["arch"],
+            "LIBGHOSTTY_VT_OPTIMIZE": "ReleaseFast", "LIBGHOSTTY_VT_SIMD": "false"}
 
 
 class Fixture:
@@ -42,7 +52,7 @@ class Fixture:
 
     def artifact(self, target, binary=None, version="3.1.0", exec_status="ran", exec_output=None, env=None,
                  sidecar=True, member=None, cargo_version="3.1.0", checkout_head=SHA, extra_file=None,
-                 native_tool_output=None):
+                 native_tool_output=None, tree_status="", mutate=None):
         spec = release_binary.TARGETS[target]
         if binary is None:
             if spec["format"] == "elf":
@@ -65,8 +75,10 @@ class Fixture:
                 exec_output=exec_output if exec_output is not None else f"zynk {version}\n",
                 cargo_version=cargo_version, checkout_head=checkout_head,
                 env=env or producer_env(spec["build_job"]), toolchain={"rustc": "rustc 1.98.1"},
-                native_tool_output=native_tool_output,
+                native_tool_output=native_tool_output, tree_status=tree_status,
             )
+            if mutate:
+                mutate(ev)
             (tdir / "EVIDENCE.json").write_text(json.dumps(ev))
         if extra_file:
             (tdir / extra_file).write_text("stray")
@@ -720,6 +732,178 @@ class ArtifactIdBound(unittest.TestCase):
             f.job("build-linux-x86_64", artifact_id="9007199254740991")
             f.artifact("linux-x86_64")
             self.assertEqual(status(f.evaluate(optional_targets="none"), "linux-x86_64"), "ELIGIBLE")
+
+
+class NativeRawEvidence(unittest.TestCase):
+    """Gate-3 AUD-4F1-REL-001: the raw native objdump text is mandatory for Linux and re-derived by the consumer."""
+
+    def linux(self, f, **kw):
+        f.job("test-linux")
+        f.job("build-linux-x86_64")
+        f.artifact("linux-x86_64", **kw)
+        return f.evaluate(optional_targets="none")
+
+    def test_missing_raw_native_output_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.linux(Fixture(tmp), mutate=lambda ev: ev.pop("native_tool_output"))
+            self.assertFalse(m["ok"])
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+
+    def test_raw_native_output_contradicting_the_derived_floor_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def contradict(ev):
+                ev["native_tool_output"] = "GLIBC_2.17\nGLIBC_2.99\n"  # derived field left at 2.30
+            m = self.linux(Fixture(tmp), mutate=contradict)
+            self.assertFalse(m["ok"])
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+            self.assertTrue(any("raw" in r for r in m["targets"]["linux-x86_64"]["reasons"]))
+            self.assertEqual(release_manifest.render_sha256sums(m), "")
+
+    def test_raw_native_output_without_glibc_tokens_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def blank(ev):
+                ev["native_tool_output"] = "ELF 64-bit LSB pie executable\n"
+                ev["binary"]["abi"]["native_glibc_floor"] = "2.30"  # derived claims a floor the raw text lacks
+            m = self.linux(Fixture(tmp), mutate=blank)
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+
+    def test_consistent_raw_derived_and_measured_floor_is_eligible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.linux(Fixture(tmp))
+            self.assertEqual(status(m, "linux-x86_64"), "ELIGIBLE")
+
+
+class RunnerIdentity(unittest.TestCase):
+    """Gate-3 INSPECTOR-4F1-001: the producer must have run on the target's native runner."""
+
+    def test_non_native_runner_is_inconsistent_for_every_eligible_capable_target(self):
+        cases = [
+            ("linux-x86_64", "test-linux", "build-linux-x86_64", {"os": "Linux", "arch": "ARM64"}),
+            ("macos-aarch64", "test-macos-aarch64", "build-macos-aarch64", {"os": "Linux", "arch": "X64"}),
+            ("windows-x86_64", "test-windows-x86_64", "build-windows-x86_64", {"os": "Linux", "arch": "X64"}),
+        ]
+        for target, test_job, build_job, wrong in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                f = Fixture(tmp)
+                if target != "linux-x86_64":
+                    f.required_ok()
+                f.job(test_job)
+                f.job(build_job, artifact_id="778")
+                f.artifact(target, env=producer_env(build_job, runner=wrong))
+                m = f.evaluate(optional_targets="eligible")
+                self.assertEqual(status(m, target), "INCONSISTENT", target)
+                self.assertTrue(any("runner" in r for r in m["targets"][target]["reasons"]), target)
+
+    def test_native_runner_is_eligible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            f.job("test-macos-aarch64")
+            f.job("build-macos-aarch64", artifact_id="778")
+            f.artifact("macos-aarch64")
+            m = f.evaluate()
+            self.assertEqual(status(m, "macos-aarch64"), "ELIGIBLE")
+            self.assertEqual(m["targets"]["macos-aarch64"]["producer_runner"], "macOS/ARM64")
+
+    def test_empty_runner_fields_are_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", mutate=lambda ev: ev["provenance"].update(runner_os="", runner_arch=""))
+            self.assertEqual(status(f.evaluate(optional_targets="none"), "linux-x86_64"), "INCONSISTENT")
+
+
+class SymlinkedDirectories(unittest.TestCase):
+    """Gate-3 AUD-4F1-REL-002: the target directory and the dist root must be real directories."""
+
+    def test_symlinked_target_directory_to_a_valid_external_directory_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            outside = pathlib.Path(tmp, "outside")
+            (f.dist / "linux-x86_64").rename(outside)
+            (f.dist / "linux-x86_64").symlink_to(outside, target_is_directory=True)
+            m = f.evaluate(optional_targets="none")
+            self.assertFalse(m["ok"])
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+            self.assertTrue(any("symlink" in r for r in m["targets"]["linux-x86_64"]["reasons"]))
+            self.assertEqual(release_manifest.render_sha256sums(m), "")
+
+    def test_symlinked_dist_root_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.required_ok()
+            real = pathlib.Path(tmp, "real-dist")
+            f.dist.rename(real)
+            f.dist.symlink_to(real, target_is_directory=True)
+            m = f.evaluate(optional_targets="none")
+            self.assertFalse(m["ok"])
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+
+
+class TreeCleanliness(unittest.TestCase):
+    """Gate-3 ARCH-REL-PROVENANCE-001: the producer's tracked tree must have been clean after the build."""
+
+    def test_dirty_tracked_tree_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", tree_status=" M vendor/libghostty-vt/build.zig\n")
+            m = f.evaluate(optional_targets="none")
+            self.assertFalse(m["ok"])
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+            self.assertTrue(any("tracked tree" in r for r in m["targets"]["linux-x86_64"]["reasons"]))
+
+    def test_missing_tree_clean_field_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", mutate=lambda ev: ev["provenance"].pop("tree_clean"))
+            self.assertEqual(status(f.evaluate(optional_targets="none"), "linux-x86_64"), "INCONSISTENT")
+
+    def test_tree_clean_string_true_is_not_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", mutate=lambda ev: ev["provenance"].update(tree_clean="true"))
+            self.assertEqual(status(f.evaluate(optional_targets="none"), "linux-x86_64"), "INCONSISTENT")
+
+
+class SidecarSemantics(unittest.TestCase):
+    """Gate-3 ARB-4F1-SIDECAR-SEMANTICS-001: sizes match the bytes; a producer attempt never exceeds the manifest's."""
+
+    def test_wrong_sizes_are_inconsistent(self):
+        for field in ("archive", "binary"):
+            with tempfile.TemporaryDirectory() as tmp:
+                f = Fixture(tmp)
+                f.job("test-linux")
+                f.job("build-linux-x86_64")
+                f.artifact("linux-x86_64", mutate=lambda ev, field=field: ev[field].update(size=0))
+                m = f.evaluate(optional_targets="none")
+                self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT", field)
+                self.assertTrue(any("size" in r for r in m["targets"]["linux-x86_64"]["reasons"]), field)
+
+    def test_future_producer_attempt_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", env=producer_env("build-linux-x86_64", attempt="999"))
+            m = f.evaluate(optional_targets="none", run_attempt=2)
+            self.assertEqual(status(m, "linux-x86_64"), "INCONSISTENT")
+            self.assertTrue(any("attempt" in r for r in m["targets"]["linux-x86_64"]["reasons"]))
+
+    def test_same_attempt_is_eligible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Fixture(tmp)
+            f.job("test-linux")
+            f.job("build-linux-x86_64")
+            f.artifact("linux-x86_64", env=producer_env("build-linux-x86_64", attempt="2"))
+            self.assertEqual(status(f.evaluate(optional_targets="none", run_attempt=2), "linux-x86_64"), "ELIGIBLE")
 
 
 class Rendering(unittest.TestCase):

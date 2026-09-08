@@ -222,7 +222,7 @@ class Sidecar(unittest.TestCase):
                 target="linux-x86_64", version="3.1.0", archive=archive, exec_status="ran",
                 exec_output="zynk 3.1.0\n", cargo_version="3.1.0", checkout_head="a" * 40,
                 env=PRODUCER_ENV, toolchain={"rustc": "rustc 1.98.1"},
-                native_tool_output="ELF 64-bit LSB pie executable\nGLIBC_2.17\nGLIBC_2.30\n",
+                native_tool_output="ELF 64-bit LSB pie executable\nGLIBC_2.17\nGLIBC_2.30\n", tree_status="",
             )
             self.assertEqual(ev["schema"], 1)
             self.assertEqual(ev["target"], "linux-x86_64")
@@ -239,6 +239,33 @@ class Sidecar(unittest.TestCase):
             self.assertEqual(ev["toolchain"], {"rustc": "rustc 1.98.1"})
             self.assertEqual(ev["build_inputs"], {"libghostty_optimize": "ReleaseFast", "libghostty_simd": "false"})
             self.assertEqual(ev["binary"]["abi"]["native_glibc_floor"], "2.30")
+            self.assertEqual(ev["native_tool_output"], "ELF 64-bit LSB pie executable\nGLIBC_2.17\nGLIBC_2.30")
+            self.assertEqual(ev["provenance"]["runner_os"], "Linux")
+            self.assertEqual(ev["provenance"]["runner_arch"], "X64")
+            self.assertTrue(ev["provenance"]["tree_clean"])
+            self.assertEqual(ev["provenance"]["tree_status"], "")
+
+    def test_dirty_tree_status_is_recorded_as_not_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self.make_archive(tmp)
+            ev = release_evidence.build_evidence(
+                target="linux-x86_64", version="3.1.0", archive=archive, exec_status="ran", exec_output="zynk 3.1.0",
+                cargo_version="3.1.0", checkout_head="a" * 40, env=PRODUCER_ENV, toolchain={},
+                native_tool_output="GLIBC_2.30\n", tree_status=" M src/main.rs\n",
+            )
+            self.assertFalse(ev["provenance"]["tree_clean"])
+            self.assertEqual(ev["provenance"]["tree_status"], " M src/main.rs")
+            self.assertEqual(ev["native_tool_output"], "GLIBC_2.30")
+
+    def test_native_tool_output_is_always_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self.make_archive(tmp)
+            ev = release_evidence.build_evidence(
+                target="linux-x86_64", version="3.1.0", archive=archive, exec_status="ran", exec_output="zynk 3.1.0",
+                cargo_version="3.1.0", checkout_head="a" * 40, env=PRODUCER_ENV, toolchain={}, tree_status="",
+            )
+            self.assertEqual(ev["native_tool_output"], "")
+            self.assertIsNone(ev["binary"]["abi"]["native_glibc_floor"])
 
     def test_native_tool_output_disagreeing_with_the_headers_is_recorded_as_is(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,7 +273,7 @@ class Sidecar(unittest.TestCase):
             ev = release_evidence.build_evidence(
                 target="linux-x86_64", version="3.1.0", archive=archive, exec_status="ran",
                 exec_output="zynk 3.1.0", cargo_version="3.1.0", checkout_head="a" * 40, env=PRODUCER_ENV,
-                toolchain={}, native_tool_output="GLIBC_2.17\nGLIBC_2.34\n",
+                toolchain={}, native_tool_output="GLIBC_2.17\nGLIBC_2.34\n", tree_status="",
             )
             self.assertEqual(ev["binary"]["abi"]["glibc_floor"], "2.30")
             self.assertEqual(ev["binary"]["abi"]["native_glibc_floor"], "2.34")
@@ -257,6 +284,7 @@ class Sidecar(unittest.TestCase):
             ev = release_evidence.build_evidence(
                 target="linux-x86_64", version="3.1.0", archive=archive, exec_status="not_run",
                 exec_output="", cargo_version="3.1.0", checkout_head="a" * 40, env=PRODUCER_ENV, toolchain={},
+                tree_status="",
             )
             self.assertEqual(ev["exec"], {"status": "not_run", "output": ""})
 
@@ -266,11 +294,13 @@ class Sidecar(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release_evidence.build_evidence(target="freebsd", version="3.1.0", archive=archive,
                                                 exec_status="ran", exec_output="", cargo_version="3.1.0",
-                                                checkout_head="a" * 40, env=PRODUCER_ENV, toolchain={})
+                                                checkout_head="a" * 40, env=PRODUCER_ENV, toolchain={},
+                                                tree_status="")
             with self.assertRaises(ValueError):
                 release_evidence.build_evidence(target="linux-x86_64", version="3.1.0", archive=archive,
                                                 exec_status="maybe", exec_output="", cargo_version="3.1.0",
-                                                checkout_head="a" * 40, env=PRODUCER_ENV, toolchain={})
+                                                checkout_head="a" * 40, env=PRODUCER_ENV, toolchain={},
+                                                tree_status="")
 
     def test_cli_writes_the_sidecar_next_to_the_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -279,13 +309,15 @@ class Sidecar(unittest.TestCase):
             cargo.write_text('[package]\nname = "zynk"\nversion = "3.1.0"\n')
             exec_out = pathlib.Path(tmp, "exec.txt")
             exec_out.write_text("zynk 3.1.0\n")
+            tree = pathlib.Path(tmp, "tree-status.txt")
+            tree.write_text("")
             out = pathlib.Path(tmp, "EVIDENCE.json")
             env = dict(os.environ, **PRODUCER_ENV)
             proc = subprocess.run(
                 [sys.executable, str(ROOT / "scripts" / "release_evidence.py"), "--target", "linux-x86_64",
                  "--version", "3.1.0", "--archive", str(archive), "--exec-status", "ran",
                  "--exec-output-file", str(exec_out), "--cargo-toml", str(cargo), "--checkout-head", "a" * 40,
-                 "--toolchain", "rustc=rustc 1.98.1", "--out", str(out)],
+                 "--tree-status-file", str(tree), "--toolchain", "rustc=rustc 1.98.1", "--out", str(out)],
                 env=env, capture_output=True, text=True,
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -293,6 +325,14 @@ class Sidecar(unittest.TestCase):
             self.assertEqual(ev["cargo_version"], "3.1.0")
             self.assertEqual(ev["exec"]["output"], "zynk 3.1.0")
             self.assertEqual(ev["provenance"]["checkout_head"], "a" * 40)
+            self.assertTrue(ev["provenance"]["tree_clean"])
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "release_evidence.py"), "--target", "linux-x86_64",
+                 "--version", "3.1.0", "--archive", str(archive), "--exec-status", "ran",
+                 "--exec-output-file", str(exec_out), "--cargo-toml", str(cargo), "--checkout-head", "a" * 40,
+                 "--out", str(out)], env=env, capture_output=True, text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0, "--tree-status-file is mandatory")
 
 
 if __name__ == "__main__":

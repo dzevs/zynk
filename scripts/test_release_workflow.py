@@ -92,6 +92,52 @@ class ManifestJob(unittest.TestCase):
                 self.assertNotIn("continue-on-error", step, f"{job}: {step.get('name')}")
 
 
+class ProducerJobs(unittest.TestCase):
+    """Gate-3 ARCH-REL-PROVENANCE-001 / INSPECTOR-4F1-001: producers assert a clean tracked tree after the build
+    and before packaging/evidence, bind it into the sidecar, and the macOS-aarch64 jobs assert the ARM64 runner."""
+
+    BUILD_JOBS = ("build-linux-x86_64", "build-macos-aarch64", "build-windows-x86_64", "build-linux-aarch64",
+                  "build-macos-x86_64")
+
+    def setUp(self):
+        self.text = CANDIDATE.read_text()
+
+    def names(self, job):
+        return [s.get("name", s.get("uses", "")) for s in steps(job_block(self.text, job))]
+
+    def test_every_build_job_asserts_a_clean_tracked_tree_between_build_and_packaging(self):
+        for job in self.BUILD_JOBS:
+            names = self.names(job)
+            build = next(i for i, n in enumerate(names) if n.startswith("Build"))
+            clean = next(i for i, n in enumerate(names) if n.startswith("Assert clean tracked tree"))
+            package = next(i for i, n in enumerate(names) if n.startswith("Package"))
+            evidence = next(i for i, n in enumerate(names) if n.startswith("Write evidence sidecar"))
+            self.assertLess(build, clean, job)
+            self.assertLess(clean, package, job)
+            self.assertLess(clean, evidence, job)
+            block = job_block(self.text, job)
+            self.assertIn("git status --porcelain --untracked-files=no", block, job)
+            self.assertIn("--tree-status-file", block, job)
+
+    def test_linux_producers_record_native_objdump_evidence(self):
+        for job in ("build-linux-x86_64", "build-linux-aarch64"):
+            block = job_block(self.text, job)
+            self.assertIn("objdump -T", block, job)
+            self.assertIn("--native-tool-output-file", block, job)
+
+    def test_macos_aarch64_jobs_assert_the_arm64_runner(self):
+        for job in ("test-macos-aarch64", "build-macos-aarch64"):
+            names = self.names(job)
+            self.assertTrue(any(n.startswith("Assert Apple-silicon runner") for n in names), (job, names))
+            self.assertIn('RUNNER_ARCH', job_block(self.text, job))
+
+    def test_required_jobs_and_manifest_assert_the_candidate_sha_when_given(self):
+        for job in ("test-linux", "build-linux-x86_64", "manifest"):
+            names = self.names(job)
+            self.assertTrue(any(n.startswith("Assert candidate SHA") for n in names), (job, names))
+        self.assertIn("candidate_sha:", self.text)
+
+
 class RequiredCi(unittest.TestCase):
     def test_check_required_runs_just_check_with_gitleaks_installed(self):
         block = job_block(CI.read_text(), "check-required")

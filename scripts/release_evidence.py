@@ -2,8 +2,10 @@
 """Producer-side release evidence (ADR 0012): writes the EVIDENCE.json sidecar that binds a packaged release
 archive to the CI checkout provenance of the job that built it.
 
-Runs on the producing job's native runner AFTER the job executed the actual packaged binary (`zynk --version`);
-the execution result is passed in, everything else is read from the archive bytes and the GitHub environment.
+Runs in the producing job after it packaged the archive and — for the eligible-capable targets, on their native
+runner — executed the actual packaged binary (`zynk --version`); build-only targets pass `not_run`. The execution
+result, the native tool output, and the tracked-tree status are passed in; everything else is read from the
+archive bytes and the GitHub environment.
 `zynk --version` prints only the version — no commit is embedded in the binary — so `git_sha`/`checkout_head`
 here are checkout provenance, not a binary self-report."""
 from __future__ import annotations
@@ -25,7 +27,7 @@ EXEC_STATUSES = ("ran", "not_run")
 
 
 def build_evidence(*, target, version, archive, exec_status, exec_output, cargo_version, checkout_head, env,
-                   toolchain, native_tool_output=None) -> dict:
+                   toolchain, tree_status, native_tool_output=None) -> dict:
     spec = release_binary.TARGETS.get(target)
     if spec is None:
         raise ValueError(f"unknown target {target!r}; known: {sorted(release_binary.TARGETS)}")
@@ -60,11 +62,15 @@ def build_evidence(*, target, version, archive, exec_status, exec_output, cargo_
             "job": env.get("GITHUB_JOB", ""),
             "runner_os": env.get("RUNNER_OS", ""),
             "runner_arch": env.get("RUNNER_ARCH", ""),
+            # `git status --porcelain --untracked-files=no` after the build: the packaged bytes must come from
+            # the exact checked-out tree, so any tracked modification is recorded and refused downstream.
+            "tree_status": tree_status.lstrip("\ufeff").rstrip(),
+            "tree_clean": tree_status.lstrip("\ufeff").strip() == "",
         },
         "toolchain": dict(toolchain),
+        # Raw native tool output (e.g. `objdump -T`) — the consumer re-derives the glibc floor from it.
+        "native_tool_output": (native_tool_output or "").strip(),
     }
-    if native_tool_output is not None:
-        evidence["native_tool_output"] = native_tool_output.strip()
     return evidence
 
 
@@ -82,6 +88,8 @@ def main(argv=None) -> int:
     parser.add_argument("--exec-output-file", type=pathlib.Path, help="stdout captured from `zynk --version`")
     parser.add_argument("--cargo-toml", required=True, type=pathlib.Path)
     parser.add_argument("--checkout-head", help="`git rev-parse HEAD` of the checkout (default: run git)")
+    parser.add_argument("--tree-status-file", required=True, type=pathlib.Path,
+                        help="output of `git status --porcelain --untracked-files=no` taken after the build")
     parser.add_argument("--toolchain", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--native-tool-output-file", type=pathlib.Path)
     parser.add_argument("--out", required=True, type=pathlib.Path)
@@ -102,6 +110,7 @@ def main(argv=None) -> int:
         target=args.target, version=args.version, archive=args.archive, exec_status=args.exec_status,
         exec_output=exec_output, cargo_version=cargo_version_from(args.cargo_toml), checkout_head=checkout_head,
         env=os.environ, toolchain=toolchain, native_tool_output=native,
+        tree_status=args.tree_status_file.read_text(encoding="utf-8", errors="replace"),
     )
     args.out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
     print(f"evidence written: {args.out} ({evidence['target']} {evidence['archive']['sha256']})")

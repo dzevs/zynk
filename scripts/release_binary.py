@@ -22,32 +22,38 @@ def valid_artifact_id(value) -> bool:
     """Exactly one positive artifact id that the pinned download action represents exactly."""
     return isinstance(value, str) and bool(_ARTIFACT_ID.match(value)) and int(value) <= MAX_ARTIFACT_ID
 
-# target -> tier, applicable test job (None = no hosted test evidence), build job, archive/member names, header facts.
+# target -> tier, applicable test job (None = no hosted test evidence), build job, archive/member names, header
+# facts, and the producer runner (RUNNER_OS/RUNNER_ARCH) the evidence must have been produced on.
 TARGETS = {
     "linux-x86_64": {
         "tier": "required", "test_job": "test-linux", "build_job": "build-linux-x86_64",
         "archive": "zynk-v{version}-linux-x86_64.tar.gz", "member": "zynk",
         "format": "elf", "cpu": "x86_64", "os": "linux", "glibc_max": LINUX_GLIBC_MAX,
+        "runner": {"os": "Linux", "arch": "X64"},
     },
     "macos-aarch64": {
         "tier": "optional", "test_job": "test-macos-aarch64", "build_job": "build-macos-aarch64",
         "archive": "zynk-v{version}-macos-aarch64.tar.gz", "member": "zynk",
         "format": "macho", "cpu": "aarch64", "os": "macos", "glibc_max": None,
+        "runner": {"os": "macOS", "arch": "ARM64"},
     },
     "windows-x86_64": {
         "tier": "optional", "test_job": "test-windows-x86_64", "build_job": "build-windows-x86_64",
         "archive": "zynk-v{version}-windows-x86_64.zip", "member": "zynk.exe",
         "format": "pe", "cpu": "x86_64", "os": "windows", "glibc_max": None,
+        "runner": {"os": "Windows", "arch": "X64"},
     },
     "macos-x86_64": {
         "tier": "optional", "test_job": None, "build_job": "build-macos-x86_64",
         "archive": "zynk-v{version}-macos-x86_64.tar.gz", "member": "zynk",
         "format": "macho", "cpu": "x86_64", "os": "macos", "glibc_max": None,
+        "runner": {"os": "macOS", "arch": "ARM64"},  # Apple-silicon runner; Rosetta execution only, never eligible
     },
     "linux-aarch64": {
         "tier": "optional", "test_job": None, "build_job": "build-linux-aarch64",
         "archive": "zynk-v{version}-linux-aarch64.tar.gz", "member": "zynk",
         "format": "elf", "cpu": "aarch64", "os": "linux", "glibc_max": LINUX_GLIBC_MAX,
+        "runner": {"os": "Linux", "arch": "X64"},  # cross-built, never executed, never eligible
     },
 }
 
