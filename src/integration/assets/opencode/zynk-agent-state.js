@@ -2,18 +2,26 @@
 // managed by zynk; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // ZYNK_INTEGRATION_ID=opencode
-// ZYNK_INTEGRATION_VERSION=7
+// ZYNK_INTEGRATION_VERSION=9
 
 import net from "node:net";
 
 const SOURCE = "zynk:opencode";
 const AGENT = "opencode";
 let reportSeq = Date.now() * 1000;
+let requestChain = Promise.resolve();
+let reportedRootSessionID;
 
-// Subagent (task tool) sessions carry a parentID; the main agent session does
-// not. Their lifecycle events would otherwise clobber the pane's real state, so
-// learn child session ids from session.created/updated and drop their reports.
+// Track child sessions so their events cannot replace the pane's root session.
+// Their user prompts still project state without attaching the child session id.
 const childSessions = new Set();
+const CHILD_EVENT_STATES = new Map([
+  ["permission.asked", "blocked"],
+  ["question.asked", "blocked"],
+  ["permission.replied", "working"],
+  ["question.replied", "working"],
+  ["question.rejected", "working"],
+]);
 
 function nextReportSeq() {
   reportSeq += 1;
@@ -26,26 +34,31 @@ function sessionIDFromProperties(properties) {
     : undefined;
 }
 
+const SESSION_STATE_BY_STATUS = new Map([
+  ["idle", "idle"],
+  ["active", "working"],
+  ["busy", "working"],
+  ["pending", "working"],
+  ["retry", "working"],
+  ["running", "working"],
+  ["streaming", "working"],
+  ["working", "working"],
+]);
+
 function stateFromSessionStatus(status) {
-  if (typeof status !== "string") {
-    return undefined;
-  }
-  switch (status.toLowerCase()) {
-    case "idle":
-      return "idle";
-    case "active":
-    case "busy":
-    case "pending":
-    case "running":
-    case "streaming":
-    case "working":
-      return "working";
-    default:
-      return undefined;
-  }
+  const kind = typeof status === "string" ? status : status?.type;
+  return typeof kind === "string"
+    ? SESSION_STATE_BY_STATUS.get(kind.toLowerCase())
+    : undefined;
 }
 
 function request(method, params) {
+  const pending = requestChain.then(() => requestOnce(method, params));
+  requestChain = pending.catch(() => {});
+  return pending;
+}
+
+function requestOnce(method, params) {
   const paneId = process.env.ZYNK_PANE_ID ?? process.env.ZYNK_PANE_ID;
   const socketPath = process.env.ZYNK_SOCKET_PATH ?? process.env.ZYNK_SOCKET_PATH;
 
@@ -100,6 +113,7 @@ function reportSession(sessionID, sessionStartSource) {
 function reportState(state, sessionID) {
   const params = { state };
   if (sessionID) {
+    reportedRootSessionID = sessionID;
     params.agent_session_id = sessionID;
   }
   return request("pane.report_agent", params);
@@ -131,6 +145,10 @@ export const ZynkAgentStatePlugin = async () => {
         childSessions.add(info.id);
       }
       if (sessionID && childSessions.has(sessionID)) {
+        const state = CHILD_EVENT_STATES.get(type);
+        if (state) {
+          await reportState(state);
+        }
         return;
       }
 
@@ -142,7 +160,9 @@ export const ZynkAgentStatePlugin = async () => {
           await reportSession(sessionID, "new");
           break;
         case "session.updated":
-          await reportSession(sessionID);
+          if (sessionID && sessionID !== reportedRootSessionID) {
+            await reportSession(sessionID);
+          }
           break;
         case "session.status": {
           const state = stateFromSessionStatus(properties.status);

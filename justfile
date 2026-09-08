@@ -14,6 +14,7 @@ test-one filter:
 test-ts:
     bun test src/integration/assets/zynk-agent-state.test.ts
     bun test src/integration/assets/pi/zynk-agent-state.test.ts
+    bun test src/integration/assets/opencode/zynk-agent-state.test.ts
 
 # Run fast local lint checks
 lint:
