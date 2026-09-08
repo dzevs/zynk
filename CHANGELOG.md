@@ -70,8 +70,9 @@ config key is removed (see **Changed**).
   existing slot name is ever touched, each member moves in one atomic no-replace step (Linux, macOS and
   Windows each provide one — where none exists the command refuses instead of copying), a backup that gained
   an entry that is not a bundle member is refused and rolled back, a blocked rollback is reported naming the
-  members left under the slot, a symlinked database path is relocated where SQLite would open it (the link
-  stays), and `adopt` never touches the ambient `~/.zynk/zynk-v2` database when the native path was selected
+  members left under the slot, on Unix a symlinked database path is relocated where SQLite would open it (the
+  link stays) while on Windows a database path whose final component is a symbolic link is refused outright
+  (zynk does not resolve links there), and `adopt` never touches the ambient `~/.zynk/zynk-v2` database when the native path was selected
   explicitly. A sidecar that is a symbolic link is refused at startup instead of being opened through. They also move aside what the startup guards refuse to open (a rollback journal that looks hot, orphan
   sidecars beside a missing database) — the remedy those refusals name. Output from every `zynk db` command
   escapes control and Unicode format/bidi characters in names and paths.
@@ -88,6 +89,16 @@ config key is removed (see **Changed**).
   the root agent and adopting new sessions; the idle client writer blocks instead of busy-polling; remote
   handshakes get a 60 s budget (local stays 5 s).
 - Self-update messages now say accurately that self-update is unavailable; the updater remains fail-closed.
+- Source builds on macOS: the vendored libghostty-vt static archive is normalized for Apple's linker.
+  Zig 0.15's archive writer pads members to 2 bytes and Apple's `ld` (Xcode 15+) rejects a 64-bit Mach-O
+  member that is not 8-byte aligned (`64-bit mach-o member 'compiler_rt.o' not 8-byte aligned`); whether a
+  member landed aligned depended on the sizes of the members before it (a `LIBGHOSTTY_VT_SIMD=false` build
+  failed to link, the default SIMD build happened to work). `build.rs` now rewrites a misaligned archive with
+  Apple's `libtool -static` (override the tool with `LIBGHOSTTY_VT_LIBTOOL`) and verifies the result.
+- Release tooling: the aarch64 Linux release build uses cargo-zigbuild 0.23.4, which filters the
+  `-Wl,--fix-cortex-a53-843419` flag rustc 1.98 now passes for `aarch64-unknown-linux-gnu` and `zig cc`
+  refuses; the Nix flake tracks `nixos-26.05` (crates fetched from `static.crates.io` instead of the
+  rate-limited crates.io API, and `x86_64-darwin` stays supported).
 
 **Install notes**
 
