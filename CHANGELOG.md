@@ -113,6 +113,8 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 - Resuming that finished session anchors the pane again too, because an agent that resumes keeps its session
   id. The integration's own resume report is accepted once the agent's process has been seen running again;
   a resume with nothing observed since, or any ordinary late callback, still cannot revive the session.
+- A process seen running is only evidence while it is still running: if it is then seen ending, a resume
+  arriving afterwards waits for the agent to be observed running again, as it did before.
 
 **Removed**
 

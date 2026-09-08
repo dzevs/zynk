@@ -61,13 +61,18 @@ enum HookSuppressionReason {
 struct StaleHookSession {
     agent_label: String,
     session_ref: crate::agent_resume::AgentSessionRef,
-    /// Whether this owner's process was OBSERVED AGAIN after the retirement that made
-    /// this session stale. It is the same "fresh process" evidence the restart path
-    /// already requires, and it is what separates a genuine resume from a late
-    /// callback: only with it may an explicit session-start report reclaim this
+    /// WHEN this owner's process was OBSERVED AGAIN after the retirement that made
+    /// this session stale, if it has been. It is the same "fresh process" evidence the
+    /// restart path already requires, and it is what separates a genuine resume from a
+    /// late callback: only with it may an explicit session-start report reclaim this
     /// session id (`explicit_session_start_reclaims_stale_session`). Every new
     /// retirement clears it, so only an observation after the LATEST retirement counts.
-    fresh_process_evidence: bool,
+    ///
+    /// The timestamp is what bounds its LIFETIME. The evidence asserts a process that is
+    /// still RUNNING, so a later observation showing that process gone expires it again
+    /// (`expire_stale_session_evidence_on_process_loss`), while an observation captured
+    /// before it decides nothing.
+    fresh_process_evidence: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,7 +268,7 @@ impl TerminalState {
         }
         self.detected_agent = agent;
         if !process_exited {
-            self.clear_hook_suppression_for_detected_agent(previous_detected_agent, agent);
+            self.clear_hook_suppression_for_detected_agent(previous_detected_agent, agent, now);
         }
         self.fallback_state = fallback_state;
         self.fallback_visible_blocker = visible_blocker && fallback_state == AgentState::Blocked;
@@ -304,6 +309,10 @@ impl TerminalState {
                 HookSuppressionReason::HookClear
             });
         }
+        // Pending reclaim evidence OUTLIVES the identity it was recorded against, so
+        // its lifetime cannot be bounded by the block above: that block runs only while
+        // an identity is installed, and the window a delayed resume arrives in has none.
+        self.expire_stale_session_evidence_on_process_loss(agent, process_exited, now);
         // Identity and its session go together: the session survives only while a
         // still-live identity (one this observation was too old to retire) anchors it.
         if process_exited
@@ -675,7 +684,7 @@ impl TerminalState {
                     source.to_string(),
                     suppressed.agent_label,
                     suppressed_ref,
-                    false,
+                    None,
                 );
             }
         }
@@ -836,7 +845,7 @@ impl TerminalState {
                 .iter_mut()
                 .filter(|stale| stale.agent_label == agent_label)
             {
-                stale.fresh_process_evidence = false;
+                stale.fresh_process_evidence = None;
             }
         }
         self.suppressed_hook_reports.insert(
@@ -953,7 +962,9 @@ impl TerminalState {
     /// the same bar the restart path applies to a brand-new session id. A resume that
     /// arrives with no process seen since the retirement is still suppressed, and a
     /// late callback with no session-start reason is still stale, however fresh the
-    /// process is. WHY this exists at all: the Hermes resume command reuses
+    /// process is. Evidence a later observation has since expired counts as none
+    /// (`expire_stale_session_evidence_on_process_loss`). WHY this exists at all: the
+    /// Hermes resume command reuses
     /// `session_ref.value` (`src/agent_resume.rs`), so a new id would be a NEW session
     /// — a real resume can only ever name the retired one.
     fn explicit_session_start_reclaims_stale_session(
@@ -979,7 +990,7 @@ impl TerminalState {
                 stale_sessions.iter().any(|stale| {
                     stale.agent_label == agent_label
                         && &stale.session_ref == incoming_ref
-                        && stale.fresh_process_evidence
+                        && stale.fresh_process_evidence.is_some()
                 })
             })
     }
@@ -1011,6 +1022,7 @@ impl TerminalState {
         &mut self,
         previous_detected_agent: Option<Agent>,
         detected_agent: Option<Agent>,
+        observed_at: Instant,
     ) {
         let Some(detected_agent) = detected_agent else {
             return;
@@ -1039,7 +1051,17 @@ impl TerminalState {
         // — a late callback must not resurrect it — but the observation is recorded on
         // it, so the agent's own explicit resume of that session can reclaim it.
         for (source, agent_label, session_ref) in stale_sessions {
-            self.remember_stale_hook_session(source, agent_label, session_ref, true);
+            self.remember_stale_hook_session(source, agent_label, session_ref, Some(observed_at));
+        }
+        // The same observation re-arms sessions that were ALREADY stale, including one
+        // whose earlier evidence a process exit has since expired: seeing this owner's
+        // process again is the whole of the evidence, and it is no weaker the second
+        // time. Without this, a session could be reclaimed only on the first fresh
+        // process after its retirement and never again once an exit voided that one.
+        for stale in self.stale_hook_sessions.values_mut().flatten() {
+            if crate::detect::parse_agent_label(&stale.agent_label) == Some(detected_agent) {
+                Self::record_fresh_process_evidence(&mut stale.fresh_process_evidence, observed_at);
+            }
         }
         self.hook_report_sequences
             .retain(|source, _| !Self::hook_report_retirement_applies(source, detected_label));
@@ -1050,13 +1072,18 @@ impl TerminalState {
         source: String,
         agent_label: String,
         session_ref: crate::agent_resume::AgentSessionRef,
-        fresh_process_evidence: bool,
+        fresh_process_evidence: Option<Instant>,
     ) {
         let source_stale_sessions = self.stale_hook_sessions.entry(source).or_default();
         if let Some(existing) = source_stale_sessions.iter_mut().find(|existing| {
             existing.agent_label == agent_label && existing.session_ref == session_ref
         }) {
-            existing.fresh_process_evidence |= fresh_process_evidence;
+            if let Some(observed_at) = fresh_process_evidence {
+                Self::record_fresh_process_evidence(
+                    &mut existing.fresh_process_evidence,
+                    observed_at,
+                );
+            }
             return;
         }
         source_stale_sessions.push(StaleHookSession {
@@ -1064,6 +1091,51 @@ impl TerminalState {
             session_ref,
             fresh_process_evidence,
         });
+    }
+
+    /// Record a fresh-process observation, keeping the NEWEST: a replayed or reordered
+    /// older observation must not roll the evidence back over a newer one.
+    fn record_fresh_process_evidence(evidence: &mut Option<Instant>, observed_at: Instant) {
+        if evidence.is_none_or(|recorded_at| recorded_at < observed_at) {
+            *evidence = Some(observed_at);
+        }
+    }
+
+    /// Expire pending reclaim evidence whose process a LATER observation shows is gone.
+    ///
+    /// The evidence asserts a process that is still running, so it dies on the same
+    /// observation that retires an identity for that owner: this owner's process seen
+    /// exiting, or a different agent detected in its place — the two limbs of the
+    /// identity rule (`hook_identity_conflicts_with_detected_agent` likewise decides
+    /// nothing when no agent is detected at all). It cannot live INSIDE that path,
+    /// because that path runs only while an identity is installed, and between observing
+    /// the replacement process and accepting its session report there is deliberately
+    /// none — exactly the window a delayed resume arrives in. Ordering is preserved the
+    /// way `hook_identity_not_newer_than` preserves it for the identity: an observation
+    /// captured before the evidence it would erase decides nothing. Expiry only voids
+    /// the reclaim; a later fresh process observation arms it again.
+    fn expire_stale_session_evidence_on_process_loss(
+        &mut self,
+        detected_agent: Option<Agent>,
+        process_exited: bool,
+        observed_at: Instant,
+    ) {
+        for stale in self.stale_hook_sessions.values_mut().flatten() {
+            let Some(recorded_at) = stale.fresh_process_evidence else {
+                continue;
+            };
+            if observed_at <= recorded_at {
+                continue;
+            }
+            let Some(stale_agent) = crate::detect::parse_agent_label(&stale.agent_label) else {
+                continue;
+            };
+            if (process_exited && detected_agent == Some(stale_agent))
+                || detected_agent.is_some_and(|detected_agent| detected_agent != stale_agent)
+            {
+                stale.fresh_process_evidence = None;
+            }
+        }
     }
 
     fn detected_state_observed_before_release_suppression(
@@ -3473,6 +3545,147 @@ mod tests {
     #[test]
     fn identity_same_session_resume_after_process_exit_with_fresh_process_evidence() {
         same_session_resume_after_retirement(true);
+    }
+
+    #[test]
+    fn identity_same_session_resume_cannot_use_process_evidence_invalidated_by_a_later_exit() {
+        // Codex Gate-2 M3 extension finding (msg_f23d4dbab48a4c35): pending reclaim
+        // evidence is a claim about a process that is STILL RUNNING. Between observing
+        // the replacement process and accepting its session report there is deliberately
+        // no installed identity, so the identity-retirement path cannot expire it — yet a
+        // newer exit observation proves that process is gone, and a resume arriving after
+        // it is the late callback the retirement exists to refuse.
+        let mut terminal = test_terminal();
+        let observed = Instant::now();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+        retire_then_observe_a_fresh_process(&mut terminal, observed, false);
+        assert!(terminal.hook_identity.is_none());
+
+        // The new process exited before its queued resume report was handled.
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            observed + Duration::from_secs(4),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_secs(5),
+        );
+        assert!(terminal.detected_agent.is_none());
+
+        let resumed = identity_session_start(&mut terminal, "existing-session", 30, "resume");
+
+        assert!(
+            resumed.is_none(),
+            "a late resume reused process evidence invalidated by a newer exit observation"
+        );
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn identity_same_session_resume_after_an_invalidating_exit_needs_new_process_evidence() {
+        // Expiry voids the reclaim, it does not ban the session: the owner's process
+        // observed AGAIN after the invalidating exit is fresh evidence in its own right,
+        // and the explicit same-session resume it backs is admitted exactly as the first
+        // one was.
+        let mut terminal = test_terminal();
+        let observed = Instant::now();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+        retire_then_observe_a_fresh_process(&mut terminal, observed, false);
+
+        // The replacement process exits, expiring the evidence it had left behind.
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            observed + Duration::from_secs(4),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_secs(5),
+        );
+
+        // A resume in this window is refused: nothing has been seen running since.
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_none(),
+            "a resume was admitted with no process observed since the invalidating exit"
+        );
+
+        // The agent starts again, and THIS observation is the fresh evidence.
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_secs(6),
+        );
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 31, "resume").is_some(),
+            "a resume backed by process evidence newer than the exit was still refused"
+        );
+        assert!(terminal.hook_identity.is_some());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("existing-session")
+        );
+    }
+
+    #[test]
+    fn identity_same_session_resume_keeps_process_evidence_after_an_older_exit_observation() {
+        // The ordering half of the same rule, and the reason expiry is not simply "any
+        // exit clears it": an observation captured BEFORE the fresh process it would
+        // erase decides nothing, exactly as `hook_identity_not_newer_than` already holds
+        // for the identity itself.
+        let mut terminal = test_terminal();
+        let observed = Instant::now();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+        retire_then_observe_a_fresh_process(&mut terminal, observed, false);
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            observed + Duration::from_millis(2500),
+        );
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_some(),
+            "an exit observed before the fresh process cannot invalidate its resume evidence"
+        );
+        assert!(terminal.hook_identity.is_some());
     }
 
     fn same_session_resume_without_fresh_process_evidence(process_exit: bool) {
