@@ -59,8 +59,9 @@ Requirements for every PR:
   example, `Fixes #1234` or `Closes #1234`). A PR without a linked issue may be
   closed.
 - **Describe the problem and the solution.** State what changed and why.
-- **Pass the full local check.** Run `just check` (or `just ci`) and confirm
-  it's green before you open the PR. Don't open a PR that bypasses failing
+- **Pass the full local check.** Run `just check` and confirm it's green before
+  you open the PR (`just ci` is only the lint + TS + nextest subset; it skips the
+  maintenance and release-evidence tests). Don't open a PR that bypasses failing
   tests, formatting, or build errors.
 
 A maintainer reviews each PR and either requests changes or merges it.

@@ -197,7 +197,7 @@ One-paragraph description of what this project does.
 | `just build` | Production release build |
 | `just test` | Run tests (cargo nextest + script tests) |
 | `just lint` | `cargo fmt --check` + clippy with `-D warnings` |
-| `just ci` / `just check` | Full check |
+| `just check` | Full check (`just ci` = lint + TS + nextest subset) |
 
 ## Architecture
 Brief overview of the project structure and key design decisions.

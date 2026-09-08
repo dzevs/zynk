@@ -143,8 +143,9 @@ candidate-evidence workflow (`.github/workflows/release-dryrun.yml`, `workflow_d
 The candidate workflow has fixed per-target job ids (`test-linux`, `build-linux-x86_64`, `test-macos-aarch64`,
 `build-macos-aarch64`, `test-windows-x86_64`, `build-windows-x86_64`, and the build-only `build-linux-aarch64` /
 `build-macos-x86_64`), an `optional_targets: none | eligible | all` input, and a `manifest` job that downloads only by
-immutable artifact id, verifies each producer's hash-bound `EVIDENCE.json` (the packaged binary executed on its native
-runner; archive/binary sha256, `GITHUB_SHA`, version, CPU/ABI, producer run id/attempt) and writes
+immutable artifact id, verifies each producer's hash-bound `EVIDENCE.json` (for the eligible-capable targets the
+packaged binary executed on its native runner — build-only targets record `not_run` and stay BUILT_UNVERIFIED;
+archive/binary sha256, `GITHUB_SHA`, clean tracked tree, version, CPU/ABI, producer runner and run id/attempt) and writes
 `RELEASE_MANIFEST.txt` + `SHA256SUMS` over **ELIGIBLE** targets only. A required-target failure means no release
 candidate; an optional failure is `OMITTED` / `BUILT_UNVERIFIED` / `INCONSISTENT` and never blocks Linux. Never use
 `continue-on-error` to hide an optional failure: it reports the job as successful to `needs` and defeats the manifest.

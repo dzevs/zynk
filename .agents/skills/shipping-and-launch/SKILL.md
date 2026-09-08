@@ -116,25 +116,31 @@ None
    └── Full test suite (`just check`) on an isolated CARGO_TARGET_DIR
    └── Manual smoke test of critical flows against a dev socket/config (never the live one)
 
-2. TAG + BUILD release artifacts (flag OFF)
+2. CANDIDATE EVIDENCE at the exact reviewed SHA (ADR 0012; after Gate-2, Gate-3 and the operator's
+   merge/push gates, before ANY tag)
+   └── Dispatch the candidate-evidence workflow (`release-dryrun.yml`) on that SHA
+   └── Required jobs green (`test-linux`, `build-linux-x86_64`, `manifest`); review `RELEASE_MANIFEST.txt`
+   └── Only ELIGIBLE targets may ship; omitted targets are named in the release notes
+
+3. TAG (separate operator gate) + attach the ELIGIBLE artifacts from that candidate run (flag OFF)
    └── Verify the release binary boots and reports the right version
    └── Check the build is clean (no warnings, locked deps)
 
-3. ENABLE for team (flag ON for internal/dogfood install)
+4. ENABLE for team (flag ON for internal/dogfood install)
    └── Team runs the build as their live runtime
    └── 24-hour monitoring window
 
-4. CANARY rollout (publish to a beta channel / pre-release tag)
+5. CANARY rollout (publish to a beta channel / pre-release tag)
    └── Monitor crash reports, error logs, regression reports
    └── Compare: canary vs. previous stable
    └── 24-48 hour monitoring window
    └── Advance only if all thresholds pass (see table below)
 
-5. PUBLISH widely (crates.io + GitHub release + Homebrew tap)
+6. PUBLISH widely (crates.io + GitHub release + Homebrew tap)
    └── Same monitoring after publish
    └── Ability to yank / point users back to the previous version
 
-6. FULL rollout (default-on for all users)
+7. FULL rollout (default-on for all users)
    └── Monitor for 1 week
    └── Clean up feature flag
 ```

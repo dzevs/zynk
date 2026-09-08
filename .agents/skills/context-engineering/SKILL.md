@@ -52,7 +52,7 @@ Create a rules file that persists across sessions. This is the highest-leverage 
 - Test: `just test` (cargo nextest + maintenance-script tests)
 - One test: `just test-one <filter>`
 - Lint: `just lint` (= `cargo fmt --check` + `cargo clippy --all-targets --locked -- -D warnings`)
-- Full check: `just ci` / `just check`
+- Full check: `just check` (`just ci` is the subset without the maintenance and release-evidence tests)
 
 ## Code Conventions
 - No `unwrap()` in production code; surface errors via `Result`

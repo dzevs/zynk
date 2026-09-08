@@ -58,7 +58,7 @@ Don't silently fill in ambiguous requirements. The spec's entire purpose is to s
    Test:  just test               # cargo nextest run --locked …
    One:   just test-one <filter>  # cargo nextest run --locked <filter>
    Lint:  just lint               # cargo fmt --check + cargo clippy --all-targets --locked -- -D warnings
-   CI:    just ci                 # full PR check
+   Check: just check              # the full check (just ci = lint + TS + nextest subset only)
    ```
 
 3. **Project Structure** — Where source code lives, where tests go, where docs belong.

@@ -59,7 +59,15 @@ manifest in run attempt 2 may legitimately consume an artifact a successful prod
    refuses anything but a typed outcome object and reads no artifact without a recorded `success`. Artifact
    ids are bounded to JavaScript's safe-integer range shared by the exporter and the consumer. Each download
    step carries its own timeout, and the manifest job's timeout leaves a documented reserve after the
-   worst-case download total, so a slow optional download cannot cancel the job before the manifest exists.
+   worst-case download total, so a slow optional download cannot cancel the job before the manifest exists. The
+   producer records the raw native tool output, which the manifest re-derives and requires to agree with both
+   the sidecar's derived floor and the ELF's version needs; the producer's runner OS/architecture must be the
+   target's native runner (the macOS-aarch64 jobs assert ARM64); the producer asserts a clean tracked tree after
+   the build and binds that status into the sidecar, which the manifest requires; the manifest refuses a
+   symlinked dist root or target directory, sizes that differ from the downloaded bytes, and a producer attempt
+   later than its own; an optional `candidate_sha` dispatch input makes the required jobs and the manifest refuse
+   any other commit. The `build.rs` archive parser accepts only structurally complete `ar` input (exact EOF,
+   payload and padding bounds, BSD name length within the member) and carries a tracked regression set.
 5. **Required checks** (a failure stops the release; never bypassed): conventional commits; the private-content
    gates; `check-required` (CI, `just check` on Ubuntu); the Nix flake check **including** its `--all-systems
    --no-build` evaluation — a transitional exception: an evaluation failure on a non-Linux system would still
