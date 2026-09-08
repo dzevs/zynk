@@ -115,6 +115,8 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   a resume with nothing observed since, or any ordinary late callback, still cannot revive the session.
 - A process seen running is only evidence while it is still running: if it is then seen ending, a resume
   arriving afterwards waits for the agent to be observed running again, as it did before.
+- Observations that arrive out of order are judged against the last ending seen, not merely against the
+  newest evidence held: a report of the agent running that was taken before that ending no longer revives it.
 
 **Removed**
 

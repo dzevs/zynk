@@ -73,6 +73,56 @@ struct StaleHookSession {
     /// (`expire_stale_session_evidence_on_process_loss`), while an observation captured
     /// before it decides nothing.
     fresh_process_evidence: Option<Instant>,
+    /// WHEN this owner's process was last OBSERVED GONE: its own exit, or a different
+    /// agent detected in its place. This is the boundary the evidence above has to
+    /// beat, and it is kept in its OWN field because expiry empties that evidence —
+    /// were the boundary only the expired timestamp, the latest loss would be forgotten
+    /// the moment it did its work, every further loss would decide nothing while
+    /// evidence is absent, and a delayed running observation captured BEFORE that loss
+    /// would re-arm a session whose process is gone. It advances on every newer loss
+    /// whether or not evidence is held, and only a running observation strictly newer
+    /// than it re-arms (`StaleHookSession::record_fresh_process_evidence`).
+    last_loss_observed_at: Option<Instant>,
+}
+
+impl StaleHookSession {
+    /// Record a fresh-process observation, keeping the NEWEST and never crossing the
+    /// loss boundary: a replayed or reordered older observation must not roll the
+    /// evidence back over a newer one, nor assert a process the latest loss observation
+    /// has already shown gone.
+    fn record_fresh_process_evidence(&mut self, observed_at: Instant) {
+        if self
+            .last_loss_observed_at
+            .is_some_and(|lost_at| observed_at <= lost_at)
+        {
+            return;
+        }
+        if self
+            .fresh_process_evidence
+            .is_none_or(|recorded_at| recorded_at < observed_at)
+        {
+            self.fresh_process_evidence = Some(observed_at);
+        }
+    }
+
+    /// Take an observation that shows this owner's process gone: advance the loss
+    /// boundary, and drop any evidence the loss outdates. The boundary moves even when
+    /// there is no evidence left to expire — that is the whole point of keeping it
+    /// separately — while an observation older than the boundary decides nothing.
+    fn observe_process_loss(&mut self, observed_at: Instant) {
+        if self
+            .last_loss_observed_at
+            .is_none_or(|lost_at| lost_at < observed_at)
+        {
+            self.last_loss_observed_at = Some(observed_at);
+        }
+        if self
+            .fresh_process_evidence
+            .is_some_and(|recorded_at| recorded_at < observed_at)
+        {
+            self.fresh_process_evidence = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1060,7 +1110,7 @@ impl TerminalState {
         // process after its retirement and never again once an exit voided that one.
         for stale in self.stale_hook_sessions.values_mut().flatten() {
             if crate::detect::parse_agent_label(&stale.agent_label) == Some(detected_agent) {
-                Self::record_fresh_process_evidence(&mut stale.fresh_process_evidence, observed_at);
+                stale.record_fresh_process_evidence(observed_at);
             }
         }
         self.hook_report_sequences
@@ -1079,10 +1129,7 @@ impl TerminalState {
             existing.agent_label == agent_label && existing.session_ref == session_ref
         }) {
             if let Some(observed_at) = fresh_process_evidence {
-                Self::record_fresh_process_evidence(
-                    &mut existing.fresh_process_evidence,
-                    observed_at,
-                );
+                existing.record_fresh_process_evidence(observed_at);
             }
             return;
         }
@@ -1090,18 +1137,12 @@ impl TerminalState {
             agent_label,
             session_ref,
             fresh_process_evidence,
+            last_loss_observed_at: None,
         });
     }
 
-    /// Record a fresh-process observation, keeping the NEWEST: a replayed or reordered
-    /// older observation must not roll the evidence back over a newer one.
-    fn record_fresh_process_evidence(evidence: &mut Option<Instant>, observed_at: Instant) {
-        if evidence.is_none_or(|recorded_at| recorded_at < observed_at) {
-            *evidence = Some(observed_at);
-        }
-    }
-
-    /// Expire pending reclaim evidence whose process a LATER observation shows is gone.
+    /// Record that a LATER observation shows this owner's process gone, expiring any
+    /// pending reclaim evidence it outdates.
     ///
     /// The evidence asserts a process that is still running, so it dies on the same
     /// observation that retires an identity for that owner: this owner's process seen
@@ -1114,6 +1155,12 @@ impl TerminalState {
     /// way `hook_identity_not_newer_than` preserves it for the identity: an observation
     /// captured before the evidence it would erase decides nothing. Expiry only voids
     /// the reclaim; a later fresh process observation arms it again.
+    ///
+    /// Every such observation is recorded on the session as the loss boundary, whether
+    /// or not there is evidence left for it to expire: emptying the evidence must not
+    /// also erase the fact that a loss was seen, or losses after the first would decide
+    /// nothing and a running observation captured before the latest exit could re-arm
+    /// a retired session (`StaleHookSession::last_loss_observed_at`).
     fn expire_stale_session_evidence_on_process_loss(
         &mut self,
         detected_agent: Option<Agent>,
@@ -1121,19 +1168,13 @@ impl TerminalState {
         observed_at: Instant,
     ) {
         for stale in self.stale_hook_sessions.values_mut().flatten() {
-            let Some(recorded_at) = stale.fresh_process_evidence else {
-                continue;
-            };
-            if observed_at <= recorded_at {
-                continue;
-            }
             let Some(stale_agent) = crate::detect::parse_agent_label(&stale.agent_label) else {
                 continue;
             };
             if (process_exited && detected_agent == Some(stale_agent))
                 || detected_agent.is_some_and(|detected_agent| detected_agent != stale_agent)
             {
-                stale.fresh_process_evidence = None;
+                stale.observe_process_loss(observed_at);
             }
         }
     }
@@ -3545,6 +3586,109 @@ mod tests {
     #[test]
     fn identity_same_session_resume_after_process_exit_with_fresh_process_evidence() {
         same_session_resume_after_retirement(true);
+    }
+
+    fn reordered_running_observation_after_exit(repeated_exit: bool) {
+        // Codex Gate-2 M3 extension finding (msg_d2c0941e71e39abe): expiring pending
+        // reclaim evidence throws away the only record of WHEN the process was last
+        // seen gone, so once evidence is absent every later loss observation decides
+        // nothing and a delayed running observation captured BEFORE the latest exit
+        // re-arms the retired session. The latest loss is a boundary in its own right:
+        // only a running observation strictly newer than it is evidence of a process
+        // alive now.
+        let mut terminal = test_terminal();
+        let observed = Instant::now();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+        retire_then_observe_a_fresh_process(&mut terminal, observed, false);
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            observed + Duration::from_secs(4),
+        );
+        if repeated_exit {
+            // Loss observations must advance the retirement boundary even when
+            // the first loss already emptied the pending evidence.
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Hermes),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                true,
+                observed + Duration::from_secs(8),
+            );
+        }
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_secs(9),
+        );
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_none(),
+            "the unreplayed loss should retire the session"
+        );
+
+        // Delivered after the exit, but captured BEFORE the latest exit.
+        let stale_observation = if repeated_exit { 6000 } else { 3500 };
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_millis(stale_observation),
+        );
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 31, "resume").is_none(),
+            "a running observation older than the latest exit re-armed the retired session"
+        );
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_secs(10),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_secs(11),
+        );
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 32, "resume").is_some(),
+            "evidence genuinely newer than the latest loss must still allow a resume"
+        );
+    }
+
+    #[test]
+    fn reordered_running_observation_cannot_undo_a_later_exit() {
+        reordered_running_observation_after_exit(false);
+    }
+
+    #[test]
+    fn reordered_running_observation_cannot_undo_a_second_exit() {
+        reordered_running_observation_after_exit(true);
     }
 
     #[test]
