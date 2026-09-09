@@ -1215,6 +1215,209 @@ fn identity_only_shipped_reporter_path_anchors_its_receipt() {
     fixture.cleanup();
 }
 
+/// The python driver that loads the REAL shipped hermes plugin asset, registers its
+/// hooks against a recording ctx and invokes one of them. Kept as a literal so these
+/// tests exercise `src/integration/assets/hermes/__init__.py` exactly as it is
+/// installed into `~/.hermes/plugins/`, with no Rust-side restatement of what the
+/// plugin does.
+const SHIPPED_HERMES_DRIVER: &str = r#"
+import importlib.util
+import sys
+
+asset, hook, session_id, platform = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("zynk_shipped_hermes", asset)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+hooks = {}
+
+
+class RecordingCtx:
+    def register_hook(self, name, fn):
+        hooks[name] = fn
+
+
+module.register(RecordingCtx())
+if hook not in hooks:
+    sys.stderr.write("hook %r is not registered; registered: %r\n" % (hook, sorted(hooks)))
+    raise SystemExit(2)
+hooks[hook](session_id=session_id, platform=platform)
+"#;
+
+fn shipped_hermes_asset() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/integration/assets/hermes/__init__.py")
+}
+
+/// Run one hook of the shipped hermes plugin in the env a pane gives it: `ZYNK_ENV`,
+/// `ZYNK_PANE_ID` and `ZYNK_SOCKET_PATH` (exported by `apply_pane_base_env` /
+/// `apply_pane_launch_env`) plus `ZYNK_BIN_PATH`, the running build, so an asset that
+/// shells out reaches THIS server rather than whatever `zynk` a PATH lookup finds.
+fn invoke_shipped_hermes_hook(fixture: &Fixture, pane: &str, hook: &str, session_id: &str) {
+    let asset = shipped_hermes_asset();
+    let output = Command::new("python3")
+        .args(["-c", SHIPPED_HERMES_DRIVER])
+        .arg(&asset)
+        .args([hook, session_id, "cli"])
+        .env("XDG_CONFIG_HOME", &fixture.config_home)
+        .env("XDG_RUNTIME_DIR", &fixture.runtime_dir)
+        .env("ZYNK_SOCKET_PATH", &fixture.socket_path)
+        .env("ZYNK_SQLITE_HOME", &fixture.sqlite_home)
+        .env("ZYNK_ENV", "1")
+        .env("ZYNK_PANE_ID", pane)
+        .env("ZYNK_BIN_PATH", env!("CARGO_BIN_EXE_zynk"))
+        .env_remove("ZYNK_HOME")
+        .env_remove("ZYNK_CLIENT_SOCKET_PATH")
+        .output()
+        .expect("run the shipped hermes plugin under python3");
+    assert!(
+        output.status.success(),
+        "the shipped hermes plugin failed on hook {hook}: status={:?} stdout={:?} stderr={:?}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn pane_session_value(socket_path: &Path, pane_id: &str) -> Option<String> {
+    pane_get(socket_path, pane_id)
+        .pointer("/result/pane/agent_session/value")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Start `session_id` through the shipped plugin's `hook` and return the pane's session
+/// identity once it settles.
+///
+/// Bounded retry, like `run_in_pane_until_ready`: the asset caps its own report at one
+/// second and swallows every error, so a report lost to parallel suite load leaves no
+/// trace anywhere. Re-running the same hook with the same session id is idempotent (the
+/// report carries a fresh monotonic `seq`), so a retry turns a dropped report into a
+/// slower pass instead of a flake — while a report the SERVER refuses never lands however
+/// often it is repeated, which is what the negative assertions rely on.
+fn shipped_hermes_session(
+    fixture: &Fixture,
+    pane: &str,
+    hook: &str,
+    session_id: &str,
+) -> Option<String> {
+    const ATTEMPTS: usize = 3;
+    for _ in 0..ATTEMPTS {
+        invoke_shipped_hermes_hook(fixture, pane, hook, session_id);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let got = pane_session_value(&fixture.socket_path, pane);
+            if got.as_deref() == Some(session_id) {
+                return got;
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+    pane_session_value(&fixture.socket_path, pane)
+}
+
+#[test]
+fn a_new_hermes_session_replaces_the_old_receipt_anchor() {
+    // Gate-3 B1 #11 (`msg_b89f396a895ec5b2`): a NEW hermes session started in a pane whose
+    // session is already established must repoint the pane — otherwise the receipt anchor
+    // stays bound to the dead session and every message addressed to the pane afterwards is
+    // receipted, or refused, under an identity that is gone.
+    //
+    // Driven through the REAL shipped plugin, not a hand-built request: the defect was that
+    // the ASSET wired `on_session_start` to a lifecycle STATE report, which by design can
+    // never repoint an established identity-only session. Only a test that runs the shipped
+    // file can see that.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "hermes-restart");
+    start_detected_hermes(&fixture, &pane);
+
+    assert_eq!(
+        shipped_hermes_session(&fixture, &pane, "on_session_start", "hermes-old").as_deref(),
+        Some("hermes-old"),
+        "the shipped plugin must establish the first session"
+    );
+
+    let stale = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "addressed to hermes-old"],
+    );
+    let stale_sent = parse_outcome(&stale);
+    assert_eq!(stale.code, 0, "send: stderr={} {stale_sent}", stale.stderr);
+    assert_eq!(stale_sent["delivery_status"], "submitted", "{stale_sent}");
+    let stale_id = stale_sent["message_id"]
+        .as_str()
+        .expect("message_id")
+        .to_string();
+
+    // The pane restarts hermes. The plugin reports the new session identity.
+    assert_eq!(
+        shipped_hermes_session(&fixture, &pane, "on_session_start", "hermes-new").as_deref(),
+        Some("hermes-new"),
+        "a new hermes session must repoint the pane's session identity"
+    );
+
+    // The message addressed to the dead session can no longer be receipted.
+    let refused = send_json(&fixture.socket_path, &receipt_request(&stale_sent, &pane));
+    assert_eq!(
+        refused["error"]["code"], "receiver_identity_mismatch",
+        "a message anchored to the replaced session must not receipt: {refused}"
+    );
+    assert_eq!(latest_event(&fixture, &stale_id).0, "submitted");
+
+    // A message sent after the restart receipts under the new session.
+    let fresh = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "addressed to hermes-new"],
+    );
+    let fresh_sent = parse_outcome(&fresh);
+    assert_eq!(fresh.code, 0, "send: stderr={} {fresh_sent}", fresh.stderr);
+    let fresh_id = fresh_sent["message_id"]
+        .as_str()
+        .expect("message_id")
+        .to_string();
+    let receipt = send_json(&fixture.socket_path, &receipt_request(&fresh_sent, &pane));
+    assert!(
+        receipt.get("error").is_none(),
+        "the new session could not receipt its own message: {receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["delivery_status"], "received",
+        "{receipt}"
+    );
+    assert_eq!(latest_event(&fixture, &fresh_id).0, "received");
+
+    fixture.cleanup();
+}
+
+#[test]
+fn an_identity_only_hermes_state_report_still_cannot_repoint() {
+    // The control for the fix above: repointing is granted by the SESSION-START report,
+    // never by a lifecycle state report. A bare `pane.report_agent` naming a different
+    // session must still leave the established session in place — the rule the shipped v3
+    // asset violated by wiring `on_session_start` to a state report.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "hermes-state-report");
+    start_detected_hermes(&fixture, &pane);
+    report_identity_only_agent(&fixture.socket_path, &pane, "idle", "hermes-established");
+    assert_eq!(
+        pane_session_value(&fixture.socket_path, &pane).as_deref(),
+        Some("hermes-established"),
+    );
+
+    report_identity_only_agent(&fixture.socket_path, &pane, "idle", "hermes-usurper");
+
+    assert_eq!(
+        pane_session_value(&fixture.socket_path, &pane).as_deref(),
+        Some("hermes-established"),
+        "a lifecycle state report must not repoint an established session"
+    );
+
+    fixture.cleanup();
+}
+
 #[test]
 fn a_same_label_identity_only_pane_with_another_session_cannot_receipt() {
     // Owner coherence and the stored target triple are UNWEAKENED by the identity

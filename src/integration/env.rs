@@ -32,6 +32,12 @@ pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
         crate::api::ZYNK_SOCKET_PATH_ENV_VAR,
         crate::api::socket_path(),
     );
+    // Integration hook assets shell out to the zynk binary rather than speaking
+    // the socket protocol themselves, so they need the path of the running
+    // binary; a bare `zynk` on PATH may be a different build or absent.
+    if let Ok(executable) = std::env::current_exe() {
+        cmd.env("ZYNK_BIN_PATH", executable);
+    }
 }
 
 pub(crate) fn pi_extension_dir() -> io::Result<PathBuf> {

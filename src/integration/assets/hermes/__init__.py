@@ -1,95 +1,80 @@
-"""Hermes plugin installed by Zynk to report agent lifecycle state."""
+"""Hermes plugin installed by Zynk to report resumable session identity."""
 
 # ZYNK_INTEGRATION_ID=hermes
-# ZYNK_INTEGRATION_VERSION=3
+# ZYNK_INTEGRATION_VERSION=4
 
 from __future__ import annotations
 
-import json
 import os
-import random
-import socket
+import subprocess
 import time
 
 _SOURCE = "zynk:hermes"
 _AGENT = "hermes"
+_INTERACTIVE_PLATFORMS = {"cli", "tui", "desktop", "acp"}
 
 
-def _base_params() -> tuple[str, str] | None:
-    if (os.environ.get("ZYNK_ENV") or os.environ.get("ZYNK_ENV")) != "1":
+def _pane_id() -> str | None:
+    if os.environ.get("ZYNK_ENV") != "1":
         return None
-    pane_id = (os.environ.get("ZYNK_PANE_ID") or os.environ.get("ZYNK_PANE_ID") or "").strip()
-    socket_path = (os.environ.get("ZYNK_SOCKET_PATH") or os.environ.get("ZYNK_SOCKET_PATH") or "").strip()
-    if not pane_id or not socket_path:
-        return None
-    return pane_id, socket_path
+    return os.environ.get("ZYNK_PANE_ID", "").strip() or None
 
 
-def _send(method: str, params: dict) -> None:
-    base = _base_params()
-    if base is None:
+def _send_session(session_id: str, start_source: str) -> None:
+    pane_id = _pane_id()
+    if pane_id is None:
         return
-    pane_id, socket_path = base
-    params = {
-        "pane_id": pane_id,
-        "source": _SOURCE,
-        "agent": _AGENT,
-        "seq": time.time_ns(),
-        **params,
-    }
-    request = {
-        "id": f"{_SOURCE}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}",
-        "method": method,
-        "params": params,
-    }
+    command = [
+        os.environ.get("ZYNK_BIN_PATH") or "zynk",
+        "pane",
+        "report-agent-session",
+        pane_id,
+        "--source",
+        _SOURCE,
+        "--agent",
+        _AGENT,
+        "--seq",
+        str(time.time_ns()),
+        "--agent-session-id",
+        session_id,
+        "--session-start-source",
+        start_source,
+    ]
     try:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(0.5)
-        client.connect(socket_path)
-        client.sendall((json.dumps(request) + "\n").encode("utf-8"))
-        try:
-            client.recv(4096)
-        except Exception:
-            pass
-        client.close()
+        subprocess.run(
+            command,
+            check=False,
+            timeout=1,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except Exception:
         pass
 
 
-def _session_id(kwargs: dict) -> str | None:
-    value = kwargs.get("session_id")
-    if isinstance(value, str) and value:
-        return value
-    return None
+def _report_session(start_source: str, **kwargs) -> None:
+    if kwargs.get("platform") not in _INTERACTIVE_PLATFORMS:
+        return
+    session_id = kwargs.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return
+    _send_session(session_id, start_source)
 
 
-def _report(state: str, **kwargs) -> None:
-    params = {"state": state}
-    session_id = _session_id(kwargs)
-    if session_id:
-        params["agent_session_id"] = session_id
-    _send("pane.report_agent", params)
+def _session_started(**kwargs) -> None:
+    _report_session("startup", **kwargs)
 
 
-def _working(**kwargs) -> None:
-    _report("working", **kwargs)
+def _session_reset(**kwargs) -> None:
+    _report_session("new", **kwargs)
 
 
-def _blocked(**kwargs) -> None:
-    _report("blocked", **kwargs)
-
-
-def _idle(**kwargs) -> None:
-    _report("idle", **kwargs)
+def _session_observed(**kwargs) -> None:
+    if kwargs.get("platform") == "cli":
+        _report_session("resume", **kwargs)
 
 
 def register(ctx):
-    ctx.register_hook("on_session_start", _idle)
-    ctx.register_hook("pre_llm_call", _working)
-    ctx.register_hook("pre_api_request", _working)
-    ctx.register_hook("pre_tool_call", _working)
-    ctx.register_hook("post_tool_call", _working)
-    ctx.register_hook("pre_approval_request", _blocked)
-    ctx.register_hook("post_approval_response", _working)
-    ctx.register_hook("post_llm_call", _idle)
-    ctx.register_hook("on_session_end", _idle)
+    ctx.register_hook("on_session_start", _session_started)
+    ctx.register_hook("on_session_reset", _session_reset)
+    ctx.register_hook("pre_llm_call", _session_observed)

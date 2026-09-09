@@ -56,6 +56,7 @@ section 4(b) duty; it is not by itself proof of compliance.
 - src/detect/manifests/kiro.toml
 - src/detect/manifests/qwen.toml
 - src/detect/mod.rs
+- src/integration/assets/hermes/__init__.py
 - src/main.rs
 - src/terminal/state.rs
 - tests/client_mode.rs

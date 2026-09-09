@@ -37,6 +37,22 @@ fn apply_pane_base_env_exports_zynk_socket_path() {
 }
 
 #[test]
+fn apply_pane_base_env_exports_the_running_binary_path() {
+    // Hook assets shell out to `zynk pane report-agent-session` instead of
+    // speaking the socket protocol, so every pane needs the path of the running
+    // binary rather than whatever `zynk` a PATH lookup would find.
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    apply_pane_base_env(&mut cmd);
+
+    let executable = std::env::current_exe().unwrap();
+    assert_eq!(
+        cmd.get_env("ZYNK_BIN_PATH"),
+        Some(executable.as_os_str()),
+        "ZYNK_BIN_PATH must be exported to the pane"
+    );
+}
+
+#[test]
 fn extract_version_triple_parses_common_outputs() {
     assert_eq!(extract_version_triple("0.14.0"), Some((0, 14, 0)));
     assert_eq!(extract_version_triple("v1.2.3"), Some((1, 2, 3)));
@@ -2559,9 +2575,16 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(KILO_PLUGIN_ASSET.contains("pane.report_agent_session"));
     assert!(KILO_PLUGIN_ASSET.contains("reportState"));
     assert!(!KILO_PLUGIN_ASSET.contains("pane.release_agent"));
-    assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = _session_id(kwargs)"));
-    assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
-    assert!(HERMES_PLUGIN_INIT_ASSET.contains("pane.report_agent\","));
+    // Hermes (asset v4) reports session identity by SHELLING OUT to the zynk CLI
+    // rather than speaking the socket protocol, so its session ref travels as CLI
+    // flags. `--session-start-source` is what makes a new session repoint the pane;
+    // a lifecycle state report never could.
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = kwargs.get(\"session_id\")"));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("\"report-agent-session\""));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("\"--agent-session-id\""));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("\"--session-start-source\""));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("ZYNK_BIN_PATH"));
+    assert!(!HERMES_PLUGIN_INIT_ASSET.contains("pane.report_agent\","));
     assert!(!HERMES_PLUGIN_INIT_ASSET.contains("pane.release_agent"));
     assert!(QODERCLI_HOOK_ASSET.contains("ZYNK_HOOK_INPUT_FILE"));
     assert!(QODERCLI_HOOK_ASSET.contains("agent_session_id"));
