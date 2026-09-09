@@ -158,6 +158,23 @@ cargo run --release --locked -- status
 paths above — not the production runtime — before you proceed. Use a distinct
 `--session <name>` to keep dev sessions separate from any default session.
 
+### Unreleased migration checksums
+
+Migration 0004 was corrected before merge/release to preserve legacy `integration`
+receipt provenance, as required by ADR 0014's pre-merge amendment. A development
+database initialized with the rejected earlier candidate's 0004 has a different
+SQLx checksum. This build refuses it as `db_foreign_conflict` and does not rewrite
+or wipe it. This limitation applies to databases used with that unreleased
+candidate, not databases from released/main history or databases predating 0004.
+Their normal upgrade preserves legacy provenance.
+
+For an affected development database, select its isolated paths explicitly and
+use `zynk db backup` or `zynk db adopt` to preserve the bundle non-destructively
+before creating a fresh store. Those operations relocate data; they do not repair
+receipt history. The rejected migration erased the distinction between legacy
+and origin-checked rows, so no later operation can reconstruct that evidence.
+This is not a waiver of released-database compatibility.
+
 ## Testing
 
 zynk's tests are hermetic: each test spawns its own temp config and socket, so

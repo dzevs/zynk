@@ -41,6 +41,13 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 
 **Fixed**
 
+- Live handoff keeps imported hook identity provisional until the new detector
+  observes that owner's process running. An exit after snapshot capture cannot
+  leave a dead session receipt-capable; a still-running session needs no new hook report.
+- Build provenance no longer treats a failed Git status query as a clean checkout.
+  A failed query emits no source attestation, which remote custody refuses.
+- Concurrent database initialization rechecks temporary orphan sidecars under the
+  existing init lock. A sidecar link or a surviving orphan remains a refusal.
 - Remote attach binds executable validation and execution to an open file on the
   remote host, including bridge startup and live handoff. Replacing an install
   pathname cannot redirect the checked execution. Linux remote hosts require
