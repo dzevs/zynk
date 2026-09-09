@@ -62,27 +62,40 @@ fn platform_state_dir() -> PathBuf {
     }
 }
 
+/// Reads the config file, distinguishing "there is no config" from "there is a config we
+/// could not read". A prior `path.exists()` guard answered both with `false` whenever the
+/// path could not be stat'ed at all — an unreadable parent directory or a symlink loop —
+/// so a real config silently fell back to defaults with no diagnostic at all.
+fn read_optional_config(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 impl Config {
     pub fn load() -> LoadedConfig {
         let path = config_path();
-        if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => return load_config_from_str(&content),
-                Err(err) => {
-                    warn!(err = %err, "config read error, using defaults");
-                    return LoadedConfig {
-                        config: Self::default(),
-                        diagnostics: vec![format!("config read error: {err}; using defaults")],
-                        invalid_sections: Vec::new(),
-                    };
-                }
+        let content = match read_optional_config(&path) {
+            Ok(Some(content)) => content,
+            Ok(None) => {
+                return LoadedConfig {
+                    config: Self::default(),
+                    diagnostics: Vec::new(),
+                    invalid_sections: Vec::new(),
+                };
             }
-        }
-        LoadedConfig {
-            config: Self::default(),
-            diagnostics: Vec::new(),
-            invalid_sections: Vec::new(),
-        }
+            Err(err) => {
+                warn!(err = %err, "config read error, using defaults");
+                return LoadedConfig {
+                    config: Self::default(),
+                    diagnostics: vec![format!("config read error: {err}; using defaults")],
+                    invalid_sections: Vec::new(),
+                };
+            }
+        };
+        load_config_from_str(&content)
     }
 }
 
@@ -166,16 +179,21 @@ pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
 
 pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
     let path = config_path();
-    if !path.exists() {
-        return Ok(LoadedConfig {
-            config: Config::default(),
-            diagnostics: Vec::new(),
-            invalid_sections: Vec::new(),
-        });
-    }
-
-    let content = std::fs::read_to_string(&path)
-        .map_err(|err| vec![format!("config read error: {err}; keeping current config")])?;
+    let content = match read_optional_config(&path) {
+        Ok(Some(content)) => content,
+        Ok(None) => {
+            return Ok(LoadedConfig {
+                config: Config::default(),
+                diagnostics: Vec::new(),
+                invalid_sections: Vec::new(),
+            });
+        }
+        Err(err) => {
+            return Err(vec![format!(
+                "config read error: {err}; keeping current config"
+            )]);
+        }
+    };
     load_live_config_from_str(&content)
 }
 
@@ -1379,6 +1397,89 @@ agent_panel_scope = "all"
     // The two keys M5-07 registers get the fork's standard new-key pair: the key itself
     // round-trips through the live loader, and a misspelled sibling in the same section is
     // reported with its FULL path so a typo is never mistaken for the real key.
+    #[test]
+    fn load_live_config_registers_copy_on_select_and_reports_misspelled_sibling() {
+        let loaded = load_live_config_from_str(
+            r#"
+[ui]
+copy_on_select = false
+copy_on_selectt = false
+"#,
+        )
+        .unwrap();
+
+        assert!(!loaded.config.ui.copy_on_select);
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key ui.copy_on_selectt; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn config_loaders_report_unreadable_path() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("zynk-config-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let startup = Config::load();
+        let reload = load_live_config();
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(&path);
+
+        assert!(startup
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("config read error")
+                && diagnostic.contains("using defaults")));
+        assert!(reload.unwrap_err().iter().any(|diagnostic| {
+            diagnostic.contains("config read error")
+                && diagnostic.contains("keeping current config")
+        }));
+    }
+
+    /// A config path that cannot be stat'ed at all is NOT a missing config. The old
+    /// `path.exists()` guard answered `false` for both and dropped the user's real config
+    /// on the floor without a single diagnostic.
+    #[test]
+    fn config_loaders_report_an_unstattable_path_instead_of_silently_using_defaults() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("zynk-config-unstattable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let loop_target = dir.join("config-loop.toml");
+        std::os::unix::fs::symlink(&loop_target, &path).unwrap();
+        std::os::unix::fs::symlink(&path, &loop_target).unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        assert!(!path.exists(), "the loop must defeat a stat-based guard");
+        let startup = Config::load();
+        let reload = load_live_config();
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            startup
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("config read error")
+                    && diagnostic.contains("using defaults")),
+            "{:?}",
+            startup.diagnostics
+        );
+        assert!(reload.unwrap_err().iter().any(|diagnostic| {
+            diagnostic.contains("config read error")
+                && diagnostic.contains("keeping current config")
+        }));
+    }
+
     #[test]
     fn load_live_config_registers_sidebar_collapsed_mode_and_reports_misspelled_sibling() {
         let loaded = load_live_config_from_str(

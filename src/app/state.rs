@@ -1407,6 +1407,7 @@ pub struct AppState {
     /// Capture mouse input for Zynk's own mouse UI. When false, Zynk only
     /// captures mouse while the focused pane app requests mouse reporting.
     pub mouse_capture: bool,
+    pub copy_on_select: bool,
     pub right_click_passthrough_modifiers: Option<KeyModifiers>,
     pub right_click_passthrough: Option<RightClickPassthroughGesture>,
     pub redraw_on_focus_gained: bool,
@@ -1776,6 +1777,7 @@ impl AppState {
             agent_panel_sort: AgentPanelSort::Spaces,
             next_agent_state_change_seq: 0,
             mouse_capture: true,
+            copy_on_select: true,
             right_click_passthrough_modifiers: None,
             right_click_passthrough: None,
             redraw_on_focus_gained: true,

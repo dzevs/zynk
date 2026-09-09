@@ -254,6 +254,10 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Pane apps like lazygit and btop can still receive mouse when they request it.
 # mouse_capture = true
 
+# Automatically copy text selected by mouse drag.
+# Set false to keep drag selection visible without copying; double-click still copies a word.
+# copy_on_select = true
+
 # Optional modifier that forwards right-click hold/drag gestures to pane apps instead of opening Zynk's pane menu.
 # Empty/off disables this. Shift is intentionally unsupported because terminals commonly reserve Shift+mouse.
 # right_click_passthrough_modifier = ""

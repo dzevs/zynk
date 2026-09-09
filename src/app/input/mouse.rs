@@ -812,10 +812,10 @@ impl AppState {
 
             MouseEventKind::Up(MouseButton::Left) => {
                 // Mouse-up either finishes a drag selection or releases after a
-                // double-click copy; the latter is already copied.
+                // double-click copy; the latter is already finalized.
                 if let Some(selection) = self.selection.as_ref() {
                     let was_click = selection.was_just_click();
-                    let was_already_copied = selection.is_done();
+                    let was_finalized = selection.is_finalized();
 
                     self.workspace_press = None;
                     self.tab_press = None;
@@ -823,8 +823,12 @@ impl AppState {
                     self.selection_autoscroll = None;
                     if was_click {
                         self.selection = None;
-                    } else if !was_already_copied {
+                    } else if was_finalized {
+                        // Double-click copy already finalized this selection.
+                    } else if self.copy_on_select {
                         self.copy_selection(terminal_runtimes);
+                    } else if let Some(selection) = self.selection.as_mut() {
+                        selection.finish();
                     }
                     return None;
                 }
