@@ -81,6 +81,27 @@ impl App {
             return;
         }
 
+        if self
+            .state
+            .keybinds
+            .navigate
+            .workspace_up
+            .matches_direct_key(raw_key)
+        {
+            self.state.move_selected_workspace_by_visible_delta(-1);
+            return;
+        }
+        if self
+            .state
+            .keybinds
+            .navigate
+            .workspace_down
+            .matches_direct_key(raw_key)
+        {
+            self.state.move_selected_workspace_by_visible_delta(1);
+            return;
+        }
+
         if let Some(action) = navigate_reserved_action_for_key(&self.state, raw_key) {
             self.execute_tui_navigate_action(action, ActionContext::Navigate);
             return;
@@ -2417,6 +2438,37 @@ last_pane = "prefix+tab"
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('P'), KeyModifiers::empty()));
 
         assert_eq!(app.state.mode, Mode::RenamePane);
+    }
+
+    #[test]
+    fn app_navigate_mode_workspace_down_moves_selection() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        app.state.mode = Mode::Navigate;
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Down, KeyModifiers::empty()));
+
+        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn app_navigate_mode_workspace_keys_are_configurable() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+navigate_workspace_down = "j"
+navigate_pane_down = "ctrl+j"
+"#,
+        )
+        .unwrap();
+        app.state.keybinds = config.keybinds();
+        app.state.mode = Mode::Navigate;
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()));
+
+        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.mode, Mode::Navigate);
     }
 
     #[tokio::test]

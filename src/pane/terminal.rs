@@ -96,6 +96,10 @@ impl InputState {
     pub fn mouse_reporting_enabled(self) -> bool {
         self.mouse_protocol_mode.reporting_enabled()
     }
+
+    pub fn plain_page_keys_use_host_scrollback(self) -> bool {
+        !self.alternate_screen && !self.mouse_reporting_enabled() && !self.application_cursor
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

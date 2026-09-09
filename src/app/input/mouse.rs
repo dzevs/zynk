@@ -3210,6 +3210,84 @@ mod tests {
     }
 
     #[test]
+    fn clicking_tab_context_menu_close_leaves_context_menu_mode() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let second_tab = app.state.view.tab_hit_areas[1];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            second_tab.x + 1,
+            second_tab.y,
+        ));
+
+        let menu = app
+            .state
+            .context_menu_rect()
+            .expect("tab context menu rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 3,
+        ));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].display_name(), "one");
+        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .any(|(_, event)| { matches!(event.event, crate::api::schema::EventKind::TabClosed) }));
+    }
+
+    #[test]
+    fn clicking_tab_context_menu_close_last_tab_in_group_keeps_confirmation_mode() {
+        let mut app = app_for_mouse_test();
+        let mut parent = Workspace::test_new("main");
+        mark_worktree_space_member(&mut parent, 0, "repo-key");
+        let mut child = Workspace::test_new("issue");
+        mark_worktree_space_member(&mut child, 1, "repo-key");
+        app.state.workspaces = vec![parent, child];
+        app.state.active = Some(0);
+        app.state.selected = 1;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let only_tab = app.state.view.tab_hit_areas[0];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            only_tab.x + 1,
+            only_tab.y,
+        ));
+
+        let menu = app
+            .state
+            .context_menu_rect()
+            .expect("tab context menu rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 3,
+        ));
+
+        assert_eq!(app.state.selected, 0);
+        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert!(app.state.context_menu.is_none());
+    }
+
+    #[test]
     fn clicking_pane_context_menu_close_leaves_context_menu_mode() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("one");

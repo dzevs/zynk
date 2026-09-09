@@ -1166,7 +1166,9 @@ impl App {
             (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close")) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
-                self.close_active_tab_via_api_requires_confirmation();
+                if !self.close_active_tab_via_api_requires_confirmation() {
+                    leave_modal(&mut self.state);
+                }
             }
             (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
                 open_rename_pane(&mut self.state, pane_id);
