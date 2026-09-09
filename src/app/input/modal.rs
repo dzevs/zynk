@@ -933,7 +933,7 @@ impl App {
         match self.state.mode {
             Mode::RenameWorkspace if !self.state.workspaces.is_empty() && !new_name.is_empty() => {
                 let workspace_id = self.public_workspace_id(self.state.selected);
-                self.dispatch_tui_runtime_mutation(
+                self.dispatch_runtime_mutation(
                     "tui.workspace.rename",
                     crate::api::schema::Method::WorkspaceRename(
                         crate::api::schema::WorkspaceRenameParams {
@@ -950,7 +950,7 @@ impl App {
                 } else {
                     Some(new_name)
                 };
-                self.dispatch_tui_runtime_mutation(
+                self.dispatch_runtime_mutation(
                     "tui.tab.create_named",
                     crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
                         workspace_id: None,
@@ -975,7 +975,7 @@ impl App {
                         .is_some_and(|name| new_name == name);
                 if !keep_auto_name {
                     if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
-                        self.dispatch_tui_runtime_mutation(
+                        self.dispatch_runtime_mutation(
                             "tui.tab.rename",
                             crate::api::schema::Method::TabRename(
                                 crate::api::schema::TabRenameParams {
@@ -992,7 +992,7 @@ impl App {
                     (self.state.active, self.state.rename_pane_target)
                 {
                     if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                        self.dispatch_tui_runtime_mutation(
+                        self.dispatch_runtime_mutation(
                             "tui.pane.rename",
                             crate::api::schema::Method::PaneRename(
                                 crate::api::schema::PaneRenameParams {
@@ -1057,7 +1057,7 @@ impl App {
             _ => None,
         };
         if let Some(direction) = direction {
-            self.dispatch_tui_runtime_mutation(
+            self.dispatch_runtime_mutation(
                 "tui.pane.resize",
                 crate::api::schema::Method::PaneResize(crate::api::schema::PaneResizeParams {
                     pane_id: None,
@@ -1184,7 +1184,7 @@ impl App {
                 Some("Clear pane name"),
             ) => {
                 if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                    self.dispatch_tui_runtime_mutation(
+                    self.dispatch_runtime_mutation(
                         "tui.pane.clear_name",
                         crate::api::schema::Method::PaneRename(
                             crate::api::schema::PaneRenameParams {
@@ -1210,7 +1210,7 @@ impl App {
                 if let (Some(source_public_id), Some(target_public_id)) =
                     (source_public_id, target_public_id)
                 {
-                    self.dispatch_tui_runtime_mutation(
+                    self.dispatch_runtime_mutation(
                         "tui.pane.swap_exact",
                         crate::api::schema::Method::PaneSwap(crate::api::schema::PaneSwapParams {
                             pane_id: None,

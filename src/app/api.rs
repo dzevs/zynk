@@ -25,7 +25,7 @@ enum RuntimeExitAction {
 }
 
 impl App {
-    pub(crate) fn dispatch_tui_api_request(
+    pub(crate) fn dispatch_api_request(
         &mut self,
         id: &'static str,
         method: crate::api::schema::Method,
@@ -36,7 +36,7 @@ impl App {
         })
     }
 
-    pub(crate) fn dispatch_tui_deferred_api_request(
+    pub(crate) fn dispatch_deferred_api_request(
         &mut self,
         id: &'static str,
         method: crate::api::schema::Method,

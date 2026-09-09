@@ -571,7 +571,7 @@ impl App {
         let workspace_id = create.source_workspace_id.clone();
         let checkout_path = create.checkout_path.display().to_string();
 
-        let immediate_response = self.dispatch_tui_deferred_runtime_mutation(
+        let immediate_response = self.dispatch_deferred_runtime_mutation(
             "tui.worktree.create",
             crate::api::schema::Method::WorktreeCreate(crate::api::schema::WorktreeCreateParams {
                 workspace_id: Some(workspace_id),
@@ -677,7 +677,7 @@ impl App {
         };
         let source_workspace_id = open.source_workspace_id.clone();
 
-        let response = self.dispatch_tui_runtime_mutation(
+        let response = self.dispatch_runtime_mutation(
             "tui.worktree.open",
             crate::api::schema::Method::WorktreeOpen(crate::api::schema::WorktreeOpenParams {
                 workspace_id: Some(source_workspace_id),
@@ -712,7 +712,7 @@ impl App {
         remove.error = None;
         let workspace_id = remove.workspace_id.clone();
         let force = remove.force_confirmation;
-        let immediate_response = self.dispatch_tui_deferred_runtime_mutation(
+        let immediate_response = self.dispatch_deferred_runtime_mutation(
             "tui.worktree.remove",
             crate::api::schema::Method::WorktreeRemove(crate::api::schema::WorktreeRemoveParams {
                 workspace_id,

@@ -438,91 +438,9 @@ impl HeadlessServer {
             }
 
             // Handle deferred requests.
-            if self.app.state.request_complete_onboarding {
-                self.app.state.request_complete_onboarding = false;
-                self.app.open_settings_from_onboarding();
+            if self.handle_deferred_requests_headless() {
                 needs_render = true;
                 needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_onboarding");
-            }
-
-            if self.app.state.request_new_workspace {
-                self.app.state.request_new_workspace = false;
-                self.app.create_workspace();
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_new_workspace");
-            }
-
-            if self.app.state.request_new_tab {
-                self.app.state.request_new_tab = false;
-                self.app.create_tab();
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_new_tab");
-            }
-
-            if let Some(ws_idx) = self.app.state.request_new_linked_worktree.take() {
-                self.app.open_new_linked_worktree_dialog(ws_idx);
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
-            }
-
-            if let Some(ws_idx) = self.app.state.request_open_existing_worktree.take() {
-                self.app.open_existing_worktree_dialog(ws_idx);
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
-            }
-
-            if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
-                if let Err(err) = self.app.create_workspace_with_events(cwd, true) {
-                    error!(err = %err, "failed to create workspace at requested cwd");
-                    self.app.state.mode = app::Mode::Navigate;
-                }
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_workspace_cwd");
-            }
-
-            if let Some(ws_idx) = self.app.state.request_remove_linked_worktree.take() {
-                self.app.open_remove_linked_worktree_confirmation(ws_idx);
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
-            }
-
-            if self.app.state.request_submit_worktree_create {
-                self.app.state.request_submit_worktree_create = false;
-                self.app.submit_worktree_create_via_api();
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_worktree_submit");
-            }
-
-            if self.app.state.request_submit_worktree_open {
-                self.app.state.request_submit_worktree_open = false;
-                self.app.submit_worktree_open_via_api();
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_worktree_submit");
-            }
-
-            if self.app.state.request_submit_worktree_remove {
-                self.app.state.request_submit_worktree_remove = false;
-                self.app.submit_worktree_remove_via_api();
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.deferred_worktree_submit");
-            }
-
-            if self.app.state.request_reload_config {
-                self.app.state.request_reload_config = false;
-                self.reload_server_config(true);
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.config_reload");
             }
 
             if latest_app_client(&self.clients).is_some() && self.app.ensure_default_workspace() {
@@ -624,6 +542,167 @@ impl HeadlessServer {
 
         info!("headless server exiting");
         Ok(())
+    }
+
+    fn handle_deferred_requests_headless(&mut self) -> bool {
+        let mut needs_render = false;
+
+        if self.app.state.request_complete_onboarding {
+            self.app.state.request_complete_onboarding = false;
+            self.app.open_settings_from_onboarding();
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_onboarding");
+        }
+
+        if self.app.state.request_new_workspace {
+            self.app.state.request_new_workspace = false;
+            let response = self.dispatch_headless_runtime_mutation(
+                "headless.workspace.create",
+                crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: None,
+                        focus: true,
+                        label: None,
+                    },
+                ),
+            );
+            if let Err(error) = response {
+                error!(
+                    code = %error.code,
+                    message = %error.message,
+                    "failed to create workspace"
+                );
+            }
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_new_workspace");
+        }
+
+        if self.app.state.request_new_tab {
+            self.app.state.request_new_tab = false;
+            let label = self.app.state.requested_new_tab_name.take();
+            let response = self.dispatch_headless_runtime_mutation(
+                "headless.tab.create",
+                crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+                    workspace_id: None,
+                    cwd: None,
+                    focus: true,
+                    label,
+                }),
+            );
+            if let Err(error) = response {
+                error!(
+                    code = %error.code,
+                    message = %error.message,
+                    "failed to create tab"
+                );
+            }
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_new_tab");
+        }
+
+        if let Some(ws_idx) = self.app.state.request_new_linked_worktree.take() {
+            self.app.open_new_linked_worktree_dialog(ws_idx);
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+        }
+
+        if let Some(ws_idx) = self.app.state.request_open_existing_worktree.take() {
+            self.app.open_existing_worktree_dialog(ws_idx);
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+        }
+
+        if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
+            let response = self.dispatch_headless_runtime_mutation(
+                "headless.workspace.create_cwd",
+                crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: Some(cwd.display().to_string()),
+                        focus: true,
+                        label: None,
+                    },
+                ),
+            );
+            if let Err(error) = response {
+                error!(
+                    code = %error.code,
+                    message = %error.message,
+                    "failed to create workspace at requested cwd"
+                );
+                self.app.state.mode = app::Mode::Navigate;
+            }
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_workspace_cwd");
+        }
+
+        if let Some(ws_idx) = self.app.state.request_remove_linked_worktree.take() {
+            self.app.open_remove_linked_worktree_confirmation(ws_idx);
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+        }
+
+        if self.app.state.request_submit_worktree_create {
+            self.app.state.request_submit_worktree_create = false;
+            self.app.submit_worktree_create_via_api();
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_submit");
+        }
+
+        if self.app.state.request_submit_worktree_open {
+            self.app.state.request_submit_worktree_open = false;
+            self.app.submit_worktree_open_via_api();
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_submit");
+        }
+
+        if self.app.state.request_submit_worktree_remove {
+            self.app.state.request_submit_worktree_remove = false;
+            self.app.submit_worktree_remove_via_api();
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_submit");
+        }
+
+        if self.app.state.request_reload_config {
+            self.app.state.request_reload_config = false;
+            self.reload_server_config(true);
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.config_reload");
+        }
+
+        needs_render
+    }
+
+    /// Run one server-initiated mutation through the same API dispatch the socket clients use,
+    /// so a deferred UI request and a `workspace.create` request take one code path.
+    ///
+    /// `skip_default_workspace_for_request` is set: this call IS the workspace/tab creation, so the
+    /// post-request `ensure_default_workspace()` fallback must not race it (and must not paper over
+    /// a failed create by seeding a default workspace instead).
+    fn dispatch_headless_runtime_mutation(
+        &mut self,
+        id: &'static str,
+        method: api::schema::Method,
+    ) -> Result<(), api::schema::ErrorBody> {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        self.handle_api_request_with_shutdown_check_inner(
+            api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: id.to_string(),
+                    method,
+                },
+                respond_to,
+            },
+            true,
+        );
+        match response_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(response) => serde_json::from_str::<api::schema::ErrorResponse>(&response)
+                .map(|response| Err(response.error))
+                .unwrap_or(Ok(())),
+            Err(err) => Err(api::schema::ErrorBody {
+                code: "internal_error".into(),
+                message: format!("headless runtime mutation response failed: {err}"),
+            }),
+        }
     }
 
     fn allocate_activity_stamp(&mut self) -> u64 {
@@ -2497,6 +2576,14 @@ impl HeadlessServer {
     /// trigger internal events that may set toast state or would normally
     /// play sounds — in headless mode we forward these to clients instead.
     fn handle_api_request_with_shutdown_check(&mut self, msg: api::ApiRequestMessage) -> bool {
+        self.handle_api_request_with_shutdown_check_inner(msg, false)
+    }
+
+    fn handle_api_request_with_shutdown_check_inner(
+        &mut self,
+        msg: api::ApiRequestMessage,
+        skip_default_workspace_for_request: bool,
+    ) -> bool {
         if self.shutting_down {
             // During shutdown, respond with server_unavailable.
             let response = serde_json::to_string(&api::schema::ErrorResponse {
@@ -2558,10 +2645,11 @@ impl HeadlessServer {
         }
 
         let mut changed = api::request_changes_ui(&msg.request);
-        let skip_default_workspace = matches!(
-            &msg.request.method,
-            api::schema::Method::ServerStop(_) | api::schema::Method::ServerLiveHandoff(_)
-        );
+        let skip_default_workspace = skip_default_workspace_for_request
+            || matches!(
+                &msg.request.method,
+                api::schema::Method::ServerStop(_) | api::schema::Method::ServerLiveHandoff(_)
+            );
         changed |= self.drain_all_internal_events_with_forwarding();
 
         // Capture toast and effective pane states before the API call so we can
@@ -3976,9 +4064,13 @@ mod tests {
     use crate::protocol::CursorState;
 
     fn test_headless_server() -> HeadlessServer {
+        test_headless_server_with_event_hub(api::EventHub::default())
+    }
+
+    fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServer {
         let config = crate::config::Config::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = crate::app::App::new(&config, true, None, api_rx, api::EventHub::default());
+        let mut app = crate::app::App::new(&config, true, None, api_rx, event_hub);
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
 
@@ -4024,6 +4116,12 @@ mod tests {
             should_quit: Arc::new(AtomicBool::new(false)),
             server_event_rx,
             server_event_tx,
+        }
+    }
+
+    fn shutdown_test_runtimes(server: &mut HeadlessServer) {
+        for (_, runtime) in server.app.terminal_runtimes.drain() {
+            runtime.shutdown();
         }
     }
 
@@ -4095,6 +4193,107 @@ mod tests {
             Some(expected_version.as_str())
         );
         assert!(server.app.event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn headless_deferred_workspace_create_uses_runtime_events() {
+        let event_hub = api::EventHub::default();
+        let mut server = test_headless_server_with_event_hub(event_hub.clone());
+
+        server.app.state.request_new_workspace = true;
+
+        assert!(server.handle_deferred_requests_headless());
+        assert!(!server.app.state.request_new_workspace);
+        assert_eq!(
+            event_hub
+                .events_after(0)
+                .into_iter()
+                .map(|(_, event)| event.event)
+                .collect::<Vec<_>>(),
+            vec![
+                api::schema::EventKind::WorkspaceCreated,
+                api::schema::EventKind::TabCreated,
+                api::schema::EventKind::PaneCreated,
+            ]
+        );
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[tokio::test]
+    async fn headless_deferred_named_tab_create_uses_runtime_events() {
+        let event_hub = api::EventHub::default();
+        let mut server = test_headless_server_with_event_hub(event_hub.clone());
+        server
+            .app
+            .create_workspace_with_options(std::env::temp_dir(), true)
+            .unwrap();
+        let after_setup = event_hub.current_sequence();
+
+        server.app.state.request_new_tab = true;
+        server.app.state.requested_new_tab_name = Some("ops".into());
+
+        assert!(server.handle_deferred_requests_headless());
+        assert!(!server.app.state.request_new_tab);
+        assert_eq!(server.app.state.requested_new_tab_name, None);
+        let events = event_hub.events_after(after_setup);
+        assert_eq!(
+            events
+                .iter()
+                .map(|(_, event)| event.event)
+                .collect::<Vec<_>>(),
+            vec![
+                api::schema::EventKind::TabCreated,
+                api::schema::EventKind::PaneCreated,
+            ]
+        );
+        let tab_created = events
+            .iter()
+            .find_map(|(_, event)| match &event.data {
+                api::schema::EventData::TabCreated { tab } => Some(tab),
+                _ => None,
+            })
+            .expect("tab created event");
+        assert_eq!(tab_created.label, "ops");
+        shutdown_test_runtimes(&mut server);
+    }
+
+    /// A deferred create dispatched by the server IS the workspace/tab creation, so it must run
+    /// with `skip_default_workspace_for_request`. Otherwise a create that the API rejects falls
+    /// through to the post-request `ensure_default_workspace()` fallback, which seeds a workspace
+    /// nobody asked for and hides the failure.
+    #[tokio::test]
+    async fn headless_deferred_create_failure_does_not_seed_a_default_workspace() {
+        let mut server = test_headless_server();
+        let (client_tx, _client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        assert!(latest_app_client(&server.clients).is_some());
+        assert!(server.app.state.workspaces.is_empty());
+        // Out of onboarding, so `ensure_default_workspace()` is live and would fire if the
+        // dispatch did not skip it.
+        server.app.state.mode = app::Mode::Navigate;
+
+        // `tab.create` with no active workspace is rejected by the API handler.
+        server.app.state.request_new_tab = true;
+
+        assert!(server.handle_deferred_requests_headless());
+        assert!(!server.app.state.request_new_tab);
+        assert!(
+            server.app.state.workspaces.is_empty(),
+            "a rejected deferred create must not fall through to ensure_default_workspace"
+        );
+        assert_eq!(server.app.terminal_runtimes.len(), 0);
+        shutdown_test_runtimes(&mut server);
     }
 
     fn test_client_writer() -> (

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+#[cfg(test)]
 use tracing::error;
 
 use super::{
@@ -56,6 +57,7 @@ impl App {
     }
 
     /// Create a workspace with a real PTY (needs event_tx).
+    #[cfg(test)]
     pub(crate) fn create_workspace(&mut self) {
         let follow_cwd = self
             .workspace_creation_source()
@@ -70,6 +72,7 @@ impl App {
     /// Create a workspace and emit the workspace/tab/pane plugin lifecycle events.
     /// The UI-driven create flows must mirror the socket API flows, which already
     /// emit these events (port upstream d74ba8c).
+    #[cfg(test)]
     pub(crate) fn create_workspace_with_events(
         &mut self,
         initial_cwd: PathBuf,
@@ -80,6 +83,7 @@ impl App {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn create_tab(&mut self) {
         let custom_name = self.state.requested_new_tab_name.take();
         let active_before = self.state.active;
@@ -124,6 +128,7 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn create_tab_with_options(
         &mut self,
         initial_cwd: PathBuf,
