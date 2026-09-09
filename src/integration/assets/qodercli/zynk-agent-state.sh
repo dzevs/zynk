@@ -1,13 +1,12 @@
 #!/bin/sh
 # managed by zynk; reinstalling the integration replaces this file.
 # ZYNK_INTEGRATION_ID=qodercli
-# ZYNK_INTEGRATION_VERSION=2
+# ZYNK_INTEGRATION_VERSION=3
 
 [ "${1:-}" = "session" ] || exit 0
 [ "${ZYNK_ENV:-${ZYNK_ENV:-}}" = "1" ] || exit 0
 [ -n "${ZYNK_SOCKET_PATH:-${ZYNK_SOCKET_PATH:-}}" ] || exit 0
 [ -n "${ZYNK_PANE_ID:-${ZYNK_PANE_ID:-}}" ] || exit 0
-command -v zynk >/dev/null 2>&1 || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
 python3 -c '
@@ -24,7 +23,8 @@ try:
         raise ValueError
     subprocess.run(
         [
-            "zynk", "pane", "report-agent-session", os.environ["ZYNK_PANE_ID"],
+            os.environ.get("ZYNK_BIN_PATH") or "zynk",
+            "pane", "report-agent-session", os.environ["ZYNK_PANE_ID"],
             "--source", "zynk:qodercli", "--agent", "qodercli",
             "--agent-session-id", session_id, "--seq", str(time.time_ns()),
         ],

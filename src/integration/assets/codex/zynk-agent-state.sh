@@ -3,7 +3,7 @@
 # managed by zynk; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # ZYNK_INTEGRATION_ID=codex
-# ZYNK_INTEGRATION_VERSION=7
+# ZYNK_INTEGRATION_VERSION=8
 
 set -eu
 

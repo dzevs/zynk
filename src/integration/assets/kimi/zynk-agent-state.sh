@@ -1,7 +1,7 @@
 #!/bin/sh
 # managed by zynk; reinstalling the integration replaces this file.
 # ZYNK_INTEGRATION_ID=kimi
-# ZYNK_INTEGRATION_VERSION=5
+# ZYNK_INTEGRATION_VERSION=6
 
 action="${1:-}"
 case "$action" in

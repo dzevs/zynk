@@ -2641,6 +2641,24 @@ mod tests {
     }
 
     #[test]
+    fn pane_launch_env_exports_the_running_binary_path() {
+        // Agent panes spawn through `spawn`/`spawn_with_initial_history`,
+        // `spawn_shell_command` and `spawn_argv_command`, and all four apply
+        // `apply_pane_launch_env`. Hook assets that shell out to the CLI
+        // (qodercli, hermes) read `ZYNK_BIN_PATH` from that env, so it has to
+        // survive the composition, not just `apply_pane_base_env` in isolation.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
+
+        let executable = std::env::current_exe().expect("current_exe");
+        assert_eq!(
+            cmd.get_env("ZYNK_BIN_PATH"),
+            Some(executable.as_os_str()),
+            "an agent pane must export ZYNK_BIN_PATH"
+        );
+    }
+
+    #[test]
     fn pane_launch_env_exports_identity_triple_and_extra() {
         // A launch env carrying an identity exports the Zynk-branded
         // `ZYNK_WORKSPACE_ID`/`ZYNK_TAB_ID`/`ZYNK_PANE_ID` triple plus caller extra env.

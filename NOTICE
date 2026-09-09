@@ -60,9 +60,13 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 - src/detect/mod.rs
 - src/integration/actions.rs
 - src/integration/assets/antigravity_cli/zynk-agent-state.sh
+- src/integration/assets/claude/zynk-agent-state.sh
 - src/integration/assets/codex/zynk-agent-state.sh
+- src/integration/assets/copilot/zynk-agent-state.sh
+- src/integration/assets/droid/zynk-agent-state.sh
 - src/integration/assets/grok/zynk-agent-state.sh
 - src/integration/assets/hermes/__init__.py
+- src/integration/assets/kimi/zynk-agent-state.sh
 - src/integration/assets/omp/zynk-agent-state.ts
 - src/integration/assets/opencode/zynk-agent-state.js
 - src/integration/assets/opencode/zynk-agent-state.test.ts
@@ -70,6 +74,7 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 - src/integration/assets/opencode/zynk-tui-session.test.ts
 - src/integration/assets/pi/zynk-agent-state.test.ts
 - src/integration/assets/pi/zynk-agent-state.ts
+- src/integration/assets/qodercli/zynk-agent-state.sh
 - src/integration/assets/zynk-agent-state.test.ts
 - src/integration/claude_settings.rs
 - src/integration/env.rs

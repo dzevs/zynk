@@ -1036,7 +1036,7 @@ fn claude_v1_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(1));
-    assert_eq!(claude.expected_version, 7);
+    assert_eq!(claude.expected_version, 8);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1066,7 +1066,7 @@ fn claude_v2_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(2));
-    assert_eq!(claude.expected_version, 7);
+    assert_eq!(claude.expected_version, 8);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1199,7 +1199,7 @@ fn codex_v2_integration_status_is_outdated() {
 
     assert_eq!(codex.path, hook_path);
     assert_eq!(codex.installed_version, Some(2));
-    assert_eq!(codex.expected_version, 7);
+    assert_eq!(codex.expected_version, 8);
     assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1717,18 +1717,23 @@ fn copilot_v2_hook_with_foreign_integration_id_is_outdated() {
 }
 
 #[test]
-fn native_copilot_v2_hook_is_current() {
+fn native_copilot_hook_at_the_expected_version_is_current() {
     let _lock = integration_env_lock();
     let base = unique_base();
     let home = base.join("home");
+    // The fixture tracks `COPILOT_INTEGRATION_VERSION` instead of pinning a
+    // literal: this test guards the native-hook identity gate, not one specific
+    // revision, so a version bump must not turn it red.
     write_copilot_hook(
         &home,
-        "#!/bin/sh\n# ZYNK_INTEGRATION_ID=copilot\n# ZYNK_INTEGRATION_VERSION=2\nsource=\"zynk:copilot\"\n",
+        &format!(
+            "#!/bin/sh\n# ZYNK_INTEGRATION_ID=copilot\n# ZYNK_INTEGRATION_VERSION={COPILOT_INTEGRATION_VERSION}\nsource=\"zynk:copilot\"\n"
+        ),
     );
     std::env::set_var("HOME", &home);
 
     let copilot = copilot_status();
-    assert_eq!(copilot.installed_version, Some(2));
+    assert_eq!(copilot.installed_version, Some(COPILOT_INTEGRATION_VERSION));
     assert_eq!(copilot.state, IntegrationStatusKind::Current);
 
     std::env::remove_var("HOME");
@@ -3012,6 +3017,12 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(QODERCLI_HOOK_ASSET.contains("session_id"));
     assert!(QODERCLI_HOOK_ASSET.contains("report-agent-session"));
     assert!(QODERCLI_HOOK_ASSET.contains("--agent-session-id"));
+    // The hook resolves the running build through `ZYNK_BIN_PATH` (exported to
+    // every pane by `apply_pane_base_env`) and falls back to a PATH lookup only
+    // when that variable is absent. The old `command -v zynk` precondition
+    // skipped the report entirely whenever the running binary was off PATH.
+    assert!(QODERCLI_HOOK_ASSET.contains("os.environ.get(\"ZYNK_BIN_PATH\") or \"zynk\""));
+    assert!(!QODERCLI_HOOK_ASSET.contains("command -v zynk"));
     assert!(!QODERCLI_HOOK_ASSET.contains("report-agent\""));
     assert!(!QODERCLI_HOOK_ASSET.contains("release-agent"));
     assert!(CURSOR_HOOK_ASSET.contains("ZYNK_INTEGRATION_ID=cursor"));

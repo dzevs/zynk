@@ -3,7 +3,7 @@
 # managed by zynk; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # ZYNK_INTEGRATION_ID=antigravity_cli
-# ZYNK_INTEGRATION_VERSION=1
+# ZYNK_INTEGRATION_VERSION=2
 
 # Session-only: this hook reports the Antigravity conversation so zynk can
 # resume the pane. Lifecycle state comes from zynk's screen detection.

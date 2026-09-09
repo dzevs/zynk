@@ -31,13 +31,13 @@ pub(crate) const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/zynk-agent
 pub(crate) const OMP_INTEGRATION_VERSION: u32 = 7;
 pub(crate) const CLAUDE_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/zynk-agent-state.sh");
-pub(crate) const CLAUDE_INTEGRATION_VERSION: u32 = 7;
+pub(crate) const CLAUDE_INTEGRATION_VERSION: u32 = 8;
 pub(crate) const CODEX_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/zynk-agent-state.sh");
-pub(crate) const CODEX_INTEGRATION_VERSION: u32 = 7;
+pub(crate) const CODEX_INTEGRATION_VERSION: u32 = 8;
 pub(crate) const KIMI_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const KIMI_HOOK_ASSET: &str = include_str!("assets/kimi/zynk-agent-state.sh");
-pub(crate) const KIMI_INTEGRATION_VERSION: u32 = 5;
+pub(crate) const KIMI_INTEGRATION_VERSION: u32 = 6;
 pub(crate) const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> zynk kimi integration";
 pub(crate) const KIMI_CONFIG_BLOCK_END: &str = "# <<< zynk kimi integration";
 // Pre-rebrand kimi config-block fences; removal strips them too (migration compat).
@@ -73,7 +73,7 @@ pub(crate) const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 12] = [
 ];
 pub(crate) const COPILOT_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const COPILOT_HOOK_ASSET: &str = include_str!("assets/copilot/zynk-agent-state.sh");
-pub(crate) const COPILOT_INTEGRATION_VERSION: u32 = 2;
+pub(crate) const COPILOT_INTEGRATION_VERSION: u32 = 3;
 pub(crate) const COPILOT_HOOK_EVENTS: [&str; 1] = ["SessionStart"];
 pub(crate) const COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS: [&str; 9] = [
     "UserPromptSubmit",
@@ -107,7 +107,7 @@ pub(crate) const DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 6] = [
 ];
 pub(crate) const DROID_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const DROID_HOOK_ASSET: &str = include_str!("assets/droid/zynk-agent-state.sh");
-pub(crate) const DROID_INTEGRATION_VERSION: u32 = 2;
+pub(crate) const DROID_INTEGRATION_VERSION: u32 = 3;
 pub(crate) const DROID_HOOK_EVENTS: [(&str, &str); 1] = [("SessionStart", "session")];
 pub(crate) const DROID_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 9] = [
     ("SessionStart", "idle"),
@@ -140,7 +140,7 @@ pub(crate) const HERMES_PLUGIN_INIT_ASSET: &str = include_str!("assets/hermes/__
 pub(crate) const HERMES_INTEGRATION_VERSION: u32 = 4;
 pub(crate) const QODERCLI_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const QODERCLI_HOOK_ASSET: &str = include_str!("assets/qodercli/zynk-agent-state.sh");
-pub(crate) const QODERCLI_INTEGRATION_VERSION: u32 = 2;
+pub(crate) const QODERCLI_INTEGRATION_VERSION: u32 = 3;
 pub(crate) const QODERCLI_HOOK_EVENTS: [(&str, &str); 1] = [("SessionStart", "session")];
 pub(crate) const QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 12] = [
     ("SessionStart", "idle"),
@@ -181,7 +181,7 @@ pub(crate) const MASTRACODE_HOOK_EVENTS: [(&str, &str); 12] = [
 pub(crate) const ANTIGRAVITY_CLI_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const ANTIGRAVITY_CLI_HOOK_ASSET: &str =
     include_str!("assets/antigravity_cli/zynk-agent-state.sh");
-pub(crate) const ANTIGRAVITY_CLI_INTEGRATION_VERSION: u32 = 1;
+pub(crate) const ANTIGRAVITY_CLI_INTEGRATION_VERSION: u32 = 2;
 /// Antigravity CLI keys `hooks.json` by hook name, so every zynk entry lives
 /// under one zynk-owned block that install rewrites and uninstall removes.
 pub(crate) const ANTIGRAVITY_CLI_HOOK_BLOCK_NAME: &str = "zynk";
