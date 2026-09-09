@@ -222,6 +222,7 @@ impl App {
         };
         let workspace_id = self.public_workspace_id(ws_idx);
         let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
+        let pane_ids = self.state.pane_ids_for_tab(ws_idx, tab_idx);
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &target.tab_id);
         };
@@ -239,6 +240,7 @@ impl App {
                 format!("tab {} could not be closed", target.tab_id),
             );
         }
+        self.state.remove_plugin_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
         self.schedule_session_save();
@@ -325,5 +327,38 @@ mod tests {
                     && tabs[2].tab_id == moved_id
             )
         }));
+    }
+    #[test]
+    fn api_tab_close_clears_copy_mode_for_removed_panes() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut workspace = Workspace::test_new("tabs");
+        let closing_tab = workspace.test_add_tab(Some("closing"));
+        let closing_pane = workspace.tabs[closing_tab].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.copy_mode = Some(crate::app::state::CopyModeState {
+            pane_id: closing_pane,
+            cursor_row: 0,
+            cursor_col: 0,
+            entry_offset_from_bottom: 0,
+            selection: None,
+        });
+        let closing_tab_id = app.public_tab_id(0, closing_tab).unwrap();
+
+        let response = app.handle_tab_close(
+            "req".into(),
+            TabTarget {
+                tab_id: closing_tab_id,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::Ok {}));
+        assert!(app.state.copy_mode.is_none());
+        app.state.assert_invariants_for_test();
     }
 }

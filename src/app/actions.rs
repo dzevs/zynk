@@ -296,6 +296,14 @@ impl AppState {
         }
     }
 
+    fn sync_selection_after_focus_navigation(&mut self) {
+        if self.copy_mode.is_some() {
+            self.sync_copy_mode_with_focus();
+        } else {
+            self.clear_selection();
+        }
+    }
+
     pub(crate) fn focus_pane_in_workspace(&mut self, ws_idx: usize, pane_id: PaneId) -> bool {
         let Some(ws) = self.workspaces.get(ws_idx) else {
             return false;
@@ -312,6 +320,9 @@ impl AppState {
             return false;
         }
 
+        if self.copy_mode.is_some() {
+            self.clear_copy_mode_selection();
+        }
         self.switch_workspace_tab(ws_idx, tab_idx);
         if let Some(tab) = self
             .workspaces
@@ -321,6 +332,7 @@ impl AppState {
             tab.layout.focus_pane(pane_id);
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
+            self.sync_copy_mode_with_focus();
             return true;
         }
         false
@@ -948,8 +960,6 @@ impl AppState {
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
             let previous_focus = self.current_pane_focus_target();
-            self.selection = None;
-            self.selection_autoscroll = None;
             self.active = Some(idx);
             self.selected = idx;
             let workspace_id = self.workspaces[idx].id.clone();
@@ -966,6 +976,7 @@ impl AppState {
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
             self.record_pane_focus_after_navigation(previous_focus);
+            self.sync_selection_after_focus_navigation();
         }
     }
 
@@ -983,8 +994,6 @@ impl AppState {
 
         let previous_focus = self.current_pane_focus_target();
         let workspace_changed = self.active != Some(ws_idx);
-        self.selection = None;
-        self.selection_autoscroll = None;
         self.active = Some(ws_idx);
         self.selected = ws_idx;
         let workspace_id = self.workspaces[ws_idx].id.clone();
@@ -1002,6 +1011,7 @@ impl AppState {
         self.tab_scroll_follow_active = true;
         self.refresh_tab_bar_view();
         self.record_pane_focus_after_navigation(previous_focus);
+        self.sync_selection_after_focus_navigation();
         true
     }
 
@@ -1088,8 +1098,6 @@ impl AppState {
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws_idx) = self.active {
             let previous_focus = self.current_pane_focus_target();
-            self.selection = None;
-            self.selection_autoscroll = None;
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
                 return;
             };
@@ -1101,6 +1109,7 @@ impl AppState {
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
             self.record_pane_focus_after_navigation(previous_focus);
+            self.sync_selection_after_focus_navigation();
         }
     }
 
@@ -1428,6 +1437,15 @@ impl AppState {
         &mut self,
         pane_ids: impl IntoIterator<Item = PaneId>,
     ) {
+        let pane_ids = pane_ids.into_iter().collect::<Vec<_>>();
+        self.clear_copy_mode_for_removed_panes(pane_ids.iter().copied());
+        if self
+            .previous_pane_focus
+            .as_ref()
+            .is_some_and(|focus| pane_ids.contains(&focus.pane_id))
+        {
+            self.previous_pane_focus = None;
+        }
         for pane_id in pane_ids {
             self.plugin_panes.remove(&pane_id);
         }
@@ -2995,7 +3013,7 @@ impl AppState {
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
         self.pending_agent_notifications.remove(&pane_id);
-        self.plugin_panes.remove(&pane_id);
+        self.remove_plugin_pane_records([pane_id]);
         let ws_idx = self
             .workspaces
             .iter()
