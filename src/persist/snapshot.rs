@@ -105,6 +105,11 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// The pane's hook RETIREMENT fences, so a live handoff cannot void them. Absent in
+    /// every older snapshot and in every pane that has nothing retired; only
+    /// `restore_handoff` applies it (see `crate::persist::restore`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_retirement: Option<crate::terminal::state::HookRetirementSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,6 +414,12 @@ fn capture_tab(
             .and_then(|runtime| runtime.child_pid());
         let launch_argv =
             persisted_agent_launch_argv(agent_session.as_ref(), child_pid, existing_launch_argv);
+        // Ages are relative to ONE capture instant per pane, so every boundary keeps its
+        // gaps when the restoring server re-bases them against its own clock.
+        let hook_retirement = attached_terminal_id
+            .as_ref()
+            .and_then(|tid| terminals.get(tid))
+            .and_then(|terminal| terminal.export_hook_retirement(std::time::Instant::now()));
         panes.insert(
             id.raw(),
             PaneSnapshot {
@@ -417,6 +428,7 @@ fn capture_tab(
                 agent_name,
                 agent_session,
                 launch_argv,
+                hook_retirement,
             },
         );
     }
@@ -659,6 +671,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                hook_retirement: None,
             },
         );
         panes.insert(
@@ -669,6 +682,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                hook_retirement: None,
             },
         );
 
@@ -1148,6 +1162,67 @@ mod tests {
     }
 
     #[test]
+    fn capture_contract_tracks_hook_retirement() {
+        // Gate-3 arbiter finding (msg_24fa384d30dfa9af): the capture carried the pane's
+        // agent SESSION and nothing of the identity machine, so every retirement the
+        // fork enforces was void across a live handoff.
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        assert!(
+            capture_from_state(&state).workspaces[0].tabs[0].panes[&root.raw()]
+                .hook_retirement
+                .is_none(),
+            "a pane no hook ever reported on must not grow the snapshot"
+        );
+
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                crate::detect::AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-1"),
+                Some(20),
+            )
+            .expect("pi authority");
+
+        // A LIVE session has nothing retired, but it does have a replay fence, and the
+        // fence is exactly what must not reset when the server is replaced.
+        let live = capture_from_state(&state).workspaces[0].tabs[0].panes[&root.raw()]
+            .hook_retirement
+            .clone()
+            .expect("the sequence fence is captured");
+        assert_eq!(live.sequences, vec![("zynk:pi".to_string(), 20)]);
+        assert!(live.suppressed.is_empty() && live.stale.is_empty());
+
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .release_agent_with_mutation("zynk:pi", "pi", Some(21))
+            .expect("release");
+
+        let retirement = capture_from_state(&state).workspaces[0].tabs[0].panes[&root.raw()]
+            .hook_retirement
+            .clone()
+            .expect("the release is a retirement and must be captured");
+        assert_eq!(retirement.sequences, vec![("zynk:pi".to_string(), 21)]);
+        let suppressed = &retirement.suppressed[0];
+        assert_eq!(suppressed.source, "zynk:pi");
+        assert_eq!(suppressed.agent_label, "pi");
+        assert_eq!(
+            suppressed.session_ref.as_ref().map(|s| s.value.as_str()),
+            Some("pi-1")
+        );
+    }
+
+    #[test]
     fn capture_contract_preserves_restored_agent_session() {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
@@ -1304,6 +1379,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                hook_retirement: None,
             },
         );
         panes.insert(
@@ -1316,6 +1392,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                hook_retirement: None,
             },
         );
 

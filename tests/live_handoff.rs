@@ -2341,3 +2341,224 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
 fn live_handoff_after_restored_failure_rolls_back_old_server() {
     live_handoff_import_failure_rolls_back_old_server_at("after_restored");
 }
+
+/// Probe the receipt identity gate on `pane_id`.
+///
+/// `zynk.message_received` resolves the hook-AUTHORITATIVE receiver before it looks at
+/// the message at all (`src/app/api/zynk.rs`), so a request naming ids no conversation
+/// has answers `receiver_identity_unverified` exactly when the pane holds no usable
+/// hook identity, and something else the moment it does. That is the whole question
+/// these cases ask, and it needs no conversation to ask it.
+fn receipt_identity_error(api_socket: &Path, pane_id: &str) -> String {
+    let response = request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:receipt",
+            "method": "zynk.message_received",
+            "params": {
+                "pane_id": pane_id,
+                "message_id": "msg_handoff_probe",
+                "conversation_id": "conv_handoff_probe",
+                "conversation_seq": 1,
+                "runtime_session_id": "rt_handoff_probe",
+                "socket_namespace": "ns_handoff_probe"
+            }
+        }),
+    );
+    response["error"]["code"].as_str().unwrap_or("").to_string()
+}
+
+fn report_pi_agent(api_socket: &Path, pane_id: &str, seq: u64, session: &str) -> serde_json::Value {
+    request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:report",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": pane_id,
+                "source": "zynk:pi",
+                "agent": "pi",
+                "state": "working",
+                "seq": seq,
+                "agent_session_id": session
+            }
+        }),
+    )
+}
+
+fn handoff_pane_with_pi_session(api_socket: &Path, seq: u64, session: &str) -> String {
+    let created = request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(report_pi_agent(api_socket, &pane_id, seq, session));
+    assert_ne!(
+        receipt_identity_error(api_socket, &pane_id),
+        "receiver_identity_unverified",
+        "the established session was not receipt-capable before the handoff"
+    );
+    pane_id
+}
+
+#[test]
+fn live_handoff_keeps_a_released_session_retired() {
+    // Gate-3 arbiter finding (msg_24fa384d30dfa9af): the snapshot carried the pane's
+    // agent SESSION and nothing of the identity machine, so every retirement guarantee
+    // the fork makes was void across a live handoff. Here the session is released — the
+    // receipt gate refuses it, as it must — and after the handoff an ORDINARY
+    // same-session report with no session-start reason re-anchored it on the new
+    // server, which made the message addressed to the released session `received`.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let pane_id = handoff_pane_with_pi_session(&api_socket, 5, "pi-1");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:release",
+            "method": "pane.release_agent",
+            "params": {"pane_id": pane_id, "source": "zynk:pi", "agent": "pi", "seq": 6}
+        }),
+    ));
+    assert_eq!(
+        receipt_identity_error(&api_socket, &pane_id),
+        "receiver_identity_unverified",
+        "the released session stayed receipt-capable before the handoff"
+    );
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    // The late callback the retirement exists to refuse: same session, higher sequence,
+    // no session-start reason.
+    let late = report_pi_agent(&api_socket, &pane_id, 7, "pi-1");
+    assert!(late.get("error").is_none(), "{late}");
+    let after = receipt_identity_error(&api_socket, &pane_id);
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+    assert_eq!(
+        after, "receiver_identity_unverified",
+        "a live handoff let an ordinary report re-anchor a released session"
+    );
+}
+
+#[test]
+fn live_handoff_admits_a_genuinely_new_session() {
+    // The other side of the same fence: a carried retirement must not ban the owner. A
+    // genuinely NEW session id from the released owner is admitted after the handoff
+    // exactly as it is before one, and receipts for it work.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let pane_id = handoff_pane_with_pi_session(&api_socket, 5, "pi-1");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:release",
+            "method": "pane.release_agent",
+            "params": {"pane_id": pane_id, "source": "zynk:pi", "agent": "pi", "seq": 6}
+        }),
+    ));
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    let restarted = report_pi_agent(&api_socket, &pane_id, 7, "pi-2");
+    assert!(restarted.get("error").is_none(), "{restarted}");
+    let after = receipt_identity_error(&api_socket, &pane_id);
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+    assert_ne!(
+        after, "receiver_identity_unverified",
+        "a carried retirement banned the owner instead of the session it retired"
+    );
+}
+
+#[test]
+fn live_handoff_keeps_the_sequence_fence() {
+    // The replay fence travels too. A report behind the sequence this owner anchored
+    // before the handoff is ignored on the new server, so it cannot re-establish an
+    // identity, and the first report ahead of it is accepted as usual.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let pane_id = handoff_pane_with_pi_session(&api_socket, 5, "pi-1");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    // The live authority is never restored — only the fence is — so the pane starts the
+    // new server with no receipt-capable identity either way.
+    assert_eq!(
+        receipt_identity_error(&api_socket, &pane_id),
+        "receiver_identity_unverified"
+    );
+    let replayed = report_pi_agent(&api_socket, &pane_id, 3, "pi-1");
+    assert!(replayed.get("error").is_none(), "{replayed}");
+    let behind_the_fence = receipt_identity_error(&api_socket, &pane_id);
+
+    let ahead = report_pi_agent(&api_socket, &pane_id, 6, "pi-1");
+    assert!(ahead.get("error").is_none(), "{ahead}");
+    let ahead_of_the_fence = receipt_identity_error(&api_socket, &pane_id);
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+    assert_eq!(
+        behind_the_fence, "receiver_identity_unverified",
+        "a report behind the pre-handoff sequence anchored an identity on the new server"
+    );
+    assert_ne!(
+        ahead_of_the_fence, "receiver_identity_unverified",
+        "the fence refused a report genuinely ahead of it"
+    );
+}

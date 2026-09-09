@@ -100,8 +100,9 @@ impl SuppressedHookReport {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HookSuppressionReason {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookSuppressionReason {
     HookClear,
     ProcessExit,
 }
@@ -237,6 +238,126 @@ impl StaleHookSession {
     }
 }
 
+/// The hook RETIREMENT bookkeeping of one terminal, in a form that survives a live
+/// handoff to a replacement server process.
+///
+/// Only the fences travel — never the live `hook_authority`, which the next report
+/// re-establishes on its own. Without them every retirement guarantee the fork makes
+/// was void across `server.live_handoff`: a released session could be re-anchored on
+/// the new server by an ORDINARY same-session report with no session-start reason, and
+/// the message addressed to the released session then read `received` (Gate-3 arbiter
+/// `msg_24fa384d30dfa9af`).
+///
+/// Instants cannot cross a process boundary, so every one is carried as an AGE in
+/// milliseconds at capture time and re-based against the restoring server's own clock.
+/// The granularity is deliberate: boundaries a fraction of a millisecond apart collapse
+/// into a tie, and every comparison in the retirement machine is STRICTLY newer, so a
+/// tie always decides against the reclaim — the fail-closed direction.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HookRetirementSnapshot {
+    /// The per-source hook-report replay fence (`hook_report_sequences`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequences: Vec<(String, u64)>,
+    /// The per-source agent-METADATA replay fence (`metadata_report_sequences`). It is
+    /// the same `seq <= last` rule, so it travels for the same reason: dropping it would
+    /// open a replay window on the new server that does not exist on the old one, while
+    /// keeping it refuses only genuinely replayed reports — a live agent's sequence
+    /// counter is monotonic across a handoff, which is the whole point of a handoff.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_sequences: Vec<(String, u64)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suppressed: Vec<SuppressedHookReportSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale: Vec<StaleHookSessionSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_identity: Option<HookIdentitySnapshot>,
+    /// The provisional state of the previous commit: an observed exit no running
+    /// observation has answered yet, with the agent whose process it was observed for.
+    /// It covers the live authority's `unconfirmed_since` as well, because the restore
+    /// deliberately re-installs no authority for a bare age to live on; carried this
+    /// way it taints the next identity the new server records, exactly as it would have
+    /// in the old process, and only a running observation of that same agent clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unanswered_exit: Option<UnansweredExitSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnansweredExitSnapshot {
+    pub agent_label: String,
+    pub age_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentSessionRefSnapshot {
+    pub kind: crate::agent_resume::AgentSessionRefKind,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SuppressedHookReportSnapshot {
+    pub source: String,
+    pub agent_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<AgentSessionRefSnapshot>,
+    pub reason: HookSuppressionReason,
+    pub observed_age_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_loss_age_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StaleHookSessionSnapshot {
+    pub source: String,
+    pub agent_label: String,
+    pub session_ref: AgentSessionRefSnapshot,
+    pub retired_age_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_loss_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_age_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HookIdentitySnapshot {
+    pub source: String,
+    pub agent_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<AgentSessionRefSnapshot>,
+    pub reported_age_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unconfirmed_age_ms: Option<u64>,
+}
+
+impl AgentSessionRefSnapshot {
+    fn capture(session_ref: &crate::agent_resume::AgentSessionRef) -> Self {
+        Self {
+            kind: session_ref.kind,
+            value: session_ref.value.clone(),
+        }
+    }
+
+    fn restore(self) -> crate::agent_resume::AgentSessionRef {
+        crate::agent_resume::AgentSessionRef {
+            kind: self.kind,
+            value: self.value,
+        }
+    }
+}
+
+/// The age of `instant` at `now`, in whole milliseconds. An instant the caller's clock
+/// has not reached yet (only reachable from a test that stamps ahead) saturates to 0,
+/// so it re-bases onto `now` itself rather than into the future.
+fn age_ms(now: Instant, instant: Instant) -> u64 {
+    u64::try_from(now.saturating_duration_since(instant).as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The inverse of [`age_ms`] against the restoring process's own clock, saturating at
+/// `now` for an age no monotonic clock can reach back to.
+fn instant_from_age_ms(now: Instant, age_ms: u64) -> Instant {
+    now.checked_sub(std::time::Duration::from_millis(age_ms))
+        .unwrap_or(now)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveStateChange {
     pub previous_agent_label: Option<String>,
@@ -274,6 +395,16 @@ pub struct TerminalState {
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
     hook_report_sequences: HashMap<String, u64>,
+    /// An observed process EXIT that no running observation has answered yet, held at
+    /// the TERMINAL so it outlives the owner that recorded it: `(agent_label, capture
+    /// instant of the oldest unanswered exit)`.
+    ///
+    /// In one process the per-owner `unconfirmed_since` is enough, because every path
+    /// that drops an owner also SUPPRESSES it. A live handoff is the exception — the
+    /// restore deliberately re-installs no `hook_authority`, so without this the next
+    /// report on the new server would record a confirmed identity for a process the
+    /// detector last saw exiting.
+    unanswered_hook_exit: Option<(String, Instant)>,
     suppressed_hook_reports: HashMap<String, SuppressedHookReport>,
     stale_hook_sessions: HashMap<String, Vec<StaleHookSession>>,
     metadata_report_sequences: HashMap<String, u64>,
@@ -301,6 +432,7 @@ impl TerminalState {
             manual_label: None,
             agent_name: None,
             hook_report_sequences: HashMap::new(),
+            unanswered_hook_exit: None,
             suppressed_hook_reports: HashMap::new(),
             stale_hook_sessions: HashMap::new(),
             metadata_report_sequences: HashMap::new(),
@@ -840,24 +972,43 @@ impl TerminalState {
     /// OLDEST pending exit wins, the same keep-the-oldest rule the exit path applies,
     /// so the confirmation bar never moves forward on its own.
     fn unanswered_exit_to_inherit(&self) -> Option<Instant> {
-        let authority = self
-            .hook_authority
-            .as_ref()
-            .and_then(|authority| authority.unconfirmed_since);
-        let identity = self
-            .hook_identity
-            .as_ref()
-            .and_then(|identity| identity.unconfirmed_since);
-        match (authority, identity) {
-            (Some(authority), Some(identity)) => Some(authority.min(identity)),
-            (pending, None) | (None, pending) => pending,
-        }
+        [
+            self.hook_authority
+                .as_ref()
+                .and_then(|authority| authority.unconfirmed_since),
+            self.hook_identity
+                .as_ref()
+                .and_then(|identity| identity.unconfirmed_since),
+            self.unanswered_hook_exit.as_ref().map(|(_, at)| *at),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Hold this terminal's live hook owner PROVISIONAL against an exit captured at
     /// `observed_at`, keeping the OLDEST unanswered exit when one is already pending: a
     /// newer exit must not move the bar the detector has to clear.
     fn hold_hook_owner_unconfirmed(&mut self, observed_at: Instant) {
+        // The terminal's own copy, so the exit outlives the owner that recorded it
+        // across a live handoff. Same keep-the-oldest rule, same label — the owner whose
+        // process the exit was observed for.
+        if let Some(agent_label) = self
+            .hook_authority
+            .as_ref()
+            .map(|authority| authority.agent_label.clone())
+            .or_else(|| {
+                self.hook_identity
+                    .as_ref()
+                    .map(|identity| identity.agent_label.clone())
+            })
+        {
+            let pending = self
+                .unanswered_hook_exit
+                .as_ref()
+                .map_or(observed_at, |(_, at)| (*at).min(observed_at));
+            self.unanswered_hook_exit = Some((agent_label, pending));
+        }
         if let Some(authority) = self.hook_authority.as_mut() {
             authority.unconfirmed_since = Some(
                 authority
@@ -906,6 +1057,190 @@ impl TerminalState {
             if confirms(&identity.agent_label, identity.unconfirmed_since) {
                 identity.unconfirmed_since = None;
             }
+        }
+        if self
+            .unanswered_hook_exit
+            .as_ref()
+            .is_some_and(|(agent_label, at)| confirms(agent_label, Some(*at)))
+        {
+            self.unanswered_hook_exit = None;
+        }
+    }
+
+    /// Export this terminal's hook RETIREMENT fences so they survive a live handoff.
+    ///
+    /// `None` when nothing is retired, fenced or pending, so an ordinary pane adds no
+    /// bytes to the snapshot. Everything is sorted, so a round trip is byte-stable.
+    pub fn export_hook_retirement(&self, now: Instant) -> Option<HookRetirementSnapshot> {
+        let mut sequences: Vec<(String, u64)> = self
+            .hook_report_sequences
+            .iter()
+            .map(|(source, seq)| (source.clone(), *seq))
+            .collect();
+        sequences.sort();
+        let mut metadata_sequences: Vec<(String, u64)> = self
+            .metadata_report_sequences
+            .iter()
+            .map(|(source, seq)| (source.clone(), *seq))
+            .collect();
+        metadata_sequences.sort();
+        let mut suppressed: Vec<SuppressedHookReportSnapshot> = self
+            .suppressed_hook_reports
+            .iter()
+            .map(|(source, suppressed)| SuppressedHookReportSnapshot {
+                source: source.clone(),
+                agent_label: suppressed.agent_label.clone(),
+                session_ref: suppressed
+                    .session_ref
+                    .as_ref()
+                    .map(AgentSessionRefSnapshot::capture),
+                reason: suppressed.reason,
+                observed_age_ms: age_ms(now, suppressed.observed_at),
+                last_loss_age_ms: suppressed
+                    .last_loss_observed_at
+                    .map(|lost_at| age_ms(now, lost_at)),
+            })
+            .collect();
+        suppressed.sort_by(|left, right| {
+            (&left.source, &left.agent_label).cmp(&(&right.source, &right.agent_label))
+        });
+        let mut stale: Vec<StaleHookSessionSnapshot> = self
+            .stale_hook_sessions
+            .iter()
+            .flat_map(|(source, sessions)| {
+                sessions.iter().map(move |stale| StaleHookSessionSnapshot {
+                    source: source.clone(),
+                    agent_label: stale.agent_label.clone(),
+                    session_ref: AgentSessionRefSnapshot::capture(&stale.session_ref),
+                    retired_age_ms: age_ms(now, stale.retired_at),
+                    last_loss_age_ms: stale
+                        .last_loss_observed_at
+                        .map(|lost_at| age_ms(now, lost_at)),
+                    evidence_age_ms: stale
+                        .fresh_process_evidence
+                        .map(|recorded_at| age_ms(now, recorded_at)),
+                })
+            })
+            .collect();
+        stale.sort_by(|left, right| {
+            (&left.source, &left.agent_label, &left.session_ref.value).cmp(&(
+                &right.source,
+                &right.agent_label,
+                &right.session_ref.value,
+            ))
+        });
+        let hook_identity = self
+            .hook_identity
+            .as_ref()
+            .map(|identity| HookIdentitySnapshot {
+                source: identity.source.clone(),
+                agent_label: identity.agent_label.clone(),
+                session_ref: self
+                    .owned_session_ref(&identity.source, &identity.agent_label)
+                    .as_ref()
+                    .map(AgentSessionRefSnapshot::capture),
+                reported_age_ms: age_ms(now, identity.reported_at),
+                unconfirmed_age_ms: identity
+                    .unconfirmed_since
+                    .map(|pending| age_ms(now, pending)),
+            });
+        let unanswered_exit = self
+            .unanswered_hook_exit
+            .as_ref()
+            .map(|(agent_label, pending)| UnansweredExitSnapshot {
+                agent_label: agent_label.clone(),
+                age_ms: age_ms(now, *pending),
+            });
+        let empty = sequences.is_empty()
+            && metadata_sequences.is_empty()
+            && suppressed.is_empty()
+            && stale.is_empty()
+            && hook_identity.is_none()
+            && unanswered_exit.is_none();
+        (!empty).then_some(HookRetirementSnapshot {
+            sequences,
+            metadata_sequences,
+            suppressed,
+            stale,
+            hook_identity,
+            unanswered_exit,
+        })
+    }
+
+    /// Re-apply exported fences on the replacement server, re-basing every age against
+    /// this process's own clock.
+    ///
+    /// Everything goes in through the SAME accessors the live paths use — the
+    /// suppression funnel, then `remember_stale_hook_session` with retirement, loss and
+    /// evidence in that order — so no invariant can be sidestepped by a restore. The
+    /// live `hook_authority` is deliberately NOT re-installed: the owner's next report
+    /// re-establishes it, and it is the FENCE, not the authority, that must survive.
+    pub fn restore_hook_retirement(&mut self, snapshot: HookRetirementSnapshot, now: Instant) {
+        for (source, seq) in snapshot.sequences {
+            self.hook_report_sequences.insert(source, seq);
+        }
+        for (source, seq) in snapshot.metadata_sequences {
+            self.metadata_report_sequences.insert(source, seq);
+        }
+        for suppressed in snapshot.suppressed {
+            let source = suppressed.source.clone();
+            self.suppress_hook_report_with_session_ref(
+                suppressed.source,
+                suppressed.agent_label,
+                suppressed.session_ref.map(AgentSessionRefSnapshot::restore),
+                suppressed.reason,
+                instant_from_age_ms(now, suppressed.observed_age_ms),
+            );
+            // The funnel seeds a loss only for a `ProcessExit`; a loss observed WHILE
+            // this owner was merely suppressed is a fact of its own and must survive too.
+            if let Some(last_loss_age_ms) = suppressed.last_loss_age_ms {
+                if let Some(restored) = self.suppressed_hook_reports.get_mut(&source) {
+                    restored.observe_process_loss(instant_from_age_ms(now, last_loss_age_ms));
+                }
+            }
+        }
+        for stale in snapshot.stale {
+            self.remember_stale_hook_session(
+                stale.source,
+                stale.agent_label,
+                stale.session_ref.restore(),
+                instant_from_age_ms(now, stale.retired_age_ms),
+                stale
+                    .evidence_age_ms
+                    .map(|age_ms| instant_from_age_ms(now, age_ms)),
+                stale
+                    .last_loss_age_ms
+                    .map(|age_ms| instant_from_age_ms(now, age_ms)),
+            );
+        }
+        if let Some(identity) = snapshot.hook_identity {
+            // Owner coherence the way the report path keeps it: identity and its session
+            // name the same owner. The pane snapshot is authoritative for the session and
+            // the caller applies it first, so this only fills a gap it left.
+            if let Some(session_ref) = identity.session_ref {
+                if self.persisted_agent_session.is_none() {
+                    self.persisted_agent_session =
+                        Some(crate::agent_resume::PersistedAgentSession {
+                            source: identity.source.clone(),
+                            agent: identity.agent_label.clone(),
+                            session_ref: session_ref.restore(),
+                        });
+                }
+            }
+            self.hook_identity = Some(HookIdentity {
+                source: identity.source,
+                agent_label: identity.agent_label,
+                reported_at: instant_from_age_ms(now, identity.reported_age_ms),
+                unconfirmed_since: identity
+                    .unconfirmed_age_ms
+                    .map(|age_ms| instant_from_age_ms(now, age_ms)),
+            });
+        }
+        if let Some(unanswered) = snapshot.unanswered_exit {
+            self.unanswered_hook_exit = Some((
+                unanswered.agent_label,
+                instant_from_age_ms(now, unanswered.age_ms),
+            ));
         }
     }
 
@@ -4599,6 +4934,208 @@ mod tests {
             "the setup did not reproduce the reorder window"
         );
         terminal
+    }
+
+    #[test]
+    fn hook_retirement_export_is_none_when_nothing_is_retired() {
+        // An ordinary pane adds no bytes to the snapshot.
+        let mut terminal = test_terminal();
+        assert!(terminal.export_hook_retirement(Instant::now()).is_none());
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        assert!(
+            terminal.export_hook_retirement(Instant::now()).is_none(),
+            "a merely detected agent is not a retirement"
+        );
+    }
+
+    #[test]
+    fn hook_retirement_round_trip_preserves_every_fence() {
+        // Gate-3 arbiter finding (msg_24fa384d30dfa9af): the fences, not the live
+        // authority, are what has to survive a live handoff. Instants cannot cross a
+        // process, so they travel as AGES and are re-based against the new server's own
+        // clock — and the restored terminal has to DECIDE the same way the old one did.
+        let mut source_terminal = test_terminal();
+        // A ProcessExit retirement of the identity owner, with a loss seen while it was
+        // only suppressed, plus a stale session armed with post-retirement evidence.
+        source_terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut source_terminal, "retired-session", 20, "startup")
+            .expect("initial session");
+        // Every phase is separated by a real gap, so the boundaries are millisecond-
+        // distinct: ages carry whole milliseconds, and a snapshot whose boundaries all
+        // collapsed into one instant would prove nothing about ordering.
+        let gap = || std::thread::sleep(Duration::from_millis(10));
+        gap();
+        let exit_at = Instant::now();
+        observe_at(&mut source_terminal, Some(Agent::Hermes), true, exit_at);
+        gap();
+        observe_at(
+            &mut source_terminal,
+            Some(Agent::Hermes),
+            false,
+            Instant::now(),
+        );
+        // A second owner retired by a release, which observes no process at all: its
+        // suppression carries a retirement boundary and no loss. Its label has to stop
+        // contradicting the detected agent first, the ordinary hook-report rule.
+        gap();
+        source_terminal.set_detected_state(None, AgentState::Unknown);
+        source_terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-1"),
+                Some(30),
+            )
+            .expect("pi authority");
+        gap();
+        source_terminal
+            .release_agent_with_mutation("zynk:pi", "pi", Some(31))
+            .expect("release");
+        // And a live identity for the first owner again — under a NEW session, so the
+        // retired one stays stale and the identity half travels alongside it.
+        gap();
+        source_terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut source_terminal, "second-session", 40, "startup")
+            .expect("a new session is allowed after the retirement");
+
+        gap();
+        let captured_at = Instant::now();
+        let snapshot = source_terminal
+            .export_hook_retirement(captured_at)
+            .expect("something is retired");
+        assert!(!snapshot.sequences.is_empty());
+        assert!(!snapshot.suppressed.is_empty());
+        assert!(!snapshot.stale.is_empty());
+        assert!(snapshot.hook_identity.is_some());
+        // The gaps are real, so the boundaries are genuinely ordered rather than a pile
+        // of zeroes that would pass any re-basing.
+        let stale = &snapshot.stale[0];
+        let evidence_age_ms = stale.evidence_age_ms.expect("the session is armed");
+        assert!(
+            evidence_age_ms < stale.retired_age_ms,
+            "the evidence must be NEWER than the retirement it beats: {stale:?}"
+        );
+        assert!(
+            evidence_age_ms > 0 && stale.retired_age_ms > 0,
+            "the phases collapsed into one instant: {stale:?}"
+        );
+
+        // The replacement server restores 250 ms later, against its own clock.
+        let restored_at = captured_at + Duration::from_millis(250);
+        let mut restored_terminal = test_terminal();
+        restored_terminal.restore_hook_retirement(snapshot.clone(), restored_at);
+
+        // Re-exporting at the SAME offset reproduces the snapshot: every age, and so
+        // every gap and every ordering between the boundaries, survived the round trip.
+        assert_eq!(
+            restored_terminal
+                .export_hook_retirement(restored_at)
+                .expect("the restored terminal is retired too"),
+            snapshot,
+            "a boundary lost its age across the round trip"
+        );
+        // The live authority is deliberately NOT restored — the next report re-takes it.
+        assert!(restored_terminal.hook_authority.is_none());
+
+        // The two terminals DECIDE identically for the same probes.
+        for (source, agent_label, session) in [
+            ("zynk:hermes", "hermes", "retired-session"),
+            ("zynk:pi", "pi", "pi-1"),
+        ] {
+            let session_ref = crate::agent_resume::AgentSessionRef::id(session);
+            assert_eq!(
+                source_terminal.hook_report_is_suppressed(source, agent_label, &session_ref),
+                restored_terminal.hook_report_is_suppressed(source, agent_label, &session_ref),
+                "{source} decides suppression differently after a round trip"
+            );
+            for session_start_source in [None, Some("resume")] {
+                assert_eq!(
+                    source_terminal.hook_report_survives_retirement(
+                        source,
+                        agent_label,
+                        &session_ref,
+                        session_start_source,
+                    ),
+                    restored_terminal.hook_report_survives_retirement(
+                        source,
+                        agent_label,
+                        &session_ref,
+                        session_start_source,
+                    ),
+                    "{source} decides retirement differently after a round trip \
+                     (session_start_source={session_start_source:?})"
+                );
+            }
+        }
+
+        // And a running observation captured after the restore re-arms the restored
+        // fences exactly as it would have re-armed the originals.
+        let running_at = restored_at + Duration::from_millis(100);
+        observe_at(&mut restored_terminal, Some(Agent::Pi), false, running_at);
+        assert!(
+            !restored_terminal
+                .suppressed_hook_reports
+                .contains_key("zynk:pi"),
+            "the restored release suppression did not convert on a newer observation"
+        );
+        assert!(
+            restored_terminal.stale_hook_sessions["zynk:pi"]
+                .iter()
+                .any(|stale| stale.has_reclaimable_process_evidence()),
+            "the converted session carries no reclaimable evidence"
+        );
+    }
+
+    #[test]
+    fn hook_retirement_restore_refuses_evidence_older_than_a_restored_boundary() {
+        // The negative half, and the reason the ages travel at all: a restored boundary
+        // has to REFUSE a running observation captured before it, exactly as the
+        // original did. Without the re-based instants the fence would be a clean slate.
+        let mut source_terminal = test_terminal();
+        source_terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut source_terminal, "retired-session", 20, "startup")
+            .expect("initial session");
+        source_terminal
+            .release_agent_with_mutation("zynk:hermes", "hermes", Some(21))
+            .expect("release");
+        let released_at = source_terminal.suppressed_hook_reports["zynk:hermes"].observed_at;
+
+        let captured_at = released_at + Duration::from_millis(100);
+        let snapshot = source_terminal
+            .export_hook_retirement(captured_at)
+            .expect("the release is a retirement");
+        let restored_at = captured_at + Duration::from_millis(250);
+        let mut restored_terminal = test_terminal();
+        restored_terminal.restore_hook_retirement(snapshot, restored_at);
+
+        // Captured 50 ms BEFORE the release, delivered on the new server.
+        observe_at(
+            &mut restored_terminal,
+            Some(Agent::Hermes),
+            false,
+            restored_at - Duration::from_millis(150),
+        );
+        assert!(
+            identity_session_start(&mut restored_terminal, "retired-session", 30, "resume")
+                .is_none(),
+            "an observation captured before the restored retirement re-armed the session"
+        );
+
+        // A capture after it is evidence in its own right, on either server.
+        observe_at(
+            &mut restored_terminal,
+            Some(Agent::Hermes),
+            false,
+            restored_at + Duration::from_millis(10),
+        );
+        assert!(
+            identity_session_start(&mut restored_terminal, "retired-session", 31, "resume")
+                .is_some(),
+            "a restored fence banned the session instead of dating it"
+        );
     }
 
     #[test]
