@@ -1,5 +1,5 @@
-//! What `build.rs` promises, checked by really running cargo. Both tests are `#[ignore]`d: they
-//! are neither hermetic nor fast, so `just check` stays clean of them and they are run explicitly.
+//! What `build.rs` promises, checked by running the script and cargo. The two expensive cargo
+//! cycles are ignored and run explicitly; the isolated Git-query regression runs in `just check`.
 //!
 //! ADR 0013 promises one thing to anyone who builds zynk on another platform: a `compile_error!`
 //! naming the ADR (`src/main.rs`). `build.rs` runs BEFORE rustc compiles the crate, so a build
@@ -204,6 +204,103 @@ fn binary_contains(binary: &Path, needle: &str) -> bool {
     bytes
         .windows(needle.len())
         .any(|window| window == needle.as_bytes())
+}
+
+#[test]
+fn build_attestation_distinguishes_clean_dirty_and_failed_git_queries() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_target_dir();
+    let checkout = root.join("checkout");
+    let tools = root.join("tools");
+    fs::create_dir_all(&checkout).unwrap();
+    fs::create_dir_all(&tools).unwrap();
+    let script = root.join("build-script");
+    let compiled = Command::new("rustc")
+        .args(["--edition=2021", "--crate-name", "build_script_probe"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+        .arg("-o")
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert!(compiled.status.success(), "{compiled:?}");
+
+    git(&checkout, &["init", "--quiet"]);
+    assert!(checkout.join(".git").is_dir());
+    fs::write(checkout.join("source"), "clean\n").unwrap();
+    git(&checkout, &["add", "source"]);
+    git(
+        &checkout,
+        &[
+            "-c",
+            "user.name=Build Test",
+            "-c",
+            "user.email=build@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(real_git.status.success());
+    let real_git = String::from_utf8(real_git.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let wrapper = tools.join("git");
+    fs::write(&wrapper, "#!/bin/sh\nif [ \"$1\" = \"$FAIL_GIT_QUERY\" ]; then exit 42; fi\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = env::join_paths(
+        std::iter::once(tools).chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
+    )
+    .unwrap();
+    let attest = |fail: &str| {
+        let mut command = Command::new(&script);
+        scrub_git_env(&mut command);
+        let output = command
+            .env("CARGO_MANIFEST_DIR", &checkout)
+            .env("DOCS_RS", "1")
+            .env_remove("ZYNK_BUILD_SHA")
+            .env("PATH", &path)
+            .env("REAL_GIT", &real_git)
+            .env("FAIL_GIT_QUERY", fail)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("cargo:rustc-env=ZYNK_BUILD_SHA=")
+                    .map(str::to_owned)
+            })
+            .expect("the build script must explicitly export the attestation")
+    };
+    assert_eq!(attest(""), head, "a successful empty status is clean");
+    fs::write(checkout.join("source"), "dirty\n").unwrap();
+    assert_eq!(attest(""), format!("{head}-dirty"));
+    assert_eq!(
+        attest("status"),
+        "",
+        "a failed status query must not attest clean source"
+    );
+    assert_eq!(
+        attest("rev-parse"),
+        "",
+        "a failed HEAD query cannot attest source"
+    );
+    fs::write(checkout.join("source"), "clean\n").unwrap();
+    assert_eq!(
+        attest(""),
+        head,
+        "healthy queries recover without an override"
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

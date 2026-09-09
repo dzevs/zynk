@@ -31,7 +31,8 @@ fn env_bool(name: &str) -> Option<bool> {
     }
 }
 
-/// `git` stdout for a read-only query in `dir`, or `None` when git fails or says nothing.
+/// `git` stdout for a successful read-only query, including an empty result.
+/// `None` means the query failed; in particular, it is not evidence of a clean checkout.
 fn git_stdout(dir: &str, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .current_dir(dir)
@@ -41,8 +42,7 @@ fn git_stdout(dir: &str, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (!value.is_empty()).then_some(value)
+    Some(String::from_utf8(output.stdout).ok()?.trim().to_string())
 }
 
 /// Emit `cargo:rerun-if-changed` for every TRACKED file in `dir`, returning how many were watched.
@@ -147,12 +147,18 @@ fn export_build_sha() {
     // attestation is worse than none.
     let watched = watch_tracked_sources(&dir);
 
-    let sha = match git_stdout(&dir, &["rev-parse", "HEAD"]).filter(|_| watched > 0) {
+    let sha = match git_stdout(&dir, &["rev-parse", "HEAD"])
+        .filter(|sha| watched > 0 && build_sha::attested_sha_problem(sha).is_none())
+    {
         Some(sha) => {
             let dirty = git_stdout(&dir, &["status", "--porcelain", "--untracked-files=no"]);
             match dirty {
+                Some(status) if status.is_empty() => sha,
                 Some(_) => format!("{sha}-dirty"),
-                None => sha,
+                None => {
+                    println!("cargo:warning=git status failed; building without source attestation (ADR 0013 remote custody is unavailable)");
+                    String::new()
+                }
             }
         }
         None => String::new(),
