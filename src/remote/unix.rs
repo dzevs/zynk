@@ -1,6 +1,5 @@
 //! Remote thin-client launcher over SSH command stdio.
 
-use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -20,8 +19,6 @@ const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
 const REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
-const STABLE_UPDATE_MANIFEST_URL: &str = "https://zynk.dev/latest.json";
-const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://zynk.dev/preview.json";
 const REMOTE_BINARY_ENV_VAR: &str = "ZYNK_REMOTE_BINARY";
 pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "ZYNK_REATTACH_COMMAND";
 
@@ -243,35 +240,31 @@ struct RemotePlatform {
 }
 
 impl RemotePlatform {
+    /// ADR 0013: zynk is Linux x86_64 only, so a remote host is supported only when its `uname`
+    /// says exactly that. Every other operating system and architecture is refused here rather
+    /// than mapped to a platform zynk never builds for.
     fn from_uname(os: &str, arch: &str) -> Option<Self> {
         let os = match os.trim() {
             "Linux" => "linux",
-            "Darwin" => "macos",
             _ => return None,
         };
         let arch = match arch.trim() {
             "x86_64" | "amd64" => "x86_64",
-            "aarch64" | "arm64" => "aarch64",
             _ => return None,
         };
         Some(Self { os, arch })
     }
 
+    /// The local platform. ADR 0013 makes any other `target_os`/`target_arch` a `compile_error!`,
+    /// so this build can only ever be Linux x86_64.
     fn local() -> Self {
-        let os = "linux";
-
-        let arch = if cfg!(target_arch = "x86_64") {
-            "x86_64"
-        } else if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            "unknown"
-        };
-
-        Self { os, arch }
+        Self {
+            os: "linux",
+            arch: "x86_64",
+        }
     }
 
-    fn asset_key(&self) -> String {
+    fn platform_key(&self) -> String {
         format!("{}-{}", self.os, self.arch)
     }
 }
@@ -300,122 +293,22 @@ impl RemoteZynk {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum RemoteAssetRef {
-    Url(String),
-    Object { url: String, sha256: Option<String> },
-}
-
-impl RemoteAssetRef {
-    fn url(&self) -> &str {
-        match self {
-            Self::Url(url) => url,
-            Self::Object { url, .. } => url,
-        }
-    }
-
-    fn sha256(&self) -> Option<&str> {
-        match self {
-            Self::Url(_) => None,
-            Self::Object { sha256, .. } => {
-                sha256.as_deref().filter(|value| !value.trim().is_empty())
-            }
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct RemoteUpdateManifest {
-    version: String,
-    protocol: Option<u32>,
-    assets: BTreeMap<String, RemoteAssetRef>,
-    #[serde(default, deserialize_with = "deserialize_remote_manifest_releases")]
-    releases: BTreeMap<String, RemoteReleaseMetadata>,
-}
-
-#[derive(Deserialize)]
-struct RemoteReleaseMetadata {
-    protocol: Option<u32>,
-    #[serde(default)]
-    assets: BTreeMap<String, RemoteAssetRef>,
-}
-
-#[derive(Deserialize)]
-struct RemotePreviewManifest {
-    build_id: String,
-    protocol: u32,
-    assets: BTreeMap<String, RemoteAssetRef>,
-    #[serde(default)]
-    builds: BTreeMap<String, RemotePreviewBuildMetadata>,
-}
-
-#[derive(Deserialize)]
-struct RemotePreviewBuildMetadata {
-    protocol: u32,
-    assets: BTreeMap<String, RemoteAssetRef>,
-}
-
-fn deserialize_remote_manifest_releases<'de, D>(
-    deserializer: D,
-) -> Result<BTreeMap<String, RemoteReleaseMetadata>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(match value {
-        Some(serde_json::Value::Object(object)) => object
-            .into_iter()
-            .filter_map(|(version, release)| {
-                serde_json::from_value::<RemoteReleaseMetadata>(release)
-                    .ok()
-                    .map(|metadata| (version, metadata))
-            })
-            .collect(),
-        _ => BTreeMap::new(),
-    })
-}
-
-impl RemoteUpdateManifest {
-    fn release_for_version(&self, version: &str) -> Option<RemoteManifestReleaseRef<'_>> {
-        if self.version.trim_start_matches('v') == version {
-            return Some(RemoteManifestReleaseRef {
-                protocol: self.protocol,
-                assets: &self.assets,
-            });
-        }
-
-        self.releases.get(version).and_then(|release| {
-            (!release.assets.is_empty()).then_some(RemoteManifestReleaseRef {
-                protocol: release.protocol,
-                assets: &release.assets,
-            })
-        })
-    }
-}
-
-#[derive(Clone, Copy)]
-struct RemoteManifestReleaseRef<'a> {
-    protocol: Option<u32>,
-    assets: &'a BTreeMap<String, RemoteAssetRef>,
-}
-
 fn current_version() -> String {
     crate::build_info::version()
 }
 
-fn current_channel() -> &'static str {
-    crate::build_info::channel()
-}
-
+/// Where the binary copied to the remote host comes from. ADR 0013 leaves exactly two sources —
+/// the running executable and `ZYNK_REMOTE_BINARY` — so there is nothing temporary to clean up.
 struct InstallSource {
     path: PathBuf,
-    temporary_dir: Option<PathBuf>,
 }
 
-struct RemoteReleaseAsset {
-    url: String,
-    sha256: Option<String>,
+/// What the remote copy must be able to prove about itself afterwards (ADR 0013 Decision 3):
+/// the exact bytes that were sent, and the source commit the sender was built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstallCustody {
+    sha256: String,
+    build_sha: String,
 }
 
 struct PreparedRemoteZynk {
@@ -426,23 +319,7 @@ struct PreparedRemoteZynk {
 
 impl InstallSource {
     fn persistent(path: PathBuf) -> Self {
-        Self {
-            path,
-            temporary_dir: None,
-        }
-    }
-
-    fn temporary(path: PathBuf, temporary_dir: PathBuf) -> Self {
-        Self {
-            path,
-            temporary_dir: Some(temporary_dir),
-        }
-    }
-
-    fn cleanup(&self) {
-        if let Some(dir) = &self.temporary_dir {
-            let _ = fs::remove_dir_all(dir);
-        }
+        Self { path }
     }
 }
 
@@ -490,9 +367,9 @@ fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<P
         &install_source_description(&remote_zynk.platform, override_binary.as_deref()),
     )?;
     let source = resolve_install_source(&remote_zynk.platform, override_binary)?;
-    let install_result = install_remote_zynk(target, &remote_zynk, &source.path);
-    source.cleanup();
-    install_result?;
+    let custody = local_install_custody(&source.path)?;
+    install_remote_zynk(target, &remote_zynk, &source.path)?;
+    verify_remote_custody(target, &remote_zynk, &custody)?;
 
     if !remote_binary_matches(target, &remote_zynk)? {
         return Err(io::Error::other(format!(
@@ -520,13 +397,16 @@ fn detect_remote_platform(target: &str) -> io::Result<RemotePlatform> {
     let mut lines = stdout.lines();
     let os = lines.next().unwrap_or_default();
     let arch = lines.next().unwrap_or_default();
-    RemotePlatform::from_uname(os, arch).ok_or_else(|| {
-        io::Error::other(format!(
-            "unsupported remote platform: {} {}",
-            os.trim(),
-            arch.trim()
-        ))
-    })
+    RemotePlatform::from_uname(os, arch).ok_or_else(|| unsupported_remote_platform_error(os, arch))
+}
+
+/// ADR 0013: the refusal has to say what zynk actually supports, and where that was decided.
+fn unsupported_remote_platform_error(os: &str, arch: &str) -> io::Error {
+    io::Error::other(format!(
+        "unsupported remote platform: {} {} — zynk supports Linux x86_64 only (docs/zynk/decisions/0013-linux-only-platform-scope.md). Install zynk on the remote host from source, or attach to a Linux x86_64 host.",
+        os.trim(),
+        arch.trim()
+    ))
 }
 
 fn remote_binary_on_path_any(
@@ -563,14 +443,32 @@ fn remote_binary_matches(target: &str, remote_zynk: &RemoteZynk) -> io::Result<b
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut lines = stdout.lines();
-    let version = lines.next().unwrap_or_default().trim();
+    let version_line = lines.next().unwrap_or_default().trim();
     let status = lines.next().unwrap_or_default();
     // ADR 0007 §1/§3: the binary's `--version` line is Zynk-branded; the remote
-    // binary is this same build deployed, so it reports `zynk <version>` too.
-    Ok(version == format!("zynk {}", current_version())
-        && parse_client_status_json(status)
-            .map(|status| status.protocol == CURRENT_PROTOCOL)
-            .unwrap_or(false))
+    // binary is this same build deployed, so it reports `zynk <version>` too, and
+    // since ADR 0013 custody it also carries the source commit in parentheses.
+    Ok(
+        parse_version_line(version_line).is_some_and(|(version, _)| version == current_version())
+            && parse_client_status_json(status)
+                .map(|status| status.protocol == CURRENT_PROTOCOL)
+                .unwrap_or(false),
+    )
+}
+
+/// Split a `zynk <version>` or `zynk <version> (<source sha>)` line into its parts. Returns `None`
+/// for anything that is not a zynk version line at all.
+fn parse_version_line(line: &str) -> Option<(String, Option<String>)> {
+    let rest = line.trim().strip_prefix("zynk ")?.trim();
+    let Some((version, sha)) = rest.split_once(" (") else {
+        return (!rest.is_empty()).then(|| (rest.to_string(), None));
+    };
+    let version = version.trim();
+    let sha = sha.strip_suffix(')')?.trim();
+    if version.is_empty() || sha.is_empty() {
+        return None;
+    }
+    Some((version.to_string(), Some(sha.to_string())))
 }
 
 fn remote_binary_exists(target: &str, remote_zynk: &RemoteZynk) -> io::Result<bool> {
@@ -632,11 +530,11 @@ fn install_source_description_for(
     if local_binary_can_seed_remote {
         "the current local zynk binary".to_string()
     } else {
+        // ADR 0013: there is no release-asset download path; the only other source is an
+        // explicitly named local build.
         format!(
-            "the {} {} asset for {}",
-            current_version(),
-            current_channel(),
-            platform.asset_key()
+            "no install source for {} (set {REMOTE_BINARY_ENV_VAR})",
+            platform.platform_key()
         )
     }
 }
@@ -656,7 +554,12 @@ fn resolve_install_source(
         }
     }
 
-    download_release_asset(platform)
+    // ADR 0013: zynk ships no release assets, so there is nothing to download. The remote is
+    // seeded from a reviewed local build or not at all.
+    Err(io::Error::other(format!(
+        "no install source for a {} remote: this build is managed by a package manager, so its file is not zynk's to copy, and zynk has no release-asset download path (docs/zynk/decisions/0013-linux-only-platform-scope.md). Set {REMOTE_BINARY_ENV_VAR}=path/to/zynk (a Linux x86_64 build of the same source commit) or install zynk on the remote host from source.",
+        platform.platform_key()
+    )))
 }
 
 fn local_binary_can_seed_remote(platform: &RemotePlatform) -> bool {
@@ -1029,156 +932,6 @@ fn remote_shell_resolves_managed_install(stdout: &str) -> bool {
         .is_some_and(|path| path.ends_with("/.local/bin/zynk"))
 }
 
-fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource> {
-    let asset_key = platform.asset_key();
-    let asset = remote_release_asset(&asset_key)?;
-
-    let dir = private_download_dir(&asset_key)?;
-    let path = dir.join("zynk.tmp");
-    let status = Command::new("curl")
-        .args(["-sfL", "--max-time", "120", "-o"])
-        .arg(&path)
-        .arg(&asset.url)
-        .status()
-        .map_err(|err| io::Error::new(err.kind(), format!("download failed: {err}")))?;
-    if !status.success() {
-        let _ = fs::remove_dir_all(&dir);
-        return Err(io::Error::other("download failed"));
-    }
-    if let Some(expected) = &asset.sha256 {
-        if let Err(err) = crate::checksum::verify_sha256(&path, expected) {
-            let _ = fs::remove_dir_all(&dir);
-            return Err(io::Error::new(
-                err.kind(),
-                format!("downloaded remote asset checksum verification failed: {err}"),
-            ));
-        }
-    }
-
-    Ok(InstallSource::temporary(path, dir))
-}
-
-fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
-    let output = Command::new("curl")
-        .args([
-            "-sfL",
-            "--retry",
-            "3",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "20",
-            url,
-        ])
-        .output()
-        .map_err(|err| io::Error::new(err.kind(), format!("curl failed: {err}")))?;
-    if !output.status.success() {
-        return Err(command_failed("failed to fetch update manifest", &output));
-    }
-    Ok(output.stdout)
-}
-
-fn remote_asset_info(asset: &RemoteAssetRef) -> RemoteReleaseAsset {
-    RemoteReleaseAsset {
-        url: asset.url().to_string(),
-        sha256: asset.sha256().map(str::to_string),
-    }
-}
-
-fn preview_assets_for_build<'a>(
-    manifest: &'a RemotePreviewManifest,
-    build_id: &str,
-) -> io::Result<(u32, &'a BTreeMap<String, RemoteAssetRef>)> {
-    if manifest.build_id == build_id {
-        return Ok((manifest.protocol, &manifest.assets));
-    }
-    let build = manifest.builds.get(build_id).ok_or_else(|| {
-        io::Error::other(format!(
-            "preview manifest no longer includes build {build_id}; run `zynk update` locally or set {REMOTE_BINARY_ENV_VAR}=target/release/zynk"
-        ))
-    })?;
-    Ok((build.protocol, &build.assets))
-}
-
-fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
-    // Fail-closed: there is no release-manifest hosting yet, so the remote bootstrap must NOT fetch
-    // zynk.dev release manifests/assets. Seed the remote explicitly instead.
-    if !crate::update::release_infra_open() {
-        return Err(io::Error::other(format!(
-            "remote binary fetch is unavailable (no release-manifest hosting yet) — cannot fetch a remote binary. Set {REMOTE_BINARY_ENV_VAR}=path/to/zynk (a matching-platform build) or install zynk on the remote host manually."
-        )));
-    }
-    if crate::build_info::is_preview() {
-        let build_id = crate::build_info::build_id().ok_or_else(|| {
-            io::Error::other("preview client has no build id; set ZYNK_REMOTE_BINARY or install Zynk on the remote manually")
-        })?;
-        let manifest_bytes = fetch_remote_manifest(PREVIEW_UPDATE_MANIFEST_URL)?;
-        let manifest: RemotePreviewManifest =
-            serde_json::from_slice(&manifest_bytes).map_err(|err| {
-                io::Error::other(format!("failed to parse preview manifest JSON: {err}"))
-            })?;
-        let (protocol, assets) = preview_assets_for_build(&manifest, build_id)?;
-        if protocol != CURRENT_PROTOCOL {
-            return Err(io::Error::other(format!(
-                "preview manifest has build {build_id} protocol {protocol}, but this client needs protocol {CURRENT_PROTOCOL}; set {REMOTE_BINARY_ENV_VAR}=target/release/zynk or install a matching Zynk on the remote host manually"
-            )));
-        }
-        return assets.get(asset_key).map(remote_asset_info).ok_or_else(|| {
-            io::Error::other(format!(
-                "no {asset_key} binary in the preview manifest for build {build_id}"
-            ))
-        });
-    }
-
-    let current_version = current_version();
-    let manifest_bytes = fetch_remote_manifest(STABLE_UPDATE_MANIFEST_URL)?;
-    let manifest: RemoteUpdateManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|err| io::Error::other(format!("failed to parse update manifest JSON: {err}")))?;
-    let release = manifest.release_for_version(&current_version).ok_or_else(|| {
-        io::Error::other(format!(
-            "release manifest does not include zynk {current_version}; build zynk for {} or install it there manually",
-            asset_key
-        ))
-    })?;
-    if let Some(protocol) = release.protocol {
-        if protocol != CURRENT_PROTOCOL {
-            return Err(io::Error::other(format!(
-                "release manifest has zynk {current_version} protocol {protocol}, but this client needs protocol {CURRENT_PROTOCOL}; set {REMOTE_BINARY_ENV_VAR}=target/release/zynk or install a matching zynk on the remote host manually"
-            )));
-        }
-    }
-    release
-        .assets
-        .get(asset_key)
-        .map(remote_asset_info)
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "no {asset_key} binary in the release manifest for zynk {current_version}"
-            ))
-        })
-}
-
-fn private_download_dir(asset_key: &str) -> io::Result<PathBuf> {
-    let base = std::env::temp_dir();
-    for attempt in 0..100 {
-        let dir = base.join(format!(
-            "zynk-remote-{}-{}-{attempt}",
-            std::process::id(),
-            asset_key
-        ));
-        match fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err),
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "failed to create private zynk remote download directory",
-    ))
-}
-
 fn confirm_remote_install(
     target: &str,
     remote_zynk: &RemoteZynk,
@@ -1195,7 +948,7 @@ fn confirm_remote_install(
     eprintln!(
         "matching zynk {} is not installed on {target} for {}.",
         current_version(),
-        remote_zynk.platform.asset_key()
+        remote_zynk.platform.platform_key()
     );
     eprint!(
         "Install {} to {}? [Y/n] ",
@@ -1214,6 +967,121 @@ fn confirm_remote_install(
     }
 
     Ok(())
+}
+
+/// ADR 0013 Decision 3: read what the binary about to be copied is, before copying it. A version
+/// string is not custody — the exact source commit is — so a binary that cannot attest one is
+/// refused as an install source, `ZYNK_REMOTE_BINARY` files included.
+fn local_install_custody(path: &Path) -> io::Result<InstallCustody> {
+    let sha256 = crate::checksum::file_sha256(path)?;
+
+    let output = Command::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("failed to run {} --version: {err}", path.display()),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(command_failed(
+            &format!("{} --version failed", path.display()),
+            &output,
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next().unwrap_or_default();
+    let (_, build_sha) = parse_version_line(line).ok_or_else(|| {
+        io::Error::other(format!(
+            "{} does not report a zynk version line, so it must not be copied to a remote host: got {line:?}",
+            path.display()
+        ))
+    })?;
+    let build_sha = build_sha.ok_or_else(|| {
+        io::Error::other(format!(
+            "{} cannot attest the source commit it was built from, so it must not be copied to a remote host: ADR 0013 custody needs the exact reviewed source SHA, not a version string (docs/zynk/decisions/0013-linux-only-platform-scope.md). Rebuild it from a git checkout, or set ZYNK_BUILD_SHA at build time.",
+            path.display()
+        ))
+    })?;
+
+    Ok(InstallCustody { sha256, build_sha })
+}
+
+/// ADR 0013 Decision 3: after the copy, make the REMOTE file prove it is the same bytes from the
+/// same source commit — over the same ssh channel, and before any version/protocol check, so a
+/// substituted binary is caught by its hash rather than by its self-reported version.
+fn verify_remote_custody(
+    target: &str,
+    remote_zynk: &RemoteZynk,
+    custody: &InstallCustody,
+) -> io::Result<()> {
+    let command = format!(
+        "sha256sum {0} | cut -d ' ' -f 1 && {0} --version",
+        remote_zynk.shell_path
+    );
+    let output = ssh_sh_output(target, &command)?;
+    if !output.status.success() {
+        return Err(command_failed(
+            "remote custody verification failed (the remote host needs sha256sum)",
+            &output,
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let remote_sha256 = stdout
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    tracing::info!(
+        target = %target,
+        path = %remote_zynk.shell_path,
+        local_sha256 = %custody.sha256,
+        remote_sha256 = %remote_sha256,
+        build_sha = %custody.build_sha,
+        "verifying custody of the remote zynk binary"
+    );
+
+    check_remote_custody(&stdout, &remote_zynk.shell_path, custody)
+}
+
+/// The custody comparison itself, over the remote's `sha256sum` + `--version` output. The hash is
+/// checked first: a substituted binary must fail on its bytes, not on what it says about itself.
+fn check_remote_custody(
+    remote_stdout: &str,
+    remote_path: &str,
+    custody: &InstallCustody,
+) -> io::Result<()> {
+    let mut lines = remote_stdout.lines();
+    let remote_sha256 = lines.next().unwrap_or_default().trim().to_ascii_lowercase();
+    let remote_version_line = lines.next().unwrap_or_default();
+
+    if remote_sha256 != custody.sha256 {
+        return Err(io::Error::other(format!(
+            "remote zynk at {remote_path} is not the binary that was copied: sha256 {remote_sha256} != {} (ADR 0013 custody)",
+            custody.sha256
+        )));
+    }
+
+    let (_, remote_build_sha) = parse_version_line(remote_version_line).ok_or_else(|| {
+        io::Error::other(format!(
+            "remote zynk at {remote_path} does not report a zynk version line: got {remote_version_line:?}"
+        ))
+    })?;
+    match remote_build_sha {
+        Some(sha) if sha == custody.build_sha => Ok(()),
+        Some(sha) => Err(io::Error::other(format!(
+            "remote zynk at {remote_path} reports source commit {sha}, but the copied binary was built from {} (ADR 0013 custody)",
+            custody.build_sha
+        ))),
+        None => Err(io::Error::other(format!(
+            "remote zynk at {remote_path} cannot attest the source commit it was built from (ADR 0013 custody)"
+        ))),
+    }
 }
 
 fn install_remote_zynk(
@@ -1688,30 +1556,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_release_asset_fails_closed_without_release_infra() {
-        // No release-manifest hosting + no ZYNK_REMOTE_BINARY => the remote bootstrap must NOT
-        // fetch zynk.dev manifests/assets. The gate returns before any network call.
-        assert!(
-            !crate::update::release_infra_open(),
-            "release infra must be closed in production"
-        );
-        let err = match remote_release_asset("linux-x86_64") {
-            Ok(_) => panic!("expected fail-closed error, got an asset"),
-            Err(e) => e,
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("cannot fetch a remote binary")
-                && msg.contains("no release-manifest hosting"),
-            "expected fail-closed message, got: {msg}"
-        );
-        assert!(
-            msg.contains(REMOTE_BINARY_ENV_VAR),
-            "message should point at ZYNK_REMOTE_BINARY, got: {msg}"
-        );
-    }
-
-    #[test]
     fn bridge_socket_is_user_only() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1947,20 +1791,49 @@ mod tests {
     }
 
     #[test]
-    fn remote_platform_maps_uname_values() {
+    fn remote_platform_accepts_only_linux_x86_64() {
+        // ADR 0013: Linux x86_64 is the whole supported surface, on the remote host too.
         assert_eq!(
-            RemotePlatform::from_uname("Linux", "amd64")
+            RemotePlatform::from_uname("Linux", "x86_64")
                 .unwrap()
-                .asset_key(),
+                .platform_key(),
             "linux-x86_64"
         );
         assert_eq!(
-            RemotePlatform::from_uname("Darwin", "arm64")
+            RemotePlatform::from_uname("Linux", "amd64")
                 .unwrap()
-                .asset_key(),
-            "macos-aarch64"
+                .platform_key(),
+            "linux-x86_64"
         );
-        assert!(RemotePlatform::from_uname("FreeBSD", "x86_64").is_none());
+    }
+
+    #[test]
+    fn remote_platform_refuses_every_other_os_and_architecture() {
+        for (os, arch) in [
+            ("Darwin", "arm64"),
+            ("Darwin", "x86_64"),
+            ("Linux", "aarch64"),
+            ("Linux", "arm64"),
+            ("Linux", "riscv64"),
+            ("FreeBSD", "x86_64"),
+        ] {
+            assert!(
+                RemotePlatform::from_uname(os, arch).is_none(),
+                "{os} {arch} must be refused (ADR 0013: Linux x86_64 only)"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_platform_detection_error_names_the_linux_only_decision() {
+        let err = RemotePlatform::from_uname("Darwin", "arm64")
+            .ok_or_else(|| unsupported_remote_platform_error("Darwin", "arm64"))
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("Linux x86_64 only") && message.contains("0013"),
+            "the refusal must name ADR 0013: {message}"
+        );
     }
 
     #[test]
@@ -2050,19 +1923,16 @@ mod tests {
     }
 
     #[test]
-    fn remote_path_discovery_uses_macos_path_binary() {
-        let remote_zynk = RemoteZynk::for_platform(RemotePlatform {
-            os: "macos",
-            arch: "aarch64",
-        });
-        let remote_zynk = remote_zynk_from_path_discovery(&remote_zynk, "/opt/homebrew/bin/zynk\n")
+    fn remote_path_discovery_keeps_the_linux_platform_key() {
+        let remote_zynk = RemoteZynk::for_platform(RemotePlatform::local());
+        let remote_zynk = remote_zynk_from_path_discovery(&remote_zynk, "/usr/local/bin/zynk\n")
             .expect("path binary");
 
         assert_eq!(
             remote_bridge_command(&remote_zynk, crate::session::DEFAULT_SESSION_NAME),
-            "exec /opt/homebrew/bin/zynk remote-client-bridge"
+            "exec /usr/local/bin/zynk remote-client-bridge"
         );
-        assert_eq!(remote_zynk.platform.asset_key(), "macos-aarch64");
+        assert_eq!(remote_zynk.platform.platform_key(), "linux-x86_64");
     }
 
     #[test]
@@ -2168,157 +2038,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_update_manifest_uses_root_assets_for_latest_version() {
-        let manifest: RemoteUpdateManifest = serde_json::from_str(
-            r#"{
-                "version": "1.2.3",
-                "assets": {
-                    "linux-x86_64": "https://example.com/latest"
-                },
-                "releases": {
-                    "1.2.3": {
-                        "assets": {
-                            "linux-x86_64": "https://example.com/archive"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            manifest
-                .release_for_version("1.2.3")
-                .and_then(|release| release.assets.get("linux-x86_64"))
-                .map(RemoteAssetRef::url),
-            Some("https://example.com/latest")
-        );
-    }
-
-    #[test]
-    fn remote_update_manifest_reads_archived_release_assets() {
-        let manifest: RemoteUpdateManifest = serde_json::from_str(
-            r#"{
-                "version": "1.2.4",
-                "assets": {
-                    "linux-x86_64": "https://example.com/latest"
-                },
-                "releases": {
-                    "1.2.3": {
-                        "notes": "ignored",
-                        "assets": {
-                            "linux-x86_64": "https://example.com/archive"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            manifest
-                .release_for_version("1.2.3")
-                .and_then(|release| release.assets.get("linux-x86_64"))
-                .map(RemoteAssetRef::url),
-            Some("https://example.com/archive")
-        );
-    }
-
-    #[test]
-    fn remote_update_manifest_uses_archived_release_protocol() {
-        let manifest: RemoteUpdateManifest = serde_json::from_str(
-            r#"{
-                "version": "1.2.4",
-                "protocol": 42,
-                "assets": {
-                    "linux-x86_64": "https://example.com/latest"
-                },
-                "releases": {
-                    "1.2.3": {
-                        "notes": "ignored",
-                        "protocol": 41,
-                        "assets": {
-                            "linux-x86_64": "https://example.com/archive"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            manifest
-                .release_for_version("1.2.3")
-                .and_then(|release| release.protocol),
-            Some(41)
-        );
-    }
-
-    #[test]
-    fn remote_update_manifest_does_not_inherit_latest_protocol_for_archived_assets() {
-        let manifest: RemoteUpdateManifest = serde_json::from_str(
-            r#"{
-                "version": "1.2.4",
-                "protocol": 42,
-                "assets": {
-                    "linux-x86_64": "https://example.com/latest"
-                },
-                "releases": {
-                    "1.2.3": {
-                        "notes": "ignored",
-                        "assets": {
-                            "linux-x86_64": "https://example.com/archive"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            manifest
-                .release_for_version("1.2.3")
-                .and_then(|release| release.protocol),
-            None
-        );
-    }
-
-    #[test]
-    fn remote_preview_manifest_falls_back_to_archived_exact_build_assets() {
-        let manifest: RemotePreviewManifest = serde_json::from_str(
-            r#"{
-                "build_id": "2026-06-06-new",
-                "protocol": 12,
-                "assets": {
-                    "linux-x86_64": {
-                        "url": "https://example.com/new",
-                        "sha256": "new"
-                    }
-                },
-                "builds": {
-                    "2026-06-02-old": {
-                        "protocol": 11,
-                        "assets": {
-                            "linux-x86_64": {
-                                "url": "https://example.com/old",
-                                "sha256": "old"
-                            }
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        let (protocol, assets) =
-            preview_assets_for_build(&manifest, "2026-06-02-old").expect("archived build");
-        let asset = assets.get("linux-x86_64").expect("asset");
-        assert_eq!(protocol, 11);
-        assert_eq!(asset.url(), "https://example.com/old");
-        assert_eq!(asset.sha256(), Some("old"));
-    }
-
-    #[test]
     fn remote_server_restart_reason_requires_stop_for_protocol_mismatch() {
         assert_eq!(
             remote_server_restart_reason(Some(&current_version()), Some(0), false),
@@ -2356,13 +2075,10 @@ mod tests {
 
     #[test]
     fn install_source_description_uses_override_binary() {
-        let platform = RemotePlatform {
-            os: "linux",
-            arch: "aarch64",
-        };
+        let platform = RemotePlatform::local();
         assert_eq!(
-            install_source_description_for(&platform, Some(Path::new("/tmp/zynk-aarch64")), false),
-            "ZYNK_REMOTE_BINARY (/tmp/zynk-aarch64)"
+            install_source_description_for(&platform, Some(Path::new("/tmp/zynk-linux")), false),
+            "ZYNK_REMOTE_BINARY (/tmp/zynk-linux)"
         );
     }
 
@@ -2377,30 +2093,148 @@ mod tests {
     }
 
     #[test]
-    fn install_source_description_uses_release_asset_when_local_binary_cannot_seed_remote() {
+    fn install_source_description_has_no_source_when_local_binary_cannot_seed_remote() {
+        // ADR 0013 removed the release-asset download path: an unusable local binary leaves
+        // ZYNK_REMOTE_BINARY as the only source, and the description says so.
         let platform = RemotePlatform::local();
 
         assert_eq!(
             install_source_description_for(&platform, None, false),
-            format!(
-                "the {} {} asset for {}",
-                current_version(),
-                current_channel(),
-                platform.asset_key()
-            )
+            "no install source for linux-x86_64 (set ZYNK_REMOTE_BINARY)"
+        );
+    }
+
+    fn write_fake_zynk(name: &str, version_line: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "zynk-custody-{}-{name}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create custody fixture dir");
+        let path = dir.join("zynk");
+        fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' '{version_line}'\n"),
+        )
+        .expect("write custody fixture");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod fixture");
+        path
+    }
+
+    #[test]
+    fn parse_version_line_reads_the_version_and_the_source_commit() {
+        assert_eq!(
+            parse_version_line("zynk 3.1.0 (abc123)"),
+            Some(("3.1.0".to_string(), Some("abc123".to_string())))
+        );
+        assert_eq!(
+            parse_version_line("zynk 3.1.0"),
+            Some(("3.1.0".to_string(), None))
+        );
+        assert_eq!(parse_version_line("something else 1.0"), None);
+        assert_eq!(parse_version_line("zynk"), None);
+    }
+
+    #[test]
+    fn local_install_custody_records_the_hash_and_the_source_commit() {
+        // ADR 0013 Decision 3: custody is the exact source SHA plus the binary hash.
+        let path = write_fake_zynk("attesting", "zynk 3.1.0 (deadbeefcafe)");
+        let custody = local_install_custody(&path).expect("custody");
+        assert_eq!(custody.build_sha, "deadbeefcafe");
+        assert_eq!(
+            custody.sha256,
+            crate::checksum::file_sha256(&path).expect("hash")
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn local_install_custody_refuses_a_binary_that_cannot_attest_its_source() {
+        // A version string is not custody: a binary with no attested commit must not be copied,
+        // ZYNK_REMOTE_BINARY files included.
+        let path = write_fake_zynk("unattested", "zynk 3.1.0");
+        let err = local_install_custody(&path).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("cannot attest the source commit") && message.contains("0013"),
+            "the refusal must name ADR 0013 custody: {message}"
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn local_install_custody_refuses_a_binary_that_is_not_zynk() {
+        let path = write_fake_zynk("foreign", "some-other-tool 1.0.0");
+        let err = local_install_custody(&path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not report a zynk version line"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    fn custody_fixture() -> InstallCustody {
+        InstallCustody {
+            sha256: "a".repeat(64),
+            build_sha: "deadbeefcafe".to_string(),
+        }
+    }
+
+    #[test]
+    fn remote_custody_accepts_the_same_bytes_from_the_same_commit() {
+        let custody = custody_fixture();
+        let stdout = format!("{}\nzynk 3.1.0 (deadbeefcafe)\n", custody.sha256);
+        check_remote_custody(&stdout, "'$HOME/.local/bin/zynk'", &custody).expect("custody ok");
+    }
+
+    #[test]
+    fn remote_custody_rejects_a_substituted_binary_even_with_a_matching_version() {
+        // The hash is checked before the version/protocol validation, so a binary that reports the
+        // right version but is not the bytes that were copied still fails.
+        let custody = custody_fixture();
+        let stdout = format!("{}\nzynk 3.1.0 (deadbeefcafe)\n", "b".repeat(64));
+        let err = check_remote_custody(&stdout, "/remote/zynk", &custody).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("is not the binary that was copied"),
+            "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn resolve_install_source_uses_override_binary_without_temporary_cleanup() {
-        let platform = RemotePlatform {
-            os: "linux",
-            arch: "aarch64",
-        };
-        let source = resolve_install_source(&platform, Some(PathBuf::from("/tmp/zynk-aarch64")))
+    fn remote_custody_rejects_a_different_source_commit() {
+        let custody = custody_fixture();
+        let stdout = format!("{}\nzynk 3.1.0 (0123456789ab)\n", custody.sha256);
+        let err = check_remote_custody(&stdout, "/remote/zynk", &custody).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("reports source commit 0123456789ab"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn remote_custody_rejects_a_remote_that_cannot_attest_its_source() {
+        let custody = custody_fixture();
+        let stdout = format!("{}\nzynk 3.1.0\n", custody.sha256);
+        let err = check_remote_custody(&stdout, "/remote/zynk", &custody).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot attest the source commit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_install_source_uses_override_binary() {
+        let platform = RemotePlatform::local();
+        let source = resolve_install_source(&platform, Some(PathBuf::from("/tmp/zynk-linux")))
             .expect("override source");
-        assert_eq!(source.path, PathBuf::from("/tmp/zynk-aarch64"));
-        assert!(source.temporary_dir.is_none());
+        assert_eq!(source.path, PathBuf::from("/tmp/zynk-linux"));
     }
 
     fn remote_env_lock() -> &'static std::sync::Mutex<()> {
@@ -2485,21 +2319,5 @@ mod tests {
             filename.starts_with("zynk-r-"),
             "expected hashed fallback, got {filename}"
         );
-    }
-
-    #[test]
-    fn install_source_cleanup_removes_temporary_directory() {
-        let dir = std::env::temp_dir().join(format!(
-            "zynk-install-source-cleanup-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir(&dir).expect("create temp dir");
-        let path = dir.join("zynk.tmp");
-        fs::write(&path, b"test").expect("write temp file");
-
-        InstallSource::temporary(path, dir.clone()).cleanup();
-
-        assert!(!dir.exists());
     }
 }

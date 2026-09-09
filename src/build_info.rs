@@ -20,6 +20,21 @@ pub fn version() -> String {
     }
 }
 
+/// The source commit this binary was built from, when the build could attest one (ADR 0013
+/// custody). `None` for a build with no git checkout — a crates.io `.crate` unpack or a source
+/// tarball — in which case the remote-copy install path refuses to seed a remote from this binary.
+pub fn build_sha() -> Option<&'static str> {
+    non_empty(option_env!("ZYNK_BUILD_SHA"))
+}
+
+/// The `--version` line: `zynk <version>`, plus the attested source commit when there is one.
+pub fn version_line() -> String {
+    match build_sha() {
+        Some(sha) => format!("zynk {} ({sha})", version()),
+        None => format!("zynk {}", version()),
+    }
+}
+
 pub fn is_preview() -> bool {
     channel() == "preview"
 }

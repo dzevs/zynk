@@ -31,6 +31,68 @@ fn env_bool(name: &str) -> Option<bool> {
     }
 }
 
+/// `git` stdout for a read-only query in `dir`, or `None` when git fails or says nothing.
+fn git_stdout(dir: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+/// Export `ZYNK_BUILD_SHA`: the source commit this binary is built from (ADR 0013 custody).
+///
+/// A remote-copy install has to prove the far end runs the exact reviewed source, and a version
+/// string cannot do that. An explicit `ZYNK_BUILD_SHA` wins, for reproducible and CI builds;
+/// otherwise the commit comes from `git rev-parse HEAD`, suffixed `-dirty` when tracked files
+/// differ from it. A build with neither — a crates.io `.crate` unpack, a source tarball — exports
+/// an empty value, and the remote-copy path then refuses to seed a remote host from that binary.
+fn export_build_sha() {
+    println!("cargo:rerun-if-env-changed=ZYNK_BUILD_SHA");
+    if let Ok(value) = env::var("ZYNK_BUILD_SHA") {
+        println!("cargo:rustc-env=ZYNK_BUILD_SHA={}", value.trim());
+        return;
+    }
+
+    let dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    // Rebuild when the checkout moves, so the attested commit cannot go stale. The explicit
+    // `rerun-if-changed` list above replaces cargo's default file watching, so without these a
+    // later commit would keep the previous SHA compiled in.
+    let watch = |args: &[&str]| {
+        if let Some(path) = git_stdout(&dir, args) {
+            if PathBuf::from(&path).exists() {
+                println!("cargo:rerun-if-changed={path}");
+            }
+        }
+    };
+    watch(&["rev-parse", "--path-format=absolute", "--git-path", "HEAD"]);
+    if let Some(reference) = git_stdout(&dir, &["symbolic-ref", "-q", "HEAD"]) {
+        watch(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            &reference,
+        ]);
+    }
+
+    let sha = match git_stdout(&dir, &["rev-parse", "HEAD"]) {
+        Some(sha) => {
+            let dirty = git_stdout(&dir, &["status", "--porcelain", "--untracked-files=no"]);
+            match dirty {
+                Some(_) => format!("{sha}-dirty"),
+                None => sha,
+            }
+        }
+        None => String::new(),
+    };
+    println!("cargo:rustc-env=ZYNK_BUILD_SHA={sha}");
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
@@ -51,6 +113,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ZYNK_BUILD_ID");
     println!("cargo:rerun-if-env-changed=ZYNK_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=ZIG");
+
+    export_build_sha();
 
     // docs.rs builds with no network and no Zig toolchain. rustdoc does not link, and the libghostty-vt API
     // is consumed via `extern "C"` declarations, so skip the native Zig build + all link directives there.
