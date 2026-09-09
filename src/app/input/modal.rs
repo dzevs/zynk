@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Direction, Rect};
+#[cfg(test)]
+use ratatui::layout::Direction;
+use ratatui::layout::Rect;
 
 use crate::{
     app::{
@@ -426,6 +428,7 @@ pub(super) const SETTINGS_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
     },
 ];
 
+#[cfg(test)]
 pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
     match action {
         ModalAction::Save => {
@@ -588,12 +591,7 @@ fn delete_rename_input_word(state: &mut AppState) {
     }
 }
 
-pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
-    if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
-        apply_rename_action(state, action);
-        return;
-    }
-
+fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             clear_rename_input(state);
@@ -618,6 +616,17 @@ pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
+    if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
+        apply_rename_action(state, action);
+        return;
+    }
+
+    handle_rename_edit_key(state, key);
+}
+
+#[cfg(test)]
 pub(crate) fn handle_resize_key(state: &mut AppState, raw_key: TerminalKey) {
     let key = raw_key.as_key_event();
     if key.code == KeyCode::Esc
@@ -646,6 +655,7 @@ pub(super) fn open_confirm_close(state: &mut AppState) {
     state.mode = Mode::ConfirmClose;
 }
 
+#[cfg(test)]
 pub(super) fn confirm_close_accept(state: &mut AppState) {
     state.close_selected_workspace();
     if state.workspaces.is_empty() {
@@ -659,6 +669,7 @@ pub(super) fn confirm_close_cancel(state: &mut AppState) {
     state.mode = Mode::Navigate;
 }
 
+#[cfg(test)]
 pub(crate) fn handle_confirm_close_key(state: &mut AppState, key: KeyEvent) {
     match modal_action_from_key(&key, CONFIRM_CLOSE_ACTIONS) {
         Some(ModalAction::Confirm) => confirm_close_accept(state),
@@ -667,6 +678,7 @@ pub(crate) fn handle_confirm_close_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn apply_context_menu_action(
     state: &mut AppState,
     terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
@@ -870,6 +882,7 @@ pub(super) fn apply_context_menu_action(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn handle_context_menu_key(
     state: &mut AppState,
     terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
@@ -903,19 +916,11 @@ pub(crate) fn handle_context_menu_key(
 impl App {
     pub(crate) fn handle_rename_key_via_api(&mut self, key: KeyEvent) {
         if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
-            match action {
-                ModalAction::Save => self.save_rename_modal_via_api(),
-                ModalAction::Clear => {
-                    self.state.name_input.clear();
-                    self.state.name_input_replace_on_type = false;
-                }
-                ModalAction::Cancel => cancel_rename_modal(&mut self.state),
-                _ => {}
-            }
+            self.apply_rename_mouse_action_via_api(action);
             return;
         }
 
-        handle_rename_key(&mut self.state, key);
+        handle_rename_edit_key(&mut self.state, key);
     }
 
     fn save_rename_modal_via_api(&mut self) {
@@ -928,7 +933,7 @@ impl App {
         match self.state.mode {
             Mode::RenameWorkspace if !self.state.workspaces.is_empty() && !new_name.is_empty() => {
                 let workspace_id = self.public_workspace_id(self.state.selected);
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.workspace.rename",
                     crate::api::schema::Method::WorkspaceRename(
                         crate::api::schema::WorkspaceRenameParams {
@@ -945,7 +950,7 @@ impl App {
                 } else {
                     Some(new_name)
                 };
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.tab.create_named",
                     crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
                         workspace_id: None,
@@ -970,7 +975,7 @@ impl App {
                         .is_some_and(|name| new_name == name);
                 if !keep_auto_name {
                     if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
-                        self.dispatch_tui_api_request(
+                        self.dispatch_tui_runtime_mutation(
                             "tui.tab.rename",
                             crate::api::schema::Method::TabRename(
                                 crate::api::schema::TabRenameParams {
@@ -987,7 +992,7 @@ impl App {
                     (self.state.active, self.state.rename_pane_target)
                 {
                     if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                        self.dispatch_tui_api_request(
+                        self.dispatch_tui_runtime_mutation(
                             "tui.pane.rename",
                             crate::api::schema::Method::PaneRename(
                                 crate::api::schema::PaneRenameParams {
@@ -1003,6 +1008,30 @@ impl App {
         }
 
         cancel_rename_modal(&mut self.state);
+    }
+
+    pub(super) fn apply_rename_mouse_action_via_api(&mut self, action: ModalAction) {
+        match action {
+            ModalAction::Save => self.save_rename_modal_via_api(),
+            ModalAction::Clear => {
+                self.state.name_input.clear();
+                self.state.name_input_replace_on_type = false;
+            }
+            ModalAction::Cancel => cancel_rename_modal(&mut self.state),
+            _ => {}
+        }
+    }
+
+    pub(super) fn confirm_close_accept_via_api(&mut self) {
+        let ws_idx = self.state.selected;
+        if ws_idx < self.state.workspaces.len() {
+            self.close_workspace_idx_via_api(ws_idx);
+        }
+        self.state.mode = if self.state.active.is_some() {
+            Mode::Terminal
+        } else {
+            Mode::Navigate
+        };
     }
 
     pub(crate) fn handle_resize_key_via_api(&mut self, raw_key: TerminalKey) {
@@ -1028,7 +1057,7 @@ impl App {
             _ => None,
         };
         if let Some(direction) = direction {
-            self.dispatch_tui_api_request(
+            self.dispatch_tui_runtime_mutation(
                 "tui.pane.resize",
                 crate::api::schema::Method::PaneResize(crate::api::schema::PaneResizeParams {
                     pane_id: None,
@@ -1042,15 +1071,7 @@ impl App {
     pub(crate) fn handle_confirm_close_key_via_api(&mut self, key: KeyEvent) {
         match modal_action_from_key(&key, CONFIRM_CLOSE_ACTIONS) {
             Some(ModalAction::Confirm) => {
-                let ws_idx = self.state.selected;
-                if ws_idx < self.state.workspaces.len() {
-                    self.close_workspace_idx_via_api(ws_idx);
-                }
-                self.state.mode = if self.state.active.is_some() {
-                    Mode::Terminal
-                } else {
-                    Mode::Navigate
-                };
+                self.confirm_close_accept_via_api();
             }
             Some(ModalAction::Cancel) => confirm_close_cancel(&mut self.state),
             _ => {}
@@ -1163,7 +1184,7 @@ impl App {
                 Some("Clear pane name"),
             ) => {
                 if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                    self.dispatch_tui_api_request(
+                    self.dispatch_tui_runtime_mutation(
                         "tui.pane.clear_name",
                         crate::api::schema::Method::PaneRename(
                             crate::api::schema::PaneRenameParams {
@@ -1189,7 +1210,7 @@ impl App {
                 if let (Some(source_public_id), Some(target_public_id)) =
                     (source_public_id, target_public_id)
                 {
-                    self.dispatch_tui_api_request(
+                    self.dispatch_tui_runtime_mutation(
                         "tui.pane.swap_exact",
                         crate::api::schema::Method::PaneSwap(crate::api::schema::PaneSwapParams {
                             pane_id: None,

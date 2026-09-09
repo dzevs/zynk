@@ -14,6 +14,7 @@ mod creation;
 mod ids;
 mod input;
 mod runtime;
+mod runtime_mutations;
 mod session;
 pub mod state;
 mod terminal_targets;
@@ -857,7 +858,7 @@ impl App {
 
             if self.state.request_new_workspace {
                 self.state.request_new_workspace = false;
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.workspace.create",
                     crate::api::schema::Method::WorkspaceCreate(
                         crate::api::schema::WorkspaceCreateParams {
@@ -873,7 +874,7 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 let label = self.state.requested_new_tab_name.take();
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.tab.create",
                     crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
                         workspace_id: None,
@@ -896,7 +897,7 @@ impl App {
             }
 
             if let Some(cwd) = self.state.request_new_workspace_cwd.take() {
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.workspace.create_cwd",
                     crate::api::schema::Method::WorkspaceCreate(
                         crate::api::schema::WorkspaceCreateParams {
@@ -1593,7 +1594,7 @@ impl App {
                 self.handle_copy_mode_key(key);
             }
             Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                input::handle_rename_key(&mut self.state, key_event);
+                self.handle_rename_key_via_api(key_event);
             }
             Mode::NewLinkedWorktree => {
                 self.handle_worktree_create_key(key_event);
@@ -1605,17 +1606,13 @@ impl App {
                 self.handle_worktree_remove_key(key_event);
             }
             Mode::Resize => {
-                input::handle_resize_key(&mut self.state, key);
+                self.handle_resize_key_via_api(key);
             }
             Mode::ConfirmClose => {
-                input::handle_confirm_close_key(&mut self.state, key_event);
+                self.handle_confirm_close_key_via_api(key_event);
             }
             Mode::ContextMenu => {
-                input::handle_context_menu_key(
-                    &mut self.state,
-                    &mut self.terminal_runtimes,
-                    key_event,
-                );
+                self.handle_context_menu_key_via_api(key_event);
             }
             Mode::KeybindHelp => {
                 input::handle_keybind_help_key(&mut self.state, key_event);
@@ -4356,6 +4353,47 @@ last_pane = "prefix+tab"
 
         assert_eq!(app.state.name_input, "feature/logs");
         assert!(!app.state.name_input_replace_on_type);
+    }
+
+    #[test]
+    fn route_client_input_rename_enter_submits_through_api_path() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("old")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::RenameWorkspace;
+        app.state.name_input = "new".into();
+
+        app.route_client_input(b"\r".to_vec());
+
+        assert_eq!(app.state.workspaces[0].custom_name.as_deref(), Some("new"));
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(event.event, crate::api::schema::EventKind::WorkspaceRenamed)
+        }));
+    }
+
+    #[test]
+    fn route_client_input_context_menu_enter_submits_through_api_path() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.confirm_close = false;
+        app.state.context_menu = Some(state::ContextMenuState {
+            kind: state::ContextMenuKind::Workspace { ws_idx: 1 },
+            x: 2,
+            y: 2,
+            list: state::MenuListState::new(1),
+        });
+        app.state.mode = Mode::ContextMenu;
+
+        app.route_client_input(b"\r".to_vec());
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].display_name(), "a");
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(event.event, crate::api::schema::EventKind::WorkspaceClosed)
+        }));
     }
 
     #[test]

@@ -107,7 +107,7 @@ impl App {
         let previous_mode = self.state.mode;
         match action {
             NavigateAction::NewWorkspace => {
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.key.workspace.create",
                     crate::api::schema::Method::WorkspaceCreate(
                         crate::api::schema::WorkspaceCreateParams {
@@ -220,7 +220,7 @@ impl App {
                     if self.state.prompt_new_tab_name {
                         super::modal::open_new_tab_dialog(&mut self.state);
                     } else {
-                        self.dispatch_tui_api_request(
+                        self.dispatch_tui_runtime_mutation(
                             "tui.key.tab.create",
                             crate::api::schema::Method::TabCreate(
                                 crate::api::schema::TabCreateParams {
@@ -352,27 +352,17 @@ impl App {
 
     pub(crate) fn focus_workspace_idx_via_api(&mut self, ws_idx: usize) {
         let workspace_id = self.public_workspace_id(ws_idx);
-        self.dispatch_tui_api_request(
-            "tui.workspace.focus",
-            crate::api::schema::Method::WorkspaceFocus(crate::api::schema::WorkspaceTarget {
-                workspace_id,
-            }),
-        );
+        self.runtime_workspace_focus("tui.workspace.focus", workspace_id);
     }
 
     pub(crate) fn close_workspace_idx_via_api(&mut self, ws_idx: usize) {
         let workspace_id = self.public_workspace_id(ws_idx);
-        self.dispatch_tui_api_request(
-            "tui.workspace.close",
-            crate::api::schema::Method::WorkspaceClose(crate::api::schema::WorkspaceTarget {
-                workspace_id,
-            }),
-        );
+        self.runtime_workspace_close("tui.workspace.close", workspace_id);
     }
 
     pub(crate) fn move_workspace_via_api(&mut self, source_ws_idx: usize, insert_idx: usize) {
         let workspace_id = self.public_workspace_id(source_ws_idx);
-        self.dispatch_tui_api_request(
+        self.dispatch_tui_runtime_mutation(
             "tui.workspace.move",
             crate::api::schema::Method::WorkspaceMove(crate::api::schema::WorkspaceMoveParams {
                 workspace_id,
@@ -388,10 +378,7 @@ impl App {
         let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
             return;
         };
-        self.dispatch_tui_api_request(
-            "tui.tab.focus",
-            crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget { tab_id }),
-        );
+        self.runtime_tab_focus("tui.tab.focus", tab_id);
     }
 
     pub(crate) fn close_active_tab_via_api(&mut self) {
@@ -402,10 +389,7 @@ impl App {
         let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
             return;
         };
-        self.dispatch_tui_api_request(
-            "tui.tab.close",
-            crate::api::schema::Method::TabClose(crate::api::schema::TabTarget { tab_id }),
-        );
+        self.runtime_tab_close("tui.tab.close", tab_id);
     }
 
     pub(crate) fn move_tab_via_api(
@@ -417,7 +401,7 @@ impl App {
         let Some(tab_id) = self.public_tab_id(ws_idx, source_tab_idx) else {
             return;
         };
-        self.dispatch_tui_api_request(
+        self.dispatch_tui_runtime_mutation(
             "tui.tab.move",
             crate::api::schema::Method::TabMove(crate::api::schema::TabMoveParams {
                 tab_id,
@@ -434,10 +418,7 @@ impl App {
         let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return;
         };
-        self.dispatch_tui_api_request(
-            "tui.pane.focus",
-            crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget { pane_id }),
-        );
+        self.runtime_pane_focus("tui.pane.focus", pane_id);
     }
 
     pub(crate) fn focus_pane_direction_via_api(&mut self, direction: NavDirection) {
@@ -445,7 +426,7 @@ impl App {
             self.focus_pane_internal_via_api(ws_idx, target);
             return;
         }
-        self.dispatch_tui_api_request(
+        self.dispatch_tui_runtime_mutation(
             "tui.pane.focus_direction",
             crate::api::schema::Method::PaneFocusDirection(
                 crate::api::schema::PaneFocusDirectionParams {
@@ -461,7 +442,7 @@ impl App {
             let source_pane_id = self.public_pane_id(ws_idx, source);
             let target_pane_id = self.public_pane_id(ws_idx, target);
             if let (Some(source_pane_id), Some(target_pane_id)) = (source_pane_id, target_pane_id) {
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.pane.swap_exact",
                     crate::api::schema::Method::PaneSwap(crate::api::schema::PaneSwapParams {
                         pane_id: None,
@@ -473,7 +454,7 @@ impl App {
                 return;
             }
         }
-        self.dispatch_tui_api_request(
+        self.dispatch_tui_runtime_mutation(
             "tui.pane.swap",
             crate::api::schema::Method::PaneSwap(crate::api::schema::PaneSwapParams {
                 pane_id: None,
@@ -488,7 +469,7 @@ impl App {
         &mut self,
         direction: crate::api::schema::SplitDirection,
     ) {
-        self.dispatch_tui_api_request(
+        self.dispatch_tui_runtime_mutation(
             "tui.pane.split",
             crate::api::schema::Method::PaneSplit(crate::api::schema::PaneSplitParams {
                 workspace_id: None,
@@ -508,14 +489,11 @@ impl App {
         let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return;
         };
-        self.dispatch_tui_api_request(
-            "tui.pane.close",
-            crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget { pane_id }),
-        );
+        self.runtime_pane_close("tui.pane.close", pane_id);
     }
 
     pub(crate) fn zoom_focused_pane_via_api(&mut self) {
-        self.dispatch_tui_api_request(
+        self.dispatch_tui_runtime_mutation(
             "tui.pane.zoom",
             crate::api::schema::Method::PaneZoom(crate::api::schema::PaneZoomParams {
                 pane_id: None,
@@ -525,7 +503,7 @@ impl App {
     }
 
     pub(crate) fn set_split_ratio_via_api(&mut self, path: Vec<bool>, ratio: f32) {
-        self.dispatch_tui_api_request(
+        self.dispatch_tui_runtime_mutation(
             "tui.layout.set_split_ratio",
             crate::api::schema::Method::LayoutSetSplitRatio(
                 crate::api::schema::LayoutSetSplitRatioParams {

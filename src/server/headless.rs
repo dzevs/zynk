@@ -495,7 +495,7 @@ impl HeadlessServer {
 
             if self.app.state.request_submit_worktree_create {
                 self.app.state.request_submit_worktree_create = false;
-                self.app.start_worktree_add();
+                self.app.submit_worktree_create_via_api();
                 needs_render = true;
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.deferred_worktree_submit");
@@ -503,7 +503,7 @@ impl HeadlessServer {
 
             if self.app.state.request_submit_worktree_open {
                 self.app.state.request_submit_worktree_open = false;
-                self.app.open_selected_existing_worktree();
+                self.app.submit_worktree_open_via_api();
                 needs_render = true;
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.deferred_worktree_submit");
@@ -511,7 +511,7 @@ impl HeadlessServer {
 
             if self.app.state.request_submit_worktree_remove {
                 self.app.state.request_submit_worktree_remove = false;
-                self.app.start_worktree_remove();
+                self.app.submit_worktree_remove_via_api();
                 needs_render = true;
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.deferred_worktree_submit");

@@ -45,8 +45,7 @@ mod terminal;
 
 pub(crate) use self::{
     modal::{
-        handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
-        handle_keybind_help_key, handle_navigator_key, handle_rename_key, handle_resize_key,
+        handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
         insert_navigator_search_text, insert_rename_input_text,
     },
     navigate::terminal_direct_navigation_action,
@@ -320,6 +319,13 @@ impl App {
                     } => self.move_tab_via_api(ws_idx, source_tab_idx, insert_idx),
                     MouseAction::SetSplitRatio { path, ratio } => {
                         self.set_split_ratio_via_api(path, ratio)
+                    }
+                    MouseAction::RenameModal(action) => {
+                        self.apply_rename_mouse_action_via_api(action)
+                    }
+                    MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
+                    MouseAction::ContextMenu { menu, idx } => {
+                        self.apply_context_menu_action_via_api(menu, idx)
                     }
                 }
             }
