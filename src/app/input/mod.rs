@@ -223,6 +223,20 @@ impl App {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.pending_url_click = false;
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.pending_url_click => {
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.pending_url_click => {
+                self.pending_url_click = false;
+                return;
+            }
+            _ => {}
+        }
+
         if self.handle_overlay_mouse(mouse) {
             return;
         }
@@ -381,6 +395,7 @@ impl App {
         };
 
         self.last_pane_click = None;
+        self.pending_url_click = true;
         match self.invoke_plugin_link_handler_for_url(&url, info.id) {
             Ok(true) => return true,
             Ok(false) => {}

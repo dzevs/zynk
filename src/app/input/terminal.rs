@@ -500,6 +500,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ctrl_click_url_does_not_forward_release_to_mouse_reporting_pane() {
+        let line = "see https://github.com/dzevs/zynk/issues/1761";
+        let col = line.find("github").expect("url host") as u16;
+        let (mut app, info) = app_with_screen_bytes(b"");
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let screen = format!("\x1b[?1049h\x1b[?1000h\x1b[?1006h{line}");
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                screen.as_bytes(),
+                4,
+            );
+        app.state.insert_test_runtime(pane_id, runtime);
+        install_test_link_handler(&mut app);
+        let mut send_mouse = |kind, column, modifiers| {
+            app.handle_mouse(modified_mouse(kind, column, info.inner_rect.y, modifiers));
+        };
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+        let url_x = info.inner_rect.x + col;
+
+        send_mouse(down, url_x, KeyModifiers::CONTROL);
+        send_mouse(up, url_x, KeyModifiers::empty());
+        send_mouse(down, info.inner_rect.x, KeyModifiers::empty());
+        send_mouse(up, info.inner_rect.x, KeyModifiers::empty());
+
+        assert_eq!(app.state.plugin_command_logs.len(), 1);
+        assert_eq!(
+            input_rx.try_recv().expect("later gesture mouse down"),
+            Bytes::from_static(b"\x1b[<0;1;1M")
+        );
+        assert_eq!(
+            input_rx.try_recv().expect("later gesture mouse up"),
+            Bytes::from_static(b"\x1b[<0;1;1m")
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "handled URL click must not leave an unmatched release for the pane"
+        );
+    }
+
+    #[tokio::test]
     async fn ctrl_click_url_invokes_plugin_link_handler_but_super_click_does_not() {
         let line = "see https://github.com/example/repo/issues/398";
         let col = line.find("github").expect("url host") as u16;
@@ -555,6 +599,128 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn pane_cell_url_resolver_finds_soft_wrapped_url() {
+        let (_app, info) = app_with_screen_bytes(b"");
+        let prefix = "https://example.com/";
+        let padding = "a".repeat(info.inner_rect.width as usize - prefix.len());
+        let url = format!("{prefix}{padding}tail");
+        let (app, _info) = app_with_screen_bytes(url.as_bytes());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        assert_eq!(
+            app.state
+                .url_at_pane_cell(&app.terminal_runtimes, pane_id, 1, 1)
+                .as_deref(),
+            Some(url.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_cell_url_resolver_does_not_shift_after_zero_width_mark() {
+        let url = "https://example.com/mark";
+        let screen = format!("e\u{301} {url}");
+        let (app, _info) = app_with_screen_bytes(screen.as_bytes());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        assert_eq!(
+            app.state
+                .url_at_pane_cell(&app.terminal_runtimes, pane_id, 0, 2)
+                .as_deref(),
+            Some(url)
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_cell_url_resolver_handles_hard_newline_after_full_row() {
+        let (_app, info) = app_with_screen_bytes(b"");
+        let full_row = "x".repeat(info.inner_rect.width as usize);
+        let url = "https://example.com/next";
+        let screen = format!("{full_row}\n{url}");
+        let (app, _info) = app_with_screen_bytes(screen.as_bytes());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        assert_eq!(
+            app.state
+                .url_at_pane_cell(&app.terminal_runtimes, pane_id, 1, 1)
+                .as_deref(),
+            None
+        );
+        assert_eq!(
+            app.state
+                .url_at_pane_cell(&app.terminal_runtimes, pane_id, 2, 1)
+                .as_deref(),
+            Some(url)
+        );
+    }
+
+    #[tokio::test]
+    async fn render_stream_does_not_synthesize_soft_wrapped_url_hyperlinks() {
+        let (_app, info) = app_with_screen_bytes(b"");
+        let prefix = "https://example.com/";
+        let padding = "b".repeat(info.inner_rect.width as usize - prefix.len());
+        let url = format!("{prefix}{padding}tail");
+        let (app, _info) = app_with_screen_bytes(url.as_bytes());
+
+        let links =
+            crate::server::render_stream::visible_hyperlinks(&app.state, &app.terminal_runtimes);
+
+        assert!(links.is_empty());
+    }
+
+    #[tokio::test]
+    async fn render_stream_does_not_synthesize_url_hyperlinks_after_zero_width_mark() {
+        let url = "https://example.com/mark";
+        let screen = format!("e\u{301} {url}");
+        let (app, _info) = app_with_screen_bytes(screen.as_bytes());
+
+        let links =
+            crate::server::render_stream::visible_hyperlinks(&app.state, &app.terminal_runtimes);
+
+        assert!(links.is_empty());
+    }
+
+    #[tokio::test]
+    async fn render_stream_does_not_synthesize_hard_newline_plain_url_hyperlinks() {
+        let (_app, info) = app_with_screen_bytes(b"");
+        let full_row = "x".repeat(info.inner_rect.width as usize);
+        let url = "https://example.com/next";
+        let screen = format!("{full_row}\n{url}");
+        let (app, _info) = app_with_screen_bytes(screen.as_bytes());
+        let links =
+            crate::server::render_stream::visible_hyperlinks(&app.state, &app.terminal_runtimes);
+
+        assert!(links.is_empty());
+    }
+
+    #[tokio::test]
+    async fn render_stream_exports_osc8_hyperlink_metadata() {
+        let uri = "https://example.com/target";
+        let (mut app, _info) =
+            app_with_screen_bytes(format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\").as_bytes());
+        let (buffer, cursor) = crate::server::render_stream::render_virtual_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            ratatui::layout::Rect::new(0, 0, 106, 20),
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        let links =
+            crate::server::render_stream::visible_hyperlinks(&app.state, &app.terminal_runtimes);
+        let frame = crate::protocol::FrameData::from_ratatui_buffer_with_hyperlinks(
+            &buffer, cursor, &links,
+        );
+        let ((x, y), symbol, _) = links
+            .iter()
+            .find(|(_, symbol, link_uri)| symbol == "l" && link_uri == uri)
+            .expect("OSC 8 link cell");
+        let linked_cell_index = usize::from(*y) * usize::from(frame.width) + usize::from(*x);
+
+        assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
+        assert_eq!(symbol, "l");
+        assert_eq!(frame.cells[linked_cell_index].hyperlink, Some(0));
     }
 
     #[tokio::test]

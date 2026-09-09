@@ -47,6 +47,9 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 - scripts/test_hermes_integration_asset.py
 - src/agent_resume.rs
 - src/api/schema/integrations.rs
+- src/app/input/mod.rs
+- src/app/input/terminal.rs
+- src/app/mod.rs
 - src/cli/integration.rs
 - src/client/mod.rs
 - src/config/model.rs

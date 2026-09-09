@@ -1998,15 +1998,23 @@ impl AppState {
         }
 
         let metrics = self.pane_scroll_metrics(terminal_runtimes, pane_id);
-        let row_selection = Selection::range(
+        let visible_selection = Selection::line_range(
             pane_id,
-            viewport_row,
-            0,
+            Selection::absolute_row_for_viewport(0, metrics),
+            Selection::absolute_row_for_viewport(info.inner_rect.height.saturating_sub(1), metrics),
             info.inner_rect.width.saturating_sub(1),
-            metrics,
         );
-        let row_text = rt.extract_selection(&row_selection)?;
-        url_at_column(&row_text, col).map(str::to_owned)
+        let visible_text = rt.extract_selection(&visible_selection)?;
+        let logical_cell =
+            logical_cell_for_visible_cell(&visible_text, info.inner_rect.width, viewport_row, col)?;
+        let line_start = visible_text[..logical_cell.byte_index]
+            .rfind('\n')
+            .map_or(0, |idx| idx + 1);
+        let line_end = visible_text[logical_cell.byte_index..]
+            .find('\n')
+            .map_or(visible_text.len(), |idx| logical_cell.byte_index + idx);
+        let line = visible_text.get(line_start..line_end)?;
+        url_at_column(line, logical_cell.logical_col).map(str::to_owned)
     }
 
     pub fn copy_selection(&mut self, terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry) {
@@ -2087,10 +2095,110 @@ fn word_bounds_at_column(row: &str, col: u16) -> Option<(u16, u16)> {
 pub(crate) fn url_at_column(row: &str, col: u16) -> Option<&str> {
     let cells = text_cells(row);
     let clicked_idx = cell_index_at_column(&cells, col)?;
-    let span = url_span_at_column(&cells, clicked_idx)?;
+    let span = url_spans(&cells)
+        .into_iter()
+        .find(|span| span.contains(clicked_idx))?;
     let start_byte = byte_index_for_cell(row, span.start);
     let end_byte = byte_index_after_cell(row, span.end);
     safe_web_url(row.get(start_byte..end_byte)?)
+}
+
+fn url_spans(cells: &[TextCell]) -> Vec<CellSpan> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    while start < cells.len() {
+        if starts_with_chars(&cells[start..], "http://")
+            || starts_with_chars(&cells[start..], "https://")
+        {
+            let mut end = start;
+            while end + 1 < cells.len() && !cells[end + 1].ch.is_whitespace() {
+                end += 1;
+            }
+            if let Some(span) = trim_url_edges(cells, CellSpan { start, end }) {
+                spans.push(span);
+            }
+            start = end + 1;
+        } else {
+            start += 1;
+        }
+    }
+    spans
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VisibleTextCell {
+    pub(crate) byte_index: usize,
+    pub(crate) ch: char,
+    pub(crate) logical_col: u16,
+    pub(crate) screen_row: u16,
+    pub(crate) screen_col: u16,
+}
+
+pub(crate) fn visible_text_cells(text: &str, pane_width: u16) -> Vec<VisibleTextCell> {
+    if pane_width == 0 {
+        return Vec::new();
+    }
+
+    let mut cells = Vec::new();
+    let mut screen_row = 0u16;
+    let mut screen_col = 0u16;
+    let mut logical_col = 0u16;
+    let mut pending_wrap = false;
+    for (byte_index, ch) in text.char_indices() {
+        if ch == '\n' {
+            screen_row = screen_row.saturating_add(1);
+            screen_col = 0;
+            logical_col = 0;
+            pending_wrap = false;
+            continue;
+        }
+        if pending_wrap {
+            screen_row = screen_row.saturating_add(1);
+            screen_col = 0;
+            pending_wrap = false;
+        }
+
+        let width = u16::from(crate::ghostty::unicode_codepoint_width(ch as u32));
+        cells.push(VisibleTextCell {
+            byte_index,
+            ch,
+            logical_col,
+            screen_row,
+            screen_col,
+        });
+
+        logical_col = logical_col.saturating_add(width);
+        screen_col = screen_col.saturating_add(width);
+        while screen_col > pane_width {
+            screen_col -= pane_width;
+            screen_row = screen_row.saturating_add(1);
+        }
+        if width > 0 && screen_col == pane_width {
+            pending_wrap = true;
+            screen_col = pane_width.saturating_sub(1);
+        }
+    }
+    cells
+}
+
+pub(crate) fn logical_cell_for_visible_cell(
+    text: &str,
+    pane_width: u16,
+    target_row: u16,
+    target_col: u16,
+) -> Option<VisibleTextCell> {
+    visible_text_cells(text, pane_width)
+        .into_iter()
+        .find(|cell| {
+            let width = u16::from(crate::ghostty::unicode_codepoint_width(cell.ch as u32));
+            cell.screen_row == target_row
+                && if width == 0 {
+                    target_col == cell.screen_col
+                } else {
+                    target_col >= cell.screen_col
+                        && target_col < cell.screen_col.saturating_add(width)
+                }
+        })
 }
 
 fn token_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
@@ -3192,6 +3300,56 @@ mod tests {
             None
         );
         assert_eq!(selected_url("open file:///tmp/report", "file"), None);
+    }
+
+    #[test]
+    fn visible_text_cells_use_the_emulator_width_table() {
+        // Fork-only width oracle: the wrapped-link helpers must measure columns
+        // with libghostty's width table, the same one the emulator prints with,
+        // never `unicode_width`.
+        let text = "a\u{4e16}\u{754c}b\u{301}c";
+        let cells = super::visible_text_cells(text, 80);
+        let widths: Vec<u16> = cells
+            .iter()
+            .map(|cell| u16::from(crate::ghostty::unicode_codepoint_width(cell.ch as u32)))
+            .collect();
+        assert_eq!(widths, vec![1, 2, 2, 1, 0, 1]);
+
+        let logical_cols: Vec<u16> = cells.iter().map(|cell| cell.logical_col).collect();
+        assert_eq!(logical_cols, vec![0, 1, 3, 5, 6, 6]);
+
+        let screen_cols: Vec<u16> = cells.iter().map(|cell| cell.screen_col).collect();
+        assert_eq!(screen_cols, vec![0, 1, 3, 5, 6, 6]);
+        assert!(cells.iter().all(|cell| cell.screen_row == 0));
+
+        // A wide character owns both of its columns; a zero-width mark owns
+        // none, so it only answers for the exact column it was placed on.
+        assert_eq!(
+            super::logical_cell_for_visible_cell(text, 80, 0, 1).map(|cell| cell.ch),
+            Some('\u{4e16}')
+        );
+        assert_eq!(
+            super::logical_cell_for_visible_cell(text, 80, 0, 2).map(|cell| cell.ch),
+            Some('\u{4e16}')
+        );
+        assert_eq!(
+            super::logical_cell_for_visible_cell(text, 80, 0, 5).map(|cell| cell.ch),
+            Some('b')
+        );
+        assert_eq!(
+            super::logical_cell_for_visible_cell(text, 80, 0, 6).map(|cell| cell.ch),
+            Some('\u{301}')
+        );
+
+        // Wide characters spend two columns of the soft-wrap budget.
+        let wrapped = super::visible_text_cells("\u{4e16}\u{754c}\u{4e16}", 4);
+        assert_eq!(
+            wrapped
+                .iter()
+                .map(|cell| (cell.screen_row, cell.screen_col, cell.logical_col))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 0), (0, 2, 2), (1, 0, 4)]
+        );
     }
 
     #[test]
