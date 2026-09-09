@@ -22,7 +22,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts import release_binary_audit as audit
-from scripts.git_test_support import init_repo, run_git
+from scripts.git_test_support import git_env, init_repo, run_git
 
 FAIL_CLOSED_MESSAGE = "zynk update is not available yet: build from source"
 
@@ -170,7 +170,8 @@ class AuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             binary = _write_binary(tmp, name, body)
             root = _write_source_root(tmp, source)
-            return audit.audit(binary, root)
+            with patch.dict(os.environ, git_env(), clear=True):
+                return audit.audit(binary, root)
 
     def test_a_correctly_gated_binary_passes(self):
         failures, _ = self._audit(GOOD_BINARY)
@@ -327,7 +328,8 @@ class BuildAttestationTests(unittest.TestCase):
     def _check(self, tmp, root, attestation):
         binary = _write_binary(tmp, "zynk", _attesting_binary(attestation))
         report = []
-        return audit.check_build_attestation(binary, root, report), report
+        with patch.dict(os.environ, git_env(), clear=True):
+            return audit.check_build_attestation(binary, root, report), report
 
     def test_a_clean_checkout_attested_as_its_own_commit_passes(self):
         with tempfile.TemporaryDirectory() as tmp:

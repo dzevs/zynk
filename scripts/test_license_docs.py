@@ -14,6 +14,8 @@ import pathlib
 import subprocess
 import unittest
 
+from scripts.git_test_support import git_env
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 RELICENSE_COMMIT = "cd5ea1be"
@@ -48,7 +50,8 @@ def _listed_files():
 
 def _tracked_files():
     out = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True, text=True
+        ["git", "ls-files", "-z"], cwd=ROOT, env=git_env(),
+        check=True, capture_output=True, text=True
     ).stdout
     return [rel for rel in out.split("\0") if rel]
 
