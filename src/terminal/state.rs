@@ -5124,12 +5124,16 @@ mod tests {
             "an observation captured before the restored retirement re-armed the session"
         );
 
-        // A capture after it is evidence in its own right, on either server.
+        // And the case that only a re-BASED boundary can decide, the handoff window
+        // itself: an observation captured 50 ms before the restore is still NEWER than
+        // the retirement, which the restored fence dates 100 ms before it. A restore
+        // that dropped the ages and stamped every boundary at the restore instant would
+        // refuse this one, so the assertion is what makes the ages load-bearing.
         observe_at(
             &mut restored_terminal,
             Some(Agent::Hermes),
             false,
-            restored_at + Duration::from_millis(10),
+            restored_at - Duration::from_millis(50),
         );
         assert!(
             identity_session_start(&mut restored_terminal, "retired-session", 31, "resume")
