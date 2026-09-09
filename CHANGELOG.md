@@ -29,7 +29,8 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   reload keeps the valid subset of bindings.
 - The raw image-paste shortcut is remote-only: `keys.remote_image_paste` (default `ctrl+v`; empty disables).
 - **Linux x86_64 only** ([ADR 0013](docs/zynk/decisions/0013-linux-only-platform-scope.md)): zynk builds for
-  `x86_64-unknown-linux-gnu`; every other target fails at compile time with a message naming that ADR. There are
+  `x86_64-unknown-linux-gnu`; every other target fails at compile time with a message naming that ADR — the
+  build script skips the native library there, so that message is what the build reports. There are
   no platform tiers, no optional targets and no release artifacts to verify — distribution is source only, from
   this repository or crates.io. CI is one Ubuntu `just check` (which now includes the maintenance unittests).
 - `NOTICE` now records that upstream relicensed from AGPL-3.0-or-later to Apache-2.0 (upstream commit

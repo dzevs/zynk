@@ -3,11 +3,19 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn zig_target(target: &str) -> &str {
+/// The diagnostic ADR 0013 promises on an unsupported platform. `src/main.rs` raises it as a
+/// `compile_error!`; this build script repeats it as a warning before skipping the native build,
+/// because a build script runs before rustc ever compiles the crate.
+const LINUX_ONLY_DIAGNOSTIC: &str =
+    "zynk supports Linux only (docs/zynk/decisions/0013-linux-only-platform-scope.md)";
+
+/// The Zig target for a Rust target zynk builds for, or `None` for a Linux architecture the
+/// vendored libghostty-vt build has no mapping for.
+fn zig_target(target: &str) -> Option<&'static str> {
     match target {
-        "x86_64-unknown-linux-gnu" => "x86_64-linux-gnu",
-        "x86_64-unknown-linux-musl" => "x86_64-linux-musl",
-        other => panic!("unsupported target for libghostty-vt build: {other}"),
+        "x86_64-unknown-linux-gnu" => Some("x86_64-linux-gnu"),
+        "x86_64-unknown-linux-musl" => Some("x86_64-linux-musl"),
+        _ => None,
     }
 }
 
@@ -32,6 +40,10 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/pkg");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/src");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/VERSION");
+    // DOCS_RS decides whether this script builds and links the native library at all, so a change to
+    // it has to invalidate the cached result. Without this, a docs-mode run's no-Zig/no-link output
+    // stays cached for a later normal build in the same target directory.
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_OPTIMIZE");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SIMD");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_ZIG_SYSTEM_DIR");
@@ -46,6 +58,16 @@ fn main() {
         return;
     }
 
+    // zynk builds for Linux only (ADR 0013). The failure a user on another platform is promised is the
+    // `compile_error!` in `src/main.rs` naming that ADR — and rustc only reaches it if this script does
+    // not fail first, so an unsupported OS skips the Zig build and the link directives rather than
+    // panicking over a missing Zig target mapping.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS");
+    if target_os != "linux" {
+        println!("cargo:warning={LINUX_ONLY_DIAGNOSTIC}");
+        return;
+    }
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let vendored_dir = manifest_dir.join("vendor/libghostty-vt");
     // Emit Zig's install prefix (zig-out) + local cache (.zig-cache) UNDER OUT_DIR so the `zig build` below
@@ -57,7 +79,11 @@ fn main() {
     let optimize = env::var("LIBGHOSTTY_VT_OPTIMIZE").unwrap_or_else(|_| "ReleaseFast".into());
     let simd = env_bool("LIBGHOSTTY_VT_SIMD").unwrap_or(true);
     let target = env::var("TARGET").expect("TARGET");
-    let zig_target = zig_target(&target);
+    // A Linux target with no Zig mapping compiles past the `compile_error!` in `src/main.rs` (its
+    // `target_os` IS linux), so this panic is the only diagnostic it gets.
+    let Some(zig_target) = zig_target(&target) else {
+        panic!("{LINUX_ONLY_DIAGNOSTIC}: no vendored libghostty-vt build for target {target}");
+    };
     let version_string = fs::read_to_string(vendored_dir.join("VERSION"))
         .expect("failed to read vendored libghostty-vt VERSION")
         .trim()

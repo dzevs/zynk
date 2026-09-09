@@ -62,7 +62,14 @@ just install-hooks
   never inside `vendor/`. This keeps the vendored source tree pristine, which
   `cargo package` verification requires.
 - The build skips entirely on docs.rs (`DOCS_RS` is set), since rustdoc doesn't
-  link the native library.
+  link the native library. `DOCS_RS` is declared as a `rerun-if-env-changed`
+  input, so a docs-mode result is not reused by a normal build in the same
+  target directory.
+- It also skips on a target zynk does not build for (ADR 0013 — any `target_os`
+  other than Linux), emitting the ADR message as a `cargo:warning` and no link
+  directives. That is deliberate: the diagnostic those users are promised is the
+  `compile_error!` in `src/main.rs`, and rustc only reaches it if the build
+  script does not fail first. `tests/build_script_targets.rs` guards it.
 
 A few env vars tune the native build, chiefly for packaging:
 `LIBGHOSTTY_VT_OPTIMIZE` (default `ReleaseFast`), `LIBGHOSTTY_VT_SIMD`,
@@ -154,6 +161,18 @@ exports above.
   ```bash
   just test-one <filter>      # e.g. just test-one codex_stale_working
   ```
+
+- **Cross-target build diagnostic** (`#[ignore]`d — not hermetic, several
+  minutes): checks the crate for a non-Linux target and asserts the failure is
+  the ADR 0013 `compile_error!`, not a build-script panic.
+
+  ```bash
+  rustup target add x86_64-pc-windows-gnu
+  cargo test --locked --test build_script_targets -- --ignored --nocapture
+  ```
+
+  It writes a throwaway target directory under `$CARGO_TARGET_DIR`;
+  `ZYNK_CROSS_CHECK_TARGET_ROOT` puts it elsewhere.
 
 - **TypeScript asset test (Bun):**
 
