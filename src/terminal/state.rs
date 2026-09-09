@@ -6075,7 +6075,14 @@ mod tests {
             );
         }
         let mut replacement = terminal.clone();
-        identity_session_start(&mut replacement, "new-session", 2, "new")
+        assert!(
+            identity_session_start(&mut replacement, "new-session", 2, "new").is_none(),
+            "replacement needs a detected process"
+        );
+        // Presence satisfies the existing session-replacement clamp, but evidence
+        // captured at the import boundary is still too old to confirm a receipt.
+        observe_at(&mut replacement, Some(Agent::Hermes), false, imported_at);
+        identity_session_start(&mut replacement, "new-session", 3, "new")
             .expect("a genuinely new session can replace the imported session");
         assert_eq!(
             replacement
