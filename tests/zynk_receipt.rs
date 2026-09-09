@@ -458,35 +458,50 @@ fn agent_send_codex(fixture: &Fixture, body: &str) -> Value {
     v
 }
 
-/// Run a process whose argv[0] is `hermes` in `pane` and wait until DETECTION
+/// Run a fake `hermes` process in `pane` and wait until DETECTION reports it.
+fn start_detected_hermes(fixture: &Fixture, pane: &str) {
+    start_detected_agent(fixture, pane, "hermes");
+}
+
+/// Run a fake `agy` process in `pane` and wait until DETECTION reports it. The
+/// antigravity-cli integration is session-identity-only, exactly like hermes, so its
+/// receipt tests need the same really-detected process.
+fn start_detected_agy(fixture: &Fixture, pane: &str) {
+    start_detected_agent(fixture, pane, "agy");
+}
+
+/// Run a process whose argv[0] is `agent` in `pane` and wait until DETECTION
 /// reports it. A session-identity-only integration leaves lifecycle to the screen,
 /// so its tests need a really-detected process rather than a hook state report.
 ///
 /// Two stages with separate failure messages: the pane shell must actually RUN the command
-/// (proven by `__zynk_hermes_ready__`), and only then can foreground detection report `hermes`.
+/// (proven by `__zynk_<agent>_ready__`), and only then can foreground detection report `agent`.
 /// Keeping them apart is what identified the real cause of the ~1-in-5 failure under parallel suite
 /// load — the command always ran, so the deadline was never the problem.
-fn start_detected_hermes(fixture: &Fixture, pane: &str) {
+fn start_detected_agent(fixture: &Fixture, pane: &str, agent: &str) {
     // The fake agent must run as a CHILD of the pane shell, never `exec` in place, because that is
     // the only shape the server's process probe reliably notices. `should_probe_foreground_job`
     // (`src/pane.rs`) re-probes a pane that has no agent yet only when the foreground PROCESS GROUP
     // changes, or while the content-driven acquisition window (8 s from the pane's first output) is
     // still open. An `exec`d agent inherits the pane shell's own process group and then, being a
     // silent `cat`, emits nothing that could reopen that window: once it closed, the pane was never
-    // probed again and detection could never report `hermes` — which is why raising the deadline from
+    // probed again and detection could never report the agent — which is why raising the deadline from
     // 10 s to 30 s in the previous commit changed nothing. A forked child gets its OWN foreground
     // process group, forcing the probe on the next tick, and it is also how a real agent starts.
     //
     // The ready marker is shell-quote-split so the ECHOED command line does not contain it verbatim —
     // only the `printf` output (emitted just before the agent starts) does. The `bash -c` layer keeps
-    // argv[0] = `hermes` (what `identify_agent_in_job` reads) without assuming the pane's own shell
+    // argv[0] = `agent` (what `identify_agent_in_job` reads) without assuming the pane's own shell
     // implements `exec -a`.
+    let marker = format!("__zynk_{agent}_ready__");
     run_in_pane_until_ready(
         fixture,
         pane,
-        "fake hermes",
-        "stty -echo 2>/dev/null; printf '__zynk''_hermes_ready__\\n'; bash -c 'exec -a hermes cat'",
-        "__zynk_hermes_ready__",
+        &format!("fake {agent}"),
+        &format!(
+            "stty -echo 2>/dev/null; printf '__zynk''_{agent}_ready__\\n'; bash -c 'exec -a {agent} cat'"
+        ),
+        &marker,
     );
     // The process is running in its own foreground process group. Detection is still polled by the
     // server, so it keeps room under parallel suite load — but a timeout here now means detection,
@@ -499,12 +514,12 @@ fn start_detected_hermes(fixture: &Fixture, pane: &str) {
                 "{{\"id\":\"get\",\"method\":\"pane.get\",\"params\":{{\"pane_id\":\"{pane}\"}}}}"
             ),
         );
-        if got.pointer("/result/pane/agent").and_then(Value::as_str) == Some("hermes") {
+        if got.pointer("/result/pane/agent").and_then(Value::as_str) == Some(agent) {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "the fake hermes process started (ready marker seen) but detection never reported it: {got}"
+            "the fake {agent} process started (ready marker seen) but detection never reported it: {got}"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -1258,6 +1273,124 @@ fn a_same_label_identity_only_pane_with_another_session_cannot_receipt() {
         "the addressed session's own receipt failed: {right}"
     );
     assert_eq!(latest_event(&fixture, &message_id).0, "received");
+
+    fixture.cleanup();
+}
+
+#[test]
+fn antigravity_cli_session_report_anchors_its_receipt() {
+    // antigravity-cli is the second session-identity-only integration (upstream
+    // `679584fd`). Its shipped hook reports the conversation over
+    // `pane.report_agent_session` and NOTHING else — no lifecycle state — so the
+    // identity it anchors must come from `hook_identity`, and the pane must then be
+    // able to receipt the message addressed to it while its status stays
+    // screen-detected. Note the label asymmetry: source `zynk:antigravity_cli`,
+    // agent label `agy`.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "agy-identity-receipt");
+    start_detected_agy(&fixture, &pane);
+    report_session(
+        &fixture.socket_path,
+        &pane,
+        "zynk:antigravity_cli",
+        "agy",
+        "agy-conversation-1",
+    );
+
+    let got = pane_get(&fixture.socket_path, &pane);
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/value")
+            .and_then(Value::as_str),
+        Some("agy-conversation-1"),
+        "the identity-only session report lost its session identity: {got}"
+    );
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/source")
+            .and_then(Value::as_str),
+        Some("zynk:antigravity_cli"),
+        "{got}"
+    );
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/agent")
+            .and_then(Value::as_str),
+        Some("agy"),
+        "{got}"
+    );
+
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "for the antigravity conversation"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send: stderr={} {sent}", out.stderr);
+    assert_eq!(sent["delivery_status"], "submitted", "{sent}");
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let receipt = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    assert!(
+        receipt.get("error").is_none(),
+        "the hook-identified antigravity addressee could not receipt its own message: {receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["delivery_status"], "received",
+        "{receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["receiver_agent_label"], "agy",
+        "{receipt}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "received");
+
+    fixture.cleanup();
+}
+
+#[test]
+fn a_detection_only_antigravity_cli_pane_is_not_receipt_capable() {
+    // The negative half for the new integration: a really detected `agy` process that
+    // never reported through its hook carries a detection-derived label only. Adding
+    // antigravity-cli to `session_identity_only_integration` must not let detection
+    // manufacture receipt identity for it.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "agy-detection-only");
+    start_detected_agy(&fixture, &pane);
+
+    let got = pane_get(&fixture.socket_path, &pane);
+    assert_eq!(
+        got.pointer("/result/pane/agent").and_then(Value::as_str),
+        Some("agy"),
+        "precondition: the pane carries a detection-only label: {got}"
+    );
+    assert!(
+        got.pointer("/result/pane/agent_session").is_none()
+            || got
+                .pointer("/result/pane/agent_session")
+                .map(Value::is_null)
+                == Some(true),
+        "precondition: no hook reported a session: {got}"
+    );
+
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "to a detected-only antigravity pane"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send: stderr={} {sent}", out.stderr);
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let receipt = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    assert!(
+        receipt.get("result").is_none(),
+        "a detection-only antigravity pane must not receipt: {receipt}"
+    );
+    assert_eq!(
+        receipt["error"]["code"], "receiver_identity_unverified",
+        "{receipt}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
 
     fixture.cleanup();
 }

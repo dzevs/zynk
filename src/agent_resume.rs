@@ -91,6 +91,7 @@ pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
             | ("zynk:droid", "droid")
             | ("zynk:qodercli", "qodercli")
             | ("zynk:cursor", "cursor")
+            | ("zynk:grok", "grok")
     )
 }
 
@@ -242,6 +243,16 @@ fn canonical_resume_argv(
                 session_ref.value.clone(),
             ]
         }
+        ("zynk:antigravity_cli", "agy", AgentSessionRefKind::Id) => {
+            vec![
+                "agy".into(),
+                "--conversation".into(),
+                session_ref.value.clone(),
+            ]
+        }
+        ("zynk:grok", "grok", AgentSessionRefKind::Id) => {
+            vec!["grok".into(), "--resume".into(), session_ref.value.clone()]
+        }
         _ => return None,
     };
 
@@ -272,6 +283,8 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("zynk:qodercli", "qodercli")
             | ("zynk:kilo", "kilo")
             | ("zynk:cursor", "cursor")
+            | ("zynk:antigravity_cli", "agy")
+            | ("zynk:grok", "grok")
     )
 }
 
@@ -542,6 +555,15 @@ mod tests {
         assert!(is_reserved_native_state_source("zynk:claude", "claude"));
         assert!(is_reserved_native_state_source("zynk:codex", "codex"));
         assert!(is_reserved_native_state_source("zynk:devin", "devin"));
+        // grok reports its session over a SessionStart hook and nothing else, so it
+        // joins the reserved-native tier: state stays screen-detected.
+        assert!(is_reserved_native_state_source("zynk:grok", "grok"));
+        // antigravity-cli is session-identity-only, not reserved-native: its report
+        // routes through `record_identity_only_hook_report` so it anchors identity.
+        assert!(!is_reserved_native_state_source(
+            "zynk:antigravity_cli",
+            "agy"
+        ));
         assert!(!is_reserved_native_state_source("zynk:kimi", "kimi"));
         assert!(!is_reserved_native_state_source(
             "zynk:opencode",
@@ -1272,6 +1294,28 @@ mod tests {
             .argv,
             vec!["cursor-agent", "--resume", "cursor-session"]
         );
+        assert_eq!(
+            plan(
+                "zynk:antigravity_cli",
+                "agy",
+                &AgentSessionRef::id("agy-session").unwrap(),
+                None,
+            )
+            .unwrap()
+            .argv,
+            vec!["agy", "--conversation", "agy-session"]
+        );
+        assert_eq!(
+            plan(
+                "zynk:grok",
+                "grok",
+                &AgentSessionRef::id("grok-session").unwrap(),
+                None,
+            )
+            .unwrap()
+            .argv,
+            vec!["grok", "--resume", "grok-session"]
+        );
     }
 
     #[test]
@@ -1399,6 +1443,17 @@ mod tests {
                 .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "qoder-id");
+
+        let session_ref =
+            session_ref_from_report("zynk:antigravity_cli", "agy", Some("agy-id".into()), None)
+                .unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "agy-id");
+
+        let session_ref =
+            session_ref_from_report("zynk:grok", "grok", Some("grok-id".into()), None).unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "grok-id");
     }
 
     #[test]
@@ -1550,5 +1605,35 @@ mod tests {
             "devin-session"
         )
         .is_some());
+        assert!(session_ref_from_snapshot(
+            "zynk:antigravity_cli",
+            "agy",
+            AgentSessionRefKind::Id,
+            "agy-session"
+        )
+        .is_some());
+        let agy_session = absolute_test_path("agy-session");
+        assert!(plan(
+            "zynk:antigravity_cli",
+            "agy",
+            &AgentSessionRef::path(&agy_session).unwrap(),
+            None,
+        )
+        .is_none());
+        assert!(session_ref_from_snapshot(
+            "zynk:grok",
+            "grok",
+            AgentSessionRefKind::Id,
+            "grok-session"
+        )
+        .is_some());
+        let grok_session = absolute_test_path("grok-session");
+        assert!(plan(
+            "zynk:grok",
+            "grok",
+            &AgentSessionRef::path(&grok_session).unwrap(),
+            None,
+        )
+        .is_none());
     }
 }

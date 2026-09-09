@@ -27,6 +27,8 @@ pub enum IntegrationTarget {
     Qodercli,
     Cursor,
     Mastracode,
+    AntigravityCli,
+    Grok,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +67,8 @@ mod tests {
             (IntegrationTarget::Qodercli, "qodercli"),
             (IntegrationTarget::Cursor, "cursor"),
             (IntegrationTarget::Mastracode, "mastracode"),
+            (IntegrationTarget::AntigravityCli, "antigravity_cli"),
+            (IntegrationTarget::Grok, "grok"),
         ] {
             assert_eq!(
                 serde_json::to_value(target).unwrap(),

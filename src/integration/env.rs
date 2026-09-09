@@ -27,6 +27,11 @@ pub(crate) const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
 pub(crate) const COPILOT_HOME_ENV_VAR: &str = "COPILOT_HOME";
 pub(crate) const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
 pub(crate) const CURSOR_CONFIG_DIR_ENV_VAR: &str = "CURSOR_CONFIG_DIR";
+pub(crate) const ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR: &str = "ANTIGRAVITY_CLI_CONFIG_DIR";
+pub(crate) const GROK_CONFIG_DIR_ENV_VAR: &str = "GROK_CONFIG_DIR";
+/// The grok CLI's own config-home override (documented alongside
+/// `$GROK_HOME/config.toml` and `$GROK_HOME/auth.json`).
+pub(crate) const GROK_HOME_ENV_VAR: &str = "GROK_HOME";
 
 /// Export the Zynk-branded base env (`ZYNK_SOCKET_PATH`) that every spawned pane
 /// receives regardless of whether it carries a pane/tab/workspace identity. The
@@ -118,6 +123,25 @@ pub(crate) fn cursor_dir() -> io::Result<PathBuf> {
 
 pub(crate) fn mastracode_dir() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".mastracode"))
+}
+
+pub(crate) fn antigravity_cli_dir() -> io::Result<PathBuf> {
+    // Antigravity CLI discovers global customizations (hooks.json included)
+    // from ~/.gemini/config; ~/.gemini/antigravity-cli holds runtime data and
+    // is never read for hooks.
+    config_dir_from_env_or_home(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &[".gemini", "config"])
+}
+
+pub(crate) fn grok_dir() -> io::Result<PathBuf> {
+    // GROK_CONFIG_DIR is a zynk-level override only (primarily a test seam);
+    // the grok CLI does not honor it, so it stays first and explicit.
+    if let Some(value) = std::env::var_os(GROK_CONFIG_DIR_ENV_VAR).filter(|value| !value.is_empty())
+    {
+        return expand_tilde_path(PathBuf::from(value));
+    }
+    // The grok CLI honors GROK_HOME as its config home (config.toml,
+    // auth.json, hooks/); mirror it so hook installs land where grok looks.
+    config_dir_from_env_or_home(GROK_HOME_ENV_VAR, &[".grok"])
 }
 
 #[cfg(test)]

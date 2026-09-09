@@ -123,6 +123,9 @@ fn clear_integration_path_env() {
     std::env::remove_var("XDG_CONFIG_HOME");
     std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
+    std::env::remove_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR);
+    std::env::remove_var(GROK_CONFIG_DIR_ENV_VAR);
+    std::env::remove_var(GROK_HOME_ENV_VAR);
 }
 
 fn kimi_hook_command(hook_path: &Path, action: &str) -> String {
@@ -1642,6 +1645,11 @@ fn all_native_status_assets_pass_identity_gate() {
         (IntegrationTarget::Qodercli, QODERCLI_HOOK_ASSET),
         (IntegrationTarget::Cursor, CURSOR_HOOK_ASSET),
         (IntegrationTarget::Mastracode, MASTRACODE_HOOK_ASSET),
+        (
+            IntegrationTarget::AntigravityCli,
+            ANTIGRAVITY_CLI_HOOK_ASSET,
+        ),
+        (IntegrationTarget::Grok, GROK_HOOK_ASSET),
     ];
     assert_eq!(
         assets.len(),
@@ -2681,6 +2689,12 @@ fn bundled_integration_asset_versions_match_expected_versions() {
             MASTRACODE_HOOK_ASSET,
             MASTRACODE_INTEGRATION_VERSION,
         ),
+        (
+            "antigravity_cli",
+            ANTIGRAVITY_CLI_HOOK_ASSET,
+            ANTIGRAVITY_CLI_INTEGRATION_VERSION,
+        ),
+        ("grok", GROK_HOOK_ASSET, GROK_INTEGRATION_VERSION),
     ] {
         assert_eq!(
             parse_integration_version(asset),
@@ -2770,6 +2784,26 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(MASTRACODE_HOOK_ASSET.contains("agent_session_id"));
     assert!(MASTRACODE_HOOK_ASSET.contains("pane.report_agent"));
     assert!(MASTRACODE_HOOK_ASSET.contains("pane.release_agent"));
+    assert!(GROK_HOOK_ASSET.contains("ZYNK_INTEGRATION_ID=grok"));
+    assert!(GROK_HOOK_ASSET.contains("GROK_SESSION_ID"));
+    assert!(GROK_HOOK_ASSET.contains("sessionId"));
+    assert!(GROK_HOOK_ASSET.contains("agent_session_id"));
+    assert!(GROK_HOOK_ASSET.contains("pane.report_agent_session"));
+    assert!(GROK_HOOK_ASSET.contains("zynk:grok"));
+    assert!(!GROK_HOOK_ASSET.contains("\"state\":"));
+    assert!(!GROK_HOOK_ASSET.contains("pane.release_agent"));
+    assert!(ANTIGRAVITY_CLI_HOOK_ASSET.contains("ZYNK_INTEGRATION_ID=antigravity_cli"));
+    assert!(ANTIGRAVITY_CLI_HOOK_ASSET.contains("conversationId"));
+    assert!(ANTIGRAVITY_CLI_HOOK_ASSET.contains("agent_session_id"));
+    assert!(ANTIGRAVITY_CLI_HOOK_ASSET.contains("agent_session_path"));
+    assert!(ANTIGRAVITY_CLI_HOOK_ASSET.contains("pane.report_agent_session"));
+    assert!(ANTIGRAVITY_CLI_HOOK_ASSET.contains("zynk:antigravity_cli"));
+    // The hook reports the canonical `agy` label; the server normalizes
+    // `antigravity-cli` to it before matching, so a raw product-name report would
+    // never reach `is_official_agent_source` and resume would be unreachable.
+    assert!(ANTIGRAVITY_CLI_HOOK_ASSET.contains("\"agent\": \"agy\""));
+    assert!(!ANTIGRAVITY_CLI_HOOK_ASSET.contains("\"state\":"));
+    assert!(!ANTIGRAVITY_CLI_HOOK_ASSET.contains("pane.release_agent"));
 }
 
 #[test]
@@ -3596,5 +3630,480 @@ fn uninstall_mastracode_errors_when_event_value_not_array() {
     } else {
         std::env::remove_var("HOME");
     }
+    let _ = fs::remove_dir_all(base);
+}
+
+fn grok_session_command(config: &Value) -> String {
+    config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("grok SessionStart command")
+        .to_string()
+}
+
+#[test]
+fn install_grok_writes_hook_and_config() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let grok_dir = base.join(".grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
+
+    let installed = install_grok().unwrap();
+
+    let hooks_dir = grok_dir.join("hooks");
+    assert_eq!(installed.hook_path, hooks_dir.join(GROK_HOOK_INSTALL_NAME));
+    assert_eq!(
+        installed.config_path,
+        hooks_dir.join(GROK_HOOK_CONFIG_INSTALL_NAME)
+    );
+    assert_eq!(
+        fs::read_to_string(&installed.hook_path).unwrap(),
+        GROK_HOOK_ASSET
+    );
+
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(&installed.config_path).unwrap()).unwrap();
+    assert_eq!(config, grok_hook_config(&installed.hook_path));
+    let session_start = config["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(session_start.len(), 1);
+    let command = grok_session_command(&config);
+    assert!(command.starts_with("sh "));
+    assert!(command.contains("zynk-agent-state.sh"));
+    assert!(command.ends_with(" session"));
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_grok_is_idempotent() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let grok_dir = base.join(".grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
+
+    install_grok().unwrap();
+    let first =
+        fs::read_to_string(grok_dir.join("hooks").join(GROK_HOOK_CONFIG_INSTALL_NAME)).unwrap();
+    install_grok().unwrap();
+    let second =
+        fs::read_to_string(grok_dir.join("hooks").join(GROK_HOOK_CONFIG_INSTALL_NAME)).unwrap();
+    assert_eq!(first, second);
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_grok_errors_when_config_dir_missing() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    // Deliberately do not create the ~/.grok directory ahead of time: the
+    // installer must refuse instead of conjuring a config dir for an agent
+    // that is not installed.
+    let missing = base.join(".grok");
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &missing);
+
+    let err = install_grok().unwrap_err().to_string();
+    assert!(
+        err.contains("grok config directory not found"),
+        "unexpected error: {err}"
+    );
+    assert!(!missing.exists(), "install must not create the config dir");
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn uninstall_grok_removes_files() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let grok_dir = base.join(".grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
+
+    install_grok().unwrap();
+    let result = uninstall_grok().unwrap();
+    assert!(result.removed_hook_file);
+    assert!(result.removed_config_file);
+    assert!(!result.hook_path.is_file());
+    assert!(!result.config_path.is_file());
+
+    // Uninstalling again is a no-op.
+    let again = uninstall_grok().unwrap();
+    assert!(!again.removed_hook_file);
+    assert!(!again.removed_config_file);
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_grok_uses_grok_config_dir_env() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let grok_dir = base.join("custom-grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
+
+    let installed = install_grok().unwrap();
+
+    let hooks_dir = grok_dir.join("hooks");
+    assert_eq!(installed.hook_path, hooks_dir.join(GROK_HOOK_INSTALL_NAME));
+    assert_eq!(
+        installed.config_path,
+        hooks_dir.join(GROK_HOOK_CONFIG_INSTALL_NAME)
+    );
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn grok_dir_honors_grok_home_after_config_dir_seam() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home_dir = base.join("grok-home");
+    fs::create_dir_all(&home_dir).unwrap();
+    std::env::remove_var(GROK_CONFIG_DIR_ENV_VAR);
+    std::env::set_var(GROK_HOME_ENV_VAR, &home_dir);
+
+    // The grok CLI reads its config (and hooks/) from $GROK_HOME, so the
+    // integration must install there too.
+    let installed = install_grok().unwrap();
+    assert_eq!(
+        installed.hook_path,
+        home_dir.join("hooks").join(GROK_HOOK_INSTALL_NAME)
+    );
+
+    // The zynk-level test seam still wins over GROK_HOME when set.
+    let seam_dir = base.join("seam");
+    fs::create_dir_all(&seam_dir).unwrap();
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &seam_dir);
+    let installed = install_grok().unwrap();
+    assert_eq!(
+        installed.hook_path,
+        seam_dir.join("hooks").join(GROK_HOOK_INSTALL_NAME)
+    );
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn grok_v1_integration_status_is_current() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let grok_dir = base.join(".grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
+    // A real install writes both the hook script and hooks/zynk.json.
+    install_grok().unwrap();
+
+    let statuses = installed_integration_statuses();
+    let grok = statuses
+        .iter()
+        .find(|status| status.target == crate::api::schema::IntegrationTarget::Grok)
+        .expect("grok integration status");
+    assert_eq!(grok.state, IntegrationStatusKind::Current);
+    assert_eq!(grok.installed_version, Some(GROK_INTEGRATION_VERSION));
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn grok_status_reports_outdated_when_hook_config_missing_or_broken() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let grok_dir = base.join(".grok");
+    fs::create_dir_all(&grok_dir).unwrap();
+    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
+    install_grok().unwrap();
+    let config_path = grok_dir.join("hooks").join(GROK_HOOK_CONFIG_INSTALL_NAME);
+
+    let grok_state = || {
+        installed_integration_statuses()
+            .into_iter()
+            .find(|status| status.target == crate::api::schema::IntegrationTarget::Grok)
+            .expect("grok integration status")
+            .state
+    };
+
+    // Missing config: grok never runs the hook, so the install is not current.
+    fs::remove_file(&config_path).unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // Corrupt config.
+    fs::write(&config_path, "{not json").unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // Config that no longer references the hook script.
+    fs::write(
+        &config_path,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo other"}]}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // Config that mentions the script name without invoking it, and one that
+    // invokes it without the required `session` action: both are
+    // nonfunctional, so neither may report current.
+    fs::write(
+        &config_path,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo zynk-agent-state.sh"}]}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+    let hook_path = grok_dir.join("hooks").join(GROK_HOOK_INSTALL_NAME);
+    fs::write(
+        &config_path,
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"sh '{}'"}}]}}]}}}}"#,
+            hook_path.display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // Correct command but not a command-type hook: grok will not execute it.
+    let session_command = grok_session_command(&grok_hook_config(&hook_path));
+    fs::write(
+        &config_path,
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"http","command":{}}}]}}]}}}}"#,
+            serde_json::to_string(&session_command).unwrap()
+        ),
+    )
+    .unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // A matcher can prevent the expected hook from running.
+    let mut config = grok_hook_config(&hook_path);
+    config["hooks"]["SessionStart"][0]["matcher"] = json!("(");
+    fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // A malformed sibling group makes grok reject the event's hook groups.
+    let mut config = grok_hook_config(&hook_path);
+    config["hooks"]["SessionStart"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({}));
+    fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
+
+    // Reinstall repairs both files.
+    install_grok().unwrap();
+    assert_eq!(grok_state(), IntegrationStatusKind::Current);
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_antigravity_cli_writes_hook_and_updates_hooks_json() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let agy_dir = base.join(".gemini").join("config");
+    fs::create_dir_all(&agy_dir).unwrap();
+    fs::write(
+        agy_dir.join("hooks.json"),
+        r#"{"lint-checker":{"PreInvocation":[{"type":"command","command":"echo keep-me"}]}}"#,
+    )
+    .unwrap();
+    std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
+
+    let installed = install_antigravity_cli().unwrap();
+
+    assert_eq!(
+        installed.hook_path,
+        agy_dir
+            .join("hooks")
+            .join(ANTIGRAVITY_CLI_HOOK_INSTALL_NAME)
+    );
+    assert_eq!(installed.hooks_path, agy_dir.join("hooks.json"));
+    assert_eq!(
+        fs::read_to_string(&installed.hook_path).unwrap(),
+        ANTIGRAVITY_CLI_HOOK_ASSET
+    );
+
+    let hooks_file: Value =
+        serde_json::from_str(&fs::read_to_string(agy_dir.join("hooks.json")).unwrap()).unwrap();
+    let hooks = hooks_file.as_object().unwrap();
+
+    // zynk entries live under a named hook block; Antigravity CLI rejects a
+    // file whose top level maps event names straight to arrays.
+    let block = hooks
+        .get(ANTIGRAVITY_CLI_HOOK_BLOCK_NAME)
+        .and_then(Value::as_object)
+        .unwrap();
+
+    for (event, action) in ANTIGRAVITY_CLI_HOOK_EVENTS {
+        let entries = block.get(event).and_then(Value::as_array).unwrap();
+        assert_eq!(entries.len(), 1, "{event} should hold one zynk entry");
+        let handler = &entries[0];
+
+        // Handlers must be a flat list; the matcher/hooks wrapper is only
+        // valid for tool events and invalidates the whole file here.
+        assert!(
+            handler.get("matcher").is_none() && handler.get("hooks").is_none(),
+            "{event} must be a flat handler, got {handler}"
+        );
+
+        assert_eq!(handler.get("type").and_then(Value::as_str), Some("command"));
+        assert_eq!(
+            handler.get("timeout").and_then(Value::as_u64),
+            Some(ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC)
+        );
+        let command = handler.get("command").and_then(Value::as_str).unwrap();
+        assert!(command.contains("zynk-agent-state"));
+        assert!(command.ends_with(action));
+    }
+
+    // The integration is session-only. Antigravity CLI cannot express blocked
+    // state, skips PostInvocation on interruption, and fires Stop at end of
+    // turn rather than process exit, so zynk never claims lifecycle authority
+    // here and screen detection owns agent state.
+    for event in ["PreToolUse", "PostToolUse", "PostInvocation", "Stop"] {
+        assert!(
+            block.get(event).is_none(),
+            "{event} must not be registered; lifecycle stays with screen detection"
+        );
+    }
+
+    // Other named hooks are left untouched.
+    assert_eq!(
+        hooks
+            .get("lint-checker")
+            .and_then(|block| block.get("PreInvocation"))
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry.get("command"))
+            .and_then(Value::as_str),
+        Some("echo keep-me")
+    );
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_antigravity_cli_rewrites_stale_zynk_block() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let agy_dir = base.join(".gemini").join("config");
+    fs::create_dir_all(&agy_dir).unwrap();
+    // An older zynk install claimed lifecycle authority, wrapped events in
+    // matcher/hooks, and left entries Antigravity CLI now rejects.
+    fs::write(
+        agy_dir.join("hooks.json"),
+        r#"{"zynk":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"stale"}]}],"PostInvocation":[{"type":"command","command":"stale idle"}],"Legacy":[]}}"#,
+    )
+    .unwrap();
+    std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
+
+    install_antigravity_cli().unwrap();
+
+    let hooks_file: Value =
+        serde_json::from_str(&fs::read_to_string(agy_dir.join("hooks.json")).unwrap()).unwrap();
+    let block = hooks_file
+        .get(ANTIGRAVITY_CLI_HOOK_BLOCK_NAME)
+        .and_then(Value::as_object)
+        .unwrap();
+
+    // The block is zynk-owned and rewritten wholesale, so a stale lifecycle
+    // install is migrated to session-only rather than merged with.
+    assert_eq!(
+        block.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["PreInvocation"],
+        "stale lifecycle events should be gone"
+    );
+    let entries = block
+        .get("PreInvocation")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].get("hooks").is_none());
+    assert!(entries[0]
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|command| command.contains("zynk-agent-state")));
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_antigravity_cli_errors_when_config_dir_missing() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let agy_dir = base.join(".gemini").join("config");
+    std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
+
+    let err = install_antigravity_cli().unwrap_err();
+    assert!(err.to_string().contains("install antigravity cli first"));
+    assert!(!agy_dir.exists(), "install must not create the config dir");
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn uninstall_antigravity_cli_removes_zynk_hooks_and_preserves_others() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let agy_dir = base.join(".gemini").join("config");
+    fs::create_dir_all(&agy_dir).unwrap();
+    fs::write(
+        agy_dir.join("hooks.json"),
+        r#"{"lint-checker":{"PreInvocation":[{"type":"command","command":"echo keep-me"}]}}"#,
+    )
+    .unwrap();
+    std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
+
+    let installed = install_antigravity_cli().unwrap();
+    assert!(installed.hook_path.is_file());
+
+    let result = uninstall_antigravity_cli().unwrap();
+    assert!(result.removed_hook_file);
+    assert!(!installed.hook_path.is_file());
+    assert!(result.updated_hooks);
+
+    let hooks_file: Value =
+        serde_json::from_str(&fs::read_to_string(agy_dir.join("hooks.json")).unwrap()).unwrap();
+    let hooks = hooks_file.as_object().unwrap();
+
+    // The zynk block is gone and unrelated named hooks survive.
+    assert!(hooks.get(ANTIGRAVITY_CLI_HOOK_BLOCK_NAME).is_none());
+    assert!(hooks.contains_key("lint-checker"));
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn antigravity_cli_v1_integration_status_is_current() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let agy_dir = base.join(".gemini").join("config");
+    fs::create_dir_all(&agy_dir).unwrap();
+    std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
+    install_antigravity_cli().unwrap();
+
+    let statuses = installed_integration_statuses();
+    let agy = statuses
+        .iter()
+        .find(|status| status.target == crate::api::schema::IntegrationTarget::AntigravityCli)
+        .expect("antigravity-cli integration status");
+    assert_eq!(agy.state, IntegrationStatusKind::Current);
+    assert_eq!(
+        agy.installed_version,
+        Some(ANTIGRAVITY_CLI_INTEGRATION_VERSION)
+    );
+
+    clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
 }

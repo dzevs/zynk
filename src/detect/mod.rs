@@ -325,7 +325,10 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
 /// Integrations that report session identity only and leave lifecycle state to
 /// screen detection. Their hook reports must never take hook authority.
 pub(crate) fn session_identity_only_integration(source: &str, agent_label: &str) -> bool {
-    (source, agent_label) == ("zynk:hermes", "hermes")
+    matches!(
+        (source, agent_label),
+        ("zynk:hermes", "hermes") | ("zynk:antigravity_cli", "agy")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -826,10 +829,15 @@ mod tests {
     }
 
     #[test]
-    fn hermes_session_integration_leaves_state_to_screen_detection() {
-        assert!(!full_lifecycle_hook_authority("zynk:hermes", "hermes"));
-        assert!(session_identity_only_integration("zynk:hermes", "hermes"));
-        assert!(Agent::SCREEN_MANIFEST_AGENTS.contains(&Agent::Hermes));
+    fn session_identity_integrations_leave_state_to_screen_detection() {
+        for (source, label, agent) in [
+            ("zynk:hermes", "hermes", Agent::Hermes),
+            ("zynk:antigravity_cli", "agy", Agent::Antigravity),
+        ] {
+            assert!(!full_lifecycle_hook_authority(source, label));
+            assert!(session_identity_only_integration(source, label));
+            assert!(Agent::SCREEN_MANIFEST_AGENTS.contains(&agent));
+        }
     }
 
     #[test]

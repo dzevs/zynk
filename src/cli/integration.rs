@@ -108,13 +108,13 @@ fn parse_integration_target(
 ) -> std::io::Result<Option<IntegrationTarget>> {
     let Some(target) = args.first().map(|arg| arg.as_str()) else {
         eprintln!(
-            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor|mastracode>"
+            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor|mastracode|antigravity-cli|grok>"
         );
         return Ok(None);
     };
     if args.len() != 1 {
         eprintln!(
-            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor|mastracode>"
+            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor|mastracode|antigravity-cli|grok>"
         );
         return Ok(None);
     }
@@ -134,10 +134,12 @@ fn parse_integration_target(
         "qodercli" => IntegrationTarget::Qodercli,
         "cursor" => IntegrationTarget::Cursor,
         "mastracode" => IntegrationTarget::Mastracode,
+        "antigravity-cli" | "antigravity_cli" => IntegrationTarget::AntigravityCli,
+        "grok" => IntegrationTarget::Grok,
         _ => {
             eprintln!("unknown integration target: {target}");
             eprintln!(
-                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, cursor, mastracode"
+                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, cursor, mastracode, antigravity-cli, grok"
             );
             return Ok(None);
         }
@@ -162,6 +164,8 @@ fn print_integration_help() {
     eprintln!("  zynk integration install qodercli");
     eprintln!("  zynk integration install cursor");
     eprintln!("  zynk integration install mastracode");
+    eprintln!("  zynk integration install antigravity-cli");
+    eprintln!("  zynk integration install grok");
     eprintln!("  zynk integration uninstall pi");
     eprintln!("  zynk integration uninstall omp");
     eprintln!("  zynk integration uninstall claude");
@@ -176,5 +180,7 @@ fn print_integration_help() {
     eprintln!("  zynk integration uninstall qodercli");
     eprintln!("  zynk integration uninstall cursor");
     eprintln!("  zynk integration uninstall mastracode");
+    eprintln!("  zynk integration uninstall antigravity-cli");
+    eprintln!("  zynk integration uninstall grok");
     eprintln!("  zynk integration status [--outdated-only]");
 }

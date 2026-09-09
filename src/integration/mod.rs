@@ -172,6 +172,28 @@ pub(crate) const MASTRACODE_HOOK_EVENTS: [(&str, &str); 12] = [
     ("Stop", "idle"),
     ("SessionEnd", "release"),
 ];
+pub(crate) const ANTIGRAVITY_CLI_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
+pub(crate) const ANTIGRAVITY_CLI_HOOK_ASSET: &str =
+    include_str!("assets/antigravity_cli/zynk-agent-state.sh");
+pub(crate) const ANTIGRAVITY_CLI_INTEGRATION_VERSION: u32 = 1;
+/// Antigravity CLI keys `hooks.json` by hook name, so every zynk entry lives
+/// under one zynk-owned block that install rewrites and uninstall removes.
+pub(crate) const ANTIGRAVITY_CLI_HOOK_BLOCK_NAME: &str = "zynk";
+pub(crate) const ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC: u64 = 10;
+/// `(event, reported action)`. Session-only: `PreInvocation` is the only event
+/// we need because it carries `conversationId`. The others cannot express
+/// lifecycle safely — Antigravity CLI has no blocked event, `PostInvocation` is
+/// skipped on interruption, and `Stop` is end-of-turn rather than process exit.
+/// Screen detection owns agent state instead.
+///
+/// `PreInvocation` takes a flat handler list; only the `PreToolUse`/`PostToolUse`
+/// events accept a `matcher`/`hooks` wrapper, and sending one here would
+/// invalidate the whole file.
+pub(crate) const ANTIGRAVITY_CLI_HOOK_EVENTS: [(&str, &str); 1] = [("PreInvocation", "session")];
+pub(crate) const GROK_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
+pub(crate) const GROK_HOOK_CONFIG_INSTALL_NAME: &str = "zynk.json";
+pub(crate) const GROK_HOOK_ASSET: &str = include_str!("assets/grok/zynk-agent-state.sh");
+pub(crate) const GROK_INTEGRATION_VERSION: u32 = 1;
 pub(crate) const INTEGRATION_VERSION_MARKER: &str = "ZYNK_INTEGRATION_VERSION=";
 // Pre-rebrand installs embedded `ZYNK_INTEGRATION_VERSION=`. status() still
 // recognizes it (legacy installs surface as Outdated → prompt reinstall) and

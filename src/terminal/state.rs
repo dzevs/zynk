@@ -1292,6 +1292,11 @@ impl TerminalState {
                 "codex",
                 Some("startup" | "clear" | "resume" | "compact")
             ) | ("zynk:hermes", "hermes", Some("startup" | "new" | "resume"))
+                // The antigravity-cli hook fires on PreInvocation and carries no start
+                // source, so a conversation switch is the ONLY signal that its identity
+                // moved; the identity-only `process_present` gate below still requires
+                // the agent to be the detected foreground process before it may repoint.
+                | ("zynk:antigravity_cli", "agy", None)
                 | ("zynk:opencode", "opencode", Some("new"))
                 | ("zynk:pi", "pi", Some("new" | "resume" | "fork"))
                 | (
@@ -3335,6 +3340,118 @@ mod tests {
                 .as_ref()
                 .map(|session| &session.session_ref),
             Some(&retried_ref)
+        );
+    }
+
+    #[test]
+    fn antigravity_cli_session_claim_leaves_state_to_detection() {
+        // The antigravity-cli twin of `hermes_session_claim_leaves_state_to_detection`,
+        // kept as its own test rather than folded into a table so the hermes
+        // characterization stays byte-identical. The one behavioural difference is the
+        // start source: the antigravity-cli hook fires on `PreInvocation` and reports no
+        // session-start reason, so its replacement arm keys on `None`.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Antigravity), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("agy-root").unwrap();
+
+        let session = terminal.set_agent_session_ref_for_session_start(
+            "zynk:antigravity_cli".into(),
+            "agy".into(),
+            Some(session_ref.clone()),
+            Some(10),
+            None,
+        );
+
+        assert!(session.is_some());
+        // Identity, never lifecycle authority.
+        assert!(terminal.hook_authority.is_none());
+        assert!(terminal.hook_identity.is_some());
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&session_ref)
+        );
+
+        terminal.set_detected_state(Some(Agent::Antigravity), AgentState::Working);
+
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+
+        // A conversation switch repoints the session while the agent is the detected
+        // foreground process.
+        let replacement_ref = crate::agent_resume::AgentSessionRef::id("agy-replacement").unwrap();
+        let replacement = terminal.set_agent_session_ref_for_session_start(
+            "zynk:antigravity_cli".into(),
+            "agy".into(),
+            Some(replacement_ref.clone()),
+            Some(11),
+            None,
+        );
+
+        assert!(replacement.is_some_and(|mutation| mutation.session_ref_changed));
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&replacement_ref)
+        );
+
+        // A stateful report from the same owner is refused outright: an
+        // identity-only integration never takes lifecycle authority.
+        let legacy_state = terminal.set_hook_authority_with_session_ref(
+            "zynk:antigravity_cli".into(),
+            "agy".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(replacement_ref.clone()),
+            Some(12),
+        );
+        assert!(legacy_state.is_none());
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+
+        // With the process gone the claim is background noise and must not rewrite
+        // the pane's session identity.
+        terminal.set_detected_state(None, AgentState::Unknown);
+        let background_ref = crate::agent_resume::AgentSessionRef::id("agy-background").unwrap();
+        let background_replacement = terminal.set_agent_session_ref_for_session_start(
+            "zynk:antigravity_cli".into(),
+            "agy".into(),
+            Some(background_ref.clone()),
+            Some(13),
+            None,
+        );
+        assert!(background_replacement.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&replacement_ref)
+        );
+
+        terminal.set_detected_state(Some(Agent::Antigravity), AgentState::Idle);
+        let retried_replacement = terminal.set_agent_session_ref_for_session_start(
+            "zynk:antigravity_cli".into(),
+            "agy".into(),
+            Some(background_ref.clone()),
+            Some(14),
+            None,
+        );
+        assert!(retried_replacement.is_some_and(|mutation| mutation.session_ref_changed));
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&background_ref)
         );
     }
 
