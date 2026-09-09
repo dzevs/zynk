@@ -88,6 +88,11 @@ fn watch_tracked_sources(dir: &str) -> usize {
     watched
 }
 
+/// What a usable source attestation looks like, shared verbatim with the binary (ADR 0013 custody)
+/// so the build input and the custody boundary cannot disagree.
+#[path = "src/build_sha.rs"]
+mod build_sha;
+
 /// Export `ZYNK_BUILD_SHA`: the source commit this binary is built from (ADR 0013 custody).
 ///
 /// A remote-copy install has to prove the far end runs the exact reviewed source, and a version
@@ -98,7 +103,20 @@ fn watch_tracked_sources(dir: &str) -> usize {
 fn export_build_sha() {
     println!("cargo:rerun-if-env-changed=ZYNK_BUILD_SHA");
     if let Ok(value) = env::var("ZYNK_BUILD_SHA") {
-        println!("cargo:rustc-env=ZYNK_BUILD_SHA={}", value.trim());
+        let value = value.trim();
+        // An empty override keeps its meaning: nothing is attested, and the remote-copy path
+        // refuses to seed a host from a binary that cannot name its source. A NON-empty one is a
+        // claim about reviewed source, so it has to have the shape of a commit here rather than
+        // compiling in an attestation the custody boundary would have to reject later.
+        if let Some(problem) = (!value.is_empty())
+            .then(|| build_sha::attested_sha_problem(value))
+            .flatten()
+        {
+            panic!(
+                "ZYNK_BUILD_SHA={value:?} is not a usable source attestation: {problem}. ADR 0013 custody needs the exact reviewed commit (docs/zynk/decisions/0013-linux-only-platform-scope.md); pass `git rev-parse HEAD` of the source being built, or leave it unset to attest from the checkout."
+            );
+        }
+        println!("cargo:rustc-env=ZYNK_BUILD_SHA={value}");
         return;
     }
 
@@ -144,6 +162,7 @@ fn export_build_sha() {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/build_sha.rs");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig.zon");

@@ -303,12 +303,31 @@ struct InstallSource {
     path: PathBuf,
 }
 
-/// What the remote copy must be able to prove about itself afterwards (ADR 0013 Decision 3):
-/// the exact bytes that were sent, and the source commit the sender was built from.
+/// What a remote binary must be able to prove about itself before this client will run it (ADR 0013
+/// Decision 3): the exact bytes of the reviewed local binary, the source commit those bytes attest,
+/// and the version and protocol the local end is about to speak to it over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InstallCustody {
     sha256: String,
     build_sha: String,
+    version: String,
+    protocol: u32,
+}
+
+/// Why a remote binary is not the reviewed one. A reuse decision turns this into "install the
+/// reviewed binary instead"; the post-copy check turns it into a hard failure. One comparator, two
+/// consequences, so the two paths cannot drift apart about what custody means.
+#[derive(Debug)]
+struct CustodyRefusal(String);
+
+impl CustodyRefusal {
+    fn reason(&self) -> &str {
+        &self.0
+    }
+
+    fn into_error(self) -> io::Error {
+        io::Error::other(self.0)
+    }
 }
 
 struct PreparedRemoteZynk {
@@ -329,18 +348,24 @@ fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<P
     let override_binary = remote_binary_override_path()?;
     let path_remote_zynk = remote_binary_on_path_any(target, &remote_zynk)?;
 
+    // ADR 0013 Decision 3: reusing a binary that is already on the remote host is as much a
+    // decision to RUN it as installing one is, so the reviewed local binary is read before either
+    // decision. A local build that cannot attest a clean, well-formed source commit authorises
+    // neither — it cannot say what the far end would have to match.
+    let custody_source = custody_source_path(override_binary.as_deref())?;
+    let custody = local_install_custody(&custody_source)?;
+
     if override_binary.is_none() {
-        if let Some(path_remote_zynk) = path_remote_zynk
-            .as_ref()
-            .filter(|candidate| remote_binary_matches(target, candidate).unwrap_or(false))
-        {
+        if let Some(path_remote_zynk) = path_remote_zynk.as_ref().filter(|candidate| {
+            remote_binary_is_the_reviewed_one(target, candidate, &custody).unwrap_or(false)
+        }) {
             return Ok(PreparedRemoteZynk {
                 remote_zynk: path_remote_zynk.clone(),
                 installed_or_replaced: false,
                 stop_after_install_approved: false,
             });
         }
-        if remote_binary_matches(target, &remote_zynk)? {
+        if remote_binary_is_the_reviewed_one(target, &remote_zynk, &custody)? {
             return Ok(PreparedRemoteZynk {
                 remote_zynk,
                 installed_or_replaced: false,
@@ -367,17 +392,18 @@ fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<P
         &install_source_description(&remote_zynk.platform, override_binary.as_deref()),
     )?;
     let source = resolve_install_source(&remote_zynk.platform, override_binary)?;
-    let custody = local_install_custody(&source.path)?;
-    install_remote_zynk(target, &remote_zynk, &source.path)?;
-    verify_remote_custody(target, &remote_zynk, &custody)?;
-
-    if !remote_binary_matches(target, &remote_zynk)? {
+    if source.path != custody_source {
         return Err(io::Error::other(format!(
-            "installed remote zynk at {}, but it did not report version {}",
-            remote_zynk.shell_path,
-            current_version()
+            "the install source {} is not the binary custody was taken of ({}), so nothing has attested the file about to be copied (ADR 0013 custody)",
+            source.path.display(),
+            custody_source.display()
         )));
     }
+    install_remote_zynk(target, &remote_zynk, &source.path)?;
+    // The same comparator the reuse decision uses, over the same single round trip: bytes, source
+    // commit, version and protocol. The version-only re-check this replaces was both weaker than
+    // custody and a second probe, so a binary swapped between the two could pass the pair.
+    verify_remote_custody(target, &remote_zynk, &custody)?;
     warn_if_remote_bin_not_on_path(target)?;
 
     Ok(PreparedRemoteZynk {
@@ -431,29 +457,67 @@ fn remote_zynk_from_path_discovery(remote_zynk: &RemoteZynk, stdout: &str) -> Op
     Some(remote_zynk.clone().with_shell_path(shell_quote(path)))
 }
 
-fn remote_binary_matches(target: &str, remote_zynk: &RemoteZynk) -> io::Result<bool> {
+/// One round trip that asks a remote binary for everything custody turns on: its bytes, the source
+/// commit it attests, its version and its protocol. One probe rather than three, so a decision is
+/// made about one snapshot of the file instead of straddling several.
+fn remote_custody_probe(target: &str, remote_zynk: &RemoteZynk) -> io::Result<Output> {
     let command = format!(
-        "test -x {0} && {0} --version && {0} status client --json",
+        "test -x {0} && sha256sum {0} | cut -d ' ' -f 1 && {0} --version && {0} status client --json",
         remote_zynk.shell_path
     );
-    let output = ssh_sh_output(target, &command)?;
+    ssh_sh_output(target, &command)
+}
+
+/// Reuse is custody-gated exactly as an install is (ADR 0013 Decision 3): a binary already on the
+/// remote host is used only when it is the same bytes, from the same reviewed commit, at the version
+/// and protocol this client speaks. A refusal here is not fatal — the caller falls through to the
+/// confirmed install path, which copies the reviewed binary and verifies it with this same
+/// comparator.
+fn remote_binary_is_the_reviewed_one(
+    target: &str,
+    remote_zynk: &RemoteZynk,
+    custody: &InstallCustody,
+) -> io::Result<bool> {
+    let output = remote_custody_probe(target, remote_zynk)?;
     if !output.status.success() {
         return Ok(false);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut lines = stdout.lines();
-    let version_line = lines.next().unwrap_or_default().trim();
-    let status = lines.next().unwrap_or_default();
-    // ADR 0007 §1/§3: the binary's `--version` line is Zynk-branded; the remote
-    // binary is this same build deployed, so it reports `zynk <version>` too, and
-    // since ADR 0013 custody it also carries the source commit in parentheses.
-    Ok(
-        parse_version_line(version_line).is_some_and(|(version, _)| version == current_version())
-            && parse_client_status_json(status)
-                .map(|status| status.protocol == CURRENT_PROTOCOL)
-                .unwrap_or(false),
-    )
+    let (remote_sha256, remote_build_sha) = probed_identifiers(&stdout);
+    tracing::info!(
+        target = %target,
+        path = %remote_zynk.shell_path,
+        local_sha256 = %custody.sha256,
+        remote_sha256 = %remote_sha256,
+        local_build_sha = %custody.build_sha,
+        remote_build_sha = %remote_build_sha,
+        "deciding whether the remote zynk binary may be reused"
+    );
+
+    match check_remote_custody(&stdout, &remote_zynk.shell_path, custody) {
+        Ok(()) => Ok(true),
+        Err(refusal) => {
+            tracing::info!(
+                target = %target,
+                path = %remote_zynk.shell_path,
+                reason = %refusal.reason(),
+                "not reusing the remote zynk binary; installing the reviewed one instead"
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// The two identifiers a custody decision turns on, pulled out of a probe's stdout so both the reuse
+/// decision and the post-copy check can log the pair they compared.
+fn probed_identifiers(remote_stdout: &str) -> (String, String) {
+    let mut lines = remote_stdout.lines();
+    let sha256 = lines.next().unwrap_or_default().trim().to_ascii_lowercase();
+    let build_sha = parse_version_line(lines.next().unwrap_or_default())
+        .and_then(|(_, sha)| sha)
+        .unwrap_or_else(|| "<none>".to_string());
+    (sha256, build_sha)
 }
 
 /// Split a `zynk <version>` or `zynk <version> (<source sha>)` line into its parts. Returns `None`
@@ -536,6 +600,17 @@ fn install_source_description_for(
             "no install source for {} (set {REMOTE_BINARY_ENV_VAR})",
             platform.platform_key()
         )
+    }
+}
+
+/// The binary whose bytes and attested commit define what the remote must be: the explicit
+/// `ZYNK_REMOTE_BINARY` when one is set, otherwise this running executable. It is the reference even
+/// when it cannot itself seed the remote — a package-manager-managed install is not zynk's file to
+/// copy, but it is still the reviewed binary this client speaks for, so reuse stays available to it.
+fn custody_source_path(override_binary: Option<&Path>) -> io::Result<PathBuf> {
+    match override_binary {
+        Some(path) => Ok(path.to_path_buf()),
+        None => std::env::current_exe(),
     }
 }
 
@@ -969,9 +1044,11 @@ fn confirm_remote_install(
     Ok(())
 }
 
-/// ADR 0013 Decision 3: read what the binary about to be copied is, before copying it. A version
-/// string is not custody — the exact source commit is — so a binary that cannot attest one is
-/// refused as an install source, `ZYNK_REMOTE_BINARY` files included.
+/// ADR 0013 Decision 3: read what the reviewed local binary is, before letting it authorise
+/// anything. A version string is not custody — the exact source commit is — so a binary that cannot
+/// attest one, or whose attestation is dirty or malformed, is refused outright,
+/// `ZYNK_REMOTE_BINARY` files included. This is the authority for BOTH remote decisions: what to
+/// copy, and whether a binary already on the remote host may be reused instead.
 fn local_install_custody(path: &Path) -> io::Result<InstallCustody> {
     let sha256 = crate::checksum::file_sha256(path)?;
 
@@ -1005,8 +1082,22 @@ fn local_install_custody(path: &Path) -> io::Result<InstallCustody> {
             path.display()
         ))
     })?;
+    if let Some(problem) = crate::build_sha::attested_sha_problem(&build_sha) {
+        return Err(io::Error::other(format!(
+            "{} attests the source commit {build_sha:?}, which cannot authorise a remote host: {problem}. ADR 0013 custody needs the exact reviewed source SHA (docs/zynk/decisions/0013-linux-only-platform-scope.md). Commit or stash the tree and rebuild, or set ZYNK_BUILD_SHA to the reviewed commit.",
+            path.display()
+        )));
+    }
 
-    Ok(InstallCustody { sha256, build_sha })
+    // The version and protocol are the LOCAL client's, not the source file's: a remote binary is
+    // only usable if it answers on the wire this end is about to speak, which is the pair the
+    // version-only check used to compare. Carrying them here gives the one comparator everything.
+    Ok(InstallCustody {
+        sha256,
+        build_sha,
+        version: current_version(),
+        protocol: CURRENT_PROTOCOL,
+    })
 }
 
 /// ADR 0013 Decision 3: after the copy, make the REMOTE file prove it is the same bytes from the
@@ -1017,11 +1108,7 @@ fn verify_remote_custody(
     remote_zynk: &RemoteZynk,
     custody: &InstallCustody,
 ) -> io::Result<()> {
-    let command = format!(
-        "sha256sum {0} | cut -d ' ' -f 1 && {0} --version",
-        remote_zynk.shell_path
-    );
-    let output = ssh_sh_output(target, &command)?;
+    let output = remote_custody_probe(target, remote_zynk)?;
     if !output.status.success() {
         return Err(command_failed(
             "remote custody verification failed (the remote host needs sha256sum)",
@@ -1030,58 +1117,92 @@ fn verify_remote_custody(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let remote_sha256 = stdout
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
+    let (remote_sha256, remote_build_sha) = probed_identifiers(&stdout);
 
     tracing::info!(
         target = %target,
         path = %remote_zynk.shell_path,
         local_sha256 = %custody.sha256,
         remote_sha256 = %remote_sha256,
-        build_sha = %custody.build_sha,
+        local_build_sha = %custody.build_sha,
+        remote_build_sha = %remote_build_sha,
         "verifying custody of the remote zynk binary"
     );
 
     check_remote_custody(&stdout, &remote_zynk.shell_path, custody)
+        .map_err(CustodyRefusal::into_error)
 }
 
-/// The custody comparison itself, over the remote's `sha256sum` + `--version` output. The hash is
-/// checked first: a substituted binary must fail on its bytes, not on what it says about itself.
+/// The custody comparison itself, over one probe's `sha256sum` + `--version` + `status client
+/// --json` output. The single place that decides whether a remote binary IS the reviewed one, used
+/// by the reuse decision and by the post-copy check alike.
+///
+/// The hash is checked first: a substituted binary must fail on its bytes, not on what it says about
+/// itself. Then the attestation — which must be well-formed and clean before it is compared, because
+/// a foreign build can report any string it likes, and the warden's probe reported a well-formed
+/// all-ones SHA. Only then the version and protocol, which are what the bridge needs but are not
+/// custody on their own.
 fn check_remote_custody(
     remote_stdout: &str,
     remote_path: &str,
     custody: &InstallCustody,
-) -> io::Result<()> {
+) -> Result<(), CustodyRefusal> {
+    let refuse = |reason: String| Err(CustodyRefusal(reason));
+
     let mut lines = remote_stdout.lines();
     let remote_sha256 = lines.next().unwrap_or_default().trim().to_ascii_lowercase();
     let remote_version_line = lines.next().unwrap_or_default();
+    let remote_status_line = lines.next().unwrap_or_default().trim();
 
     if remote_sha256 != custody.sha256 {
-        return Err(io::Error::other(format!(
+        return refuse(format!(
             "remote zynk at {remote_path} is not the binary that was copied: sha256 {remote_sha256} != {} (ADR 0013 custody)",
             custody.sha256
-        )));
+        ));
     }
 
-    let (_, remote_build_sha) = parse_version_line(remote_version_line).ok_or_else(|| {
-        io::Error::other(format!(
+    let Some((remote_version, remote_build_sha)) = parse_version_line(remote_version_line) else {
+        return refuse(format!(
             "remote zynk at {remote_path} does not report a zynk version line: got {remote_version_line:?}"
-        ))
-    })?;
-    match remote_build_sha {
-        Some(sha) if sha == custody.build_sha => Ok(()),
-        Some(sha) => Err(io::Error::other(format!(
-            "remote zynk at {remote_path} reports source commit {sha}, but the copied binary was built from {} (ADR 0013 custody)",
-            custody.build_sha
-        ))),
-        None => Err(io::Error::other(format!(
+        ));
+    };
+    let Some(remote_build_sha) = remote_build_sha else {
+        return refuse(format!(
             "remote zynk at {remote_path} cannot attest the source commit it was built from (ADR 0013 custody)"
-        ))),
+        ));
+    };
+    if let Some(problem) = crate::build_sha::attested_sha_problem(&remote_build_sha) {
+        return refuse(format!(
+            "remote zynk at {remote_path} attests the source commit {remote_build_sha:?}, which cannot serve as custody: {problem} (ADR 0013 custody)"
+        ));
     }
+    if remote_build_sha != custody.build_sha {
+        return refuse(format!(
+            "remote zynk at {remote_path} reports source commit {remote_build_sha}, but the reviewed binary was built from {} (ADR 0013 custody)",
+            custody.build_sha
+        ));
+    }
+
+    if remote_version != custody.version {
+        return refuse(format!(
+            "remote zynk at {remote_path} reports version {remote_version}, not the {} this client speaks (ADR 0013 custody)",
+            custody.version
+        ));
+    }
+
+    let Some(status) = parse_client_status_json(remote_status_line) else {
+        return refuse(format!(
+            "remote zynk at {remote_path} did not report its client protocol: got {remote_status_line:?} (ADR 0013 custody)"
+        ));
+    };
+    if status.protocol != custody.protocol {
+        return refuse(format!(
+            "remote zynk at {remote_path} speaks protocol {}, not the {} this client speaks (ADR 0013 custody)",
+            status.protocol, custody.protocol
+        ));
+    }
+
+    Ok(())
 }
 
 fn install_remote_zynk(
@@ -1132,7 +1253,37 @@ mv "$tmp" "$dest"
     }
 }
 
+// Test-only ssh seam: `ssh_sh_output` returns a queued canned `Output` instead of spawning ssh, so
+// the custody probe and the reuse decision can be driven over a captured remote stdout — the same
+// way `check_remote_custody` is exercised over one. An empty queue falls through to the real ssh,
+// and nothing outside `#[cfg(test)]` can reach it.
+#[cfg(test)]
+thread_local! {
+    static STUBBED_SSH_OUTPUT: std::cell::RefCell<std::collections::VecDeque<Output>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+#[cfg(test)]
+fn push_stubbed_ssh_output(stdout: &str, success: bool) {
+    use std::os::unix::process::ExitStatusExt as _;
+    let output = Output {
+        status: std::process::ExitStatus::from_raw(if success { 0 } else { 256 }),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: Vec::new(),
+    };
+    STUBBED_SSH_OUTPUT.with(|queue| queue.borrow_mut().push_back(output));
+}
+
+#[cfg(test)]
+fn take_stubbed_ssh_output() -> Option<Output> {
+    STUBBED_SSH_OUTPUT.with(|queue| queue.borrow_mut().pop_front())
+}
+
 fn ssh_sh_output(target: &str, script: &str) -> io::Result<Output> {
+    #[cfg(test)]
+    if let Some(output) = take_stubbed_ssh_output() {
+        return Ok(output);
+    }
     // Feed POSIX bootstrap scripts to /bin/sh so the user's login shell only
     // has to parse a simple executable invocation.
     let mut child = Command::new("ssh")
@@ -2141,15 +2292,76 @@ mod tests {
 
     #[test]
     fn local_install_custody_records_the_hash_and_the_source_commit() {
-        // ADR 0013 Decision 3: custody is the exact source SHA plus the binary hash.
-        let path = write_fake_zynk("attesting", "zynk 3.1.0 (deadbeefcafe)");
+        // ADR 0013 Decision 3: custody is the exact source SHA plus the binary hash, and the
+        // version and protocol the local client speaks are carried with them so one comparator
+        // decides both a reuse and a post-copy check.
+        let reviewed = "d".repeat(40);
+        let path = write_fake_zynk(
+            "attesting",
+            &format!("zynk {} ({reviewed})", current_version()),
+        );
         let custody = local_install_custody(&path).expect("custody");
-        assert_eq!(custody.build_sha, "deadbeefcafe");
+        assert_eq!(custody.build_sha, reviewed);
         assert_eq!(
             custody.sha256,
             crate::checksum::file_sha256(&path).expect("hash")
         );
+        assert_eq!(custody.version, current_version());
+        assert_eq!(custody.protocol, CURRENT_PROTOCOL);
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_dirty_local_binary_cannot_be_copied_to_a_remote_host() {
+        // A -dirty attestation says the compiled tree was NOT the commit it names, so it cannot
+        // authorise anything on another host — neither a copy nor a reuse.
+        let path = write_fake_zynk("dirty", &format!("zynk 3.1.0 ({}-dirty)", "a".repeat(40)));
+        let result = local_install_custody(&path);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+        let err = result.expect_err("a dirty local build must not authorise a remote host");
+        let message = err.to_string();
+        assert!(
+            message.contains("-dirty") && message.contains("0013"),
+            "the refusal must name the dirty tree and ADR 0013: {message}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_attestation_is_refused() {
+        // A foreign build can print any string it likes inside the parentheses, so the shape is
+        // checked before the value is trusted for anything.
+        for line in [
+            "zynk 3.1.0 (not-a-sha)",
+            "zynk 3.1.0 (deadbeefcafe)",
+            &format!("zynk 3.1.0 ({})", "A".repeat(40)),
+            &format!("zynk 3.1.0 ({})", "a".repeat(41)),
+        ] {
+            let path = write_fake_zynk("malformed", line);
+            let result = local_install_custody(&path);
+            let _ = fs::remove_dir_all(path.parent().unwrap());
+            let err = result.expect_err("a malformed attestation must be refused");
+            assert!(
+                err.to_string().contains("0013"),
+                "the refusal must name ADR 0013 for {line:?}: {err}"
+            );
+        }
+
+        // And on the remote side, where the two attestations agree but neither is a commit.
+        let mut custody = custody_fixture();
+        custody.build_sha = "deadbeefcafe".to_string();
+        let stdout = remote_probe_stdout(
+            &custody.sha256,
+            &custody.version,
+            &custody.build_sha,
+            custody.protocol,
+        );
+        let refusal = check_remote_custody(&stdout, "/remote/zynk", &custody)
+            .expect_err("a malformed remote attestation must be refused");
+        assert!(
+            refusal.reason().contains("cannot serve as custody"),
+            "unexpected refusal: {}",
+            refusal.reason()
+        );
     }
 
     #[test]
@@ -2181,14 +2393,31 @@ mod tests {
     fn custody_fixture() -> InstallCustody {
         InstallCustody {
             sha256: "a".repeat(64),
-            build_sha: "deadbeefcafe".to_string(),
+            build_sha: "d".repeat(40),
+            version: current_version(),
+            protocol: CURRENT_PROTOCOL,
         }
+    }
+
+    /// What one custody probe prints: the file's hash, its version line, its client status.
+    fn remote_probe_stdout(sha256: &str, version: &str, build_sha: &str, protocol: u32) -> String {
+        format!("{sha256}\nzynk {version} ({build_sha})\n{{\"protocol\":{protocol}}}\n")
+    }
+
+    fn probe_remote_zynk() -> RemoteZynk {
+        RemoteZynk::for_platform(RemotePlatform::local())
+            .with_shell_path("'/opt/foreign/zynk'".to_string())
     }
 
     #[test]
     fn remote_custody_accepts_the_same_bytes_from_the_same_commit() {
         let custody = custody_fixture();
-        let stdout = format!("{}\nzynk 3.1.0 (deadbeefcafe)\n", custody.sha256);
+        let stdout = remote_probe_stdout(
+            &custody.sha256,
+            &custody.version,
+            &custody.build_sha,
+            custody.protocol,
+        );
         check_remote_custody(&stdout, "'$HOME/.local/bin/zynk'", &custody).expect("custody ok");
     }
 
@@ -2197,35 +2426,215 @@ mod tests {
         // The hash is checked before the version/protocol validation, so a binary that reports the
         // right version but is not the bytes that were copied still fails.
         let custody = custody_fixture();
-        let stdout = format!("{}\nzynk 3.1.0 (deadbeefcafe)\n", "b".repeat(64));
-        let err = check_remote_custody(&stdout, "/remote/zynk", &custody).unwrap_err();
+        let stdout = remote_probe_stdout(
+            &"b".repeat(64),
+            &custody.version,
+            &custody.build_sha,
+            custody.protocol,
+        );
+        let refusal = check_remote_custody(&stdout, "/remote/zynk", &custody).unwrap_err();
         assert!(
-            err.to_string()
+            refusal
+                .reason()
                 .contains("is not the binary that was copied"),
-            "unexpected error: {err}"
+            "unexpected refusal: {}",
+            refusal.reason()
         );
     }
 
     #[test]
     fn remote_custody_rejects_a_different_source_commit() {
         let custody = custody_fixture();
-        let stdout = format!("{}\nzynk 3.1.0 (0123456789ab)\n", custody.sha256);
-        let err = check_remote_custody(&stdout, "/remote/zynk", &custody).unwrap_err();
+        let foreign = "1".repeat(40);
+        let stdout = remote_probe_stdout(
+            &custody.sha256,
+            &custody.version,
+            &foreign,
+            custody.protocol,
+        );
+        let refusal = check_remote_custody(&stdout, "/remote/zynk", &custody).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("reports source commit 0123456789ab"),
-            "unexpected error: {err}"
+            refusal
+                .reason()
+                .contains(&format!("reports source commit {foreign}")),
+            "unexpected refusal: {}",
+            refusal.reason()
         );
     }
 
     #[test]
     fn remote_custody_rejects_a_remote_that_cannot_attest_its_source() {
         let custody = custody_fixture();
-        let stdout = format!("{}\nzynk 3.1.0\n", custody.sha256);
-        let err = check_remote_custody(&stdout, "/remote/zynk", &custody).unwrap_err();
+        let stdout = format!(
+            "{}\nzynk {}\n{{\"protocol\":{}}}\n",
+            custody.sha256, custody.version, custody.protocol
+        );
+        let refusal = check_remote_custody(&stdout, "/remote/zynk", &custody).unwrap_err();
         assert!(
-            err.to_string().contains("cannot attest the source commit"),
-            "unexpected error: {err}"
+            refusal.reason().contains("cannot attest the source commit"),
+            "unexpected refusal: {}",
+            refusal.reason()
+        );
+    }
+
+    #[test]
+    fn a_dirty_remote_attestation_is_refused() {
+        // Even when both ends agree on the string: a -dirty tree is not the commit it names, so a
+        // matching pair of dirty attestations is still not custody.
+        let mut custody = custody_fixture();
+        custody.build_sha = format!("{}-dirty", "b".repeat(40));
+        let stdout = remote_probe_stdout(
+            &custody.sha256,
+            &custody.version,
+            &custody.build_sha,
+            custody.protocol,
+        );
+        let refusal = check_remote_custody(&stdout, "/remote/zynk", &custody)
+            .expect_err("a dirty remote attestation must be refused");
+        assert!(
+            refusal.reason().contains("-dirty"),
+            "the refusal must name the dirty tree: {}",
+            refusal.reason()
+        );
+    }
+
+    #[test]
+    fn a_post_copy_check_uses_the_full_comparator_not_the_version_alone() {
+        // The re-check after the copy runs this comparator, so version and protocol are part of
+        // custody's single decision rather than a second, weaker probe behind it.
+        let custody = custody_fixture();
+
+        let foreign_version = remote_probe_stdout(
+            &custody.sha256,
+            "0.0.1-foreign",
+            &custody.build_sha,
+            custody.protocol,
+        );
+        let refusal = check_remote_custody(&foreign_version, "/remote/zynk", &custody)
+            .expect_err("a foreign version must be refused");
+        assert!(
+            refusal.reason().contains("reports version 0.0.1-foreign"),
+            "unexpected refusal: {}",
+            refusal.reason()
+        );
+
+        let foreign_protocol = remote_probe_stdout(
+            &custody.sha256,
+            &custody.version,
+            &custody.build_sha,
+            custody.protocol + 1,
+        );
+        let refusal = check_remote_custody(&foreign_protocol, "/remote/zynk", &custody)
+            .expect_err("a foreign protocol must be refused");
+        assert!(
+            refusal.reason().contains("speaks protocol"),
+            "unexpected refusal: {}",
+            refusal.reason()
+        );
+
+        let no_status = format!(
+            "{}\nzynk {} ({})\n",
+            custody.sha256, custody.version, custody.build_sha
+        );
+        let refusal = check_remote_custody(&no_status, "/remote/zynk", &custody)
+            .expect_err("a remote that reports no protocol must be refused");
+        assert!(
+            refusal
+                .reason()
+                .contains("did not report its client protocol"),
+            "unexpected refusal: {}",
+            refusal.reason()
+        );
+    }
+
+    #[test]
+    fn a_reused_remote_binary_with_a_foreign_source_sha_is_not_reused() {
+        // The warden's probe: a foreign binary at /opt/foreign/zynk reporting this client's version
+        // and protocol with a well-formed all-ones source SHA. Shape validation alone would accept
+        // it; only comparing it against the local canonical SHA refuses it.
+        let custody = custody_fixture();
+        push_stubbed_ssh_output(
+            &remote_probe_stdout(
+                &custody.sha256,
+                &custody.version,
+                &"1".repeat(40),
+                custody.protocol,
+            ),
+            true,
+        );
+        assert!(
+            !remote_binary_is_the_reviewed_one("fake-host", &probe_remote_zynk(), &custody)
+                .expect("probe"),
+            "a remote binary attesting a foreign source commit must not be reused"
+        );
+    }
+
+    #[test]
+    fn a_reused_remote_binary_with_a_different_sha256_is_not_reused() {
+        let custody = custody_fixture();
+        push_stubbed_ssh_output(
+            &remote_probe_stdout(
+                &"b".repeat(64),
+                &custody.version,
+                &custody.build_sha,
+                custody.protocol,
+            ),
+            true,
+        );
+        assert!(
+            !remote_binary_is_the_reviewed_one("fake-host", &probe_remote_zynk(), &custody)
+                .expect("probe"),
+            "a remote binary with different bytes must not be reused"
+        );
+    }
+
+    #[test]
+    fn a_reused_remote_binary_with_a_foreign_protocol_is_not_reused() {
+        let custody = custody_fixture();
+        push_stubbed_ssh_output(
+            &remote_probe_stdout(
+                &custody.sha256,
+                &custody.version,
+                &custody.build_sha,
+                custody.protocol + 1,
+            ),
+            true,
+        );
+        assert!(
+            !remote_binary_is_the_reviewed_one("fake-host", &probe_remote_zynk(), &custody)
+                .expect("probe"),
+            "a remote binary speaking another protocol must not be reused"
+        );
+    }
+
+    #[test]
+    fn a_reused_remote_binary_matching_source_and_bytes_is_reused() {
+        // The positive control: same bytes, same reviewed commit, same version and protocol.
+        let custody = custody_fixture();
+        push_stubbed_ssh_output(
+            &remote_probe_stdout(
+                &custody.sha256,
+                &custody.version,
+                &custody.build_sha,
+                custody.protocol,
+            ),
+            true,
+        );
+        assert!(
+            remote_binary_is_the_reviewed_one("fake-host", &probe_remote_zynk(), &custody)
+                .expect("probe"),
+            "the reviewed binary must still be reused"
+        );
+    }
+
+    #[test]
+    fn an_absent_remote_binary_is_not_reused() {
+        let custody = custody_fixture();
+        push_stubbed_ssh_output("", false);
+        assert!(
+            !remote_binary_is_the_reviewed_one("fake-host", &probe_remote_zynk(), &custody)
+                .expect("probe"),
+            "a probe that failed must not be read as a reusable binary"
         );
     }
 
