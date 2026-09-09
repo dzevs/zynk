@@ -19,6 +19,8 @@
 //! any `USING vec0` entry (the migration created no vec0 table), NOT that a plain open
 //! would fail. A separate static check asserts the migration FILE declares no vec0.
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,10 +34,7 @@ fn unique_base() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!(
-        "/tmp/zynk-embed-migtest-{}-{nanos}",
-        std::process::id()
-    ))
+    support::test_root().join(format!("zynk-embed-migtest-{}-{nanos}", std::process::id()))
 }
 
 /// Migrate an isolated temp DB WITHOUT spawning the server/worker, by running the

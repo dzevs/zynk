@@ -57,10 +57,7 @@ fn unique_base() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!(
-        "/tmp/zynk-header-test-{}-{nanos}",
-        std::process::id()
-    ))
+    support::test_root().join(format!("zynk-header-test-{}-{nanos}", std::process::id()))
 }
 
 struct SpawnedZynk {

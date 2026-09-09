@@ -76,6 +76,37 @@ pub fn zynk_server_pids_for_runtime_dir(runtime_dir: &Path) -> std::io::Result<V
     Ok(pids)
 }
 
+/// The directory every integration harness builds its sandbox under.
+///
+/// Returns `$ZYNK_TEST_ROOT` when that variable is set and non-blank, otherwise `/tmp`
+/// (the historical default). The directory is created if it does not exist.
+///
+/// Keep any override SHORT. Each sandbox holds Unix sockets
+/// (`<root>/<harness>-<pid>-<nanos>/runtime/zynk-client.sock`) and `sun_path` is capped
+/// at 108 bytes (SUN_LEN), so a long root makes servers fail to bind instead of failing
+/// an assertion. `/tmp` was chosen originally for exactly that budget.
+///
+/// The override exists so a machine whose `/tmp` is a quota-limited tmpfs can point the
+/// whole suite at disk, e.g. `ZYNK_TEST_ROOT=/home/user/.zt`. It must name a REAL
+/// directory, never a symlink: several tests compare a pane's reported cwd — which the
+/// kernel reports resolved — against the sandbox path built from this root, and a
+/// symlink makes those two spellings differ.
+pub fn test_root() -> PathBuf {
+    let root = test_root_from(std::env::var("ZYNK_TEST_ROOT").ok().as_deref());
+    let _ = fs::create_dir_all(&root);
+    root
+}
+
+/// Pure core of [`test_root`], split out so the guard test can exercise both branches
+/// without mutating the process environment (under `cargo test` the harnesses run their
+/// tests as threads in one process, where an env write would race live sandbox setup).
+fn test_root_from(override_value: Option<&str>) -> PathBuf {
+    match override_value.map(str::trim) {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => PathBuf::from("/tmp"),
+    }
+}
+
 pub fn cleanup_test_base(base: &Path) {
     let runtime_dir = base.join("runtime");
     let runtime_dirs = HashSet::from([runtime_dir.clone()]);
@@ -770,6 +801,71 @@ mod tests {
         assert!(
             !is_test_zynk_binary(Path::new("/home/user/.local/bin/zynk")),
             "installed binaries must not be considered test-owned"
+        );
+    }
+
+    #[test]
+    fn test_root_honours_the_override_and_stays_inside_the_socket_budget() {
+        // Budget: `sun_path` is 108 bytes (SUN_LEN). Assert well under it so a harness
+        // that grows a slightly longer sandbox name still binds.
+        const SOCKET_BUDGET: usize = 100;
+
+        // The longest sandbox path any harness builds today: the longest harness prefix
+        // (`zynk-multi-client-test`), a pid, a nanosecond stamp, then the runtime dir that
+        // holds the client socket. Widths are the worst case, not today's values: 7 digits
+        // is Linux `pid_max` (2^22) and 19 digits covers `as_nanos()` until year 2262.
+        fn longest_socket_path(root: &Path) -> PathBuf {
+            root.join(format!(
+                "zynk-multi-client-test-{}-{}",
+                "9".repeat(7),
+                "9".repeat(19)
+            ))
+            .join("runtime")
+            .join("zynk-client.sock")
+        }
+
+        fn assert_fits(root: &Path) {
+            let socket = longest_socket_path(root);
+            let len = socket.as_os_str().len();
+            assert!(
+                len < SOCKET_BUDGET,
+                "test root {} is too long: the worst-case socket path is {len} bytes, over the \
+                 {SOCKET_BUDGET}-byte budget (sun_path/SUN_LEN is 108); use a shorter \
+                 ZYNK_TEST_ROOT, e.g. /home/user/.zt",
+                root.display()
+            );
+        }
+
+        // An override is taken verbatim.
+        let override_root = Path::new("/home/user/.zt");
+        assert_eq!(
+            test_root_from(override_root.to_str()),
+            override_root,
+            "ZYNK_TEST_ROOT must be used verbatim when set"
+        );
+
+        // Absent or blank falls back to the historical default.
+        assert_eq!(
+            test_root_from(None),
+            Path::new("/tmp"),
+            "an unset ZYNK_TEST_ROOT must keep the historical /tmp default"
+        );
+        assert_eq!(
+            test_root_from(Some("   ")),
+            Path::new("/tmp"),
+            "a blank ZYNK_TEST_ROOT must keep the historical /tmp default"
+        );
+
+        // Both roots must leave a bindable socket path.
+        assert_fits(override_root);
+        assert_fits(Path::new("/tmp"));
+
+        // The public helper must read the environment through the same pure core, so the
+        // two branches above are the branches the harnesses actually take.
+        assert_eq!(
+            test_root(),
+            test_root_from(std::env::var("ZYNK_TEST_ROOT").ok().as_deref()),
+            "test_root() must resolve ZYNK_TEST_ROOT through test_root_from()"
         );
     }
 }

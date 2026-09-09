@@ -23,8 +23,8 @@ fn unique_test_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!(
-        "/tmp/zynk-cross-area-test-{}-{nanos}",
+    support::test_root().join(format!(
+        "zynk-cross-area-test-{}-{nanos}",
         std::process::id()
     ))
 }
