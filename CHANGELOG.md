@@ -124,6 +124,10 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   of the agent running that was taken after its ending revives the session even when a busy moment makes both
   arrive together; one taken before that ending, or at the very same instant, still cannot — and an ending
   seen while the identity was still being retired is now remembered rather than lost.
+- Releasing or clearing a pane is such an ending too, even though it observes no process of its own: once the
+  integration reports a different session, a resume of the released one still waits for the agent to be seen
+  running again. A report of the agent running that was taken before that release, or at the very same
+  instant, no longer revives the released session, and each further release moves the line forward.
 
 **Removed**
 
