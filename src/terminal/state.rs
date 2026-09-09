@@ -457,6 +457,9 @@ pub struct TerminalState {
     /// report on the new server would record a confirmed identity for a process the
     /// detector last saw exiting.
     unanswered_hook_exit: Option<(HookOwner, Instant)>,
+    /// A transferred identity is not liveness evidence after the snapshot. Only a
+    /// fresh observation by this server's detector may confirm this imported owner.
+    handoff_confirmation: Option<(HookOwner, Instant)>,
     suppressed_hook_reports: HashMap<String, SuppressedHookReport>,
     stale_hook_sessions: HashMap<String, Vec<StaleHookSession>>,
     metadata_report_sequences: HashMap<String, u64>,
@@ -485,6 +488,7 @@ impl TerminalState {
             agent_name: None,
             hook_report_sequences: HashMap::new(),
             unanswered_hook_exit: None,
+            handoff_confirmation: None,
             suppressed_hook_reports: HashMap::new(),
             stale_hook_sessions: HashMap::new(),
             metadata_report_sequences: HashMap::new(),
@@ -1011,18 +1015,40 @@ impl TerminalState {
     /// other representation, because the pending exit is a fact about this terminal's
     /// process, not about which shape reported it. The caller then answers
     /// `receiver_identity_unverified`, exactly as for a pane no hook ever named.
+    /// An imported identity likewise waits for a post-import process observation.
     pub fn confirmed_hook_owner(&self) -> Option<(&str, &str)> {
-        if let Some(authority) = self.hook_authority.as_ref() {
-            return authority
-                .unconfirmed_since
-                .is_none()
-                .then_some((authority.source.as_str(), authority.agent_label.as_str()));
+        let (source, agent_label, pending_exit) = if let Some(authority) = &self.hook_authority {
+            (
+                &authority.source,
+                &authority.agent_label,
+                authority.unconfirmed_since,
+            )
+        } else {
+            let identity = self.hook_identity.as_ref()?;
+            (
+                &identity.source,
+                &identity.agent_label,
+                identity.unconfirmed_since,
+            )
+        };
+        if pending_exit.is_some()
+            || self
+                .handoff_confirmation
+                .as_ref()
+                .is_some_and(|(owner, _)| owner.matches(source, agent_label))
+        {
+            return None;
         }
-        let identity = self.hook_identity.as_ref()?;
-        identity
-            .unconfirmed_since
-            .is_none()
-            .then_some((identity.source.as_str(), identity.agent_label.as_str()))
+        Some((source, agent_label))
+    }
+
+    pub fn require_imported_hook_identity_confirmation(&mut self, imported_at: Instant) {
+        self.handoff_confirmation = self.hook_identity.as_ref().map(|identity| {
+            (
+                HookOwner::new(&identity.source, &identity.agent_label),
+                imported_at,
+            )
+        });
     }
 
     /// The unanswered exit an owner recorded NOW has to inherit, for the INCOMING
@@ -1145,6 +1171,13 @@ impl TerminalState {
                     && crate::detect::parse_agent_label(agent_label) == Some(detected_agent)
             })
         };
+        if self
+            .handoff_confirmation
+            .as_ref()
+            .is_some_and(|(owner, at)| confirms(&owner.agent_label, Some(*at)))
+        {
+            self.handoff_confirmation = None;
+        }
         if let Some(authority) = self.hook_authority.as_mut() {
             if confirms(&authority.agent_label, authority.unconfirmed_since) {
                 authority.unconfirmed_since = None;
@@ -6006,6 +6039,87 @@ mod tests {
         assert_eq!(
             terminal.suppressed_hook_reports["zynk:hermes"].reason,
             HookSuppressionReason::ProcessExit
+        );
+    }
+
+    #[test]
+    fn handoff_confirmation_requires_strictly_newer_matching_running_evidence() {
+        let imported_at = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.record_identity_only_hook_report_at(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("same-session"),
+            Some(1),
+            imported_at - Duration::from_secs(1),
+        );
+        terminal.require_imported_hook_identity_confirmation(imported_at);
+        for (agent, exited, offset, allowed) in [
+            (Some(Agent::Hermes), false, 0, false),
+            (Some(Agent::Hermes), true, 1, false),
+            (Some(Agent::Pi), false, 1, false),
+            (None, false, 1, false),
+            (Some(Agent::Hermes), false, 1, true),
+        ] {
+            let mut observed = terminal.clone();
+            observe_at(
+                &mut observed,
+                agent,
+                exited,
+                imported_at + Duration::from_millis(offset),
+            );
+            assert_eq!(
+                observed.confirmed_hook_owner().is_some(),
+                allowed,
+                "{agent:?}/{exited}/{offset}"
+            );
+        }
+        let mut replacement = terminal.clone();
+        identity_session_start(&mut replacement, "new-session", 2, "new")
+            .expect("a genuinely new session can replace the imported session");
+        assert_eq!(
+            replacement
+                .persisted_agent_session
+                .as_ref()
+                .unwrap()
+                .session_ref
+                .value,
+            "new-session"
+        );
+        assert!(
+            replacement.confirmed_hook_owner().is_none(),
+            "a new-session report is still not process evidence"
+        );
+        observe_at(
+            &mut replacement,
+            Some(Agent::Hermes),
+            false,
+            imported_at + Duration::from_millis(1),
+        );
+        assert_eq!(
+            replacement.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes"))
+        );
+        let captured_at = imported_at + Duration::from_millis(2);
+        let snapshot = terminal.export_hook_retirement(captured_at).unwrap();
+        let second_import = captured_at + Duration::from_secs(1);
+        let mut second = test_terminal();
+        second.restore_hook_retirement(snapshot, second_import);
+        second.require_imported_hook_identity_confirmation(second_import);
+        observe_at(&mut second, Some(Agent::Hermes), false, captured_at);
+        assert!(
+            second.confirmed_hook_owner().is_none(),
+            "another handoff cannot reuse prior-server evidence"
+        );
+        observe_at(
+            &mut second,
+            Some(Agent::Hermes),
+            false,
+            second_import + Duration::from_millis(1),
+        );
+        assert_eq!(
+            second.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes"))
         );
     }
 

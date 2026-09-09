@@ -2631,6 +2631,194 @@ fn read_report_outcome(result_file: &Path) -> String {
     }
 }
 
+fn handoff_receipt_after_snapshot(agent_exits: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = test_lock();
+    let fixture = handoff_fixture(&[("ZYNK_TEST_TRUST_PEER_PID", "disabled")]);
+    let HandoffFixture {
+        base,
+        config_home,
+        runtime_dir,
+        api_socket,
+        db,
+        pane_id,
+        spawned,
+    } = fixture;
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let path = |name: &str| quote(base.join(name).to_str().unwrap());
+    // The foreground agent is a child of the pane shell, not an exec replacing that
+    // shell. Its reporter remains a real descendant for SO_PEERCRED, with no seam.
+    let receipt_waiter = if agent_exits {
+        String::new()
+    } else {
+        format!(
+            "while ! test -f {}; do sleep .05; done\nsh {}\n",
+            path("receipt.sh"),
+            path("receipt.sh")
+        )
+    };
+    fs::write(
+        base.join("agent.sh"),
+        format!(
+            "echo $$ > {}\n(\nwhile ! test -f {}; do sleep .05; done\n\
+         \"$ZYNK_BIN_PATH\" pane report-agent {} --source zynk:hermes --agent hermes \
+         --state idle --agent-session-id handoff-session > {} 2>&1\n\
+         echo \"rc=$?\" >> {}\n{}\n) &\nexec -a hermes cat\n",
+            path("agent.pid"),
+            path("report-now"),
+            quote(&pane_id),
+            path("hook.txt"),
+            path("hook.txt"),
+            receipt_waiter,
+        ),
+    )
+    .unwrap();
+    send_pane_line(&api_socket, &pane_id, &format!("bash {}", path("agent.sh")));
+    support::wait_for_file(&base.join("agent.pid"), Duration::from_secs(10));
+    let agent_pid: u32 = fs::read_to_string(base.join("agent.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let pane = request(
+            &api_socket,
+            serde_json::json!({
+                "id":"test:detected", "method":"pane.get", "params":{"pane_id":pane_id}
+            }),
+        );
+        if pane["result"]["pane"]["agent"] == "hermes" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "foreground Hermes was not detected: {pane}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    fs::write(base.join("report-now"), "").unwrap();
+    let hook = read_report_outcome(&base.join("hook.txt"));
+    assert!(
+        hook.contains("rc=0"),
+        "real pane-tree hook report failed: {hook}"
+    );
+    let sent = zynk_send(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &pane_id,
+        "post-snapshot receipt",
+    );
+    assert_eq!(sent["delivery_status"], "submitted");
+
+    // This wrapper is spawned only AFTER capture and runtime export. Hold it before
+    // importer startup, so a kill here is unambiguously outside both snapshots.
+    let wrapper = base.join("import.sh");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ntouch {}\nwhile ! test -f {}; do sleep .05; done\nexec {} \"$@\"\n",
+            path("snapshot-taken"),
+            path("import-now"),
+            quote(env!("CARGO_BIN_EXE_zynk")),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handoff_socket = api_socket.clone();
+    thread::spawn(move || {
+        let _ = tx.send(request(&handoff_socket, serde_json::json!({
+            "id":"test:delayed-import", "method":"server.live_handoff", "params":{"import_exe":wrapper}
+        })));
+    });
+    support::wait_for_file(&base.join("snapshot-taken"), Duration::from_secs(10));
+    if agent_exits {
+        let killed = std::process::Command::new("kill")
+            .args(["-TERM", &agent_pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Path::new(&format!("/proc/{agent_pid}")).exists() {
+            assert!(Instant::now() < deadline, "the test agent did not exit");
+            thread::sleep(Duration::from_millis(25));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    fs::write(base.join("import-now"), "").unwrap();
+    assert_ok(rx.recv_timeout(Duration::from_secs(15)).unwrap());
+    register_replacement(&runtime_dir, spawned.child.process_id());
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    let receipt = format!(
+        "\"$ZYNK_BIN_PATH\" zynk message-received --pane-id {} --message-id {} \
+         --conversation-id {} --conversation-seq {} --runtime-session-id {} --socket-namespace {} --json",
+        quote(&pane_id), quote(sent["message_id"].as_str().unwrap()),
+        quote(sent["conversation_id"].as_str().unwrap()), sent["conversation_seq"],
+        quote(sent["runtime_session_id"].as_str().unwrap()), quote(sent["socket_namespace"].as_str().unwrap()),
+    );
+    let script = if agent_exits {
+        format!(
+            "{receipt} > {} 2>&1\necho \"rc=$?\" >> {}\n",
+            path("receipt.txt"),
+            path("receipt.txt")
+        )
+    } else {
+        // Only retry the receipt while the new detector acquires the live process.
+        // No hook or session report after the handoff may confirm the identity.
+        format!(
+            "for attempt in $(seq 1 100); do\n{receipt} > {} 2>&1\nrc=$?\n\
+                 if test $rc -eq 0; then break; fi\nsleep .05\ndone\necho \"rc=$rc\" >> {}\n",
+            path("receipt.txt"),
+            path("receipt.txt")
+        )
+    };
+    fs::write(base.join("receipt-ready.sh"), script).unwrap();
+    fs::rename(base.join("receipt-ready.sh"), base.join("receipt.sh")).unwrap();
+    if agent_exits {
+        send_pane_line(&api_socket, &pane_id, &format!("sh {}", path("receipt.sh")));
+    }
+    let result = read_report_outcome(&base.join("receipt.txt"));
+    let events = delivery_event_types(&db, sent["message_id"].as_str().unwrap());
+    let proof_source: Option<String> = db_block_on(async {
+        sqlx::query_scalar("SELECT proof_source FROM delivery_events WHERE message_id = ? AND event_type = 'received'")
+            .bind(sent["message_id"].as_str().unwrap())
+            .fetch_optional(&mut open_db(&db).await).await.unwrap()
+    });
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+    if agent_exits {
+        assert!(
+            result.contains("receiver_identity_unverified"),
+            "a post-snapshot exit must not receipt: {result}"
+        );
+        assert_eq!(events, ["submitted"], "a dead session must stay submitted");
+    } else {
+        assert!(
+            result.contains("rc=0"),
+            "the detector must confirm the still-live session: {result}"
+        );
+        assert_eq!(events, ["submitted", "received"]);
+        assert_eq!(proof_source.as_deref(), Some("pane_tree"));
+    }
+}
+
+#[test]
+fn live_handoff_refuses_a_receipt_after_an_exit_after_snapshot() {
+    handoff_receipt_after_snapshot(true);
+}
+
+#[test]
+fn live_handoff_reconfirms_the_same_live_session_from_the_detector() {
+    handoff_receipt_after_snapshot(false);
+}
+
 #[test]
 fn live_handoff_keeps_the_pane_tree_binding() {
     // ADR 0014 binds identity reports to the TARGET pane's process tree, and a live

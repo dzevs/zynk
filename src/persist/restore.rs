@@ -460,7 +460,11 @@ fn apply_handoff_hook_retirement(
         return;
     }
     if let Some(retirement) = retirement {
-        terminal.restore_hook_retirement(retirement, std::time::Instant::now());
+        let imported_at = std::time::Instant::now();
+        terminal.restore_hook_retirement(retirement, imported_at);
+        // The old detector can observe an exit AFTER capture. No snapshot can
+        // prove its transferred identity is still alive when the importer starts.
+        terminal.require_imported_hook_identity_confirmation(imported_at);
     }
 }
 
@@ -1648,6 +1652,78 @@ mod tests {
         assert!(
             !ordinary_pi_report_survives(&mut terminal),
             "an ordinary same-session report re-anchored a released session after a handoff"
+        );
+    }
+
+    #[test]
+    fn imported_hook_identity_needs_a_post_import_process_observation() {
+        use crate::detect::Agent;
+        use std::time::{Duration, Instant};
+
+        let mut original = TerminalState::new(TerminalId::alloc(), PathBuf::from("/"));
+        let before_import = Instant::now() - Duration::from_secs(1);
+        original.record_identity_only_hook_report_at(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("handoff-session"),
+            Some(1),
+            before_import,
+        );
+        let snapshot = original.export_hook_retirement(Instant::now()).unwrap();
+        let mut imported = TerminalState::new(TerminalId::alloc(), PathBuf::from("/"));
+        apply_handoff_hook_retirement(&mut imported, true, Some(snapshot));
+        assert_eq!(
+            imported.confirmed_hook_owner(),
+            None,
+            "a snapshot is not post-import liveness"
+        );
+        imported.record_identity_only_hook_report_at(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("handoff-session"),
+            Some(2),
+            Instant::now(),
+        );
+        assert_eq!(
+            imported.confirmed_hook_owner(),
+            None,
+            "a hook cannot confirm itself"
+        );
+        imported.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            before_import,
+        );
+        assert_eq!(
+            imported.confirmed_hook_owner(),
+            None,
+            "a pre-import observation is too old"
+        );
+        imported.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
+        assert_eq!(
+            imported.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes"))
+        );
+        assert_eq!(
+            imported
+                .persisted_agent_session
+                .as_ref()
+                .unwrap()
+                .session_ref
+                .value,
+            "handoff-session"
         );
     }
 
