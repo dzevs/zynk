@@ -1141,13 +1141,42 @@ mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
 
+    /// Fixture git commands must never inherit the caller's git environment. With `GIT_DIR`
+    /// exported, `git init` initialises the directory that variable names, leaves
+    /// `<fixture>/.git` absent and still exits 0; every later `git -C <fixture> ...` then
+    /// silently reads and writes the OUTER repository. Neutralising the global/system config
+    /// keeps the host's own git settings out of the fixture as well.
+    fn fixture_git_command() -> std::process::Command {
+        let mut command = std::process::Command::new("git");
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        ] {
+            command.env_remove(key);
+        }
+        command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+        command.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        command
+    }
+
     fn init_repo(path: &std::path::Path) {
-        let status = std::process::Command::new("git")
+        let status = fixture_git_command()
             .args(["init", "-q"])
             .current_dir(path)
             .status()
             .unwrap();
         assert!(status.success(), "git init failed for {}", path.display());
+        assert!(
+            path.join(".git").exists(),
+            "git init reported success but left no .git behind, the fixture would operate on a parent repository: {}",
+            path.display()
+        );
     }
 
     fn app_with_overlay(

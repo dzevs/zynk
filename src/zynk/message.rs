@@ -973,12 +973,35 @@ mod tests {
         assert_eq!(p.agent, None);
     }
 
+    /// Fixture git commands must never inherit the caller's git environment. With `GIT_DIR`
+    /// exported, `git init` initialises the directory that variable names, leaves
+    /// `<fixture>/.git` absent and still exits 0; every later `git -C <fixture> ...` then
+    /// silently reads and writes the OUTER repository. Neutralising the global/system config
+    /// keeps the host's own git settings out of the fixture as well.
+    fn fixture_git_command() -> std::process::Command {
+        let mut command = std::process::Command::new("git");
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        ] {
+            command.env_remove(key);
+        }
+        command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+        command.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        command
+    }
+
     #[test]
     fn git_meta_in_a_temp_repo_returns_branch_and_sha() {
         // Portability: build a SELF-CONTAINED throwaway git repo in a unique /tmp dir
         // (no dependence on the live checkout's branch — that fails under detached HEAD,
         // a packaged build, or no `.git`). A committed repo resolves a branch + 40-hex sha.
-        use std::process::Command as Cmd;
         let dir = std::env::temp_dir().join(format!(
             "zynk-gitmeta-{}-{}",
             std::process::id(),
@@ -991,21 +1014,26 @@ mod tests {
 
         // `git init -q` (force a deterministic branch name so the assertion is robust
         // regardless of the host's `init.defaultBranch`), then one empty commit.
-        let init = Cmd::new("git")
+        let init = fixture_git_command()
             .arg("-C")
             .arg(&dir)
             .args(["init", "-q", "-b", "work"])
             .status();
         // -b may be unsupported on very old git; fall back to a plain init.
         if !matches!(&init, Ok(s) if s.success()) {
-            let _ = Cmd::new("git")
+            let _ = fixture_git_command()
                 .arg("-C")
                 .arg(&dir)
                 .args(["init", "-q"])
                 .status()
                 .expect("git init");
         }
-        let commit = Cmd::new("git")
+        assert!(
+            dir.join(".git").exists(),
+            "git init left no .git behind, the empty commit would land in a parent repository: {}",
+            dir.display()
+        );
+        let commit = fixture_git_command()
             .arg("-C")
             .arg(&dir)
             .args([

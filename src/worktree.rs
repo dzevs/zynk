@@ -425,8 +425,77 @@ mod tests {
         std::env::temp_dir().join(format!("zynk-{name}-{}-{nanos}", std::process::id()))
     }
 
+    /// Fixture git commands must never inherit the caller's git environment. With `GIT_DIR`
+    /// exported, `git init` initialises the directory that variable names, leaves
+    /// `<fixture>/.git` absent and still exits 0; every later `git -C <fixture> ...` then
+    /// silently reads and writes the OUTER repository. Neutralising the global/system config
+    /// keeps the host's own git settings out of the fixture as well.
+    fn fixture_git_command() -> std::process::Command {
+        let mut command = std::process::Command::new("git");
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        ] {
+            command.env_remove(key);
+        }
+        command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+        command.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        command
+    }
+
+    /// Path of `repo`'s own config file, asserting first that `repo` really is a repository.
+    /// `git config` WALKS UP to the nearest parent repository, so an identity written into a
+    /// fixture whose `git init` did not take lands in a real checkout's `.git/config`.
+    fn fixture_git_config_path(repo: &std::path::Path) -> std::path::PathBuf {
+        assert!(
+            repo.join(".git").exists(),
+            "fixture repo has no .git, refusing to write a git config that would escape into a parent repository: {}",
+            repo.display()
+        );
+        let output = fixture_git_command()
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git rev-parse --git-common-dir failed for {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim()).join("config")
+    }
+
+    /// Seed the fixture identity so the write cannot travel: `--file` names the repository's
+    /// own config file and never walks up to a parent repository.
+    fn seed_fixture_identity(repo: &std::path::Path) {
+        let config = fixture_git_config_path(repo);
+        let config = config.to_string_lossy().into_owned();
+        run_git(
+            repo,
+            &[
+                "config",
+                "--file",
+                &config,
+                "user.email",
+                "zynk@example.invalid",
+            ],
+        );
+        run_git(
+            repo,
+            &["config", "--file", &config, "user.name", "Zynk Test"],
+        );
+    }
+
     fn run_git(repo: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
+        let status = fixture_git_command()
             .arg("-C")
             .arg(repo)
             .args(args)
@@ -444,8 +513,7 @@ mod tests {
         let repo = unique_temp_path(name);
         std::fs::create_dir_all(&repo).unwrap();
         run_git(&repo, &["init", "--quiet"]);
-        run_git(&repo, &["config", "user.email", "zynk@example.invalid"]);
-        run_git(&repo, &["config", "user.name", "Zynk Test"]);
+        seed_fixture_identity(&repo);
         std::fs::write(repo.join("README.md"), "test\n").unwrap();
         run_git(&repo, &["add", "README.md"]);
         run_git(&repo, &["commit", "--quiet", "-m", "initial"]);
@@ -663,7 +731,7 @@ prunable stale
         run_worktree_command(&add).unwrap();
 
         assert!(checkout.join("README.md").exists());
-        let branch_name = std::process::Command::new("git")
+        let branch_name = fixture_git_command()
             .arg("-C")
             .arg(&checkout)
             .args(["branch", "--show-current"])
@@ -727,5 +795,87 @@ prunable stale
         assert!(checkout.join("unrelated").exists());
         let _ = std::fs::remove_dir_all(checkout);
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// Set `GIT_DIR` for the duration of a test and restore the previous value on drop.
+    /// This is the arbiter's trigger: with `GIT_DIR` exported, `git init` initialises the
+    /// directory it names and leaves `<fixture>/.git` absent while still exiting 0.
+    struct InheritedGitDir(Option<std::ffi::OsString>);
+
+    impl InheritedGitDir {
+        fn set(value: &Path) -> Self {
+            let previous = std::env::var_os("GIT_DIR");
+            std::env::set_var("GIT_DIR", value);
+            Self(previous)
+        }
+    }
+
+    impl Drop for InheritedGitDir {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => std::env::set_var("GIT_DIR", previous),
+                None => std::env::remove_var("GIT_DIR"),
+            }
+        }
+    }
+
+    /// A throwaway outer repository with an un-initialised child directory inside it —
+    /// the exact shape in which a fixture identity write escapes into a real checkout.
+    fn outer_repo_with_bare_child(name: &str) -> (PathBuf, PathBuf) {
+        let outer = unique_temp_path(name);
+        std::fs::create_dir_all(&outer).unwrap();
+        run_git(&outer, &["init", "--quiet"]);
+        let child = outer.join("fixture");
+        std::fs::create_dir_all(&child).unwrap();
+        (outer, child)
+    }
+
+    fn outer_config(outer: &Path) -> String {
+        std::fs::read_to_string(outer.join(".git/config")).unwrap()
+    }
+
+    #[test]
+    fn fixture_identity_write_cannot_escape_into_a_parent_repository() {
+        let (outer, child) = outer_repo_with_bare_child("worktree-containment-refuse");
+        let _git_dir = InheritedGitDir::set(&outer.join(".git"));
+
+        let seeded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            seed_fixture_identity(&child);
+        }));
+
+        let config = outer_config(&outer);
+        drop(_git_dir);
+        let _ = std::fs::remove_dir_all(&outer);
+
+        assert!(
+            seeded.is_err(),
+            "seeding an un-initialised fixture must abort the test, not write git config"
+        );
+        assert!(
+            !config.contains("zynk@example.invalid"),
+            "fixture identity escaped into the parent repository's config:\n{config}"
+        );
+    }
+
+    #[test]
+    fn fixture_repo_creation_ignores_an_inherited_git_dir() {
+        let (outer, child) = outer_repo_with_bare_child("worktree-containment-scrub");
+        let _git_dir = InheritedGitDir::set(&outer.join(".git"));
+
+        run_git(&child, &["init", "--quiet"]);
+        let child_is_a_repo = child.join(".git").exists();
+
+        let config = outer_config(&outer);
+        drop(_git_dir);
+        let _ = std::fs::remove_dir_all(&outer);
+
+        assert!(
+            child_is_a_repo,
+            "an inherited GIT_DIR silently redirected the fixture's `git init`"
+        );
+        assert!(
+            !config.contains("zynk@example.invalid"),
+            "fixture writes escaped into the parent repository's config:\n{config}"
+        );
     }
 }
