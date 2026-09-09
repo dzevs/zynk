@@ -620,6 +620,152 @@ fn receipt_from_a_same_label_pane_that_is_not_the_target_is_rejected() {
     assert_eq!(latest_event(&fixture, &message_id).0, "received");
 }
 
+/// Drive the REAL bundled opencode plugin asset (`bun -e` importing
+/// `src/integration/assets/opencode/zynk-agent-state.js`) against this fixture's
+/// isolated socket, so the assertions observe what the shipped file actually puts on
+/// the wire and what the server then does with it -- not a hand-built request.
+///
+/// The pane is anchored on root session `visible-root` (a full-lifecycle
+/// `pane.report_agent` the way the asset's own root path reports it), a control
+/// message proves that anchor receipts, then a second message is submitted and a
+/// CHILD session belonging to `parent` asks a permission. Returns the resulting
+/// `pane.get` and the second message's `zynk.message_received` response.
+///
+/// `parent` is the child's `parentID`: the pane's own root (`visible-root`) or another
+/// attached client's root. `nested` inserts an intermediate child so the prompt comes
+/// from a grandchild and the asset has to walk the whole ancestry.
+fn opencode_child_prompt_through_the_real_asset(parent: &str, nested: bool) -> (Value, Value) {
+    let fixture = spawn_fixture();
+    let target = create_root_pane(&fixture.socket_path, "opencode-child");
+    start_detected_agent(&fixture, &target, "opencode");
+    let anchored = send_json(
+        &fixture.socket_path,
+        &serde_json::json!({
+            "id": "anchor", "method": "pane.report_agent",
+            "params": {"pane_id": target, "source": "zynk:opencode", "agent": "opencode",
+                "state": "idle", "agent_session_id": "visible-root", "seq": 1}
+        })
+        .to_string(),
+    );
+    assert!(anchored.get("error").is_none(), "{anchored}");
+    let control = run_cli(
+        &fixture,
+        None,
+        &["send", &target, "--", "root receipt control"],
+    );
+    let control_sent = parse_outcome(&control);
+    let control_receipt = send_json(
+        &fixture.socket_path,
+        &receipt_request(&control_sent, &target),
+    );
+    assert_eq!(
+        control_receipt["result"]["delivery_status"], "received",
+        "initial root receipt must succeed: {control_receipt}"
+    );
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &target, "--", "child prompt receipt"],
+    );
+    let sent = parse_outcome(&out);
+    let asset = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/integration/assets/opencode/zynk-agent-state.js");
+    let prompting_session = if nested {
+        "grandchild"
+    } else {
+        "child-session"
+    };
+    let mut script = format!(
+        "const {{ ZynkAgentStatePlugin }} = await import({});\n\
+         const plugin = await ZynkAgentStatePlugin();\n\
+         await plugin.event({{event: {{type: 'session.created', properties: {{\
+            sessionID: 'child-session', info: {{id: 'child-session', parentID: {}}}\
+         }}}}}});\n",
+        serde_json::to_string(&asset).unwrap(),
+        serde_json::to_string(parent).unwrap(),
+    );
+    if nested {
+        script.push_str(
+            "await plugin.event({event: {type: 'session.created', properties: {\
+                sessionID: 'grandchild', info: {id: 'grandchild', parentID: 'child-session'}\
+             }}});\n",
+        );
+    }
+    script.push_str(&format!(
+        "await plugin.event({{event: {{type: 'permission.asked', properties: {{sessionID: {}}}}}}});",
+        serde_json::to_string(prompting_session).unwrap(),
+    ));
+    let result = Command::new("bun")
+        .arg("-e")
+        .arg(script)
+        .env("ZYNK_ENV", "1")
+        .env("ZYNK_PANE_ID", &target)
+        .env("ZYNK_SOCKET_PATH", &fixture.socket_path)
+        .output()
+        .expect("run the bundled opencode asset under bun");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let pane = pane_get(&fixture.socket_path, &target);
+    let receipt = send_json(&fixture.socket_path, &receipt_request(&sent, &target));
+    fixture.cleanup();
+    (pane, receipt)
+}
+
+#[test]
+fn an_own_opencode_child_prompt_keeps_the_root_receipt_anchor() {
+    // Codex M4 P2 (`msg_a12f9abba8700337`): a session-less full-lifecycle report REPLACES the
+    // pane's session anchor (`set_hook_authority_with_custom_status_at`, `src/terminal/state.rs`:
+    // `persisted_agent_session = None` + `hook_authority.session_ref = None`), so the asset must
+    // name the OWNING root on a child's prompt. The prompt must still project `blocked` onto the
+    // pane, and a message addressed to that root just before it must still receipt.
+    let _guard = test_lock();
+    let (pane, receipt) = opencode_child_prompt_through_the_real_asset("visible-root", false);
+    assert_eq!(
+        pane.pointer("/result/pane/agent_status"),
+        Some(&Value::String("blocked".into())),
+        "{pane}"
+    );
+    assert_eq!(
+        receipt["result"]["delivery_status"], "received",
+        "the real child prompt asset erased the root receipt anchor: pane={pane}; receipt={receipt}"
+    );
+}
+
+#[test]
+fn a_nested_own_opencode_child_prompt_keeps_the_root_receipt_anchor() {
+    // Same invariant one level deeper: the prompting session is a grandchild, so resolving the
+    // owning root means walking the whole known ancestry, not just one `parentID` hop.
+    let _guard = test_lock();
+    let (pane, receipt) = opencode_child_prompt_through_the_real_asset("visible-root", true);
+    assert_eq!(
+        pane.pointer("/result/pane/agent_status"),
+        Some(&Value::String("blocked".into())),
+        "{pane}"
+    );
+    assert_eq!(
+        receipt["result"]["delivery_status"], "received",
+        "a nested child prompt erased the root receipt anchor: pane={pane}; receipt={receipt}"
+    );
+}
+
+#[test]
+fn another_clients_opencode_child_prompt_leaves_the_pane_alone() {
+    // The other half: one opencode server is shared by every attached client, so a child of
+    // ANOTHER client's root must not drive this pane. Naming the foreign root is what lets
+    // `opencode_state_report_is_cross_talk` (`src/terminal/state.rs`) filter it -- a session-less
+    // report never compares unequal to the anchor, so it would flip the pane to `blocked`.
+    let _guard = test_lock();
+    let (pane, _receipt) = opencode_child_prompt_through_the_real_asset("other-client-root", false);
+    assert_eq!(
+        pane.pointer("/result/pane/agent_status"),
+        Some(&Value::String("idle".into())),
+        "another client's child prompt changed the selected root: {pane}"
+    );
+}
+
 #[test]
 fn a_session_persisted_for_another_owner_is_not_a_receipt_anchor() {
     // Codex Gate-2 R13 on da2dca7 (r16_identity_probe): panes A and B each hold hook authority for

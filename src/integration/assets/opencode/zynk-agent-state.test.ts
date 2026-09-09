@@ -167,7 +167,7 @@ test("reports retry status as working", async () => {
   expect(requests.map(requestSessionID)).toEqual(["root-session"]);
 });
 
-test("reports child prompts without replacing the root session", async () => {
+test("reports child prompts under the owning root session", async () => {
   const plugin = await loadPlugin();
 
   await plugin.event({
@@ -195,12 +195,98 @@ test("reports child prompts without replacing the root session", async () => {
     "working",
   ]);
   expect(requests.map(requestSessionID)).toEqual([
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
+    "root-session",
+    "root-session",
+    "root-session",
+    "root-session",
+    "root-session",
   ]);
+});
+
+test("reports a nested child's prompt under its root", async () => {
+  const plugin = await loadPlugin();
+
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: {
+        sessionID: "child-session",
+        info: { id: "child-session", parentID: "root-session" },
+      },
+    },
+  });
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: {
+        sessionID: "grandchild-session",
+        info: { id: "grandchild-session", parentID: "child-session" },
+      },
+    },
+  });
+
+  await plugin.event({
+    event: { type: "permission.asked", properties: { sessionID: "grandchild-session" } },
+  });
+
+  expect(requests.map(requestState)).toEqual(["blocked"]);
+  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
+});
+
+test("does not attribute another root's child prompt to the last reported root", async () => {
+  const plugin = await loadPlugin();
+
+  await plugin.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "root-session", status: { type: "idle" } },
+    },
+  });
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: {
+        sessionID: "foreign-child",
+        info: { id: "foreign-child", parentID: "other-root" },
+      },
+    },
+  });
+
+  await plugin.event({
+    event: { type: "permission.asked", properties: { sessionID: "foreign-child" } },
+  });
+
+  expect(requests.map(requestState)).toEqual(["idle", "blocked"]);
+  expect(requests.map(requestSessionID)).toEqual(["root-session", "other-root"]);
+});
+
+test("sends nothing for a child whose ancestry is cyclic", async () => {
+  const plugin = await loadPlugin();
+
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: {
+        sessionID: "cycle-a",
+        info: { id: "cycle-a", parentID: "cycle-b" },
+      },
+    },
+  });
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: {
+        sessionID: "cycle-b",
+        info: { id: "cycle-b", parentID: "cycle-a" },
+      },
+    },
+  });
+
+  await plugin.event({
+    event: { type: "permission.asked", properties: { sessionID: "cycle-a" } },
+  });
+
+  expect(requests).toEqual([]);
 });
 
 function requestMethod(request: unknown): unknown {

@@ -2,7 +2,7 @@
 // managed by zynk; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // ZYNK_INTEGRATION_ID=opencode
-// ZYNK_INTEGRATION_VERSION=10
+// ZYNK_INTEGRATION_VERSION=11
 
 import net from "node:net";
 
@@ -12,9 +12,12 @@ let reportSeq = Date.now() * 1000;
 let requestChain = Promise.resolve();
 let reportedRootSessionID;
 
-// Track child sessions so their events cannot replace the pane's root session.
-// Their user prompts still project state without attaching the child session id.
-const childSessions = new Set();
+// Track each child session against the parent that spawned it, so a child's events
+// report under the ROOT session that owns them. Reporting no session at all would
+// replace the pane's session anchor instead of preserving it: a full-lifecycle report
+// without a session id clears the stored session triple, which breaks a pending
+// receipt for the root and lets another client's child drive this pane.
+const childParents = new Map();
 const CHILD_EVENT_STATES = new Map([
   ["permission.asked", "blocked"],
   ["question.asked", "blocked"],
@@ -106,6 +109,26 @@ function reportSession(sessionID) {
   return request("pane.report_agent_session", { agent_session_id: sessionID });
 }
 
+// The owning root of `sessionID`: walk the recorded parent links up to the topmost
+// KNOWN ancestor -- the first id that is not itself a tracked child. If the chain runs
+// past what this process has seen, that ancestor is returned as-is; the server compares
+// it against the root this pane selected and drops anything else, so an incomplete chain
+// costs a filtered report rather than a stolen anchor. A cycle returns undefined and the
+// caller reports nothing rather than guessing a root.
+function rootSessionIDFor(sessionID) {
+  const visited = new Set();
+  let current = sessionID;
+  while (!visited.has(current)) {
+    visited.add(current);
+    const parent = childParents.get(current);
+    if (!parent) {
+      return current;
+    }
+    current = parent;
+  }
+  return undefined;
+}
+
 function reportState(state, sessionID) {
   const params = { state };
   if (sessionID) {
@@ -126,7 +149,7 @@ export const ZynkAgentStatePlugin = async () => {
 
   return {
     "chat.message": async ({ sessionID }) => {
-      if (sessionID && childSessions.has(sessionID)) {
+      if (sessionID && childParents.has(sessionID)) {
         return;
       }
       await reportState("working", sessionID);
@@ -138,12 +161,15 @@ export const ZynkAgentStatePlugin = async () => {
 
       const info = properties.info;
       if (info?.id && info.parentID) {
-        childSessions.add(info.id);
+        childParents.set(info.id, info.parentID);
       }
-      if (sessionID && childSessions.has(sessionID)) {
+      if (sessionID && childParents.has(sessionID)) {
         const state = CHILD_EVENT_STATES.get(type);
         if (state) {
-          await reportState(state);
+          const root = rootSessionIDFor(sessionID);
+          if (root) {
+            await reportState(state, root);
+          }
         }
         return;
       }

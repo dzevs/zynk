@@ -1,7 +1,7 @@
 // installed by zynk
 // managed by zynk; reinstalling or updating the integration overwrites this file.
 // ZYNK_INTEGRATION_ID=opencode-tui
-// ZYNK_INTEGRATION_VERSION=10
+// ZYNK_INTEGRATION_VERSION=11
 
 import net from "node:net";
 
