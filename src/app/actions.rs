@@ -5,7 +5,9 @@ use tracing::{info, warn};
 
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
-use crate::layout::{find_in_direction, NavDirection, PaneId};
+use crate::layout::PaneId;
+#[cfg(test)]
+use crate::layout::{find_in_direction, NavDirection};
 use crate::selection::Selection;
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
 use crate::workspace::WorkspaceGitStatus;
@@ -1082,6 +1084,7 @@ impl AppState {
             .min(crate::ui::mobile_switcher_max_scroll(self));
     }
 
+    #[cfg(test)]
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws_idx) = self.active {
             let previous_focus = self.current_pane_focus_target();
@@ -1159,6 +1162,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn next_workspace(&mut self) {
         if self.workspaces.is_empty() {
             return;
@@ -1170,6 +1174,7 @@ impl AppState {
         self.switch_workspace(next);
     }
 
+    #[cfg(test)]
     pub fn previous_workspace(&mut self) {
         if self.workspaces.is_empty() {
             return;
@@ -1230,6 +1235,7 @@ impl AppState {
         self.refresh_tab_bar_view();
     }
 
+    #[cfg(test)]
     pub fn next_tab(&mut self) {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
@@ -1239,6 +1245,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn previous_tab(&mut self) {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
@@ -1252,14 +1259,17 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn next_agent(&mut self) {
         self.cycle_agent_entry(true);
     }
 
+    #[cfg(test)]
     pub fn previous_agent(&mut self) {
         self.cycle_agent_entry(false);
     }
 
+    #[cfg(test)]
     pub fn focus_agent_entry(&mut self, idx: usize) -> bool {
         let entries = crate::ui::agent_panel_entries(self);
         let Some(target) = entries.get(idx) else {
@@ -1281,6 +1291,7 @@ impl AppState {
         false
     }
 
+    #[cfg(test)]
     fn cycle_agent_entry(&mut self, forward: bool) {
         let entries = crate::ui::agent_panel_entries(self);
         if entries.is_empty() {
@@ -1528,6 +1539,7 @@ pub(crate) struct PaneZoomOutcome {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub fn navigate_pane(&mut self, direction: NavDirection) {
         let Some(ws_idx) = self.active else {
             return;
@@ -1548,6 +1560,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn swap_pane(&mut self, direction: NavDirection) -> bool {
         let Some(ws_idx) = self.active else {
             return false;
@@ -1602,6 +1615,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn cycle_pane(&mut self, reverse: bool) {
         let Some(ws_idx) = self.active else {
             return;
@@ -1620,6 +1634,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn last_pane(&mut self) {
         let Some(target) = self.previous_pane_focus.clone() else {
             return;
@@ -1700,6 +1715,7 @@ impl AppState {
         })
     }
 
+    #[cfg(test)]
     pub fn toggle_zoom(&mut self) {
         let Some(ws_idx) = self.active else {
             return;
@@ -1741,6 +1757,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     fn close_focused_pane_would_close_workspace(&self, ws_idx: usize) -> bool {
         self.workspaces.get(ws_idx).is_some_and(|ws| {
             let pane_count = ws
@@ -1759,6 +1776,7 @@ impl AppState {
         })
     }
 
+    #[cfg(test)]
     /// Close the focused pane. Returns true when the close was deferred to confirmation.
     pub fn close_pane(&mut self) -> bool {
         let active = self.active;
@@ -1804,6 +1822,7 @@ impl AppState {
         false
     }
 
+    #[cfg(test)]
     /// Close the active tab. Returns true when the close was deferred to confirmation.
     pub fn close_tab(&mut self) -> bool {
         if self.active.is_some_and(|ws_idx| {

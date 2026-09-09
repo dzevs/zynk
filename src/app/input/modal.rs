@@ -933,14 +933,12 @@ impl App {
         match self.state.mode {
             Mode::RenameWorkspace if !self.state.workspaces.is_empty() && !new_name.is_empty() => {
                 let workspace_id = self.public_workspace_id(self.state.selected);
-                self.dispatch_runtime_mutation(
+                self.runtime_workspace_rename(
                     "tui.workspace.rename",
-                    crate::api::schema::Method::WorkspaceRename(
-                        crate::api::schema::WorkspaceRenameParams {
-                            workspace_id,
-                            label: new_name,
-                        },
-                    ),
+                    crate::api::schema::WorkspaceRenameParams {
+                        workspace_id,
+                        label: new_name,
+                    },
                 );
             }
             Mode::RenameTab if self.state.creating_new_tab => {
@@ -950,14 +948,14 @@ impl App {
                 } else {
                     Some(new_name)
                 };
-                self.dispatch_runtime_mutation(
+                self.runtime_tab_create(
                     "tui.tab.create_named",
-                    crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+                    crate::api::schema::TabCreateParams {
                         workspace_id: None,
                         cwd: None,
                         focus: true,
                         label,
-                    }),
+                    },
                 );
             }
             Mode::RenameTab if !new_name.is_empty() => {
@@ -975,14 +973,12 @@ impl App {
                         .is_some_and(|name| new_name == name);
                 if !keep_auto_name {
                     if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
-                        self.dispatch_runtime_mutation(
+                        self.runtime_tab_rename(
                             "tui.tab.rename",
-                            crate::api::schema::Method::TabRename(
-                                crate::api::schema::TabRenameParams {
-                                    tab_id,
-                                    label: new_name,
-                                },
-                            ),
+                            crate::api::schema::TabRenameParams {
+                                tab_id,
+                                label: new_name,
+                            },
                         );
                     }
                 }
@@ -992,14 +988,12 @@ impl App {
                     (self.state.active, self.state.rename_pane_target)
                 {
                     if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                        self.dispatch_runtime_mutation(
+                        self.runtime_pane_rename(
                             "tui.pane.rename",
-                            crate::api::schema::Method::PaneRename(
-                                crate::api::schema::PaneRenameParams {
-                                    pane_id,
-                                    label: Some(new_name),
-                                },
-                            ),
+                            crate::api::schema::PaneRenameParams {
+                                pane_id,
+                                label: Some(new_name),
+                            },
                         );
                     }
                 }
@@ -1057,13 +1051,13 @@ impl App {
             _ => None,
         };
         if let Some(direction) = direction {
-            self.dispatch_runtime_mutation(
+            self.runtime_pane_resize(
                 "tui.pane.resize",
-                crate::api::schema::Method::PaneResize(crate::api::schema::PaneResizeParams {
+                crate::api::schema::PaneResizeParams {
                     pane_id: None,
                     direction: super::navigate::api_pane_direction(direction),
                     amount: None,
-                }),
+                },
             );
         }
     }
@@ -1172,7 +1166,7 @@ impl App {
             (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close")) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
-                self.close_active_tab_via_api();
+                self.close_active_tab_via_api_requires_confirmation();
             }
             (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
                 open_rename_pane(&mut self.state, pane_id);
@@ -1184,14 +1178,12 @@ impl App {
                 Some("Clear pane name"),
             ) => {
                 if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                    self.dispatch_runtime_mutation(
+                    self.runtime_pane_rename(
                         "tui.pane.clear_name",
-                        crate::api::schema::Method::PaneRename(
-                            crate::api::schema::PaneRenameParams {
-                                pane_id,
-                                label: None,
-                            },
-                        ),
+                        crate::api::schema::PaneRenameParams {
+                            pane_id,
+                            label: None,
+                        },
                     );
                 }
                 self.state.mode = Mode::Terminal;
@@ -1210,14 +1202,14 @@ impl App {
                 if let (Some(source_public_id), Some(target_public_id)) =
                     (source_public_id, target_public_id)
                 {
-                    self.dispatch_runtime_mutation(
+                    self.runtime_pane_swap(
                         "tui.pane.swap_exact",
-                        crate::api::schema::Method::PaneSwap(crate::api::schema::PaneSwapParams {
+                        crate::api::schema::PaneSwapParams {
                             pane_id: None,
                             direction: None,
                             source_pane_id: Some(source_public_id),
                             target_pane_id: Some(target_public_id),
-                        }),
+                        },
                     );
                     self.focus_pane_internal_via_api(ws_idx, source_pane_id);
                 }
@@ -1260,12 +1252,13 @@ impl App {
                 Some("Close pane"),
             ) => {
                 self.focus_pane_internal_via_api(ws_idx, pane_id);
-                self.close_focused_pane_via_api();
-                self.state.mode = if self.state.active.is_some() {
-                    Mode::Terminal
-                } else {
-                    Mode::Navigate
-                };
+                if !self.close_focused_pane_via_api_requires_confirmation() {
+                    self.state.mode = if self.state.active.is_some() {
+                        Mode::Terminal
+                    } else {
+                        Mode::Navigate
+                    };
+                }
             }
             _ => leave_modal(&mut self.state),
         }
@@ -1303,6 +1296,7 @@ mod tests {
 
     use super::super::{capture_snapshot, state_with_workspaces};
     use super::*;
+    use crate::workspace::Workspace;
 
     fn config_env_lock() -> &'static std::sync::Mutex<()> {
         crate::config::test_config_env_lock()
@@ -1318,6 +1312,32 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique).join("config.toml")
+    }
+
+    fn app_with_test_workspaces(names: &[&str]) -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = names.iter().map(|name| Workspace::test_new(name)).collect();
+        app.state.ensure_test_terminals();
+        app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
+        app.state.selected = 0;
+        app
+    }
+
+    fn mark_worktree_space_member(state: &mut AppState, ws_idx: usize, key: &str) {
+        state.workspaces[ws_idx].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: key.into(),
+            label: "zynk".into(),
+            repo_root: "/repo/zynk".into(),
+            checkout_path: format!("/repo/worktree-{ws_idx}").into(),
+            is_linked_worktree: ws_idx != 0,
+        });
     }
 
     #[test]
@@ -1862,5 +1882,72 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn api_context_menu_close_tab_last_parent_group_workspace_keeps_confirmation_mode() {
+        let mut app = app_with_test_workspaces(&["main", "issue"]);
+        mark_worktree_space_member(&mut app.state, 0, "repo-key");
+        mark_worktree_space_member(&mut app.state, 1, "repo-key");
+        app.state.active = Some(0);
+        app.state.selected = 1;
+        app.state.mode = Mode::ContextMenu;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close")
+            .expect("close tab item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.selected, 0);
+        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn api_context_menu_enter_close_pane_last_parent_group_pane_keeps_confirmation_mode() {
+        let mut app = app_with_test_workspaces(&["main", "issue"]);
+        mark_worktree_space_member(&mut app.state, 0, "repo-key");
+        mark_worktree_space_member(&mut app.state, 1, "repo-key");
+        app.state.active = Some(0);
+        app.state.selected = 1;
+        app.state.mode = Mode::ContextMenu;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let mut menu = ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+                source_pane_id: None,
+                has_manual_label: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let close_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close pane")
+            .expect("close pane item");
+        menu.list.highlighted = close_idx;
+        app.state.context_menu = Some(menu);
+
+        app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.selected, 0);
+        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert!(app.state.context_menu.is_none());
     }
 }

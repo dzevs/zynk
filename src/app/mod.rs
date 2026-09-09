@@ -858,15 +858,13 @@ impl App {
 
             if self.state.request_new_workspace {
                 self.state.request_new_workspace = false;
-                self.dispatch_runtime_mutation(
+                self.runtime_workspace_create(
                     "tui.workspace.create",
-                    crate::api::schema::Method::WorkspaceCreate(
-                        crate::api::schema::WorkspaceCreateParams {
-                            cwd: None,
-                            focus: true,
-                            label: None,
-                        },
-                    ),
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: None,
+                        focus: true,
+                        label: None,
+                    },
                 );
                 needs_render = true;
             }
@@ -874,14 +872,14 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 let label = self.state.requested_new_tab_name.take();
-                self.dispatch_runtime_mutation(
+                self.runtime_tab_create(
                     "tui.tab.create",
-                    crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+                    crate::api::schema::TabCreateParams {
                         workspace_id: None,
                         cwd: None,
                         focus: true,
                         label,
-                    }),
+                    },
                 );
                 needs_render = true;
             }
@@ -897,15 +895,13 @@ impl App {
             }
 
             if let Some(cwd) = self.state.request_new_workspace_cwd.take() {
-                self.dispatch_runtime_mutation(
+                self.runtime_workspace_create(
                     "tui.workspace.create_cwd",
-                    crate::api::schema::Method::WorkspaceCreate(
-                        crate::api::schema::WorkspaceCreateParams {
-                            cwd: Some(cwd.display().to_string()),
-                            focus: true,
-                            label: None,
-                        },
-                    ),
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: Some(cwd.display().to_string()),
+                        focus: true,
+                        label: None,
+                    },
                 );
                 needs_render = true;
             }
