@@ -18,6 +18,8 @@ use crate::terminal::TerminalRuntimeRegistry;
 const KITTY_CHUNK_BYTES: usize = 3072;
 const HOST_IMAGE_ID_BASE: u32 = 10_000;
 const HOST_IMAGE_ID_SPAN: u32 = 900_000;
+const HOST_PLACEMENT_ID_BASE: u32 = 1;
+const HOST_PLACEMENT_ID_SPAN: u32 = 900_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct HostCellSize {
@@ -87,8 +89,14 @@ struct ImageSignature {
     data_fingerprint: u64,
 }
 
+/// The source that OWNS a host placement slot: the pane plus the ids the client
+/// itself used. Two of these can hash to one host placement id, so the owner —
+/// not the hash — is what decides whether a slot may be reused.
+type PlacementSource = (PaneId, u32, u32);
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 struct PlacementSignature {
+    source: PlacementSource,
     x: u16,
     y: u16,
     cols: u32,
@@ -309,9 +317,24 @@ fn encode_graphics_update(
             );
             continue;
         };
-        let host_placement_id = host_placement_id(placement.pane_id, &placement.placement);
-        let placement_signature =
-            placement_signature(clipped, placement.placement.z, placement.scrollback_offset);
+        let source = placement_source(placement.pane_id, &placement.placement);
+        let Some(host_placement_id) = resolve_host_placement_id(source, host_id, host_placements)
+        else {
+            tracing::warn!(
+                pane_id = ?placement.pane_id,
+                source_image_id = placement.placement.image_id,
+                source_placement_id = placement.placement.placement_id,
+                host_id,
+                "host placement id namespace is full; skipping this placement"
+            );
+            continue;
+        };
+        let placement_signature = placement_signature(
+            source,
+            clipped,
+            placement.placement.z,
+            placement.scrollback_offset,
+        );
         let placement_key = (host_id, host_placement_id);
         current_placements.insert(placement_key);
 
@@ -606,6 +629,44 @@ fn resolve_host_image_id(
     })
 }
 
+/// Resolves the host placement id a source placement is displayed at.
+///
+/// One namespace below `resolve_host_image_id`, and for the same reason.
+/// `host_placement_id` truncates a 64-bit hash of the source triple into a
+/// `HOST_PLACEMENT_ID_SPAN`-wide namespace, and `(host_id, host_placement_id)`
+/// is the placement cache key, so two DIFFERENT sources of the same host image
+/// can claim one id: the second overwrote the first in `host_placements` and
+/// one of two visible placements was simply lost. Probe forward from the hashed
+/// id instead, past every slot under this host image held by a different
+/// source, and stop at the first free slot or at the one already assigned to
+/// this source.
+///
+/// Determinism: the probe reads only the persisted cache, so a source keeps its
+/// resolved id for as long as the colliding owner stays visible - independent of
+/// the order the two arrive in within a frame. When that owner disappears its
+/// entry is swept at the END of the frame, so the survivor holds its probed id
+/// through that frame and may re-place at the freed base id on the next one.
+/// That churn is bounded at one delete plus one place, and no frame is ever left
+/// without the placement.
+///
+/// `None` means every slot in the namespace under this host image is held by
+/// other sources; the caller skips that placement rather than overwriting a live
+/// one.
+fn resolve_host_placement_id(
+    source: PlacementSource,
+    host_id: u32,
+    host_placements: &HashMap<(u32, u32), PlacementSignature>,
+) -> Option<u32> {
+    let start = host_placement_id(source) - HOST_PLACEMENT_ID_BASE;
+    (0..HOST_PLACEMENT_ID_SPAN).find_map(|step| {
+        let candidate = HOST_PLACEMENT_ID_BASE + (start + step) % HOST_PLACEMENT_ID_SPAN;
+        match host_placements.get(&(host_id, candidate)) {
+            Some(existing) if existing.source != source => None,
+            _ => Some(candidate),
+        }
+    })
+}
+
 fn host_image_id_for_signature(pane_id: PaneId, signature: ImageSignature) -> u32 {
     let mut hasher = DefaultHasher::new();
     pane_id.raw().hash(&mut hasher);
@@ -613,12 +674,17 @@ fn host_image_id_for_signature(pane_id: PaneId, signature: ImageSignature) -> u3
     HOST_IMAGE_ID_BASE + ((hasher.finish() as u32) % HOST_IMAGE_ID_SPAN)
 }
 
-fn host_placement_id(pane_id: PaneId, placement: &KittyImagePlacement) -> u32 {
+fn placement_source(pane_id: PaneId, placement: &KittyImagePlacement) -> PlacementSource {
+    (pane_id, placement.image_id, placement.placement_id)
+}
+
+fn host_placement_id(source: PlacementSource) -> u32 {
+    let (pane_id, image_id, placement_id) = source;
     let mut hasher = DefaultHasher::new();
     pane_id.raw().hash(&mut hasher);
-    placement.image_id.hash(&mut hasher);
-    placement.placement_id.hash(&mut hasher);
-    1 + ((hasher.finish() as u32) % 900_000)
+    image_id.hash(&mut hasher);
+    placement_id.hash(&mut hasher);
+    HOST_PLACEMENT_ID_BASE + ((hasher.finish() as u32) % HOST_PLACEMENT_ID_SPAN)
 }
 
 fn encode_delete_image(out: &mut Vec<u8>, id: u32) {
@@ -856,11 +922,13 @@ fn image_signature_from_descriptor(
 }
 
 fn placement_signature(
+    source: PlacementSource,
     clipped: ClippedPlacement,
     z: i32,
     scrollback_offset: u32,
 ) -> PlacementSignature {
     PlacementSignature {
+        source,
         x: clipped.x,
         y: clipped.y,
         cols: clipped.cols,
@@ -914,27 +982,62 @@ mod tests {
         )
     }
 
+    /// The first pair of distinct inputs that `hash` maps to one id.
+    /// `DefaultHasher` is deterministic inside a build, so the search is
+    /// repeatable, but its output is not stable across Rust versions - hence
+    /// every collision test searches for its pair instead of hard-coding one.
+    fn first_colliding_pair<T: Copy>(
+        inputs: impl Iterator<Item = T>,
+        hash: impl Fn(T) -> u32,
+    ) -> (T, T) {
+        let mut seen: HashMap<u32, T> = HashMap::new();
+        for input in inputs {
+            if let Some(previous) = seen.insert(hash(input), input) {
+                return (previous, input);
+            }
+        }
+        panic!("no colliding ids in the search range");
+    }
+
     /// Two distinct image signatures for one pane whose hashed host image ids
-    /// collide. `DefaultHasher` is deterministic inside a build, so the search
-    /// is repeatable, but its output is not stable across Rust versions - hence
-    /// searching for a colliding pair instead of hard-coding one.
+    /// collide.
     fn colliding_data_fingerprints(pane_id: PaneId) -> (u64, u64) {
         let template = image_signature(
             &test_placement(0, 0),
             kitty_format_code(KittyImageFormat::Rgba),
         );
-        let mut seen: HashMap<u32, u64> = HashMap::new();
-        for data_fingerprint in 0..10_000_000u64 {
-            let signature = ImageSignature {
-                data_fingerprint,
-                ..template
-            };
-            let host_id = host_image_id_for_signature(pane_id, signature);
-            if let Some(previous) = seen.insert(host_id, data_fingerprint) {
-                return (previous, data_fingerprint);
-            }
-        }
-        panic!("no colliding host image ids in the search range");
+        first_colliding_pair(0..10_000_000u64, |data_fingerprint| {
+            host_image_id_for_signature(
+                pane_id,
+                ImageSignature {
+                    data_fingerprint,
+                    ..template
+                },
+            )
+        })
+    }
+
+    /// Two distinct source placement ids for one pane and source image whose
+    /// hashed host placement ids collide.
+    fn colliding_placement_ids(pane_id: PaneId, image_id: u32) -> (u32, u32) {
+        first_colliding_pair(0..10_000_000u32, |placement_id| {
+            host_placement_id((pane_id, image_id, placement_id))
+        })
+    }
+
+    /// The `p=` host placement id of every `a=p` (display placement) command in
+    /// an update, in emission order.
+    fn displayed_placement_ids(update: &str) -> Vec<u32> {
+        update
+            .split("\x1b_G")
+            .filter(|command| command.starts_with("a=p,"))
+            .filter_map(|command| {
+                command
+                    .split(',')
+                    .find_map(|field| field.strip_prefix("p="))
+                    .and_then(|value| value.parse().ok())
+            })
+            .collect()
     }
 
     fn test_placement(viewport_col: i32, viewport_row: i32) -> HostPlacement {
@@ -1712,6 +1815,202 @@ mod tests {
         );
         assert_eq!(placements.len(), 1);
         assert_eq!(sources.len(), 1);
+    }
+
+    /// The one host image id in a cache holding exactly one image.
+    fn host_id_of(images: &HashMap<u32, ImageSignature>) -> u32 {
+        assert_eq!(images.len(), 1, "expected exactly one host image");
+        *images.keys().next().expect("one host image")
+    }
+
+    #[test]
+    fn host_placement_id_collision_preserves_both_visible_placements() {
+        // Gate-3 B1 #9b: `(host_id, host_placement_id)` is the placement cache key, and
+        // `host_placement_id` truncates a hash, so two distinct sources of the SAME host
+        // image can claim one id. The second used to overwrite the first, and one of two
+        // visible placements simply vanished (the inspector reproduced it at id 105494).
+        let pane_id = PaneId::from_raw(1);
+        let image_id = 7;
+        let (first_placement_id, second_placement_id) = colliding_placement_ids(pane_id, image_id);
+        assert_eq!(
+            host_placement_id((pane_id, image_id, first_placement_id)),
+            host_placement_id((pane_id, image_id, second_placement_id)),
+            "the two sources must hash to the same host placement id"
+        );
+
+        let mut first = test_placement(0, 0);
+        first.placement.placement_id = first_placement_id;
+        let mut second = test_placement(5, 5);
+        second.placement.placement_id = second_placement_id;
+
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+        encode_graphics_update(
+            &mut bytes,
+            &[first, second],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        let update = String::from_utf8_lossy(&bytes);
+        assert_eq!(placements.len(), 2, "both placements stay in the cache");
+        assert!(
+            !update.contains("a=d"),
+            "nothing is deleted while both sources are visible"
+        );
+        let placed = displayed_placement_ids(&update);
+        assert_eq!(placed.len(), 2, "both placements are displayed");
+        assert_ne!(
+            placed[0], placed[1],
+            "colliding sources must be placed at DIFFERENT host placement ids"
+        );
+        assert_eq!(images.len(), 1, "identical content shares one host image");
+    }
+
+    #[test]
+    fn placement_probe_is_stable_while_the_collider_persists() {
+        // A probed id is not re-negotiated every frame: while the colliding owner stays
+        // visible, each source keeps the slot it resolved to, so an unchanged frame emits
+        // nothing at all.
+        let pane_id = PaneId::from_raw(1);
+        let image_id = 7;
+        let (first_placement_id, second_placement_id) = colliding_placement_ids(pane_id, image_id);
+
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+        for _ in 0..2 {
+            let mut first = test_placement(0, 0);
+            first.placement.placement_id = first_placement_id;
+            let mut second = test_placement(5, 5);
+            second.placement.placement_id = second_placement_id;
+            bytes.clear();
+            encode_graphics_update(
+                &mut bytes,
+                &[first, second],
+                false,
+                &mut images,
+                &mut placements,
+                &mut sources,
+            );
+        }
+
+        assert!(
+            bytes.is_empty(),
+            "an unchanged second frame must emit nothing: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(placements.len(), 2);
+        assert_eq!(images.len(), 1);
+    }
+
+    #[test]
+    fn placement_probe_releases_the_slot_when_the_collider_disappears() {
+        // When the source holding the hashed id disappears, its placement is deleted and
+        // the survivor may move back to the freed base id. That churn is bounded: one
+        // delete plus one place, and the survivor is never lost in between.
+        let pane_id = PaneId::from_raw(1);
+        let image_id = 7;
+        let (first_placement_id, second_placement_id) = colliding_placement_ids(pane_id, image_id);
+        let base_id = host_placement_id((pane_id, image_id, first_placement_id));
+
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+
+        let mut first = test_placement(0, 0);
+        first.placement.placement_id = first_placement_id;
+        let mut second = test_placement(5, 5);
+        second.placement.placement_id = second_placement_id;
+        encode_graphics_update(
+            &mut bytes,
+            &[first, second],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+        let probed_id = *displayed_placement_ids(&String::from_utf8_lossy(&bytes))
+            .iter()
+            .find(|id| **id != base_id)
+            .expect("the second source is placed at a probed id");
+
+        // The base-id owner disappears. Its placement is torn down; the survivor stays
+        // where it is for this frame, because the freed slot is only swept at the end.
+        let mut survivor = test_placement(5, 5);
+        survivor.placement.placement_id = second_placement_id;
+        bytes.clear();
+        encode_graphics_update(
+            &mut bytes,
+            &[survivor],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+        let update = String::from_utf8_lossy(&bytes);
+        assert!(
+            update.contains(&format!("a=d,d=i,i={},p={base_id}", host_id_of(&images))),
+            "the departed source's placement is deleted: {update:?}"
+        );
+        assert!(
+            displayed_placement_ids(&update).is_empty(),
+            "the survivor is not re-placed in the same frame: {update:?}"
+        );
+        assert_eq!(placements.len(), 1, "only the survivor is cached");
+
+        // Next frame the base id is free, so the survivor re-places there exactly once.
+        let mut survivor = test_placement(5, 5);
+        survivor.placement.placement_id = second_placement_id;
+        bytes.clear();
+        encode_graphics_update(
+            &mut bytes,
+            &[survivor],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+        let update = String::from_utf8_lossy(&bytes);
+        assert_eq!(
+            displayed_placement_ids(&update),
+            vec![base_id],
+            "the survivor re-places once, at the freed base id: {update:?}"
+        );
+        assert_eq!(
+            update.matches("a=d,d=i").count(),
+            1,
+            "its old probed slot is released once: {update:?}"
+        );
+        assert!(
+            update.contains(&format!("p={probed_id}")),
+            "the released slot is the probed one: {update:?}"
+        );
+        assert_eq!(placements.len(), 1);
+
+        // And it settles: a further identical frame emits nothing.
+        let mut survivor = test_placement(5, 5);
+        survivor.placement.placement_id = second_placement_id;
+        bytes.clear();
+        encode_graphics_update(
+            &mut bytes,
+            &[survivor],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+        assert!(
+            bytes.is_empty(),
+            "the survivor has settled: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
     }
 
     #[test]
