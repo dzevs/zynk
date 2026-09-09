@@ -979,6 +979,11 @@ mod tests {
         // (no dependence on the live checkout's branch — that fails under detached HEAD,
         // a packaged build, or no `.git`). A committed repo resolves a branch + 40-hex sha.
         use std::process::Command as Cmd;
+        let git = || {
+            let mut command = Cmd::new("git");
+            crate::workspace::scrub_git_env(&mut command);
+            command
+        };
         let dir = std::env::temp_dir().join(format!(
             "zynk-gitmeta-{}-{}",
             std::process::id(),
@@ -991,21 +996,27 @@ mod tests {
 
         // `git init -q` (force a deterministic branch name so the assertion is robust
         // regardless of the host's `init.defaultBranch`), then one empty commit.
-        let init = Cmd::new("git")
+        let init = git()
             .arg("-C")
             .arg(&dir)
             .args(["init", "-q", "-b", "work"])
             .status();
         // -b may be unsupported on very old git; fall back to a plain init.
         if !matches!(&init, Ok(s) if s.success()) {
-            let _ = Cmd::new("git")
+            let status = git()
                 .arg("-C")
                 .arg(&dir)
                 .args(["init", "-q"])
                 .status()
                 .expect("git init");
+            assert!(status.success(), "fixture git init failed");
         }
-        let commit = Cmd::new("git")
+        assert!(
+            dir.join(".git").is_dir(),
+            "fixture init left no .git: {}",
+            dir.display()
+        );
+        let commit = git()
             .arg("-C")
             .arg(&dir)
             .args([
@@ -1030,6 +1041,73 @@ mod tests {
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_meta_fixture_does_not_commit_into_an_inherited_repository() {
+        struct RestoreGitDir(Option<std::ffi::OsString>);
+        impl Drop for RestoreGitDir {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("GIT_DIR", value),
+                    None => std::env::remove_var("GIT_DIR"),
+                }
+            }
+        }
+        let outer = std::env::temp_dir().join(format!("zynk-outer-git-{}", std::process::id()));
+        std::fs::create_dir_all(&outer).unwrap();
+        let output = |args: &[&str]| {
+            let result = std::process::Command::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .arg("-C")
+                .arg(&outer)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            result.stdout
+        };
+        output(&["init", "--quiet"]);
+        output(&[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "outer",
+        ]);
+        let before_head = output(&["rev-parse", "HEAD"]);
+        let before_count = output(&["rev-list", "--count", "HEAD"]);
+        let before_config = std::fs::read(outer.join(".git/config")).unwrap();
+        let restore = RestoreGitDir(std::env::var_os("GIT_DIR"));
+        std::env::set_var("GIT_DIR", outer.join(".git"));
+        git_meta_in_a_temp_repo_returns_branch_and_sha();
+        drop(restore);
+        let after_head = output(&["rev-parse", "HEAD"]);
+        let after_count = output(&["rev-list", "--count", "HEAD"]);
+        let after_config = std::fs::read(outer.join(".git/config")).unwrap();
+        std::fs::remove_dir_all(&outer).unwrap();
+        assert_eq!(after_head, before_head, "fixture moved the outer HEAD");
+        assert_eq!(
+            after_count, before_count,
+            "fixture committed into the outer repository"
+        );
+        assert_eq!(
+            after_config, before_config,
+            "fixture changed the outer config"
+        );
     }
 
     #[test]

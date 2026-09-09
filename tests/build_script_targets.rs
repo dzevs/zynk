@@ -134,7 +134,9 @@ fn scratch_root() -> PathBuf {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    scrub_git_env(&mut command);
+    let output = command
         .current_dir(dir)
         .args(args)
         .output()
@@ -148,12 +150,24 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+fn scrub_git_env(command: &mut Command) {
+    for (key, _) in env::vars_os() {
+        if key.to_str().is_some_and(|key| key.starts_with("GIT_")) {
+            command.env_remove(key);
+        }
+    }
+    command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    command.env("GIT_CONFIG_SYSTEM", "/dev/null");
+}
+
 /// `cargo build --locked --bin zynk` in `checkout`, with its target directory OUTSIDE the checkout
 /// so the build never dirties the tree it is attesting. The same directory across calls, because a
 /// COLD rebuild would re-run the build script for reasons that have nothing to do with this test.
 fn build_zynk(checkout: &Path, target_dir: &Path) -> PathBuf {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
+    let mut command = Command::new(cargo);
+    scrub_git_env(&mut command);
+    let output = command
         .current_dir(checkout)
         .args(["build", "--locked", "--bin", "zynk"])
         .env("CARGO_TARGET_DIR", target_dir)
@@ -219,7 +233,9 @@ fn build_sha_attestation_does_not_survive_a_source_edit() {
     fs::create_dir_all(&scratch).expect("create the scratch directory");
 
     let cycle = std::panic::catch_unwind(|| {
-        let clone = Command::new("git")
+        let mut command = Command::new("git");
+        scrub_git_env(&mut command);
+        let clone = command
             .args(["clone", "--quiet"])
             .arg(&manifest)
             .arg(&checkout)
@@ -231,6 +247,10 @@ fn build_sha_attestation_does_not_survive_a_source_edit() {
             String::from_utf8_lossy(&clone.stderr)
         );
         git(&checkout, &["checkout", "--quiet", "--detach", &head]);
+        assert!(
+            checkout.join(".git").is_dir(),
+            "the build fixture must own its repository"
+        );
         assert_eq!(
             git(
                 &checkout,

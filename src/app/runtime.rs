@@ -715,12 +715,24 @@ mod tests {
         let other = repo.join("other");
         std::fs::create_dir_all(&nested).expect("create nested dir");
         std::fs::create_dir_all(&other).expect("create other dir");
-        std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        crate::workspace::scrub_git_env(&mut command);
+        let output = command
             .arg("-C")
             .arg(&repo)
             .arg("init")
             .output()
             .expect("run git init");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            repo.join(".git").is_dir(),
+            "fixture init left no .git: {}",
+            repo.display()
+        );
 
         let output = refresh_workspace_git_statuses_with_cache(
             vec![

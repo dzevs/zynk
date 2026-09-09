@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from scripts.git_test_support import git_env, init_repo, run_git
 
 SCRIPT = Path(__file__).resolve().parent / "conventional_commits.py"
 ZEROS = "0" * 40
@@ -9,17 +10,13 @@ ZEROS = "0" * 40
 
 def _init_repo(d: str, subject: str) -> str:
     def run(*args):
-        subprocess.run(["git", "-C", d, *args], check=True, capture_output=True)
+        return run_git(d, *args)
 
-    run("init", "-q", "-b", "main")
-    run("config", "user.email", "t@example.com")
-    run("config", "user.name", "Test")
+    init_repo(d, "-b", "main")
     (Path(d) / "f.txt").write_text("x")
     run("add", "f.txt")
     run("commit", "-q", "-m", subject)
-    return subprocess.check_output(
-        ["git", "-C", d, "rev-parse", "HEAD"], text=True
-    ).strip()
+    return run("rev-parse", "HEAD").stdout.strip()
 
 
 def _run_validator(repo: str, rev_range: str) -> subprocess.CompletedProcess:
@@ -28,6 +25,7 @@ def _run_validator(repo: str, rev_range: str) -> subprocess.CompletedProcess:
         cwd=repo,
         capture_output=True,
         text=True,
+        env=git_env(),
     )
 
 

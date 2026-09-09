@@ -51,8 +51,8 @@ fn unique_base() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!(
-        "/tmp/zynk-native-cli-test-{}-{nanos}",
+    support::test_root().join(format!(
+        "zynk-native-cli-test-{}-{nanos}",
         std::process::id()
     ))
 }

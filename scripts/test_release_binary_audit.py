@@ -19,8 +19,10 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts import release_binary_audit as audit
+from scripts.git_test_support import init_repo, run_git
 
 FAIL_CLOSED_MESSAGE = "zynk update is not available yet: build from source"
 
@@ -106,11 +108,9 @@ def _init_repo(directory):
     root.mkdir(parents=True, exist_ok=True)
 
     def run(*args):
-        subprocess.run(
-            ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
-        )
+        return run_git(root, *args)
 
-    run("init", "--quiet", "-b", "main")
+    init_repo(root, "-b", "main")
     (root / "tracked.txt").write_text("clean\n", encoding="utf-8")
     run("add", "tracked.txt")
     run(
@@ -125,12 +125,7 @@ def _init_repo(directory):
         "-m",
         "initial",
     )
-    head = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    head = run("rev-parse", "HEAD").stdout.strip()
     return root, head
 
 
@@ -308,6 +303,26 @@ class EnvironmentSanitizationTests(unittest.TestCase):
 
 class BuildAttestationTests(unittest.TestCase):
     """`zynk --version` must name the source the binary was actually built from."""
+
+    def test_fixture_init_cannot_commit_into_an_inherited_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outer, _ = _init_repo(pathlib.Path(tmp) / "outer")
+            (outer / "tracked.txt").write_text("outer content\n", encoding="utf-8")
+            run_git(outer, "add", "tracked.txt")
+            run_git(outer, "commit", "--quiet", "-m", "outer content")
+            before_head = run_git(outer, "rev-parse", "HEAD").stdout.strip()
+            before_config = (outer / ".git/config").read_bytes()
+            before_index = (outer / ".git/index").read_bytes()
+            with patch.dict(os.environ, {"GIT_DIR": str(outer / ".git")}):
+                child, _ = _init_repo(pathlib.Path(tmp) / "child")
+            self.assertTrue((child / ".git").is_dir(), "fixture init escaped")
+            self.assertEqual((outer / ".git/config").read_bytes(), before_config)
+            self.assertEqual((outer / ".git/index").read_bytes(), before_index)
+            self.assertEqual(
+                run_git(outer, "rev-parse", "HEAD").stdout.strip(),
+                before_head,
+                "the fixture moved the outer repository's HEAD",
+            )
 
     def _check(self, tmp, root, attestation):
         binary = _write_binary(tmp, "zynk", _attesting_binary(attestation))

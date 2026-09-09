@@ -822,7 +822,7 @@ mod tests {
             let output = command
                 .arg("-C")
                 .arg(repo)
-                .args(["rev-parse", "--absolute-git-dir"])
+                .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
                 .output()
                 .unwrap();
             assert!(

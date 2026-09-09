@@ -18,7 +18,7 @@ fn unique_test_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!("/tmp/hcli-{}-{nanos}", std::process::id()))
+    support::test_root().join(format!("hcli-{}-{nanos}", std::process::id()))
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
@@ -81,7 +81,7 @@ fn set_repo_identity(repo: &Path) {
         let output = command
             .arg("-C")
             .arg(repo)
-            .args(["rev-parse", "--absolute-git-dir"])
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .output()
             .unwrap();
         assert!(

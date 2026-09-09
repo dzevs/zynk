@@ -2,6 +2,8 @@
 
 unittest style to match the repo's maintenance-test convention (run via `python3 -m unittest`)."""
 import importlib.util, pathlib, subprocess, tempfile, os, unittest
+import shutil
+from scripts.git_test_support import git_env, init_repo, run_git
 
 _spec = importlib.util.spec_from_file_location(
     "check_public_tree", pathlib.Path(__file__).parent / "check_public_tree.py")
@@ -46,18 +48,18 @@ class ViolationsLogicTests(unittest.TestCase):
 class StagedGateIntegrationTests(unittest.TestCase):
     def _run(self, setup):
         with tempfile.TemporaryDirectory() as d:
-            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            env = {**git_env(), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
-            subprocess.run(["git", "init", "-q"], cwd=d, check=True)
+            init_repo(d)
             setup(d, env)
             return subprocess.run(["python3", SCRIPT, "--staged"], cwd=d,
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, env=env)
 
     def test_planted_forbidden_path_fails_exit1(self):
         def setup(d, env):
             os.makedirs(os.path.join(d, ".codex"))
             pathlib.Path(d, ".codex", "skill.md").write_text("x")
-            subprocess.run(["git", "add", ".codex/skill.md"], cwd=d, check=True)
+            run_git(d, "add", ".codex/skill.md")
         r = self._run(setup)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn(".codex", r.stderr)
@@ -65,17 +67,17 @@ class StagedGateIntegrationTests(unittest.TestCase):
     def test_clean_repo_passes_exit0(self):
         def setup(d, env):
             pathlib.Path(d, "README.md").write_text("hi")
-            subprocess.run(["git", "add", "README.md"], cwd=d, check=True)
+            run_git(d, "add", "README.md")
         self.assertEqual(self._run(setup).returncode, 0)
 
     def test_staged_rename_into_forbidden_fails(self):
         # Codex blocker 1: a staged RENAME into a forbidden path must also fail (ACMR, not just AM).
         def setup(d, env):
             pathlib.Path(d, "README.md").write_text("hi")
-            subprocess.run(["git", "add", "README.md"], cwd=d, check=True)
-            subprocess.run(["git", "commit", "-qm", "x"], cwd=d, check=True, env=env)
+            run_git(d, "add", "README.md")
+            run_git(d, "commit", "-qm", "x")
             os.makedirs(os.path.join(d, ".codex"))
-            subprocess.run(["git", "mv", "README.md", ".codex/skill.md"], cwd=d, check=True)
+            run_git(d, "mv", "README.md", ".codex/skill.md")
         r = self._run(setup)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn(".codex", r.stderr)
@@ -86,7 +88,7 @@ class StagedGateIntegrationTests(unittest.TestCase):
         def setup(d, env):
             os.makedirs(os.path.join(d, "pkg", "__pycache__"))
             pathlib.Path(d, "pkg", "__pycache__", "leak.pyc").write_text("/home/" + "zeus/secret")
-            subprocess.run(["git", "add", "-f", "pkg/__pycache__/leak.pyc"], cwd=d, check=True)
+            run_git(d, "add", "-f", "pkg/__pycache__/leak.pyc")
         r = self._run(setup)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("pyc", (r.stdout + r.stderr).lower())
@@ -123,31 +125,30 @@ class SymlinkCliTests(unittest.TestCase):  # real-git: a tracked symlink target 
 
     def _repo(self):
         d = pathlib.Path(tempfile.mkdtemp())
-        subprocess.run(["git", "init", "-q", str(d)], check=True)
-        subprocess.run(["git", "-C", str(d), "config", "user.email", "t@example.com"], check=True)
-        subprocess.run(["git", "-C", str(d), "config", "user.name", "t"], check=True)
+        self.addCleanup(shutil.rmtree, d)
+        init_repo(d)
         return d
 
     def _run(self, d, *args):
-        return subprocess.run(["python3", SCRIPT, *args], cwd=d).returncode
+        return subprocess.run(["python3", SCRIPT, *args], cwd=d, env=git_env()).returncode
 
     def test_staged_symlink_forbidden(self):
         d = self._repo()
         (d / "private-link").symlink_to(self.TARGET)
-        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        run_git(d, "add", "-A")
         self.assertEqual(self._run(d, "--staged"), 1, "a staged symlink must fail the structural gate")
 
     def test_committed_symlink_forbidden(self):
         d = self._repo()
         (d / "private-link").symlink_to(self.TARGET)
-        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
-        subprocess.run(["git", "-C", str(d), "commit", "-qm", "x"], check=True)
+        run_git(d, "add", "-A")
+        run_git(d, "commit", "-qm", "x")
         self.assertEqual(self._run(d), 1, "a committed symlink must fail the no-arg/CI gate")
 
     def test_regular_file_passes(self):
         d = self._repo()
         (d / "README.md").write_text("clean public file\n")
-        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        run_git(d, "add", "-A")
         self.assertEqual(self._run(d, "--staged"), 0)
 
 

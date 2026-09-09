@@ -44,7 +44,7 @@ fn test_lock() -> MutexGuard<'static, ()> {
 fn unique_test_dir() -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    PathBuf::from(format!("/tmp/hlh-{}-{n}", std::process::id()))
+    support::test_root().join(format!("hlh-{}-{n}", std::process::id()))
 }
 
 fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket: &Path) -> SpawnedZynk {

@@ -1154,12 +1154,19 @@ mod tests {
     use crate::detect::{Agent, AgentState};
 
     fn init_repo(path: &std::path::Path) {
-        let status = std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        crate::workspace::scrub_git_env(&mut command);
+        let status = command
             .args(["init", "-q"])
             .current_dir(path)
             .status()
             .unwrap();
         assert!(status.success(), "git init failed for {}", path.display());
+        assert!(
+            path.join(".git").is_dir(),
+            "fixture init left no .git: {}",
+            path.display()
+        );
     }
 
     fn app_with_overlay(

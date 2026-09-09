@@ -20,6 +20,8 @@ mod tab;
 
 #[cfg(test)]
 use self::git::git_ahead_behind;
+#[cfg(test)]
+pub(crate) use self::git::test_support::scrub_git_env;
 pub(crate) use self::tab::MovedPane;
 pub use self::{
     git::{

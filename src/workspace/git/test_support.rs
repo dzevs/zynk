@@ -57,7 +57,7 @@ pub(super) fn run_git(cwd: &Path, args: &[&str]) {
 /// in the fixture notices, and a real checkout is left authoring commits as
 /// `Zynk Test <zynk@example.invalid>`. A sanitised caller environment hides this, so a fixture
 /// cannot rely on having one.
-pub(super) fn scrub_git_env(command: &mut std::process::Command) -> &mut std::process::Command {
+pub(crate) fn scrub_git_env(command: &mut std::process::Command) -> &mut std::process::Command {
     for name in [
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -95,7 +95,7 @@ pub(super) fn set_repo_identity(repo: &Path) {
         let output = command
             .arg("-C")
             .arg(repo)
-            .args(["rev-parse", "--absolute-git-dir"])
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .output()
             .unwrap();
         assert!(
@@ -123,6 +123,55 @@ impl Drop for GitDirEnvGuard {
     fn drop(&mut self) {
         std::env::remove_var("GIT_DIR");
     }
+}
+
+#[test]
+fn linked_fixture_identity_uses_the_common_repository_config() {
+    let root = temp_test_dir("linked-fixture-config");
+    run_git(&root, &["init", "--quiet"]);
+    set_repo_identity(&root);
+    run_git(
+        &root,
+        &["commit", "--allow-empty", "--quiet", "-m", "initial"],
+    );
+    let linked = root.join("linked");
+    run_git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            linked.to_str().unwrap(),
+        ],
+    );
+    run_git(
+        &root,
+        &["config", "--local", "user.email", "outer@example.invalid"],
+    );
+    set_repo_identity(&linked);
+    let mut command = std::process::Command::new("git");
+    scrub_git_env(&mut command);
+    let output = command
+        .arg("-C")
+        .arg(&linked)
+        .args(["config", "--get", "user.email"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "zynk@example.invalid",
+        "the worktree must read the identity the fixture just set"
+    );
+    assert!(std::fs::read_to_string(root.join(".git/config"))
+        .unwrap()
+        .contains("zynk@example.invalid"));
+    assert!(
+        !root.join(".git/worktrees/linked/config").exists(),
+        "a fixture must not create an ignored per-worktree config"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
