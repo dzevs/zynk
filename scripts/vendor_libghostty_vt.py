@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
 import shutil
 import subprocess
 import tarfile
@@ -92,9 +93,9 @@ def check_archive_member(member: tarfile.TarInfo) -> None:
     if name.startswith("/") or PurePosixPath(name).is_absolute():
         raise ValueError(f"refusing to extract absolute archive member {name!r}")
     parts = _path_parts(name)
-    if _escapes_root(parts):
+    if ".." in parts:
         raise ValueError(
-            f"refusing to extract archive member {name!r}: it escapes the extraction root"
+            f"refusing to extract archive member {name!r}: parent components are not source paths"
         )
     if member.ischr() or member.isblk() or member.isfifo() or member.isdev():
         raise ValueError(
@@ -125,14 +126,35 @@ def check_archive_member(member: tarfile.TarInfo) -> None:
 def extract_archive(archive: Path, destination: Path) -> None:
     """Extract the dist archive into ``destination`` after validating every member.
 
-    The explicit per-member validation is the primary guard: `tarfile`'s extraction filters only
-    exist from Python 3.12 and only became the default in 3.14, so on an older interpreter a plain
-    `extractall` still honours `..` components, absolute names, links pointing anywhere and device
-    entries. Where the filter is available it runs as well, as a second, independent check.
+    Explicit member and namespace validation is the primary guard, including on
+    interpreters without extraction filters. Where available, the data filter
+    runs as a second check; neither its availability nor its defaults are trusted.
     """
     with tarfile.open(archive, "r:gz") as tar:
-        for member in tar.getmembers():
+        members = tar.getmembers()
+        by_path = {}
+        links = set()
+        for member in members:
             check_archive_member(member)
+            parts = _path_parts(member.name)
+            if parts in by_path:
+                raise ValueError(f"refusing to extract duplicate archive member {member.name!r}")
+            by_path[parts] = member
+            if member.issym() or member.islnk():
+                links.add(parts)
+        # Check the whole namespace before extracting, independent of member order.
+        # File aliases are useful; directory aliases and link chains are not needed
+        # by the source dist and can redirect later members or copytree traversal.
+        for parts, member in by_path.items():
+            if any(parts[:depth] in links for depth in range(1, len(parts))):
+                raise ValueError(f"refusing to extract member through a link: {member.name!r}")
+            if parts in links:
+                base = "/".join(parts[:-1]) if member.issym() else ""
+                target = _path_parts(posixpath.normpath(posixpath.join(base, member.linkname)))
+                target_member = by_path.get(target)
+                if (not target or target[0] != parts[0]
+                        or target_member is None or not target_member.isreg()):
+                    raise ValueError(f"refusing to extract link outside a regular source member: {member.name!r}")
         if hasattr(tarfile, "data_filter"):
             tar.extractall(destination, filter="data")
         else:
@@ -142,25 +164,41 @@ def extract_archive(archive: Path, destination: Path) -> None:
 def vendor_libghostty_vt(source_repo: Path, destination: Path) -> VendorMetadata:
     archive = ensure_dist_archive(source_repo)
     root = parse_archive_root(archive)
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir_path = Path(temp_dir)
-        extract_archive(archive, temp_dir_path)
-
-        extracted = temp_dir_path / root
-        if not extracted.exists():
+    metadata = VendorMetadata(
+        source_commit=git_head(source_repo), dist_archive=archive.name, extracted_dir=root,
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".vendor-stage-", dir=destination.parent))
+    previous = staging / "previous"
+    try:
+        unpacked = staging / "unpacked"
+        unpacked.mkdir()
+        extract_archive(archive, unpacked)
+        extracted = unpacked / root
+        if not extracted.is_dir() or extracted.is_symlink():
             raise FileNotFoundError(f"expected extracted root {extracted}")
 
+        ready = staging / "new"
+        shutil.copytree(extracted, ready)
         if destination.exists():
-            shutil.rmtree(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(extracted, destination)
-
-    return VendorMetadata(
-        source_commit=git_head(source_repo),
-        dist_archive=archive.name,
-        extracted_dir=root,
-    )
+            destination.rename(previous)
+        try:
+            ready.rename(destination)
+        except OSError:
+            if previous.exists():
+                try:
+                    previous.rename(destination)
+                except OSError as rollback_error:
+                    raise OSError(f"vendor install and rollback failed; backup retained at {previous}") from rollback_error
+            raise
+        if previous.exists():
+            shutil.rmtree(previous)
+        return metadata
+    finally:
+        # If rollback itself failed, never let temporary-directory cleanup delete
+        # the only remaining copy of the old vendor tree.
+        if not previous.exists():
+            shutil.rmtree(staging)
 
 
 def main() -> None:

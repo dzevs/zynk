@@ -41,6 +41,8 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 
 **Fixed**
 
+- Vendoring: source archives are validated before extraction, including on interpreters without tarfile
+  filters. Link traversal is refused, and a failed staged replacement preserves the previous vendor tree.
 - Startup: two zynk processes opening a fresh shared database at the same time (for example two named-session
   servers) no longer make the second one fail closed with a false "foreign database" error — first-time
   initialization is serialized across processes, and a database that holds only an empty migration ledger is
