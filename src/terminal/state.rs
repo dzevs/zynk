@@ -153,6 +153,7 @@ impl StaleHookSession {
         }
         self.fresh_process_evidence = None;
     }
+
     /// Record a fresh-process observation, keeping the NEWEST and never crossing the
     /// boundary: a replayed or reordered older observation must not roll the evidence
     /// back over a newer one, nor assert a process the latest loss has already shown
@@ -4023,6 +4024,70 @@ mod tests {
         assert!(
             identity_session_start(&mut terminal, "retired-session", 52, "resume").is_some(),
             "evidence newer than every retirement must still allow an explicit resume"
+        );
+    }
+
+    #[test]
+    fn a_release_advances_the_boundary_of_a_session_already_stale_from_an_exit() {
+        // Codex B1 precision (msg_ec7ace170dd16799): the retirement boundary has to be
+        // recorded on sessions that are ALREADY stale, not only on the one a conversion
+        // is creating. Here the two halves of the boundary are deliberately pulled
+        // apart: the ONLY loss this owner ever shows is the exit that retires the first
+        // session, and the second retirement is a release, which observes no process
+        // and so seeds no loss at all. The running observation replayed at the end is
+        // newer than that single loss, so nothing but the release recorded on the
+        // already-stale session can refuse it.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "retired-session", 20, "startup")
+            .expect("initial session");
+
+        let exited_at = Instant::now();
+        observe_at(&mut terminal, Some(Agent::Hermes), true, exited_at);
+        assert!(
+            terminal.hook_identity.is_none(),
+            "the observed exit retired nothing"
+        );
+
+        // The process is seen again, which converts the suppression into a stale
+        // session and arms it. The gap in the detected agent is what makes the second
+        // observation a CHANGE the conversion path looks at.
+        observe_at(&mut terminal, None, false, Instant::now());
+        let seen_running_at = Instant::now();
+        observe_at(&mut terminal, Some(Agent::Hermes), false, seen_running_at);
+
+        identity_session_start(&mut terminal, "second-session", 30, "startup")
+            .expect("a new session is allowed once the process is running again");
+        terminal
+            .release_agent_with_mutation("zynk:hermes", "hermes", Some(31))
+            .expect("release");
+        let released_at = terminal.suppressed_hook_reports["zynk:hermes"].observed_at;
+        assert!(exited_at < seen_running_at && seen_running_at < released_at);
+        identity_session_start(&mut terminal, "third-session", 40, "startup")
+            .expect("a new session is allowed after the release");
+        assert!(!terminal.suppressed_hook_reports.contains_key("zynk:hermes"));
+
+        // Replay the very observation that armed the first session BEFORE the release.
+        // It is newer than the only loss this owner ever showed, so the release is its
+        // one fence.
+        observe_at(&mut terminal, Some(Agent::Hermes), false, seen_running_at);
+        assert!(
+            identity_session_start(&mut terminal, "retired-session", 50, "resume").is_none(),
+            "a release did not advance the boundary of a session that was already stale"
+        );
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("third-session")
+        );
+
+        observe_at(&mut terminal, None, false, Instant::now());
+        observe_at(&mut terminal, Some(Agent::Hermes), false, Instant::now());
+        assert!(
+            identity_session_start(&mut terminal, "retired-session", 51, "resume").is_some(),
+            "evidence newer than the release must still allow an explicit resume"
         );
     }
 
