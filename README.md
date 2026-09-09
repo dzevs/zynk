@@ -8,7 +8,6 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: AGPL-3.0-or-later" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg"></a>
-  <a href="https://github.com/dzevs/zynk/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/dzevs/zynk?color=green"></a>
   <a href="https://crates.io/crates/zynk"><img alt="crates.io" src="https://img.shields.io/crates/v/zynk.svg"></a>
 </p>
 

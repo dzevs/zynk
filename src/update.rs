@@ -1864,9 +1864,10 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 // M6/ADR 0007: release-infra gate
 // ---------------------------------------------------------------------------
 
-/// Zynk-branded message printed when the updater fails closed (self-update needs release-manifest
-/// hosting, which is not set up; releases exist and are installed manually).
-pub(crate) const ZYNK_UPDATE_UNAVAILABLE_MESSAGE: &str = "zynk update is not available yet: self-update needs release-manifest hosting, which is not set up. Update manually — Homebrew: brew upgrade dzevs/tap/zynk; prebuilt binary: https://github.com/dzevs/zynk/releases; Nix: nix run github:dzevs/zynk; source: cargo install zynk --locked (Rust + Zig 0.15.2). Then run `zynk server stop` so the new binary takes effect.";
+/// Zynk-branded message printed when the updater fails closed. ADR 0013 makes zynk source-only:
+/// there are no prebuilt binaries and no package-manager distribution to point at, so the guidance
+/// is to rebuild from the exact source you reviewed.
+pub(crate) const ZYNK_UPDATE_UNAVAILABLE_MESSAGE: &str = "zynk update is not available: zynk is built from source only, so there is nothing for the updater to download. Rebuild from the exact source you want — from crates.io: cargo install zynk --locked; from a reviewed checkout: cargo install --path . --locked (needs Rust and Zig 0.15.2). Then run `zynk server stop` so the new binary takes effect.";
 
 /// True when a release-machinery test override is active. Debug/test builds only: the update tests
 /// simulate a published release via `ZYNK_FAKE_UPDATE_VERSION` (`FAKE_UPDATE_VERSION_ENV`), and
@@ -3372,9 +3373,15 @@ mod tests {
         }
         assert!(err.contains("not available"), "fail-closed message: {err}");
         assert!(
-            err.contains("Zig 0.15.2") && err.contains("nix run github:dzevs/zynk"),
-            "message points to source/Nix build: {err}"
+            err.contains("cargo install --path . --locked") && err.contains("Zig 0.15.2"),
+            "message points to an exact-source rebuild: {err}"
         );
+        for retired in ["brew ", "github.com/dzevs/zynk/releases", "nix run"] {
+            assert!(
+                !err.contains(retired),
+                "ADR 0013 leaves no {retired:?} install channel to point at: {err}"
+            );
+        }
     }
 
     /// WARDEN-R14-SOURCE-ONLY-BYPASS-001, debug half: the seam still opens the gate where the
