@@ -171,16 +171,23 @@ async fn open_migrated_at_with_hook(
     // SQLite discards a stale `-wal` on the first read of a zero-page database (ADR 0011). A HOT
     // rollback journal is refused before any connection too: a read-write pager would play it back
     // on its first shared lock — before any verdict (Codex Gate-2 round 8).
-    refuse_orphan_sidecars(path)?;
-    // A journal that looks hot may belong to a zynk initializer mid journal-mode switch (it holds the
-    // init lock for that): wait for the lock, then re-check; a journal that is still hot afterwards
-    // was left by a crashed or foreign writer and is refused for good.
+    // An apparently orphaned sidecar or hot journal may belong to a zynk initializer
+    // holding the init lock. Wait for that writer, then repeat BOTH guards before
+    // opening SQLite. Sidecar bytes still present after the lock are never discarded.
     let mut early_lock = None;
-    if let Err(err) = refuse_hot_journal(path) {
-        if err.code != "db_hot_journal" {
+    if let Err(err) = refuse_orphan_sidecars(path).and_then(|()| refuse_hot_journal(path)) {
+        if !matches!(err.code, "db_hot_journal" | "db_orphan_sidecar") {
             return Err(err);
         }
-        let lock = InitLock::acquire(path).await?;
+        let lock = InitLock::acquire(path).await.map_err(|lock_err| {
+            DbError::new(
+                lock_err.code,
+                format!(
+                    "{}; pending {}: {}",
+                    lock_err.message, err.code, err.message
+                ),
+            )
+        })?;
         refuse_orphan_sidecars(path)?;
         refuse_hot_journal(path)?;
         early_lock = Some(lock);
@@ -3198,6 +3205,41 @@ mod tests {
             let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
             assert_eq!(err.code, "db_orphan_sidecar", "{suffix}: {}", err.message);
             assert_eq!(std::fs::read(sidecar(&path, suffix)).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn a_sidecar_from_an_active_initializer_is_rechecked_under_its_lock() {
+        for journal_survives in [false, true] {
+            let path = tmp_db("active-initializer-sidecar");
+            let journal = sidecar(&path, "-journal");
+            let holder = hold_init_lock(&path);
+            std::fs::write(&path, b"").unwrap();
+            let bytes = vec![0_u8; 512];
+            std::fs::write(&journal, &bytes).unwrap();
+            block_on(async {
+                let mut opening = Box::pin(open_migrated_at_without_recovery(&path));
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), &mut opening).await.is_err(),
+                    "an active initializer's journal must be checked after its init lock is released"
+                );
+                assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+                assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+                if !journal_survives {
+                    std::fs::remove_file(&journal).unwrap();
+                }
+                holder.unlock().unwrap();
+                let result = opening.await;
+                if journal_survives {
+                    assert_eq!(result.unwrap_err().code, "db_orphan_sidecar");
+                    assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+                    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+                } else {
+                    result.unwrap().close().await.unwrap();
+                    assert_eq!(classify_db_at(&path).await.unwrap(), DbClassification::Native);
+                }
+                Ok(())
+            }).unwrap();
         }
     }
 
