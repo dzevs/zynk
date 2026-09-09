@@ -285,8 +285,52 @@ pub struct HookRetirementSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UnansweredExitSnapshot {
+    /// The hook SOURCE the exit was observed for, so the fence lands on the same full owner it
+    /// was recorded against rather than on any owner that happens to share the agent label.
+    ///
+    /// Absent in a snapshot written by a server that keyed this fence by label alone. Such a
+    /// fence restores with no source and then matches its label under ANY source — exactly the
+    /// reach it had on the server that wrote it — because narrowing it to a source that server
+    /// never recorded would invent evidence, and dropping it would open a window that server
+    /// did not have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub agent_label: String,
     pub age_ms: u64,
+}
+
+/// The full owner an unanswered process exit belongs to: the hook SOURCE that reported it and the
+/// agent label that source named.
+///
+/// Two owners can share an agent label under different sources — `zynk:hermes` and some other
+/// source both reporting `hermes` — and a fence keyed by the label alone lets one owner's pending
+/// exit gate the other's identity. That is the class of bug fix #20 closed one level up, so the
+/// fence is keyed by the pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookOwner {
+    /// `None` only for a fence restored from a snapshot that predates the source travelling; see
+    /// `UnansweredExitSnapshot::source`.
+    pub source: Option<String>,
+    pub agent_label: String,
+}
+
+impl HookOwner {
+    fn new(source: &str, agent_label: &str) -> Self {
+        Self {
+            source: Some(source.to_string()),
+            agent_label: agent_label.to_string(),
+        }
+    }
+
+    /// Whether this fence is the one `(source, agent_label)` has to answer. A fence with no
+    /// recorded source matches its label alone, as the server that wrote it did.
+    fn matches(&self, source: &str, agent_label: &str) -> bool {
+        self.agent_label == agent_label
+            && self
+                .source
+                .as_deref()
+                .is_none_or(|fenced_source| fenced_source == source)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -398,15 +442,20 @@ pub struct TerminalState {
     pub agent_name: Option<String>,
     hook_report_sequences: HashMap<String, u64>,
     /// An observed process EXIT that no running observation has answered yet, held at
-    /// the TERMINAL so it outlives the owner that recorded it: `(agent_label, capture
+    /// the TERMINAL so it outlives the owner that recorded it: `(full owner, capture
     /// instant of the oldest unanswered exit)`.
+    ///
+    /// Keyed by the FULL owner — source and agent label — because two owners can report the
+    /// same agent label under different sources, and a label-only key lets one gate the other.
+    /// A `HookOwner` rather than a bare tuple: the pair is stored, snapshotted and matched
+    /// as one thing, and the legacy no-source case needs a name and a rule of its own.
     ///
     /// In one process the per-owner `unconfirmed_since` is enough, because every path
     /// that drops an owner also SUPPRESSES it. A live handoff is the exception — the
     /// restore deliberately re-installs no `hook_authority`, so without this the next
     /// report on the new server would record a confirmed identity for a process the
     /// detector last saw exiting.
-    unanswered_hook_exit: Option<(String, Instant)>,
+    unanswered_hook_exit: Option<(HookOwner, Instant)>,
     suppressed_hook_reports: HashMap<String, SuppressedHookReport>,
     stale_hook_sessions: HashMap<String, Vec<StaleHookSession>>,
     metadata_report_sequences: HashMap<String, u64>,
@@ -592,13 +641,13 @@ impl TerminalState {
             .then(|| {
                 self.hook_authority.as_ref().and_then(|authority| {
                     (crate::detect::parse_agent_label(&authority.agent_label) == agent)
-                        .then(|| authority.agent_label.clone())
+                        .then(|| (authority.source.clone(), authority.agent_label.clone()))
                 })
             })
             .flatten();
-        if let Some(owner_label) = exited_authority_owner {
+        if let Some((owner_source, owner_label)) = exited_authority_owner {
             if self.hook_authority_not_newer_than(now)
-                || self.hook_owner_has_unanswered_exit_older_than(&owner_label, now)
+                || self.hook_owner_has_unanswered_exit_older_than(&owner_source, &owner_label, now)
             {
                 let cleared_source = self
                     .hook_authority
@@ -610,7 +659,7 @@ impl TerminalState {
                 }
                 self.hook_authority = None;
             } else {
-                self.hold_hook_owner_unconfirmed(&owner_label, now);
+                self.hold_hook_owner_unconfirmed(&owner_source, &owner_label, now);
             }
         }
         // A session-identity-only integration lives and dies with its process: it
@@ -627,17 +676,17 @@ impl TerminalState {
             .then(|| {
                 self.hook_identity.as_ref().and_then(|identity| {
                     (crate::detect::parse_agent_label(&identity.agent_label) == agent)
-                        .then(|| identity.agent_label.clone())
+                        .then(|| (identity.source.clone(), identity.agent_label.clone()))
                 })
             })
             .flatten();
-        if let Some(owner_label) = exited_identity_owner {
+        if let Some((owner_source, owner_label)) = exited_identity_owner {
             if self.hook_identity_not_newer_than(now)
-                || self.hook_owner_has_unanswered_exit_older_than(&owner_label, now)
+                || self.hook_owner_has_unanswered_exit_older_than(&owner_source, &owner_label, now)
             {
                 self.retire_hook_identity(HookSuppressionReason::ProcessExit, now);
             } else {
-                self.hold_hook_owner_unconfirmed(&owner_label, now);
+                self.hold_hook_owner_unconfirmed(&owner_source, &owner_label, now);
             }
         } else if self.hook_identity_not_newer_than(now)
             && self.hook_identity_conflicts_with_detected_agent(agent)
@@ -823,7 +872,7 @@ impl TerminalState {
             self.hook_identity = None;
         }
         self.persisted_agent_session = None;
-        let unconfirmed_since = self.unanswered_exit_to_inherit(&agent_label);
+        let unconfirmed_since = self.unanswered_exit_to_inherit(&source, &agent_label);
         self.hook_authority = Some(HookAuthority {
             source,
             agent_label,
@@ -922,7 +971,7 @@ impl TerminalState {
             source: source.clone(),
             agent_label: agent_label.clone(),
             reported_at: now,
-            unconfirmed_since: self.unanswered_exit_to_inherit(&agent_label),
+            unconfirmed_since: self.unanswered_exit_to_inherit(&source, &agent_label),
         });
         if let Some(session_ref) = session_ref {
             self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
@@ -984,32 +1033,37 @@ impl TerminalState {
     /// OLDEST pending exit wins, the same keep-the-oldest rule the exit path applies,
     /// so the confirmation bar never moves forward on its own.
     ///
-    /// The fence is OWNER-SCOPED: only a pending exit recorded for THIS `agent_label`
-    /// carries over, whether it sits on the outgoing authority, on the outgoing identity
-    /// or in the terminal's own copy. A DIFFERENT label starts unfenced, because the exit
-    /// asked an unanswered question about the previous agent's process and the detector's
-    /// observation of THAT agent is the only thing that answers it. Unscoped, a retired
-    /// owner's pending exit was inherited by every successor while
-    /// `confirm_pending_hook_owner` could only clear it on an observation of the RETIRED
-    /// label, so an already-confirmed new owner lost its receipt authority on its next
-    /// ordinary report and could never regain it (Codex Gate-2 `msg_3e339000b75278a4`).
+    /// The fence is OWNER-SCOPED, and the owner is the FULL pair `(source, agent_label)`:
+    /// only a pending exit recorded for THIS owner carries over, whether it sits on the
+    /// outgoing authority, on the outgoing identity or in the terminal's own copy. A
+    /// different owner starts unfenced, because the exit asked an unanswered question about
+    /// the previous owner's process and the detector's observation of THAT agent is the only
+    /// thing that answers it. Unscoped, a retired owner's pending exit was inherited by every
+    /// successor while `confirm_pending_hook_owner` could only clear it on an observation of
+    /// the RETIRED label, so an already-confirmed new owner lost its receipt authority on its
+    /// next ordinary report and could never regain it (Codex Gate-2 `msg_3e339000b75278a4`).
+    /// Scoping it to the label alone left the same bug one level finer: two owners can share
+    /// an agent label under different sources, and one would still gate the other (warden R15,
+    /// `msg_e60980952feed121`).
     ///
-    /// The accepted consequence: a fence for an agent that never returns simply lingers.
-    /// It gates that label alone, and it rides the handoff snapshot as it already did —
-    /// `UnansweredExitSnapshot` has always carried the label.
-    fn unanswered_exit_to_inherit(&self, agent_label: &str) -> Option<Instant> {
+    /// The accepted consequence: a fence for an owner that never returns simply lingers. It
+    /// gates that owner alone, and it rides the handoff snapshot as it already did —
+    /// `UnansweredExitSnapshot` carries the label, and now the source with it.
+    fn unanswered_exit_to_inherit(&self, source: &str, agent_label: &str) -> Option<Instant> {
         [
             self.hook_authority
                 .as_ref()
-                .filter(|authority| authority.agent_label == agent_label)
+                .filter(|authority| {
+                    authority.source == source && authority.agent_label == agent_label
+                })
                 .and_then(|authority| authority.unconfirmed_since),
             self.hook_identity
                 .as_ref()
-                .filter(|identity| identity.agent_label == agent_label)
+                .filter(|identity| identity.source == source && identity.agent_label == agent_label)
                 .and_then(|identity| identity.unconfirmed_since),
             self.unanswered_hook_exit
                 .as_ref()
-                .filter(|(pending_label, _)| pending_label == agent_label)
+                .filter(|(owner, _)| owner.matches(source, agent_label))
                 .map(|(_, at)| *at),
         ]
         .into_iter()
@@ -1017,26 +1071,31 @@ impl TerminalState {
         .min()
     }
 
-    /// Hold `agent_label`'s live hook owner PROVISIONAL against an exit captured at
-    /// `observed_at`, keeping the OLDEST unanswered exit when one is already pending FOR
+    /// Hold the live hook owner `(source, agent_label)` PROVISIONAL against an exit captured
+    /// at `observed_at`, keeping the OLDEST unanswered exit when one is already pending FOR
     /// THAT OWNER: a newer exit must not move the bar the detector has to clear, and
     /// another owner's older exit is not this owner's question to answer.
-    fn hold_hook_owner_unconfirmed(&mut self, agent_label: &str, observed_at: Instant) {
+    fn hold_hook_owner_unconfirmed(
+        &mut self,
+        source: &str,
+        agent_label: &str,
+        observed_at: Instant,
+    ) {
         // The terminal's own copy, so the exit outlives the owner that recorded it
-        // across a live handoff. Same keep-the-oldest rule, same label — the owner whose
+        // across a live handoff. Same keep-the-oldest rule, same owner — the one whose
         // process the exit was observed for. A pending exit stored under a DIFFERENT
-        // label is replaced rather than merged: it belonged to an owner this one
-        // succeeded, and relabelling its instant would fence this owner behind a bar set
+        // owner is replaced rather than merged: it belonged to an owner this one
+        // succeeded, and re-keying its instant would fence this owner behind a bar set
         // for someone else's process.
         let pending = match self.unanswered_hook_exit.as_ref() {
-            Some((pending_label, at)) if pending_label == agent_label => (*at).min(observed_at),
+            Some((owner, at)) if owner.matches(source, agent_label) => (*at).min(observed_at),
             _ => observed_at,
         };
-        self.unanswered_hook_exit = Some((agent_label.to_string(), pending));
+        self.unanswered_hook_exit = Some((HookOwner::new(source, agent_label), pending));
         if let Some(authority) = self
             .hook_authority
             .as_mut()
-            .filter(|authority| authority.agent_label == agent_label)
+            .filter(|authority| authority.source == source && authority.agent_label == agent_label)
         {
             authority.unconfirmed_since = Some(
                 authority
@@ -1047,7 +1106,7 @@ impl TerminalState {
         if let Some(identity) = self
             .hook_identity
             .as_mut()
-            .filter(|identity| identity.agent_label == agent_label)
+            .filter(|identity| identity.source == source && identity.agent_label == agent_label)
         {
             identity.unconfirmed_since = Some(
                 identity
@@ -1063,10 +1122,11 @@ impl TerminalState {
     /// first one only held provisional.
     fn hook_owner_has_unanswered_exit_older_than(
         &self,
+        source: &str,
         agent_label: &str,
         observed_at: Instant,
     ) -> bool {
-        self.unanswered_exit_to_inherit(agent_label)
+        self.unanswered_exit_to_inherit(source, agent_label)
             .is_some_and(|pending| pending < observed_at)
     }
 
@@ -1094,10 +1154,13 @@ impl TerminalState {
                 identity.unconfirmed_since = None;
             }
         }
+        // The detector observes a PROCESS, not a source, so an owner's fence is answered by a
+        // running observation of the agent it named — the same rule as for the two live
+        // representations above, applied to the owner this fence belongs to.
         if self
             .unanswered_hook_exit
             .as_ref()
-            .is_some_and(|(agent_label, at)| confirms(agent_label, Some(*at)))
+            .is_some_and(|(owner, at)| confirms(&owner.agent_label, Some(*at)))
         {
             self.unanswered_hook_exit = None;
         }
@@ -1180,13 +1243,14 @@ impl TerminalState {
                     .unconfirmed_since
                     .map(|pending| age_ms(now, pending)),
             });
-        let unanswered_exit = self
-            .unanswered_hook_exit
-            .as_ref()
-            .map(|(agent_label, pending)| UnansweredExitSnapshot {
-                agent_label: agent_label.clone(),
-                age_ms: age_ms(now, *pending),
-            });
+        let unanswered_exit =
+            self.unanswered_hook_exit
+                .as_ref()
+                .map(|(owner, pending)| UnansweredExitSnapshot {
+                    source: owner.source.clone(),
+                    agent_label: owner.agent_label.clone(),
+                    age_ms: age_ms(now, *pending),
+                });
         let empty = sequences.is_empty()
             && metadata_sequences.is_empty()
             && suppressed.is_empty()
@@ -1274,7 +1338,10 @@ impl TerminalState {
         }
         if let Some(unanswered) = snapshot.unanswered_exit {
             self.unanswered_hook_exit = Some((
-                unanswered.agent_label,
+                HookOwner {
+                    source: unanswered.source,
+                    agent_label: unanswered.agent_label,
+                },
                 instant_from_age_ms(now, unanswered.age_ms),
             ));
         }
@@ -2110,7 +2177,7 @@ impl TerminalState {
                 source: source.clone(),
                 agent_label: agent_label.clone(),
                 reported_at: Instant::now(),
-                unconfirmed_since: self.unanswered_exit_to_inherit(&agent_label),
+                unconfirmed_since: self.unanswered_exit_to_inherit(&source, &agent_label),
             });
         }
         self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
@@ -5151,9 +5218,9 @@ mod tests {
             source_terminal
                 .unanswered_hook_exit
                 .as_ref()
-                .map(|(agent_label, _)| agent_label.as_str()),
-            Some("hermes"),
-            "the reorder-window exit recorded no labelled fence"
+                .map(|(owner, _)| (owner.source.as_deref(), owner.agent_label.as_str())),
+            Some((Some("zynk:hermes"), "hermes")),
+            "the reorder-window exit recorded no owner-keyed fence"
         );
         assert!(source_terminal.confirmed_hook_owner().is_none());
 
@@ -5460,8 +5527,8 @@ mod tests {
             terminal
                 .unanswered_hook_exit
                 .as_ref()
-                .map(|(agent_label, _)| agent_label.as_str()),
-            Some("hermes"),
+                .map(|(owner, _)| (owner.source.as_deref(), owner.agent_label.as_str())),
+            Some((Some("zynk:hermes"), "hermes")),
             "scoping the fence must not discard it"
         );
     }
@@ -5492,8 +5559,11 @@ mod tests {
         );
         assert_eq!(
             terminal.unanswered_hook_exit,
-            Some(("hermes".to_string(), base + Duration::from_secs(1))),
-            "the reorder-window exit recorded no labelled fence"
+            Some((
+                HookOwner::new("zynk:hermes", "hermes"),
+                base + Duration::from_secs(1)
+            )),
+            "the reorder-window exit recorded no owner-keyed fence"
         );
         assert!(terminal.confirmed_hook_owner().is_none());
 
@@ -5524,6 +5594,263 @@ mod tests {
             "the detector's own observation did not answer the fence"
         );
         assert!(terminal.unanswered_hook_exit.is_none());
+    }
+
+    #[test]
+    fn a_fence_recorded_for_one_source_never_gates_another_source_with_the_same_label() {
+        // The refinement fix #20 could not reach: the fence was scoped to the agent LABEL, and two
+        // owners can report the same label under different sources. The first source's unanswered
+        // exit is a question about ITS process; it says nothing about the second source's.
+        let base = Instant::now() - Duration::from_secs(10);
+        let mut terminal = test_terminal();
+        observe_at(&mut terminal, Some(Agent::Pi), false, base);
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some(1),
+                base + Duration::from_secs(2),
+            )
+            .expect("the first Pi owner is accepted");
+        // A reorder-window exit: captured BEFORE the report it would retire, so the owner is held
+        // provisional and the terminal records the fence against it.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Pi),
+            true,
+            base + Duration::from_secs(1),
+        );
+        assert!(
+            terminal.confirmed_hook_owner().is_none(),
+            "the reorder-window exit must hold the first owner provisional"
+        );
+        assert_eq!(
+            terminal
+                .unanswered_hook_exit
+                .as_ref()
+                .map(|(owner, _)| (owner.source.as_deref(), owner.agent_label.as_str())),
+            Some((Some("zynk:pi"), "pi")),
+            "the fence must name the full owner it was recorded for"
+        );
+
+        // A DIFFERENT source reporting the same agent label takes the pane.
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "other:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some(1),
+                base + Duration::from_secs(4),
+            )
+            .expect("the second source is accepted");
+        assert_eq!(
+            terminal.confirmed_hook_owner(),
+            Some(("other:pi", "pi")),
+            "one source's pending exit gated another source with the same agent label"
+        );
+        // And the fence is not discarded: it still stands, for the source it names.
+        assert_eq!(
+            terminal
+                .unanswered_hook_exit
+                .as_ref()
+                .map(|(owner, _)| (owner.source.as_deref(), owner.agent_label.as_str())),
+            Some((Some("zynk:pi"), "pi")),
+            "scoping the fence to the full owner must not discard it"
+        );
+    }
+
+    #[test]
+    fn a_delayed_pi_exit_does_not_gate_a_confirmed_codex_owner() {
+        // The reviewer's own probe shape (warden R15, msg_e60980952feed121): a delayed Pi exit, a
+        // Codex replacement, a fresh Codex observation that confirms the new owner, and then a
+        // normal Codex lifecycle report, which must NOT return to None.
+        let base = Instant::now() - Duration::from_secs(10);
+        let mut terminal = test_terminal();
+        observe_at(&mut terminal, Some(Agent::Pi), false, base);
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some(1),
+                base + Duration::from_secs(2),
+            )
+            .expect("the Pi owner is accepted");
+        observe_at(
+            &mut terminal,
+            Some(Agent::Pi),
+            true,
+            base + Duration::from_secs(1),
+        );
+        assert!(terminal.confirmed_hook_owner().is_none());
+
+        observe_at(
+            &mut terminal,
+            Some(Agent::Codex),
+            false,
+            base + Duration::from_secs(3),
+        );
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:codex".into(),
+                "codex".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some(1),
+                base + Duration::from_secs(4),
+            )
+            .expect("the Codex owner is accepted");
+        observe_at(
+            &mut terminal,
+            Some(Agent::Codex),
+            false,
+            base + Duration::from_secs(5),
+        );
+        assert_eq!(
+            terminal.confirmed_hook_owner(),
+            Some(("zynk:codex", "codex"))
+        );
+
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:codex".into(),
+                "codex".into(),
+                AgentState::Idle,
+                None,
+                None,
+                None,
+                Some(2),
+                base + Duration::from_secs(6),
+            )
+            .expect("ordinary Codex lifecycle follow-up");
+        assert_eq!(
+            terminal.confirmed_hook_owner(),
+            Some(("zynk:codex", "codex")),
+            "Pi's pending exit made an already-confirmed Codex owner non-receipt-capable again"
+        );
+    }
+
+    #[test]
+    fn a_handoff_snapshot_round_trips_the_fence_source_with_its_label() {
+        let base = Instant::now() - Duration::from_secs(10);
+        let mut terminal = test_terminal();
+        observe_at(&mut terminal, Some(Agent::Pi), false, base);
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some(1),
+                base + Duration::from_secs(2),
+            )
+            .expect("the Pi owner is accepted");
+        observe_at(
+            &mut terminal,
+            Some(Agent::Pi),
+            true,
+            base + Duration::from_secs(1),
+        );
+
+        let captured_at = base + Duration::from_secs(2);
+        let snapshot = terminal
+            .export_hook_retirement(captured_at)
+            .expect("the fence is a retirement fact of its own");
+        assert_eq!(
+            snapshot
+                .unanswered_exit
+                .as_ref()
+                .map(|exit| (exit.source.as_deref(), exit.agent_label.as_str())),
+            Some((Some("zynk:pi"), "pi")),
+            "the snapshot must carry the source with the label"
+        );
+
+        let restored_at = Instant::now();
+        let mut restored = test_terminal();
+        restored.restore_hook_retirement(snapshot, restored_at);
+        assert_eq!(
+            restored
+                .unanswered_hook_exit
+                .as_ref()
+                .map(|(owner, _)| (owner.source.as_deref(), owner.agent_label.as_str())),
+            Some((Some("zynk:pi"), "pi"))
+        );
+        // The restored fence gates its own owner and nobody else's.
+        assert!(restored.hook_owner_has_unanswered_exit_older_than(
+            "zynk:pi",
+            "pi",
+            restored_at + Duration::from_secs(1)
+        ));
+        assert!(!restored.hook_owner_has_unanswered_exit_older_than(
+            "other:pi",
+            "pi",
+            restored_at + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn a_fence_from_a_snapshot_without_a_source_still_gates_its_label() {
+        // Backward compatibility: a snapshot written by a server that keyed the fence by label
+        // alone deserializes with no source (serde default) and keeps exactly the reach it had
+        // there — its label under any source — rather than being narrowed or dropped.
+        let decoded: UnansweredExitSnapshot =
+            serde_json::from_str(r#"{"agent_label":"hermes","age_ms":1500}"#)
+                .expect("an older snapshot still loads");
+        assert_eq!(decoded.source, None);
+
+        let restored_at = Instant::now();
+        let mut restored = test_terminal();
+        restored.restore_hook_retirement(
+            HookRetirementSnapshot {
+                sequences: Vec::new(),
+                metadata_sequences: Vec::new(),
+                suppressed: Vec::new(),
+                stale: Vec::new(),
+                hook_identity: None,
+                unanswered_exit: Some(decoded),
+            },
+            restored_at,
+        );
+        for source in ["zynk:hermes", "some-other-source"] {
+            assert!(
+                restored.hook_owner_has_unanswered_exit_older_than(
+                    source,
+                    "hermes",
+                    restored_at + Duration::from_secs(1)
+                ),
+                "a sourceless fence must gate {source} as the server that wrote it did"
+            );
+        }
+        assert!(
+            !restored.hook_owner_has_unanswered_exit_older_than(
+                "zynk:pi",
+                "pi",
+                restored_at + Duration::from_secs(1)
+            ),
+            "a sourceless fence must still gate its own label only"
+        );
+        // And it re-exports without inventing a source it never had.
+        assert_eq!(
+            restored
+                .export_hook_retirement(restored_at)
+                .and_then(|snapshot| snapshot.unanswered_exit)
+                .map(|exit| (exit.source, exit.agent_label)),
+            Some((None, "hermes".to_string()))
+        );
     }
 
     #[test]
@@ -5570,8 +5897,8 @@ mod tests {
             terminal
                 .unanswered_hook_exit
                 .as_ref()
-                .map(|(agent_label, _)| agent_label.as_str()),
-            Some("pi"),
+                .map(|(owner, _)| (owner.source.as_deref(), owner.agent_label.as_str())),
+            Some((Some("zynk:pi"), "pi")),
             "the fence must name the owner it was recorded for"
         );
 

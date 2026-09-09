@@ -115,6 +115,8 @@ Decision 2's rename applies to the receipts **this build records**. It does not 
   operator | system.recovery`.
 - No CLI, API or document may present an `integration` row as a pane-tree receipt. Its provenance is a
   claim about which check ran, and for those rows the origin check did not run.
+- **Only a row recorded AFTER migration 0004 has run, by a build that performs the pane-tree origin
+  check, may carry `pane_tree`; a row that predates it can only ever be `integration`.**
 
 ## Amendment 2026-09-09 (pre-merge; ARCH-E8-ADR14-PID-REUSE-001)
 
