@@ -21,6 +21,8 @@ pub enum Subscription {
     WorkspaceUpdated {},
     #[serde(rename = "workspace.renamed")]
     WorkspaceRenamed {},
+    #[serde(rename = "workspace.moved")]
+    WorkspaceMoved {},
     #[serde(rename = "workspace.closed")]
     WorkspaceClosed {},
     #[serde(rename = "workspace.focused")]
@@ -33,6 +35,8 @@ pub enum Subscription {
     TabFocused {},
     #[serde(rename = "tab.renamed")]
     TabRenamed {},
+    #[serde(rename = "tab.moved")]
+    TabMoved {},
     #[serde(rename = "pane.created")]
     PaneCreated {},
     #[serde(rename = "pane.closed")]
@@ -108,6 +112,9 @@ pub enum EventMatch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
+    WorkspaceMoved {
+        workspace_id: String,
+    },
     WorkspaceFocused {
         workspace_id: String,
     },
@@ -124,6 +131,9 @@ pub enum EventMatch {
         tab_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+    },
+    TabMoved {
+        tab_id: String,
     },
     TabFocused {
         tab_id: String,
@@ -169,10 +179,12 @@ pub enum EventKind {
     WorkspaceUpdated,
     WorkspaceClosed,
     WorkspaceRenamed,
+    WorkspaceMoved,
     WorkspaceFocused,
     TabCreated,
     TabClosed,
     TabRenamed,
+    TabMoved,
     TabFocused,
     PaneCreated,
     PaneClosed,
@@ -191,10 +203,12 @@ impl EventKind {
             EventKind::WorkspaceUpdated => "workspace.updated",
             EventKind::WorkspaceClosed => "workspace.closed",
             EventKind::WorkspaceRenamed => "workspace.renamed",
+            EventKind::WorkspaceMoved => "workspace.moved",
             EventKind::WorkspaceFocused => "workspace.focused",
             EventKind::TabCreated => "tab.created",
             EventKind::TabClosed => "tab.closed",
             EventKind::TabRenamed => "tab.renamed",
+            EventKind::TabMoved => "tab.moved",
             EventKind::TabFocused => "tab.focused",
             EventKind::PaneCreated => "pane.created",
             EventKind::PaneClosed => "pane.closed",
@@ -216,10 +230,12 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceUpdated,
     EventKind::WorkspaceClosed,
     EventKind::WorkspaceRenamed,
+    EventKind::WorkspaceMoved,
     EventKind::WorkspaceFocused,
     EventKind::TabCreated,
     EventKind::TabClosed,
     EventKind::TabRenamed,
+    EventKind::TabMoved,
     EventKind::TabFocused,
     EventKind::PaneCreated,
     EventKind::PaneClosed,
@@ -306,6 +322,11 @@ pub enum EventData {
         workspace_id: String,
         label: String,
     },
+    WorkspaceMoved {
+        workspace_id: String,
+        insert_index: usize,
+        workspaces: Vec<WorkspaceInfo>,
+    },
     WorkspaceFocused {
         workspace_id: String,
     },
@@ -320,6 +341,12 @@ pub enum EventData {
         tab_id: String,
         workspace_id: String,
         label: String,
+    },
+    TabMoved {
+        tab_id: String,
+        workspace_id: String,
+        insert_index: usize,
+        tabs: Vec<TabInfo>,
     },
     TabFocused {
         tab_id: String,

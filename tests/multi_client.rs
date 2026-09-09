@@ -15,7 +15,8 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde::Deserialize;
 use serde_json::Value;
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_zynk_pid, unregister_spawned_zynk_pid,
+    cleanup_test_base, register_runtime_dir, register_spawned_zynk_pid,
+    unregister_spawned_zynk_pid, CURRENT_PROTOCOL,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -583,7 +584,7 @@ fn client_handshake(
 
 fn connect_raw_client(client_socket: &Path, cols: u16, rows: u16) -> UnixStream {
     let mut stream = UnixStream::connect(client_socket).expect("should connect to client socket");
-    client_handshake(&mut stream, 14, cols, rows).expect("handshake should succeed");
+    client_handshake(&mut stream, CURRENT_PROTOCOL, cols, rows).expect("handshake should succeed");
     stream
 }
 

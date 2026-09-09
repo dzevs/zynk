@@ -404,18 +404,39 @@ mod tests {
 
     #[test]
     fn event_envelope_round_trips() {
-        let event = EventEnvelope {
-            event: EventKind::PaneOutputChanged,
-            data: EventData::PaneOutputChanged {
-                pane_id: "w1:p1".into(),
-                workspace_id: "w1".into(),
-                revision: 42,
+        let events = [
+            EventEnvelope {
+                event: EventKind::PaneOutputChanged,
+                data: EventData::PaneOutputChanged {
+                    pane_id: "w1:p1".into(),
+                    workspace_id: "w1".into(),
+                    revision: 42,
+                },
             },
-        };
+            EventEnvelope {
+                event: EventKind::WorkspaceMoved,
+                data: EventData::WorkspaceMoved {
+                    workspace_id: "w1".into(),
+                    insert_index: 2,
+                    workspaces: vec![],
+                },
+            },
+            EventEnvelope {
+                event: EventKind::TabMoved,
+                data: EventData::TabMoved {
+                    tab_id: "w1:1".into(),
+                    workspace_id: "w1".into(),
+                    insert_index: 1,
+                    tabs: vec![],
+                },
+            },
+        ];
 
-        let json = serde_json::to_string(&event).unwrap();
-        let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored, event);
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, event);
+        }
     }
 
     #[test]
@@ -505,6 +526,32 @@ mod tests {
         };
 
         let json = serde_json::to_string(&response).unwrap();
+        let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, response);
+    }
+
+    #[test]
+    fn layout_split_ratio_set_response_round_trips() {
+        let response = SuccessResponse {
+            id: "layout_ratio".into(),
+            result: ResponseResult::LayoutSplitRatioSet {
+                layout: LayoutDescription {
+                    workspace_id: "w1".into(),
+                    tab_id: "w1:1".into(),
+                    zoomed: false,
+                    focused_pane_id: "w1-1".into(),
+                    root: LayoutNode::Pane {
+                        pane: LayoutPane {
+                            pane_id: Some("w1-1".into()),
+                            ..Default::default()
+                        },
+                    },
+                },
+            },
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"layout_split_ratio_set\""));
         let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, response);
     }
@@ -795,6 +842,128 @@ mod tests {
         );
     }
 
+    /// Every wire id `serde` will accept for an [`EventKind`], in declaration
+    /// order, paired with the dot name published on the socket and to plugin
+    /// event hooks. Both columns are published values: renaming one, reordering
+    /// the enum, or adding a variant without pinning it here silently breaks
+    /// existing subscribers. Mirrors `method_wire_ids_are_stable`
+    /// (this module) for the event contract.
+    const EVENT_KIND_WIRE_IDS: &[(EventKind, &str, &str)] = &[
+        (
+            EventKind::WorkspaceCreated,
+            "workspace_created",
+            "workspace.created",
+        ),
+        (
+            EventKind::WorkspaceUpdated,
+            "workspace_updated",
+            "workspace.updated",
+        ),
+        (
+            EventKind::WorkspaceClosed,
+            "workspace_closed",
+            "workspace.closed",
+        ),
+        (
+            EventKind::WorkspaceRenamed,
+            "workspace_renamed",
+            "workspace.renamed",
+        ),
+        (
+            EventKind::WorkspaceMoved,
+            "workspace_moved",
+            "workspace.moved",
+        ),
+        (
+            EventKind::WorkspaceFocused,
+            "workspace_focused",
+            "workspace.focused",
+        ),
+        (EventKind::TabCreated, "tab_created", "tab.created"),
+        (EventKind::TabClosed, "tab_closed", "tab.closed"),
+        (EventKind::TabRenamed, "tab_renamed", "tab.renamed"),
+        (EventKind::TabMoved, "tab_moved", "tab.moved"),
+        (EventKind::TabFocused, "tab_focused", "tab.focused"),
+        (EventKind::PaneCreated, "pane_created", "pane.created"),
+        (EventKind::PaneClosed, "pane_closed", "pane.closed"),
+        (EventKind::PaneFocused, "pane_focused", "pane.focused"),
+        (EventKind::PaneMoved, "pane_moved", "pane.moved"),
+        (
+            EventKind::PaneOutputChanged,
+            "pane_output_changed",
+            "pane.output_changed",
+        ),
+        (EventKind::PaneExited, "pane_exited", "pane.exited"),
+        (
+            EventKind::PaneAgentDetected,
+            "pane_agent_detected",
+            "pane.agent_detected",
+        ),
+        (
+            EventKind::PaneAgentStatusChanged,
+            "pane_agent_status_changed",
+            "pane.agent_status_changed",
+        ),
+    ];
+
+    /// The ids `serde` itself reports as acceptable for an [`EventKind`], taken
+    /// from the `unknown variant` error so the list cannot drift from the enum.
+    fn serde_declared_event_kind_wire_ids() -> Vec<String> {
+        let error = serde_json::from_value::<EventKind>(serde_json::json!("__not_an_event__"))
+            .expect_err("an unknown event kind must not deserialize")
+            .to_string();
+        let (_, expected) = error
+            .split_once("expected")
+            .unwrap_or_else(|| panic!("serde must report the accepted variants: {error}"));
+        expected
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn event_kind_wire_ids_are_stable() {
+        let pinned: Vec<String> = EVENT_KIND_WIRE_IDS
+            .iter()
+            .map(|(_, wire_id, _)| (*wire_id).to_string())
+            .collect();
+        assert_eq!(
+            serde_declared_event_kind_wire_ids(),
+            pinned,
+            "the EventKind wire contract changed: every id is published to subscribers"
+        );
+
+        for (kind, wire_id, dot_name) in EVENT_KIND_WIRE_IDS {
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::json!(wire_id),
+                "{wire_id} must serialize as its wire id"
+            );
+            assert_eq!(
+                kind.dot_name(),
+                *dot_name,
+                "{wire_id} must keep its published dot name"
+            );
+        }
+
+        let hook_dot_names: Vec<&str> = PLUGIN_HOOK_EVENT_KINDS
+            .iter()
+            .copied()
+            .map(EventKind::dot_name)
+            .collect();
+        let expected_hook_dot_names: Vec<&str> = EVENT_KIND_WIRE_IDS
+            .iter()
+            .filter(|(kind, _, _)| !matches!(kind, EventKind::PaneOutputChanged))
+            .map(|(_, _, dot_name)| *dot_name)
+            .collect();
+        assert_eq!(
+            hook_dot_names, expected_hook_dot_names,
+            "plugin event hooks must cover every event kind except pane.output_changed"
+        );
+    }
+
     /// The four runtime-authority mutation methods (upstream 1a4e94e5) named by
     /// variant, so removing or renaming one is a compile error here and a wire
     /// break is caught by the assertions.
@@ -901,5 +1070,17 @@ mod tests {
         assert_eq!(json["method"], "layout.set_split_ratio");
         let restored: Request = serde_json::from_value(json).unwrap();
         assert_eq!(restored, split_ratio);
+
+        let subscription = Request {
+            id: "sub_moves".into(),
+            method: Method::EventsSubscribe(EventsSubscribeParams {
+                subscriptions: vec![Subscription::WorkspaceMoved {}, Subscription::TabMoved {}],
+            }),
+        };
+        let json = serde_json::to_string(&subscription).unwrap();
+        assert!(json.contains("\"type\":\"workspace.moved\""));
+        assert!(json.contains("\"type\":\"tab.moved\""));
+        let restored: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, subscription);
     }
 }

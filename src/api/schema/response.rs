@@ -145,6 +145,9 @@ pub enum ResponseResult {
     LayoutApply {
         layout: LayoutDescription,
     },
+    LayoutSplitRatioSet {
+        layout: LayoutDescription,
+    },
     AgentExplain {
         explain: serde_json::Value,
     },

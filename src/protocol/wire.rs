@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -855,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn client_message_wire_tags_preserve_protocol_13_order() {
+    fn client_message_wire_tags_preserve_protocol_15_order() {
         fn tag(msg: &ClientMessage) -> u8 {
             *bincode::serde::encode_to_vec(msg, bincode::config::standard())
                 .unwrap()

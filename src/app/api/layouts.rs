@@ -243,7 +243,7 @@ impl App {
         let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
             return encode_error(id, "layout_not_found", "layout unavailable");
         };
-        encode_success(id, ResponseResult::LayoutApply { layout })
+        encode_success(id, ResponseResult::LayoutSplitRatioSet { layout })
     }
 
     fn resolve_layout_export_target(&self, params: &LayoutExportParams) -> Option<(usize, usize)> {
@@ -684,8 +684,8 @@ mod tests {
         );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
-        let ResponseResult::LayoutApply { layout } = success.result else {
-            panic!("expected layout apply response");
+        let ResponseResult::LayoutSplitRatioSet { layout } = success.result else {
+            panic!("expected layout split ratio set response");
         };
         let LayoutNode::Split { ratio, .. } = layout.root else {
             panic!("expected split layout root");
