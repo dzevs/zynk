@@ -12,6 +12,24 @@ use super::{
 
 pub fn raise_server_nofile_limit() {}
 
+/// The parent PID of `pid`, read from `/proc/<pid>/stat`.
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    // /proc/<pid>/stat: "pid (comm) state ppid pgrp ...". The (comm) field can
+    // contain spaces and parens, so the numeric fields are read after the LAST
+    // ')': state(0) ppid(1).
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    let ppid: i32 = rest.split_whitespace().nth(1)?.parse().ok()?;
+    (ppid > 0).then_some(ppid as u32)
+}
+
+/// The effective UID this server runs as. A peer on another UID is refused by
+/// the pane-bound methods before any ancestry is walked (ADR 0014).
+pub fn current_uid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     let tpgid = foreground_process_group_id(child_pid)?;

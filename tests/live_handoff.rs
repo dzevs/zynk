@@ -51,6 +51,22 @@ fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket: &Path) -> Sp
     spawn_server_with_env(config_home, runtime_dir, api_socket, &[])
 }
 
+/// A server that enforces the real ADR 0014 pane-tree binding: `extra_env` is
+/// applied after the debug seam, so setting the variable to anything but the
+/// literal `pane-child` turns the seam off.
+fn spawn_server_without_peer_trust(
+    config_home: &Path,
+    runtime_dir: &Path,
+    api_socket: &Path,
+) -> SpawnedZynk {
+    spawn_server_with_env(
+        config_home,
+        runtime_dir,
+        api_socket,
+        &[("ZYNK_TEST_TRUST_PEER_PID", "disabled")],
+    )
+}
+
 fn spawn_server_with_env(
     config_home: &Path,
     runtime_dir: &Path,
@@ -75,6 +91,13 @@ fn spawn_server_with_env(
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_zynk"));
     cmd.arg("server");
+    // ADR 0014 debug seam: identity reports and receipts are accepted only from the
+    // TARGET pane's process tree, and this harness process is outside every pane. The
+    // seam makes this server treat each accepted connection as the pane's own child.
+    // It is compiled only under `#[cfg(debug_assertions)]`, so it cannot exist in a
+    // release binary, and the tests that must exercise the REAL binding spawn a
+    // server without it.
+    cmd.env("ZYNK_TEST_TRUST_PEER_PID", "pane-child");
     cmd.env("XDG_CONFIG_HOME", config_home);
     // #117 DB isolation: pin the global DB to a per-test sqlite home + scrub ZYNK_HOME.
     cmd.env("ZYNK_SQLITE_HOME", config_home.join("sqlite"));
@@ -121,6 +144,13 @@ fn spawn_named_session_server(
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_zynk"));
     cmd.arg("server");
+    // ADR 0014 debug seam: identity reports and receipts are accepted only from the
+    // TARGET pane's process tree, and this harness process is outside every pane. The
+    // seam makes this server treat each accepted connection as the pane's own child.
+    // It is compiled only under `#[cfg(debug_assertions)]`, so it cannot exist in a
+    // release binary, and the tests that must exercise the REAL binding spawn a
+    // server without it.
+    cmd.env("ZYNK_TEST_TRUST_PEER_PID", "pane-child");
     cmd.env("XDG_CONFIG_HOME", config_home);
     // #117 DB isolation: pin the global DB to a per-test sqlite home + scrub ZYNK_HOME.
     cmd.env("ZYNK_SQLITE_HOME", config_home.join("sqlite"));
@@ -2560,5 +2590,125 @@ fn live_handoff_keeps_the_sequence_fence() {
     assert_ne!(
         ahead_of_the_fence, "receiver_identity_unverified",
         "the fence refused a report genuinely ahead of it"
+    );
+}
+
+/// The shell line an in-pane reporter runs: report `session` for `pane_id` through
+/// the zynk binary the server exports into every pane, recording the exit status in
+/// `result_file` so the test observes the server's answer rather than pane text.
+fn in_pane_report_line(pane_id: &str, session: &str, result_file: &Path) -> String {
+    format!(
+        "\"$ZYNK_BIN_PATH\" pane report-agent {pane_id} --source zynk:pi --agent pi \
+         --state idle --agent-session-id {session} >{file} 2>&1; echo \"rc=$?\" >>{file}",
+        file = result_file.display()
+    )
+}
+
+fn send_pane_line(api_socket: &Path, pane_id: &str, line: &str) {
+    assert_ok(request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:pane:run",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": line, "keys": ["Enter"]}
+        }),
+    ));
+}
+
+fn read_report_outcome(result_file: &Path) -> String {
+    support::wait_for_file(result_file, Duration::from_secs(20));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let text = fs::read_to_string(result_file).unwrap_or_default();
+        if text.contains("rc=") {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the in-pane reporter never finished: {text:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn live_handoff_keeps_the_pane_tree_binding() {
+    // ADR 0014 binds identity reports to the TARGET pane's process tree, and a live
+    // handoff replaces the server without replacing the panes — the child PIDs it
+    // hands over are the same ones. So the binding has to hold across it, in both
+    // directions: a process the pane started is still accepted, and this harness,
+    // which is outside every pane, is still refused. Run without the debug seam, so
+    // the real check answers every call.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let before_file = base.join("report-before.txt");
+    let after_file = base.join("report-after.txt");
+
+    let spawned = spawn_server_without_peer_trust(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Before the handoff: the harness is refused, the pane's own process is not.
+    assert_eq!(
+        report_pi_agent(&api_socket, &pane_id, 1, "handoff-outside-1")["error"]["code"],
+        "caller_outside_pane",
+        "the harness must be refused before the handoff"
+    );
+    send_pane_line(
+        &api_socket,
+        &pane_id,
+        &in_pane_report_line(&pane_id, "handoff-inside-1", &before_file),
+    );
+    let before = read_report_outcome(&before_file);
+    assert!(
+        before.contains("rc=0"),
+        "an in-pane report must be accepted before the handoff: {before:?}"
+    );
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    // After the handoff the new server walks the SAME pane child PIDs.
+    let outside_after = report_pi_agent(&api_socket, &pane_id, 2, "handoff-outside-2");
+    send_pane_line(
+        &api_socket,
+        &pane_id,
+        &in_pane_report_line(&pane_id, "handoff-inside-2", &after_file),
+    );
+    let after = read_report_outcome(&after_file);
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+
+    assert_eq!(
+        outside_after["error"]["code"], "caller_outside_pane",
+        "a live handoff must not open the pane-tree binding to outside callers"
+    );
+    assert!(
+        after.contains("rc=0"),
+        "an in-pane report must still be accepted after the handoff: {after:?}"
     );
 }

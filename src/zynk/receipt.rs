@@ -55,6 +55,12 @@ pub struct ReceiptRequest {
     pub receiver_agent_session_hint: Option<serde_json::Value>,
 }
 
+/// The `delivery_events.proof_source` a receipt records (ADR 0014). It names what
+/// the server proved — that a process inside the receiver pane's tree reported the
+/// ingestion — and deliberately NOT that an integration binary ran, which no
+/// same-UID check can establish.
+pub const RECEIPT_PROOF_SOURCE: &str = "pane_tree";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptStatus {
     Received,
@@ -428,13 +434,15 @@ async fn append_received_event_in_tx(
 
     // Defense in depth: route the append through the shared validated path, which
     // re-checks `submitted -> received`, allocates the authoritative
-    // `delivery_events.seq`, and inserts with `proof_source='integration'`.
+    // `delivery_events.seq`, and inserts with `proof_source='pane_tree'` — the
+    // truthful provenance under ADR 0014: a process inside the receiver pane's
+    // tree reported ingestion, which is not a proof that the integration ran.
     append_delivery_event_in_transaction(
         conn,
         DeliveryEventInput {
             message_id: &request.message_id,
             event_type: DeliveryEventType::Received,
-            proof_source: "integration",
+            proof_source: RECEIPT_PROOF_SOURCE,
             timestamp: effective_timestamp,
             payload,
         },
@@ -696,7 +704,7 @@ mod tests {
             assert_eq!(accepted.status, ReceiptStatus::Received);
             assert_eq!(
                 latest_event(&mut conn, "msg_v").await,
-                ("received".into(), "integration".into())
+                ("received".into(), RECEIPT_PROOF_SOURCE.into())
             );
             let _ = std::fs::remove_file(path);
             Ok(())

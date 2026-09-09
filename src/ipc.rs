@@ -6,6 +6,30 @@ use std::path::Path;
 pub(crate) type LocalListener = interprocess::local_socket::Listener;
 pub(crate) type LocalStream = interprocess::local_socket::Stream;
 
+/// Kernel-reported credentials of the peer on an accepted API connection
+/// (ADR 0014).
+///
+/// `interprocess`' `peer_creds` is `getsockopt(SOL_SOCKET, SO_PEERCRED)` into a
+/// `libc::ucred` on Linux — the same syscall a hand-rolled call would make,
+/// filled in by the kernel when the peer connected and unforgeable by the
+/// client. It is the only route to those credentials here: the local-socket
+/// `Stream` deliberately exposes no raw fd. `None` (no pid, no euid, or the
+/// option unavailable) is a refusal for every caller.
+pub(crate) fn stream_peer_credentials(
+    stream: &LocalStream,
+) -> Option<crate::platform::PeerCredentials> {
+    use interprocess::local_socket::traits::StreamCommon as _;
+    let credentials = stream.peer_creds().ok()?;
+    let pid = credentials.pid()?;
+    if pid <= 0 {
+        return None;
+    }
+    Some(crate::platform::PeerCredentials {
+        pid: pid as u32,
+        uid: credentials.euid()?,
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SocketFileIdentity {
     dev: u64,

@@ -1876,6 +1876,155 @@ mod tests {
         path
     }
 
+    /// A genuine native DB migrated by hand up to (and including) `max_version`,
+    /// with the built-in migrator's own SQL and checksums in the ledger, so a
+    /// later `open_migrated_at` applies exactly the migrations above it.
+    fn plant_native_db_through(tag: &str, max_version: i64) -> std::path::PathBuf {
+        let path = plant_real_sqlx_ledger(tag);
+        let applied: Vec<_> = MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= max_version)
+            .collect();
+        assert!(
+            !applied.is_empty(),
+            "no migrations at or below {max_version}"
+        );
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await?;
+            conn.execute("PRAGMA journal_mode = WAL").await?;
+            for migration in applied {
+                conn.execute(migration.sql.as_ref()).await?;
+                sqlx::query(
+                    "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+                     VALUES (?, ?, 1, ?, 0)",
+                )
+                .bind(migration.version)
+                .bind(migration.description.as_ref())
+                .bind(migration.checksum.as_ref())
+                .execute(&mut conn)
+                .await?;
+            }
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn migration_0004_rewrites_the_retired_integration_proof_source() {
+        // ADR 0014: `received` is recorded as `pane_tree`, the provenance the server
+        // can actually prove. Rows written before that carried `integration`, and a
+        // CHECK constraint means the value cannot simply be updated in place — so
+        // migration 0004 rebuilds the table. This walks the real upgrade: a DB at
+        // version 3 with an `integration` row, opened, and the row must come back
+        // rewritten with everything else about it intact.
+        let path = plant_native_db_through("proof-source-rewrite", 3);
+        assert_eq!(recorded_versions(&path), vec![1, 2, 3]);
+
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO conversations (id, runtime_session_id, socket_namespace, workspace_id, \
+                 tab_id, created_at, last_message_at) \
+                 VALUES ('conv_pre', 'rt', 'ns', 'w1', 't1', '2026-09-09T00:00:00Z', '2026-09-09T00:00:00Z')",
+            )
+            .await?;
+            for (id, label) in [("p1", "codex"), ("p2", "claude")] {
+                sqlx::query(
+                    "INSERT INTO conversation_participants (id, conversation_id, agent_label, \
+                     participant_key, joined_at) VALUES (?, 'conv_pre', ?, ?, '2026-09-09T00:00:00Z')",
+                )
+                .bind(id)
+                .bind(label)
+                .bind(label)
+                .execute(&mut conn)
+                .await?;
+            }
+            conn.execute(
+                "INSERT INTO messages (id, conversation_id, conversation_seq, runtime_session_id, \
+                 socket_namespace, created_at, target_arg, from_participant_id, to_participant_id, \
+                 type, body, body_hash, workspace_id, tab_id) \
+                 VALUES ('msg_pre', 'conv_pre', 1, 'rt', 'ns', '2026-09-09T00:00:00Z', 'claude', \
+                 'p1', 'p2', 'note', 'body', 'hash', 'w1', 't1')",
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) \
+                 VALUES ('evt_submit', 'msg_pre', 'submitted', 'pane.send_input', 1, '2026-09-09T00:00:01Z')",
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp, payload_json) \
+                 VALUES ('evt_receipt', 'msg_pre', 'received', 'integration', 2, '2026-09-09T00:00:02Z', '{\"kept\":true}')",
+            )
+            .await?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+
+        let mut conn = block_on(open_migrated_at(&path)).unwrap();
+        let rows: Vec<(String, String, String)> = block_on(async {
+            sqlx::query_as(
+                "SELECT id, proof_source, payload_json FROM delivery_events ORDER BY seq",
+            )
+            .fetch_all(&mut conn)
+            .await
+            .map_err(|err| DbError::new("query", err.to_string()))
+        })
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "evt_submit".to_string(),
+                    "pane.send_input".to_string(),
+                    "{}".to_string()
+                ),
+                (
+                    "evt_receipt".to_string(),
+                    "pane_tree".to_string(),
+                    "{\"kept\":true}".to_string()
+                ),
+            ],
+            "the receipt row is rewritten and every other column survives"
+        );
+
+        // And the rebuilt CHECK constraint refuses the retired value outright.
+        let refused = block_on(async {
+            let outcome = sqlx::query(
+                "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) \
+                 VALUES ('evt_old', 'msg_pre', 'received', 'integration', 3, '2026-09-09T00:00:03Z')",
+            )
+            .execute(&mut conn)
+            .await;
+            Ok::<bool, DbError>(outcome.is_err())
+        })
+        .unwrap();
+        assert!(
+            refused,
+            "the retired `integration` proof_source must no longer be writable"
+        );
+        block_on(async {
+            conn.close()
+                .await
+                .map_err(|err| DbError::new("close", err.to_string()))
+        })
+        .unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
     fn recorded_versions(path: &std::path::Path) -> Vec<i64> {
         block_on(async {
             let mut conn = SqliteConnection::connect_with(

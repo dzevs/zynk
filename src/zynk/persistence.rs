@@ -1062,7 +1062,7 @@ mod tests {
                 &mut conn,
                 &orphan.message_id,
                 DeliveryEventType::Received,
-                "integration",
+                crate::zynk::receipt::RECEIPT_PROOF_SOURCE,
                 "2026-06-14T00:00:00Z",
             )
             .await
@@ -1083,7 +1083,7 @@ mod tests {
                 &mut conn,
                 &m.message_id,
                 DeliveryEventType::Received,
-                "integration",
+                crate::zynk::receipt::RECEIPT_PROOF_SOURCE,
                 "2026-06-14T00:00:02Z",
             )
             .await?;
@@ -1095,7 +1095,7 @@ mod tests {
                 &mut conn,
                 &m.message_id,
                 DeliveryEventType::Received,
-                "integration",
+                crate::zynk::receipt::RECEIPT_PROOF_SOURCE,
                 "2026-06-14T00:00:03Z",
             )
             .await
@@ -1128,7 +1128,7 @@ mod tests {
                 &mut conn,
                 &d.message_id,
                 DeliveryEventType::Received,
-                "integration",
+                crate::zynk::receipt::RECEIPT_PROOF_SOURCE,
                 "2026-06-14T00:00:06Z",
             )
             .await
@@ -1157,7 +1157,7 @@ mod tests {
                 &mut conn,
                 &f.message_id,
                 DeliveryEventType::Received,
-                "integration",
+                crate::zynk::receipt::RECEIPT_PROOF_SOURCE,
                 "2026-06-14T00:00:09Z",
             )
             .await

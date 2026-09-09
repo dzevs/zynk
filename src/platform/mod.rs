@@ -18,6 +18,53 @@ pub struct ForegroundJob {
     pub processes: Vec<ForegroundProcess>,
 }
 
+/// Credentials of the process on the other end of a Unix-socket connection
+/// (ADR 0014). The kernel fills these in at connect time, so a client cannot
+/// forge them; they are never taken from a request field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCredentials {
+    pub pid: u32,
+    pub uid: u32,
+}
+
+/// The longest ancestry chain `process_is_descendant_of` walks before giving up.
+/// A pane's own tree is a handful of hops (shell -> agent -> hook -> python), so
+/// the bound only exists so a `/proc` cycle or a pathological tree cannot spin.
+pub(crate) const MAX_ANCESTRY_HOPS: usize = 64;
+
+/// True when `pid` is `ancestor` itself or a descendant of it, following
+/// `parent_of` upward from `pid`.
+///
+/// Stops at PID 1 (init), at an unreadable process, at a self-parent, and after
+/// `MAX_ANCESTRY_HOPS`; every stop is a refusal, so the walk fails closed. The
+/// parent lookup is injected rather than called directly so the rule can be
+/// unit-tested against a synthetic process table (ADR 0014).
+pub(crate) fn process_is_descendant_of(
+    pid: u32,
+    ancestor: u32,
+    parent_of: impl Fn(u32) -> Option<u32>,
+) -> bool {
+    if pid == 0 || ancestor == 0 {
+        return false;
+    }
+    let mut current = pid;
+    for _ in 0..MAX_ANCESTRY_HOPS {
+        if current == ancestor {
+            return true;
+        }
+        // PID 1 has no parent inside any pane: a process reparented to init has
+        // left the tree it was spawned in and can no longer be placed.
+        if current <= 1 {
+            return false;
+        }
+        match parent_of(current) {
+            Some(parent) if parent != current => current = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,

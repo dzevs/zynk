@@ -97,7 +97,31 @@ fn app_dir() -> &'static str {
     }
 }
 
+/// Whether the spawned server enables the ADR 0014 debug seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerTrust {
+    /// Treat every accepted connection as the target pane's own child. The test
+    /// harness process is outside every pane, so the many tests here that report
+    /// identity directly over the socket need this to reach the behaviour they
+    /// are actually about.
+    PaneChild,
+    /// No seam: the pane-tree binding is enforced exactly as it is in a release
+    /// build. The ADR 0014 tests use this, and only this.
+    Real,
+}
+
+/// A fixture whose server trusts the harness as the pane's own child (see
+/// `PeerTrust::PaneChild`). Every pre-ADR-0014 test in this file uses it.
 fn spawn_fixture() -> Fixture {
+    spawn_fixture_with_peer_trust(PeerTrust::PaneChild)
+}
+
+/// A fixture whose server enforces the real ADR 0014 pane-tree binding.
+fn spawn_untrusted_fixture() -> Fixture {
+    spawn_fixture_with_peer_trust(PeerTrust::Real)
+}
+
+fn spawn_fixture_with_peer_trust(trust: PeerTrust) -> Fixture {
     let base = unique_base();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
@@ -114,7 +138,13 @@ fn spawn_fixture() -> Fixture {
     )
     .unwrap();
 
-    let server = spawn_server_process(&config_home, &runtime_dir, &socket_path, &sqlite_home);
+    let server = spawn_server_process(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        &sqlite_home,
+        trust,
+    );
 
     Fixture {
         base,
@@ -131,6 +161,7 @@ fn spawn_server_process(
     runtime_dir: &Path,
     socket_path: &Path,
     sqlite_home: &Path,
+    trust: PeerTrust,
 ) -> SpawnedZynk {
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -152,6 +183,11 @@ fn spawn_server_process(
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("ZYNK_ENV");
     cmd.env_remove("ZYNK_PANE_ID");
+    match trust {
+        // ADR 0014 debug seam, compiled only under `#[cfg(debug_assertions)]`.
+        PeerTrust::PaneChild => cmd.env("ZYNK_TEST_TRUST_PEER_PID", "pane-child"),
+        PeerTrust::Real => cmd.env_remove("ZYNK_TEST_TRUST_PEER_PID"),
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_zynk_pid(child.process_id());
@@ -761,8 +797,8 @@ fn receipt_records_received_via_raw_socket() {
 
     assert_eq!(
         latest_event(&fixture, &message_id),
-        ("received".to_string(), "integration".to_string()),
-        "latest delivery event must be received/integration"
+        ("received".to_string(), "pane_tree".to_string()),
+        "latest delivery event must be received/pane_tree"
     );
 
     fixture.cleanup();
@@ -824,8 +860,8 @@ fn receipt_via_cli_shim_matches_socket() {
 
     assert_eq!(
         latest_event(&fixture, &mid),
-        ("received".to_string(), "integration".to_string()),
-        "CLI shim must record received/integration just like the socket"
+        ("received".to_string(), "pane_tree".to_string()),
+        "CLI shim must record received/pane_tree just like the socket"
     );
 
     fixture.cleanup();
@@ -854,8 +890,8 @@ fn duplicate_receipt_returns_already_received() {
     );
     assert_eq!(
         latest_event(&fixture, &message_id),
-        ("received".to_string(), "integration".to_string()),
-        "first receipt records received/integration"
+        ("received".to_string(), "pane_tree".to_string()),
+        "first receipt records received/pane_tree"
     );
 
     let second = send_json(&fixture.socket_path, &request);
@@ -869,10 +905,10 @@ fn duplicate_receipt_returns_already_received() {
     );
 
     // The idempotent re-receipt must NOT append a new event — latest stays the
-    // single received/integration row.
+    // single received/pane_tree row.
     assert_eq!(
         latest_event(&fixture, &message_id),
-        ("received".to_string(), "integration".to_string()),
+        ("received".to_string(), "pane_tree".to_string()),
         "duplicate receipt must not overwrite the received event"
     );
 
@@ -1619,7 +1655,7 @@ fn message_received_api_remains_dormant_capability() {
     );
 
     // The DORMANT server-authoritative receipt API still works when explicitly called
-    // with valid hook-authority + the F4 IDs → exactly one received/integration event.
+    // with valid hook-authority + the F4 IDs → exactly one received/pane_tree event.
     let response = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
     assert!(
         response.get("error").is_none(),
@@ -1631,8 +1667,8 @@ fn message_received_api_remains_dormant_capability() {
     );
     assert_eq!(
         latest_event(&fixture, &message_id),
-        ("received".to_string(), "integration".to_string()),
-        "explicit dormant-capability receipt must record received/integration"
+        ("received".to_string(), "pane_tree".to_string()),
+        "explicit dormant-capability receipt must record received/pane_tree"
     );
 
     // Idempotent: a duplicate receipt is already_received, no second event.
@@ -1640,7 +1676,329 @@ fn message_received_api_remains_dormant_capability() {
     assert_eq!(dup["result"]["receipt_status"], "already_received", "{dup}");
     assert_eq!(
         latest_event(&fixture, &message_id),
-        ("received".to_string(), "integration".to_string()),
+        ("received".to_string(), "pane_tree".to_string()),
+    );
+
+    fixture.cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0014 — identity reports and receipts are bound to the target pane's
+// same-UID process tree. Every test below runs against a server spawned WITHOUT
+// the debug seam, so the binding is exercised exactly as a release build
+// enforces it: the peer PID comes from the kernel, and nothing in a request can
+// influence it.
+// ---------------------------------------------------------------------------
+
+/// Send `pane.report_agent_session` and return the RAW response, so a refusal
+/// can be asserted instead of unwrapped.
+fn try_report_session(socket_path: &Path, pane_id: &str, agent: &str, session: &str) -> Value {
+    send_json(
+        socket_path,
+        &format!(
+            "{{\"id\":\"sess\",\"method\":\"pane.report_agent_session\",\"params\":{{\"pane_id\":\"{pane_id}\",\"source\":\"zynk:{agent}\",\"agent\":\"{agent}\",\"agent_session_id\":\"{session}\"}}}}"
+        ),
+    )
+}
+
+/// Send `pane.report_agent` (state plus session) and return the RAW response.
+fn try_report_state(socket_path: &Path, pane_id: &str, agent: &str, session: &str) -> Value {
+    send_json(
+        socket_path,
+        &format!(
+            "{{\"id\":\"state\",\"method\":\"pane.report_agent\",\"params\":{{\"pane_id\":\"{pane_id}\",\"source\":\"zynk:{agent}\",\"agent\":\"{agent}\",\"state\":\"idle\",\"agent_session_id\":\"{session}\"}}}}"
+        ),
+    )
+}
+
+/// The shell line that reports `agent` (optionally with `session`) for `target`
+/// through the zynk CLI, using the binary path the server exports into every pane.
+fn in_pane_report_command(
+    target: &str,
+    source: &str,
+    agent: &str,
+    session: Option<&str>,
+) -> String {
+    let session = session
+        .map(|session| format!(" --agent-session-id {session}"))
+        .unwrap_or_default();
+    format!(
+        "\"$ZYNK_BIN_PATH\" pane report-agent {target} --source {source} --agent {agent} \
+         --state idle{session}"
+    )
+}
+
+/// Run `command` in `pane`'s own shell and return the exit status it reported.
+///
+/// The point of the detour through the PTY is the peer credentials: the process
+/// that opens the API socket is a child of the pane's shell, so the kernel places
+/// it inside the pane's tree. Nothing about the request itself differs from one
+/// the harness could send.
+fn run_in_pane_for_status(fixture: &Fixture, pane: &str, what: &str, command: &str) -> i32 {
+    // Every call gets its own marker. A pane keeps the previous command's output,
+    // so a shared marker would be satisfied by the PREVIOUS run and hand back its
+    // status — which is exactly how a refusal can read as an acceptance.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let nonce = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let prefix = format!("__zynk_rc{nonce}_");
+    // The marker is quote-split inside the printf FORMAT, so the shell's echo of
+    // the command line cannot satisfy the wait — only the printf output can.
+    let line = format!("{command}; printf '__zynk''_rc{nonce}_%s__\\n' \"$?\"");
+    run_in_pane_until_ready(fixture, pane, what, &line, &prefix);
+    let text = pane_recent_text(&fixture.socket_path, pane);
+    let start = text
+        .rfind(&prefix)
+        .unwrap_or_else(|| panic!("{what}: no rc marker in pane text: {text:?}"))
+        + prefix.len();
+    let rest = &text[start..];
+    let end = rest
+        .find("__")
+        .unwrap_or_else(|| panic!("{what}: unterminated rc marker in pane text: {text:?}"));
+    rest[..end]
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("{what}: unparsable rc {:?} in {text:?}", &rest[..end]))
+}
+
+#[test]
+fn an_identity_report_from_outside_the_pane_is_refused() {
+    // Gate-3 B1 (SENT-R12-RECEIPT-001 / ARB-B70-RECEIPT-ORIGIN-001): before ADR 0014
+    // any same-UID process could name any pane and be believed. The harness process
+    // is outside every pane, which is exactly the shape the arbiter exploited.
+    let _guard = test_lock();
+    let fixture = spawn_untrusted_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "outside-report");
+
+    let refused = try_report_session(&fixture.socket_path, &pane, "pi", "outside-1");
+    assert_eq!(
+        refused["error"]["code"], "caller_outside_pane",
+        "an out-of-pane identity report must be refused: {refused}"
+    );
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&pane) && message.contains("ADR 0014"),
+        "the refusal must name the pane and the decision: {message:?}"
+    );
+
+    // The state-report shape carries identity too, and is bound the same way.
+    let refused_state = try_report_state(&fixture.socket_path, &pane, "pi", "outside-2");
+    assert_eq!(
+        refused_state["error"]["code"], "caller_outside_pane",
+        "an out-of-pane state report must be refused: {refused_state}"
+    );
+
+    assert_eq!(
+        pane_session_value(&fixture.socket_path, &pane),
+        None,
+        "a refused report must leave the pane with no session identity"
+    );
+
+    fixture.cleanup();
+}
+
+#[test]
+fn an_identity_report_from_inside_the_pane_is_accepted() {
+    // The other half of the rule: the binding refuses callers, not integrations.
+    // A report made by a process the pane itself started is accepted, and the pane
+    // becomes receipt-capable exactly as before.
+    let _guard = test_lock();
+    let fixture = spawn_untrusted_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "inside-report");
+
+    let status = run_in_pane_for_status(
+        &fixture,
+        &pane,
+        "in-pane identity report",
+        &in_pane_report_command(&pane, "zynk:pi", "pi", Some("inside-1")),
+    );
+    assert_eq!(status, 0, "the in-pane report must be accepted");
+    assert_eq!(
+        pane_session_value(&fixture.socket_path, &pane).as_deref(),
+        Some("inside-1"),
+    );
+
+    fixture.cleanup();
+}
+
+#[test]
+fn a_pane_process_may_claim_its_own_pane_but_not_another() {
+    // The arbiter's shape, stated as the rule ADR 0014 actually makes: a plain,
+    // passive process in a pane — no agent, nothing detected — IS a trusted
+    // principal for ITS OWN pane, by design. What it may not do is speak for a
+    // pane it is not inside, which is what made the finding a blocker.
+    let _guard = test_lock();
+    let fixture = spawn_untrusted_fixture();
+    let own = create_root_pane(&fixture.socket_path, "own-pane");
+    let other = create_root_pane(&fixture.socket_path, "other-pane");
+
+    let mine = run_in_pane_for_status(
+        &fixture,
+        &own,
+        "report for its own pane",
+        &in_pane_report_command(&own, "zynk:pi", "pi", Some("own-1")),
+    );
+    assert_eq!(mine, 0, "a pane's own process may claim that pane");
+    assert_eq!(
+        pane_session_value(&fixture.socket_path, &own).as_deref(),
+        Some("own-1"),
+    );
+
+    let theirs = run_in_pane_for_status(
+        &fixture,
+        &own,
+        "report for another pane",
+        &in_pane_report_command(&other, "zynk:pi", "pi", Some("other-1")),
+    );
+    assert_ne!(theirs, 0, "a pane's process must not claim another pane");
+    assert_eq!(
+        pane_session_value(&fixture.socket_path, &other),
+        None,
+        "the other pane must be untouched"
+    );
+
+    fixture.cleanup();
+}
+
+#[test]
+fn a_reparented_reporter_is_refused() {
+    // A hook that double-forks leaves the pane's tree: its parent dies, it is
+    // reparented to init or to a subreaper, and its ancestry no longer reaches the
+    // pane. ADR 0014 refuses that fail-closed, and says integrations must keep
+    // their reporters in the tree.
+    let _guard = test_lock();
+    let fixture = spawn_untrusted_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "reparented-report");
+    let result_file = fixture.base.join("detached-report.txt");
+    let result_path = result_file.display().to_string();
+    let command = in_pane_report_command(&pane, "zynk:pi", "pi", Some("detached-1"));
+
+    // The inner process waits until its PPID has actually CHANGED before it
+    // connects, so the test asserts the reparented state and never races the
+    // moment before the parent exits. The wait is bounded so a shell without a
+    // usable `ps` fails the assertion rather than hanging.
+    let detach = format!(
+        "( ( orig=$(ps -o ppid= -p $$ | tr -d ' '); i=0; \
+         while [ \"$(ps -o ppid= -p $$ | tr -d ' ')\" = \"$orig\" ] && [ $i -lt 200 ]; \
+         do sleep 0.05; i=$((i+1)); done; \
+         {command} >{result_path} 2>&1; echo \"rc=$?\" >>{result_path} ) & )"
+    );
+    let spawned = run_in_pane_for_status(&fixture, &pane, "spawn a detached reporter", &detach);
+    assert_eq!(spawned, 0, "the detaching shell itself must succeed");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let outcome = loop {
+        if let Ok(text) = fs::read_to_string(&result_file) {
+            if text.contains("rc=") {
+                break text;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the detached reporter never finished; file: {:?}",
+            fs::read_to_string(&result_file).ok()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    assert!(
+        outcome.contains("caller_outside_pane"),
+        "a reparented reporter must be refused: {outcome:?}"
+    );
+    assert!(
+        !outcome.contains("rc=0"),
+        "a reparented reporter must not exit 0: {outcome:?}"
+    );
+    assert_eq!(
+        pane_session_value(&fixture.socket_path, &pane),
+        None,
+        "a refused report must leave the pane with no session identity"
+    );
+
+    fixture.cleanup();
+}
+
+#[test]
+fn a_receipt_from_outside_the_receiver_pane_is_refused() {
+    // ADR 0002 Decision 4 gets a principal: the ids may all match and the receiver
+    // may be the right pane, and a receipt is still refused when the caller is not
+    // inside that pane. The message stays `submitted`, and NO delivery event is
+    // written — a refused receipt records nothing at all.
+    let _guard = test_lock();
+    let fixture = spawn_untrusted_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "receipt-outside");
+    assert_eq!(
+        run_in_pane_for_status(
+            &fixture,
+            &pane,
+            "establish the receiver identity",
+            &in_pane_report_command(&pane, "hook", "codex", None),
+        ),
+        0
+    );
+
+    let sent = agent_send_codex(&fixture, "addressed to a pane the caller is not inside");
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let refused = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    assert_eq!(
+        refused["error"]["code"], "caller_outside_pane",
+        "a receipt from outside the receiver pane must be refused: {refused}"
+    );
+    assert_eq!(
+        latest_event(&fixture, &message_id).0,
+        "submitted",
+        "a refused receipt must leave the message submitted"
+    );
+
+    fixture.cleanup();
+}
+
+#[test]
+fn a_receipt_from_inside_the_receiver_pane_is_received() {
+    // And the accepted half, end to end on the real socket: the receiver pane's own
+    // process receipts its own message, and the delivery event records the truthful
+    // provenance `pane_tree` (ADR 0014 Decision 2) rather than a claim that an
+    // integration ran.
+    let _guard = test_lock();
+    let fixture = spawn_untrusted_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "receipt-inside");
+    assert_eq!(
+        run_in_pane_for_status(
+            &fixture,
+            &pane,
+            "establish the receiver identity",
+            &in_pane_report_command(&pane, "hook", "codex", None),
+        ),
+        0
+    );
+
+    let sent = agent_send_codex(&fixture, "receipted from inside the pane");
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+    let conversation_id = sent["conversation_id"].as_str().expect("conversation_id");
+    let conversation_seq = sent["conversation_seq"]
+        .as_i64()
+        .expect("conversation_seq")
+        .to_string();
+    let runtime_session_id = sent["runtime_session_id"]
+        .as_str()
+        .expect("runtime_session_id");
+    let socket_namespace = sent["socket_namespace"].as_str().expect("socket_namespace");
+
+    let receipt = format!(
+        "\"$ZYNK_BIN_PATH\" zynk message-received --pane-id {pane} --message-id {message_id} \
+         --conversation-id {conversation_id} --conversation-seq {conversation_seq} \
+         --runtime-session-id {runtime_session_id} --socket-namespace {socket_namespace}"
+    );
+    assert_eq!(
+        run_in_pane_for_status(&fixture, &pane, "in-pane receipt", &receipt),
+        0,
+        "the receiver pane's own process must be able to receipt"
+    );
+
+    assert_eq!(
+        latest_event(&fixture, &message_id),
+        ("received".to_string(), "pane_tree".to_string()),
+        "an accepted receipt records the pane-tree provenance"
     );
 
     fixture.cleanup();

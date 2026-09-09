@@ -463,6 +463,10 @@ fn pane_read(
         },
         api_tx,
         Some(APP_RESPONSE_TIMEOUT),
+        // ADR 0014: this re-dispatch only ever carries a READ method
+        // (`pane.read` / `pane.get`), never a pane-bound one, so the
+        // fail-closed default caller is correct and deliberate.
+        crate::api::ApiCaller::default(),
     );
     let value: serde_json::Value = serde_json::from_str(&response).map_err(|_| ErrorResponse {
         id: request_id.clone(),
@@ -503,6 +507,10 @@ fn pane_get(
         },
         api_tx,
         Some(APP_RESPONSE_TIMEOUT),
+        // ADR 0014: this re-dispatch only ever carries a READ method
+        // (`pane.read` / `pane.get`), never a pane-bound one, so the
+        // fail-closed default caller is correct and deliberate.
+        crate::api::ApiCaller::default(),
     );
     let value: serde_json::Value = serde_json::from_str(&response).map_err(|_| ErrorResponse {
         id: request_id.clone(),

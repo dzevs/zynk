@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 mod agents;
+pub(crate) mod caller;
 mod env;
 mod integrations;
 mod layouts;
@@ -723,18 +724,67 @@ impl App {
         runtime.try_send_focus_event(event);
     }
 
+    /// Handle a request that did NOT arrive over the API socket.
+    ///
+    /// The caller is the fail-closed `ApiCaller::default()`, so the pane-bound
+    /// methods of ADR 0014 are refused: nothing inside the server raises one for
+    /// itself, and a future path that did would have to say who it is.
+    ///
+    /// Test-only since ADR 0014 gave the production path a caller to carry
+    /// (`handle_api_request_from_socket`). Kept rather than inlined because ~70
+    /// unit tests drive API methods through it, and because it is the one place
+    /// that names what a caller-less request means.
+    #[cfg(test)]
     pub(crate) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
+        self.handle_api_request_from_socket(request, crate::api::ApiCaller::default())
+    }
+
+    /// Handle a request that arrived on the API socket, carrying the peer
+    /// credentials the kernel reported for that connection (ADR 0014).
+    pub(crate) fn handle_api_request_from_socket(
+        &mut self,
+        request: crate::api::schema::Request,
+        caller: crate::api::ApiCaller,
+    ) -> String {
         self.drain_all_internal_events();
-        self.handle_api_request_after_internal_events_drained(request)
+        self.handle_api_request_after_internal_events_drained_from_socket(request, caller)
     }
 
     pub(crate) fn handle_api_request_after_internal_events_drained(
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
+        self.handle_api_request_after_internal_events_drained_from_socket(
+            request,
+            crate::api::ApiCaller::default(),
+        )
+    }
+
+    pub(crate) fn handle_api_request_after_internal_events_drained_from_socket(
+        &mut self,
+        request: crate::api::schema::Request,
+        caller: crate::api::ApiCaller,
+    ) -> String {
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
+
+        // ADR 0014: identity reports and receipts are accepted only from a
+        // process inside the TARGET pane's tree. The check lives here, at the
+        // socket-to-state boundary, so no bound handler can be reached without
+        // it, and the bound set is one greppable list (`pane_bound_target`).
+        if let Some((method, pane_id)) = caller::pane_bound_target(&request.method) {
+            if let Err(rejection) = self.caller_is_inside_pane(pane_id, caller) {
+                let message = rejection.message(pane_id);
+                tracing::warn!(
+                    method,
+                    pane_id,
+                    rejection = ?rejection,
+                    "refusing a pane-bound request from outside the pane (ADR 0014)"
+                );
+                return responses::encode_error(request.id, caller::CALLER_OUTSIDE_PANE, message);
+            }
+        }
 
         let response = match request.method {
             Method::ServerStop(_) => {

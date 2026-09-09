@@ -2636,7 +2636,10 @@ impl HeadlessServer {
             })
         } else {
             self.app
-                .handle_api_request_after_internal_events_drained(msg.request)
+                .handle_api_request_after_internal_events_drained_from_socket(
+                    msg.request,
+                    msg.caller,
+                )
         };
         let _ = msg.respond_to.send(response);
 
@@ -4081,6 +4084,7 @@ mod tests {
                     method: api::schema::Method::ServerStop(api::schema::EmptyParams::default()),
                 },
                 respond_to,
+                caller: api::ApiCaller::default(),
             })
         );
         let response = response_rx
@@ -7372,6 +7376,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            caller: api::ApiCaller::default(),
         });
 
         assert!(changed);
@@ -7457,6 +7462,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            caller: api::ApiCaller::default(),
         });
 
         assert!(changed);
@@ -7508,6 +7514,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            caller: api::ApiCaller::default(),
         });
 
         assert!(changed);
@@ -7539,6 +7546,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            caller: api::ApiCaller::default(),
         });
 
         assert!(changed);
@@ -7575,6 +7583,7 @@ next_tab = ""
                     ),
                 },
                 respond_to,
+                caller: api::ApiCaller::default(),
             })
         );
 
@@ -7630,6 +7639,7 @@ next_tab = ""
                     ),
                 },
                 respond_to,
+                caller: api::ApiCaller::default(),
             })
         );
 
@@ -7902,6 +7912,7 @@ next_tab = ""
                 }),
             },
             respond_to,
+            caller: api::ApiCaller::default(),
         });
 
         assert!(changed);

@@ -15,7 +15,9 @@ use crate::api::schema::{
 };
 use crate::api::subscriptions::ActiveSubscription;
 use crate::api::wait::wait_for_output;
-use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
+use crate::api::{
+    request_changes_ui, socket_path, ApiCaller, ApiRequestMessage, ApiRequestSender, EventHub,
+};
 use crate::ipc::{
     bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalStream,
     SocketFileIdentity,
@@ -142,6 +144,10 @@ fn handle_connection(
         debug!(err = %err, "api connection write timeout unavailable");
     }
 
+    // ADR 0014: the caller's identity comes from the kernel, at accept, for the
+    // whole connection — never from anything the request carries.
+    let caller = ApiCaller::from_socket(crate::ipc::stream_peer_credentials(&stream));
+
     let Some(line) = read_initial_request_line(&mut stream)? else {
         return Ok(());
     };
@@ -230,6 +236,7 @@ fn handle_connection(
                 },
                 api_tx,
                 capabilities,
+                caller,
             );
             let result = write_text_line_allow_disconnect(&mut stream, &response);
             match &result {
@@ -252,6 +259,7 @@ fn handle_request(
     request: Request,
     api_tx: &ApiRequestSender,
     capabilities: Option<ServerCapabilities>,
+    caller: ApiCaller,
 ) -> String {
     match request.method {
         Method::Ping(_) => serde_json::to_string(&SuccessResponse {
@@ -266,7 +274,7 @@ fn handle_request(
             r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
                 .to_string()
         }),
-        _ => dispatch_to_app(request, api_tx),
+        _ => dispatch_to_app(request, api_tx, caller),
     }
 }
 
@@ -546,20 +554,22 @@ fn is_connection_closed_error(err: &std::io::Error) -> bool {
     )
 }
 
-fn dispatch_to_app(request: Request, api_tx: &ApiRequestSender) -> String {
-    dispatch_to_app_with_timeout(request, api_tx, None)
+fn dispatch_to_app(request: Request, api_tx: &ApiRequestSender, caller: ApiCaller) -> String {
+    dispatch_to_app_with_timeout(request, api_tx, None, caller)
 }
 
 pub(super) fn dispatch_to_app_with_timeout(
     request: Request,
     api_tx: &ApiRequestSender,
     timeout: Option<Duration>,
+    caller: ApiCaller,
 ) -> String {
     let request_id = request.id.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     if let Err(err) = api_tx.send(ApiRequestMessage {
         request,
         respond_to,
+        caller,
     }) {
         return error_response_json(
             request_id,
@@ -742,6 +752,7 @@ mod tests {
             },
             &tx,
             Some(ServerCapabilities { live_handoff: true }),
+            ApiCaller::default(),
         );
 
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -758,7 +769,9 @@ mod tests {
         };
 
         let request_for_thread = request.clone();
-        let thread = std::thread::spawn(move || handle_request(request_for_thread, &tx, None));
+        let thread = std::thread::spawn(move || {
+            handle_request(request_for_thread, &tx, None, ApiCaller::default())
+        });
 
         let msg = rx.blocking_recv().unwrap();
         assert_eq!(msg.request.id, "req_2");

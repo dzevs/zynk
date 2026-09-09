@@ -83,7 +83,7 @@ impl App {
             }
             return changed | deferred_changed;
         }
-        let response = self.handle_api_request(msg.request);
+        let response = self.handle_api_request_from_socket(msg.request, msg.caller);
         if !skip_default_workspace {
             changed |= self.ensure_default_workspace();
         }

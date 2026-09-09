@@ -211,6 +211,13 @@ fn spawn_named_server_with_env(
         .env_remove("ZYNK_SOCKET_PATH")
         .env_remove("ZYNK_CLIENT_SOCKET_PATH")
         .env_remove("ZYNK_ENV")
+        // ADR 0014 debug seam: identity reports and receipts are accepted only from the
+        // TARGET pane's process tree, and this harness process is outside every pane. The
+        // seam makes this server treat each accepted connection as the pane's own child.
+        // It is compiled only under `#[cfg(debug_assertions)]`, so it cannot exist in a
+        // release binary, and the tests that must exercise the REAL binding spawn a
+        // server without it.
+        .env("ZYNK_TEST_TRUST_PEER_PID", "pane-child")
         .stdin(std::process::Stdio::null());
     for (key, value) in extra_env {
         command.env(key, value);
@@ -357,6 +364,13 @@ fn spawn_zynk_with_config(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_zynk"));
     cmd.arg("server");
+    // ADR 0014 debug seam: identity reports and receipts are accepted only from the
+    // TARGET pane's process tree, and this harness process is outside every pane. The
+    // seam makes this server treat each accepted connection as the pane's own child.
+    // It is compiled only under `#[cfg(debug_assertions)]`, so it cannot exist in a
+    // release binary, and the tests that must exercise the REAL binding spawn a
+    // server without it.
+    cmd.env("ZYNK_TEST_TRUST_PEER_PID", "pane-child");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("ZYNK_SOCKET_PATH", socket_path);
