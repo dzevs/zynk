@@ -18,6 +18,7 @@ mod settings;
 mod sidebar;
 mod status;
 mod tabs;
+mod text;
 mod widgets;
 
 use self::dialogs::{
@@ -72,9 +73,9 @@ pub(crate) use self::{
         agent_panel_toggle_rect, agent_visible_rows, collapsed_sidebar_sections,
         collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
         expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
-        workspace_drop_indicator_row, workspace_list_entries, workspace_list_rect,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentVisibleRow, WorkspaceListEntry,
+        workspace_drop_indicator_row, workspace_list_entries, workspace_list_entries_expanded,
+        workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
+        workspace_parent_group_state, AgentVisibleRow, WorkspaceListEntry,
     },
 };
 pub(crate) use self::{
@@ -1258,5 +1259,40 @@ mod tests {
             .join("");
         assert!(rendered_help.contains("open lazygit"));
         assert!(rendered_help.contains("custom command"));
+    }
+
+    #[test]
+    fn keybind_help_compacts_multiple_indexed_ranges() {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = ["prefix+1..9", "alt+1..9"]
+switch_workspace = "ctrl+1..9"
+"#,
+        )
+        .expect("config parses");
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.keybinds = config.keybinds();
+
+        let workspace_tab = keybind_help_groups(&app)
+            .into_iter()
+            .find(|(name, _)| *name == "workspaces / tabs")
+            .expect("workspace tab group")
+            .1;
+
+        let switch_tab_key = workspace_tab
+            .iter()
+            .find(|(_, label)| label.as_ref() == "switch tab 1-9")
+            .map(|(key, _)| key.as_str())
+            .expect("switch tab help entry");
+        let switch_workspace_key = workspace_tab
+            .iter()
+            .find(|(_, label)| label.as_ref() == "switch workspace 1-9")
+            .map(|(key, _)| key.as_str())
+            .expect("switch workspace help entry");
+
+        assert_eq!(switch_tab_key, "prefix+1..9 / alt+1..9");
+        assert_eq!(switch_workspace_key, "ctrl+1..9");
     }
 }

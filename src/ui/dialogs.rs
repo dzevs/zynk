@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use super::text::{display_width_u16, truncate_end};
 use super::widgets::{
     action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
@@ -18,22 +19,6 @@ use crate::app::{state::WorktreeOpenState, AppState, Mode};
 // height than upstream's 12 to leave room for the 3-line wrapped error).
 const NEW_LINKED_WORKTREE_POPUP_WIDTH: u16 = 68;
 const NEW_LINKED_WORKTREE_POPUP_HEIGHT: u16 = 14;
-
-fn truncate_text(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
-        return text.to_string();
-    }
-    if max_width <= 1 {
-        return "…".into();
-    }
-    format!(
-        "{}…",
-        text.chars()
-            .take(max_width.saturating_sub(1))
-            .collect::<String>()
-    )
-}
 
 pub(crate) fn rename_button_rects(inner: Rect) -> (Rect, Rect, Rect) {
     let rects = action_button_row_rects(
@@ -501,27 +486,27 @@ pub(super) fn render_open_existing_worktree_overlay(app: &AppState, frame: &mut 
         let status = entry.status_label();
         let title_width = inner
             .width
-            .saturating_sub(status.len() as u16)
+            .saturating_sub(display_width_u16(status))
             .saturating_sub(4) as usize;
         let mut title = format!(
             "{marker} {}",
-            truncate_text(&entry.display_name(), title_width)
+            truncate_end(&entry.display_name(), title_width)
         );
         if !status.is_empty() {
             let pad = inner
                 .width
-                .saturating_sub(title.chars().count() as u16)
-                .saturating_sub(status.len() as u16)
+                .saturating_sub(display_width_u16(&title))
+                .saturating_sub(display_width_u16(status))
                 .max(1);
             title.push_str(&" ".repeat(pad as usize));
             title.push_str(status);
         }
         frame.render_widget(
-            Paragraph::new(truncate_text(&title, inner.width as usize)).style(row_style),
+            Paragraph::new(truncate_end(&title, inner.width as usize)).style(row_style),
             Rect::new(inner.x, y, inner.width, 1),
         );
         frame.render_widget(
-            Paragraph::new(truncate_text(
+            Paragraph::new(truncate_end(
                 &format!("  {}", entry.path.display()),
                 inner.width as usize,
             ))

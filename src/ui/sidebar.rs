@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_label, state_label_color};
+use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
@@ -85,7 +86,7 @@ pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect 
     }
 
     let label = agent_panel_sort_label(sort);
-    let width = label.chars().count() as u16;
+    let width = display_width_u16(label);
     Rect::new(
         area.x + area.width.saturating_sub(width),
         area.y + 1,
@@ -167,21 +168,6 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
     }
 }
 
-fn truncate_text(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
-    format!("{prefix}…")
-}
-
 fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
     if ws.branch().is_some() {
         2
@@ -233,7 +219,11 @@ pub(crate) fn workspace_parent_group_state(
     })
 }
 
-fn grouped_child_display_label(label: &str, branch: Option<&str>, has_custom_name: bool) -> String {
+pub(crate) fn grouped_child_display_label(
+    label: &str,
+    branch: Option<&str>,
+    has_custom_name: bool,
+) -> String {
     if has_custom_name {
         return label.to_string();
     }
@@ -251,7 +241,7 @@ pub(crate) enum WorkspaceListEntry {
     Workspace { ws_idx: usize, indented: bool },
 }
 
-fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
+pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
     matches!(
         entries.get(idx.saturating_add(1)),
         Some(WorkspaceListEntry::Workspace { indented: true, .. })
@@ -274,6 +264,17 @@ pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested:
 }
 
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
+    workspace_list_entries_inner(app, false)
+}
+
+/// Like [`workspace_list_entries`] but always expands worktree groups, ignoring
+/// `collapsed_space_keys`. The mobile switcher has no collapse affordance and
+/// always shows the full worktree tree.
+pub(crate) fn workspace_list_entries_expanded(app: &AppState) -> Vec<WorkspaceListEntry> {
+    workspace_list_entries_inner(app, true)
+}
+
+fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<WorkspaceListEntry> {
     let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
         if let Some(space) = ws.worktree_space() {
@@ -342,7 +343,7 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
             });
             continue;
         };
-        let collapsed = app.collapsed_space_keys.contains(&space.key);
+        let collapsed = !force_expanded && app.collapsed_space_keys.contains(&space.key);
         entries.push(WorkspaceListEntry::Workspace {
             ws_idx: parent_idx,
             indented: false,
@@ -1073,9 +1074,9 @@ fn render_workspace_list(
                     })
                     .unwrap_or(0);
                 let max_branch_len = (card.rect.width as usize).saturating_sub(5 + reserved);
-                // Truncate by CHARACTER (`truncate_text`), not byte-slicing — a branch name can be
-                // non-ASCII and a byte index could land inside a codepoint and panic (SB-001).
-                let branch_display = truncate_text(&branch, max_branch_len);
+                // Truncate by DISPLAY WIDTH (`truncate_end`), not byte-slicing — a branch name can
+                // be non-ASCII and a byte index could land inside a codepoint and panic (SB-001).
+                let branch_display = truncate_end(&branch, max_branch_len);
                 let branch_color = if selected || is_active {
                     p.mauve
                 } else {
@@ -1246,7 +1247,7 @@ fn render_agent_detail(
                     .map(|d| (d.state, d.seen))
                     .collect();
                 let (icon, icon_style) = agents_group_aggregate(&states, app.spinner_tick, p);
-                let tab = truncate_text(&detail.tab_label, body_width.saturating_sub(2));
+                let tab = truncate_end(&detail.tab_label, body_width.saturating_sub(2));
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled(icon, icon_style),
@@ -1293,9 +1294,9 @@ fn render_agent_detail(
 
                 // `└─ ` + icon + ` ` = 5 cols of fixed prefix; the state label is right-aligned with
                 // at least one separating space, and the agent name elides between them.
-                let label_width = label.chars().count();
+                let label_width = display_width(label);
                 let name_budget = body_width.saturating_sub(5 + label_width + 1).max(1);
-                let name = truncate_text(name, name_budget);
+                let name = truncate_end(name, name_budget);
                 let mut spans = vec![
                     Span::styled(connector, Style::default().fg(p.overlay0)),
                     Span::styled(" ", Style::default()),
@@ -1303,7 +1304,7 @@ fn render_agent_detail(
                     Span::styled(" ", Style::default()),
                     Span::styled(name, name_style),
                 ];
-                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                let used: usize = spans.iter().map(|s| display_width(&s.content)).sum();
                 let pad = body_width
                     .saturating_sub(used)
                     .saturating_sub(label_width)

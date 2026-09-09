@@ -29,25 +29,34 @@ fn keybind_label(bindings: &crate::config::ActionKeybinds) -> String {
 
 fn indexed_label(bindings: &[crate::config::IndexedKeybind]) -> String {
     if bindings.is_empty() {
-        "unset".to_string()
-    } else if bindings.len() == 9 {
-        let first = &bindings[0].label;
-        if first.ends_with('1') {
-            format!("{}1..9", first.trim_end_matches('1'))
-        } else {
-            bindings
-                .iter()
-                .map(|binding| binding.label.clone())
-                .collect::<Vec<_>>()
-                .join(" / ")
-        }
-    } else {
-        bindings
-            .iter()
-            .map(|binding| binding.label.clone())
-            .collect::<Vec<_>>()
-            .join(" / ")
+        return "unset".to_string();
     }
+
+    let mut parts = Vec::new();
+    let mut index = 0;
+    while index < bindings.len() {
+        if let Some(prefix) = indexed_range_prefix(&bindings[index..]) {
+            parts.push(format!("{prefix}1..9"));
+            index += 9;
+        } else {
+            parts.push(bindings[index].label.clone());
+            index += 1;
+        }
+    }
+
+    parts.join(" / ")
+}
+
+fn indexed_range_prefix(bindings: &[crate::config::IndexedKeybind]) -> Option<&str> {
+    let run = bindings.get(..9)?;
+    let prefix = run[0].label.strip_suffix('1')?;
+    for (offset, binding) in run.iter().enumerate() {
+        let digit = char::from(b'1' + offset as u8);
+        if binding.label.strip_suffix(digit) != Some(prefix) {
+            return None;
+        }
+    }
+    Some(prefix)
 }
 
 pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {

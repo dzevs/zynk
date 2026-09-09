@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use super::text::display_width_u16;
 use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{CopyFeedback, Palette, ToastKind, ToastNotification},
@@ -54,7 +55,9 @@ pub(crate) fn toast_notification_rect(
     offset_for_warning: bool,
     position: ToastZynkPosition,
 ) -> Rect {
-    let content_width = (toast.title.len().max(toast.context.len()) as u16) + 4;
+    let content_width = display_width_u16(&toast.title)
+        .max(display_width_u16(&toast.context))
+        .saturating_add(4);
     let width = content_width.saturating_add(2).min(area.width);
     let content_height = if toast.context.is_empty() { 1 } else { 2 };
     let height = (content_height + 2).min(area.height);
@@ -299,6 +302,25 @@ mod tests {
             toast_notification_rect(area, &toast, false, ToastZynkPosition::BottomRight);
         assert_eq!(bottom_right.x + bottom_right.width, area.x + area.width);
         assert_eq!(bottom_right.y + bottom_right.height, area.y + area.height);
+    }
+
+    #[test]
+    fn toast_rect_uses_display_width_for_cjk_labels() {
+        let area = Rect::new(0, 0, 100, 20);
+        let toast = ToastNotification {
+            kind: ToastKind::NeedsAttention,
+            title: "重构用户认证模块".to_string(),
+            context: "提交 zynk 的反馈".to_string(),
+            position: None,
+            target: None,
+        };
+
+        let rect = toast_notification_rect(area, &toast, false, ToastZynkPosition::TopRight);
+
+        let expected_content_width =
+            display_width_u16(&toast.title).max(display_width_u16(&toast.context)) + 6;
+        assert_eq!(rect.width, expected_content_width);
+        assert_eq!(rect.x + rect.width, area.x + area.width);
     }
 
     #[test]

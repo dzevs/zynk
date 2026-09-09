@@ -9,6 +9,7 @@ use ratatui::{
 use super::{
     scrollbar::{render_scrollbar, should_show_scrollbar},
     status::{agent_icon, state_label_color},
+    text::{display_width_u16, middle_elide, truncate_end},
     widgets::{panel_contrast_fg, render_panel_shell},
 };
 use crate::app::state::{AppState, NavigatorRow, NavigatorStateFilter, NavigatorTarget};
@@ -201,9 +202,9 @@ fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow,
     let left_budget = rect
         .width
         .saturating_sub(meta_width)
-        .saturating_sub(left_fixed.chars().count() as u16)
+        .saturating_sub(display_width_u16(&left_fixed))
         .saturating_sub(3) as usize;
-    let title = truncate_text(&row.label, left_budget);
+    let title = truncate_end(&row.label, left_budget);
 
     let spans = vec![
         Span::styled(left_fixed, dim_style),
@@ -220,7 +221,7 @@ fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow,
             meta_width,
             1,
         );
-        let meta = truncate_text(&row.meta, meta_width.saturating_sub(2) as usize);
+        let meta = truncate_end(&row.meta, meta_width.saturating_sub(2) as usize);
         let meta_style = if selected {
             base_style
         } else if row.is_workspace || row.is_tab {
@@ -471,28 +472,6 @@ fn display_state(state: crate::detect::AgentState, seen: bool) -> &'static str {
     }
 }
 
-fn middle_elide(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
-        return text.to_string();
-    }
-    if max_width <= 1 {
-        return "…".to_string();
-    }
-    let left = max_width.saturating_sub(1) / 2;
-    let right = max_width.saturating_sub(1).saturating_sub(left);
-    let prefix: String = text.chars().take(left).collect();
-    let suffix: String = text
-        .chars()
-        .rev()
-        .take(right)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{prefix}…{suffix}")
-}
-
 fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
@@ -513,19 +492,4 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
         Span::styled(" close", dim),
     ]);
     frame.render_widget(Paragraph::new(line), area);
-}
-
-fn truncate_text(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
-    format!("{prefix}…")
 }

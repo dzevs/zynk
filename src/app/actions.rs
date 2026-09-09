@@ -1071,7 +1071,7 @@ impl AppState {
             return;
         }
 
-        let row_range = crate::ui::mobile_switcher_workspace_doc_range(idx);
+        let row_range = crate::ui::mobile_switcher_workspace_doc_range(self, idx);
         let visible_start = self.mobile_switcher_scroll;
         let visible_end = visible_start.saturating_add(viewport.height as usize);
         if row_range.start < visible_start {
@@ -1127,7 +1127,14 @@ impl AppState {
     }
 
     pub(crate) fn visible_workspace_order(&self) -> Vec<usize> {
-        let order = crate::ui::workspace_list_entries(self)
+        // Mobile always shows the worktree tree expanded, so its visible order
+        // must ignore collapse state to match what the switcher renders.
+        let entries = if self.view.layout == ViewLayout::Mobile {
+            crate::ui::workspace_list_entries_expanded(self)
+        } else {
+            crate::ui::workspace_list_entries(self)
+        };
+        let order = entries
             .into_iter()
             .map(|entry| match entry {
                 crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => ws_idx,
