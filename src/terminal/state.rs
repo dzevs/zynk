@@ -25,6 +25,20 @@ pub struct HookAuthority {
     pub custom_status: Option<String>,
     pub reported_at: Instant,
     pub session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    /// The capture instant of an observed process EXIT this owner has not yet been
+    /// proven to postdate, or `None` when the detector has confirmed its process since.
+    ///
+    /// Hook reports carry no capture time of their own, so `reported_at` is stamped when
+    /// the report ARRIVED. An exit the detector captured BEFORE that arrival but the App
+    /// handled after it therefore looks older than the report and retires nothing, while
+    /// the detector has in fact seen the process gone and not seen it since. Retiring
+    /// outright would be wrong the other way: that same window is where a genuinely
+    /// restarted agent's first session-start report lands, and retiring it would strand
+    /// the new process. The detector, not the hook, is the process oracle here, so the
+    /// identity is held PROVISIONAL instead — kept and still visible, but barred from
+    /// anchoring a receipt (`TerminalState::confirmed_hook_owner`) until a running
+    /// observation captured after this instant confirms it, or a later exit retires it.
+    pub unconfirmed_since: Option<Instant>,
 }
 
 /// Hook-reported IDENTITY for a `crate::detect::session_identity_only_integration`.
@@ -41,6 +55,9 @@ pub struct HookIdentity {
     /// cannot erase it — the freshness `HookAuthority::reported_at` gives the
     /// full-lifecycle path, carried across the identity/lifecycle split.
     pub reported_at: Instant,
+    /// The unanswered exit this identity must be proven to postdate, exactly as
+    /// [`HookAuthority::unconfirmed_since`].
+    pub unconfirmed_since: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,6 +394,15 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
         let previous_session = self.current_session_identity_for_persistence();
+        // The detector is the process oracle, so a RUNNING observation is what answers
+        // an exit a hook report was accepted across. It is settled first, before any
+        // early return: a live full-lifecycle authority makes this function ignore the
+        // observation for state, and a capture older than a release suppression makes it
+        // ignore it entirely, but in both cases the observation still proves the process
+        // this owner's identity is waiting on (`confirm_pending_hook_owner`).
+        if !process_exited {
+            self.confirm_pending_hook_owner(agent, now);
+        }
         if self.should_ignore_detected_state_under_full_lifecycle_hook(agent, process_exited) {
             if self
                 .hook_authority
@@ -418,21 +444,36 @@ impl TerminalState {
         self.fallback_state = fallback_state;
         self.fallback_visible_blocker = visible_blocker && fallback_state == AgentState::Blocked;
         self.fallback_observed_at = Some(now);
+        // An exit of this owner's own process decides one of three things. It is OLD
+        // enough to be ordered against the report (`reported_at <= now`), so it retires
+        // as it always has. Or it is a SECOND unanswered exit — the owner already holds
+        // one this exit postdates, so the detector never saw the process alive between
+        // them — and it retires the identity the first one only held provisional,
+        // stamped with its OWN capture time so late callbacks are fenced as usual. Or it
+        // falls in the reorder window (`reported_at > now`, an arrival stamp that says
+        // nothing about capture), where retiring would strand a genuinely restarted
+        // agent whose first session-start report lands exactly there: the owner is held
+        // PROVISIONAL instead, and answers no receipt until the detector confirms it.
         if process_exited
-            && self.hook_authority_not_newer_than(now)
             && self.hook_authority.as_ref().is_some_and(|authority| {
                 crate::detect::parse_agent_label(&authority.agent_label) == agent
             })
         {
-            let cleared_source = self
-                .hook_authority
-                .as_ref()
-                .map(|authority| authority.source.clone());
-            self.suppress_current_hook_authority(HookSuppressionReason::ProcessExit, now);
-            if let Some(source) = cleared_source {
-                self.hook_report_sequences.remove(&source);
+            if self.hook_authority_not_newer_than(now)
+                || self.hook_owner_has_unanswered_exit_older_than(now)
+            {
+                let cleared_source = self
+                    .hook_authority
+                    .as_ref()
+                    .map(|authority| authority.source.clone());
+                self.suppress_current_hook_authority(HookSuppressionReason::ProcessExit, now);
+                if let Some(source) = cleared_source {
+                    self.hook_report_sequences.remove(&source);
+                }
+                self.hook_authority = None;
+            } else {
+                self.hold_hook_owner_unconfirmed(now);
             }
-            self.hook_authority = None;
         }
         // A session-identity-only integration lives and dies with its process: it
         // holds no lifecycle authority to arbitrate, so its identity is dropped on
@@ -441,12 +482,23 @@ impl TerminalState {
         // the same freshness comparison the authority path applies: an observation
         // captured BEFORE the report it would erase decides nothing. Retiring the
         // identity also suppresses its owner, so a late callback cannot undo this.
-        if self.hook_identity_not_newer_than(now)
-            && ((process_exited
-                && self.hook_identity.as_ref().is_some_and(|identity| {
-                    crate::detect::parse_agent_label(&identity.agent_label) == agent
-                }))
-                || self.hook_identity_conflicts_with_detected_agent(agent))
+        // The exit limb takes the three-way rule above; the CONFLICT limb — a different
+        // agent detected in this one's place — keeps the ordering rule unchanged,
+        // because a contradicting label is not an unanswered question about a process.
+        let identity_exit_matches = process_exited
+            && self.hook_identity.as_ref().is_some_and(|identity| {
+                crate::detect::parse_agent_label(&identity.agent_label) == agent
+            });
+        if identity_exit_matches {
+            if self.hook_identity_not_newer_than(now)
+                || self.hook_owner_has_unanswered_exit_older_than(now)
+            {
+                self.retire_hook_identity(HookSuppressionReason::ProcessExit, now);
+            } else {
+                self.hold_hook_owner_unconfirmed(now);
+            }
+        } else if self.hook_identity_not_newer_than(now)
+            && self.hook_identity_conflicts_with_detected_agent(agent)
         {
             self.retire_hook_identity(
                 if process_exited {
@@ -637,6 +689,7 @@ impl TerminalState {
             custom_status,
             reported_at: now,
             session_ref,
+            unconfirmed_since: self.unanswered_exit_to_inherit(),
         });
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
@@ -726,6 +779,7 @@ impl TerminalState {
             source: source.clone(),
             agent_label: agent_label.clone(),
             reported_at: now,
+            unconfirmed_since: self.unanswered_exit_to_inherit(),
         });
         if let Some(session_ref) = session_ref {
             self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
@@ -752,6 +806,107 @@ impl TerminalState {
         self.hook_identity
             .as_ref()
             .is_none_or(|identity| identity.reported_at <= observed_at)
+    }
+
+    /// The hook owner that may anchor a RECEIPT or awareness: `(source, agent_label)`,
+    /// and only while its identity is CONFIRMED.
+    ///
+    /// The precedence is the receipt path's own — a full-lifecycle owner's
+    /// `hook_authority` first, an identity-only owner's `hook_identity` only when no
+    /// authority is installed — with one addition: an owner still holding an unanswered
+    /// exit (`unconfirmed_since`) yields nothing at all, and never falls through to the
+    /// other representation, because the pending exit is a fact about this terminal's
+    /// process, not about which shape reported it. The caller then answers
+    /// `receiver_identity_unverified`, exactly as for a pane no hook ever named.
+    pub fn confirmed_hook_owner(&self) -> Option<(&str, &str)> {
+        if let Some(authority) = self.hook_authority.as_ref() {
+            return authority
+                .unconfirmed_since
+                .is_none()
+                .then_some((authority.source.as_str(), authority.agent_label.as_str()));
+        }
+        let identity = self.hook_identity.as_ref()?;
+        identity
+            .unconfirmed_since
+            .is_none()
+            .then_some((identity.source.as_str(), identity.agent_label.as_str()))
+    }
+
+    /// The unanswered exit a hook identity recorded NOW has to inherit.
+    ///
+    /// A report is not process evidence — only the detector is — so an exit that no
+    /// running observation has answered yet taints the identity that replaces the one
+    /// holding it, including a genuinely new session start from the same owner. The
+    /// OLDEST pending exit wins, the same keep-the-oldest rule the exit path applies,
+    /// so the confirmation bar never moves forward on its own.
+    fn unanswered_exit_to_inherit(&self) -> Option<Instant> {
+        let authority = self
+            .hook_authority
+            .as_ref()
+            .and_then(|authority| authority.unconfirmed_since);
+        let identity = self
+            .hook_identity
+            .as_ref()
+            .and_then(|identity| identity.unconfirmed_since);
+        match (authority, identity) {
+            (Some(authority), Some(identity)) => Some(authority.min(identity)),
+            (pending, None) | (None, pending) => pending,
+        }
+    }
+
+    /// Hold this terminal's live hook owner PROVISIONAL against an exit captured at
+    /// `observed_at`, keeping the OLDEST unanswered exit when one is already pending: a
+    /// newer exit must not move the bar the detector has to clear.
+    fn hold_hook_owner_unconfirmed(&mut self, observed_at: Instant) {
+        if let Some(authority) = self.hook_authority.as_mut() {
+            authority.unconfirmed_since = Some(
+                authority
+                    .unconfirmed_since
+                    .map_or(observed_at, |pending| pending.min(observed_at)),
+            );
+        }
+        if let Some(identity) = self.hook_identity.as_mut() {
+            identity.unconfirmed_since = Some(
+                identity
+                    .unconfirmed_since
+                    .map_or(observed_at, |pending| pending.min(observed_at)),
+            );
+        }
+    }
+
+    /// Whether the live owner holds an unanswered exit that `observed_at` — this exit's
+    /// own capture time — is strictly newer than. That means the detector never saw the
+    /// process alive between the two exits, so the second one retires the identity the
+    /// first one only held provisional.
+    fn hook_owner_has_unanswered_exit_older_than(&self, observed_at: Instant) -> bool {
+        self.unanswered_exit_to_inherit()
+            .is_some_and(|pending| pending < observed_at)
+    }
+
+    /// A RUNNING observation of the pending owner's own agent, captured strictly after
+    /// the unanswered exit, is the detector confirming the process the hook claimed.
+    /// Nothing else clears the flag: a hook report proves only that a reporter is alive,
+    /// which is precisely what the reorder window makes untrustworthy.
+    fn confirm_pending_hook_owner(&mut self, detected_agent: Option<Agent>, observed_at: Instant) {
+        let Some(detected_agent) = detected_agent else {
+            return;
+        };
+        let confirms = |agent_label: &str, pending: Option<Instant>| {
+            pending.is_some_and(|pending| {
+                pending < observed_at
+                    && crate::detect::parse_agent_label(agent_label) == Some(detected_agent)
+            })
+        };
+        if let Some(authority) = self.hook_authority.as_mut() {
+            if confirms(&authority.agent_label, authority.unconfirmed_since) {
+                authority.unconfirmed_since = None;
+            }
+        }
+        if let Some(identity) = self.hook_identity.as_mut() {
+            if confirms(&identity.agent_label, identity.unconfirmed_since) {
+                identity.unconfirmed_since = None;
+            }
+        }
     }
 
     /// Owners whose hook reports are RETIRED by a clear, a release or a process exit.
@@ -1584,6 +1739,7 @@ impl TerminalState {
                 source: source.clone(),
                 agent_label: agent_label.clone(),
                 reported_at: Instant::now(),
+                unconfirmed_since: self.unanswered_exit_to_inherit(),
             });
         }
         self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
@@ -4426,6 +4582,158 @@ mod tests {
             "evidence genuinely newer than the exit was refused"
         );
         assert!(terminal.hook_identity.is_some());
+    }
+
+    /// Establish an identity-only session whose hook report ARRIVED after the exit
+    /// instant it is about to be compared against, the reorder window this rule exists
+    /// for: `exit_at` is captured first, the process actually handling the report sleeps
+    /// past it, and `reported_at` is therefore strictly newer than the exit the detector
+    /// took earlier.
+    fn identity_reported_after(exit_at: Instant, session: &str) -> TerminalState {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        std::thread::sleep(Duration::from_millis(20));
+        identity_session_start(&mut terminal, session, 20, "startup").expect("initial session");
+        assert!(
+            identity_reported_at(&terminal) > exit_at,
+            "the setup did not reproduce the reorder window"
+        );
+        terminal
+    }
+
+    #[test]
+    fn exit_captured_before_a_delayed_hook_report_holds_the_identity_provisional() {
+        // Gate-3 B1 arbiter (msg_c76820d29bbb759b), the architect's causal-order gap.
+        // Hook reports carry no capture time, so `reported_at` is stamped at ARRIVAL.
+        // An exit the detector captured BEFORE that arrival but the App handled after it
+        // looks older than the report, so it retired nothing and the identity — with its
+        // persisted session — stayed receipt-capable although the detector had seen the
+        // process gone and had not seen it since. Retiring outright is wrong the other
+        // way: the same window is where a genuinely restarted agent's first session-start
+        // report lands. The detector is the process oracle, so the identity is held
+        // PROVISIONAL until a running observation confirms it.
+        let exit_at = Instant::now();
+        let mut terminal = identity_reported_after(exit_at, "existing-session");
+
+        observe_at(&mut terminal, Some(Agent::Hermes), true, exit_at);
+
+        assert!(
+            terminal.hook_identity.is_some(),
+            "the exit retired an identity it was too old to retire"
+        );
+        assert_eq!(
+            terminal
+                .hook_identity
+                .as_ref()
+                .and_then(|identity| identity.unconfirmed_since),
+            Some(exit_at),
+            "the unhandled exit was not recorded on the identity it could not retire"
+        );
+        assert!(
+            terminal.confirmed_hook_owner().is_none(),
+            "a provisional identity anchored a receipt"
+        );
+        // The session is part of the identity, so it stays while the identity does.
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("existing-session")
+        );
+
+        // The detector sees the process AFTER the exit: the claim is confirmed.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            exit_at + Duration::from_millis(5),
+        );
+
+        assert!(terminal
+            .hook_identity
+            .as_ref()
+            .is_some_and(|identity| identity.unconfirmed_since.is_none()));
+        assert_eq!(
+            terminal.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes")),
+            "a confirmed identity was still refused"
+        );
+    }
+
+    #[test]
+    fn a_second_exit_while_provisional_retires_the_identity() {
+        // The provisional state is a question, not an amnesty: if the detector never
+        // sees the process alive between the two exits, the second one answers it, and
+        // the identity is retired through the ordinary suppression funnel stamped with
+        // THIS exit's capture time, so late callbacks are fenced exactly as usual.
+        let exit_at = Instant::now();
+        let mut terminal = identity_reported_after(exit_at, "existing-session");
+
+        observe_at(&mut terminal, Some(Agent::Hermes), true, exit_at);
+        let second_exit_at = exit_at + Duration::from_millis(10);
+        observe_at(&mut terminal, Some(Agent::Hermes), true, second_exit_at);
+
+        assert!(terminal.hook_identity.is_none(), "the identity survived");
+        assert!(terminal.persisted_agent_session.is_none());
+        assert!(terminal.confirmed_hook_owner().is_none());
+        let suppressed = &terminal.suppressed_hook_reports["zynk:hermes"];
+        assert_eq!(suppressed.reason, HookSuppressionReason::ProcessExit);
+        assert_eq!(suppressed.observed_at, second_exit_at);
+
+        // An ordinary same-session report is refused, as after any retirement.
+        assert!(
+            terminal
+                .record_identity_only_hook_report(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("existing-session"),
+                    Some(30),
+                )
+                .is_none(),
+            "a late callback reclaimed a retired session"
+        );
+
+        // A running observation newer than the second exit re-arms it, and the explicit
+        // resume is admitted under the existing rules.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            second_exit_at + Duration::from_millis(10),
+        );
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 31, "resume").is_some(),
+            "an explicit resume backed by fresh process evidence was refused"
+        );
+        assert_eq!(
+            terminal.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes"))
+        );
+    }
+
+    #[test]
+    fn a_hook_report_not_newer_than_the_exit_is_retired_as_before() {
+        // The control: outside the reorder window nothing changes. A report that arrived
+        // at or before the exit's capture is retired on the spot, exactly as today.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session");
+        let reported_at = identity_reported_at(&terminal);
+        std::thread::sleep(Duration::from_millis(20));
+        let exit_at = Instant::now();
+        assert!(reported_at <= exit_at);
+
+        observe_at(&mut terminal, Some(Agent::Hermes), true, exit_at);
+
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+        assert!(terminal.confirmed_hook_owner().is_none());
+        assert_eq!(
+            terminal.suppressed_hook_reports["zynk:hermes"].reason,
+            HookSuppressionReason::ProcessExit
+        );
     }
 
     #[test]

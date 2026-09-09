@@ -351,17 +351,12 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane = ws.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
-        // Hook-reported identity ONLY — never `effective_agent_label()`'s detection fallback.
-        let agent_label = terminal
-            .hook_authority
-            .as_ref()
-            .map(|authority| authority.agent_label.as_str())
-            .or_else(|| {
-                terminal
-                    .hook_identity
-                    .as_ref()
-                    .map(|identity| identity.agent_label.as_str())
-            })?;
+        // Hook-reported identity ONLY — never `effective_agent_label()`'s detection
+        // fallback — and only while it is CONFIRMED: an identity accepted inside the
+        // window between an exit's capture and its handling is held provisional until
+        // the detector sees the process again, and a provisional identity anchors no
+        // receipt (`TerminalState::confirmed_hook_owner`).
+        let (_, agent_label) = terminal.confirmed_hook_owner()?;
         // Owner coherence: a persisted session is part of this receiver's identity only when it
         // was reported for the SAME agent the hook identity names; a session another owner
         // persisted on this terminal must not anchor a receipt (Codex Gate-2 R13).
@@ -446,4 +441,105 @@ pub(crate) fn terminal_agent_session_info(
             kind: session.session_ref.kind,
             value: session.session_ref.value.clone(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+    use crate::detect::{Agent, AgentState};
+    use crate::workspace::Workspace;
+    use std::time::{Duration, Instant};
+
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
+
+    #[test]
+    fn authoritative_receiver_identity_is_none_while_the_hook_identity_is_provisional() {
+        // Gate-3 B1 arbiter (msg_c76820d29bbb759b): the receipt gate is where a
+        // provisional identity has to be invisible. The pane still shows its session —
+        // the identity exists — but until the detector has seen the process after the
+        // exit it captured, nothing may anchor a receipt on it, and the CLI answers
+        // `receiver_identity_unverified` exactly as for a pane no hook ever named.
+        let mut app = test_app();
+        let workspace = Workspace::test_new("provisional-receiver");
+        let pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let pane_id = app.public_pane_id(0, pane).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .panes
+            .get(&pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        let exit_at = Instant::now();
+        {
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+            std::thread::sleep(Duration::from_millis(20));
+            terminal
+                .set_agent_session_ref_for_session_start(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("existing-session"),
+                    Some(20),
+                    Some("startup".into()),
+                )
+                .expect("initial session");
+        }
+        assert!(app.authoritative_receiver_identity(&pane_id).is_some());
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Hermes),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                true,
+                exit_at,
+            );
+
+        assert!(
+            app.state.terminals[&terminal_id].hook_identity.is_some(),
+            "the late exit retired an identity it was too old to retire"
+        );
+        assert!(
+            app.authoritative_receiver_identity(&pane_id).is_none(),
+            "a provisional identity was accepted as a receipt anchor"
+        );
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Hermes),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                false,
+                exit_at + Duration::from_millis(5),
+            );
+
+        let receiver = app
+            .authoritative_receiver_identity(&pane_id)
+            .expect("a confirmed identity anchors a receipt again");
+        assert_eq!(receiver.agent_label, "hermes");
+    }
 }

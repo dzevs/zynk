@@ -4616,6 +4616,97 @@ mod tests {
     }
 
     #[test]
+    fn a_hook_report_accepted_across_an_unhandled_exit_is_provisional() {
+        // Gate-3 B1 arbiter (msg_c76820d29bbb759b), end to end over the dispatch the
+        // finding names: `HookStateReported` is stamped when the App HANDLES it, and the
+        // `StateChanged` exit it is compared against was captured earlier. The identity
+        // survives that exit — the report may well be a restarted agent's first — but it
+        // anchors no receipt until a running observation proves the process is there.
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Hermes),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        // The detector captures the exit, and the hook report arrives before the App
+        // gets round to handling it.
+        let exit_at = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "zynk:hermes".into(),
+            agent_label: "hermes".into(),
+            state: AgentState::Idle,
+            message: None,
+            custom_status: None,
+            seq: Some(20),
+            session_ref: crate::agent_resume::AgentSessionRef::id("existing-session"),
+        });
+        assert_eq!(
+            state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes"))
+        );
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Hermes),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: true,
+            observed_at: exit_at,
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert!(
+            terminal.hook_identity.is_some(),
+            "the late exit retired an identity it was too old to retire"
+        );
+        assert!(
+            terminal.confirmed_hook_owner().is_none(),
+            "an identity accepted across an unhandled exit still anchored a receipt"
+        );
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Hermes),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: exit_at + std::time::Duration::from_millis(5),
+        });
+
+        assert_eq!(
+            state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes")),
+            "the detector confirmed the process and the identity stayed unusable"
+        );
+    }
+
+    #[test]
     fn queued_state_events_re_arm_an_agent_restarted_in_place() {
         // Gate-3 B1 arbiter (msg_fbcdf59a01d6f70d), end to end over the same dispatch:
         // an agent restarted in place produces NO `None` observation between its exit
