@@ -973,35 +973,17 @@ mod tests {
         assert_eq!(p.agent, None);
     }
 
-    /// Fixture git commands must never inherit the caller's git environment. With `GIT_DIR`
-    /// exported, `git init` initialises the directory that variable names, leaves
-    /// `<fixture>/.git` absent and still exits 0; every later `git -C <fixture> ...` then
-    /// silently reads and writes the OUTER repository. Neutralising the global/system config
-    /// keeps the host's own git settings out of the fixture as well.
-    fn fixture_git_command() -> std::process::Command {
-        let mut command = std::process::Command::new("git");
-        for key in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_COMMON_DIR",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            "GIT_CEILING_DIRECTORIES",
-            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-        ] {
-            command.env_remove(key);
-        }
-        command.env("GIT_CONFIG_GLOBAL", "/dev/null");
-        command.env("GIT_CONFIG_SYSTEM", "/dev/null");
-        command
-    }
-
     #[test]
     fn git_meta_in_a_temp_repo_returns_branch_and_sha() {
         // Portability: build a SELF-CONTAINED throwaway git repo in a unique /tmp dir
         // (no dependence on the live checkout's branch — that fails under detached HEAD,
         // a packaged build, or no `.git`). A committed repo resolves a branch + 40-hex sha.
+        use std::process::Command as Cmd;
+        let git = || {
+            let mut command = Cmd::new("git");
+            crate::workspace::scrub_git_env(&mut command);
+            command
+        };
         let dir = std::env::temp_dir().join(format!(
             "zynk-gitmeta-{}-{}",
             std::process::id(),
@@ -1014,26 +996,27 @@ mod tests {
 
         // `git init -q` (force a deterministic branch name so the assertion is robust
         // regardless of the host's `init.defaultBranch`), then one empty commit.
-        let init = fixture_git_command()
+        let init = git()
             .arg("-C")
             .arg(&dir)
             .args(["init", "-q", "-b", "work"])
             .status();
         // -b may be unsupported on very old git; fall back to a plain init.
         if !matches!(&init, Ok(s) if s.success()) {
-            let _ = fixture_git_command()
+            let status = git()
                 .arg("-C")
                 .arg(&dir)
                 .args(["init", "-q"])
                 .status()
                 .expect("git init");
+            assert!(status.success(), "fixture git init failed");
         }
         assert!(
-            dir.join(".git").exists(),
-            "git init left no .git behind, the empty commit would land in a parent repository: {}",
+            dir.join(".git").is_dir(),
+            "fixture init left no .git: {}",
             dir.display()
         );
-        let commit = fixture_git_command()
+        let commit = git()
             .arg("-C")
             .arg(&dir)
             .args([
@@ -1058,6 +1041,73 @@ mod tests {
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_meta_fixture_does_not_commit_into_an_inherited_repository() {
+        struct RestoreGitDir(Option<std::ffi::OsString>);
+        impl Drop for RestoreGitDir {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("GIT_DIR", value),
+                    None => std::env::remove_var("GIT_DIR"),
+                }
+            }
+        }
+        let outer = std::env::temp_dir().join(format!("zynk-outer-git-{}", std::process::id()));
+        std::fs::create_dir_all(&outer).unwrap();
+        let output = |args: &[&str]| {
+            let result = std::process::Command::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .arg("-C")
+                .arg(&outer)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            result.stdout
+        };
+        output(&["init", "--quiet"]);
+        output(&[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "outer",
+        ]);
+        let before_head = output(&["rev-parse", "HEAD"]);
+        let before_count = output(&["rev-list", "--count", "HEAD"]);
+        let before_config = std::fs::read(outer.join(".git/config")).unwrap();
+        let restore = RestoreGitDir(std::env::var_os("GIT_DIR"));
+        std::env::set_var("GIT_DIR", outer.join(".git"));
+        git_meta_in_a_temp_repo_returns_branch_and_sha();
+        drop(restore);
+        let after_head = output(&["rev-parse", "HEAD"]);
+        let after_count = output(&["rev-list", "--count", "HEAD"]);
+        let after_config = std::fs::read(outer.join(".git/config")).unwrap();
+        std::fs::remove_dir_all(&outer).unwrap();
+        assert_eq!(after_head, before_head, "fixture moved the outer HEAD");
+        assert_eq!(
+            after_count, before_count,
+            "fixture committed into the outer repository"
+        );
+        assert_eq!(
+            after_config, before_config,
+            "fixture changed the outer config"
+        );
     }
 
     #[test]

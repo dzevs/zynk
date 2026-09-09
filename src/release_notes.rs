@@ -126,6 +126,10 @@ fn clear_pending_at(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Debug-only: reads a `CHANGELOG.md` from the current directory to give the fake-update seam
+/// (`ZYNK_FAKE_UPDATE_VERSION`, `src/update.rs`) realistic notes. Compiled out of release builds
+/// with the rest of that seam (WARDEN-R14-SOURCE-ONLY-BYPASS-001).
+#[cfg(debug_assertions)]
 pub fn load_preview_from_local_changelog(version: &str) -> Option<ReleaseNotes> {
     let path = Path::new("CHANGELOG.md");
     let content = fs::read_to_string(path).ok()?;
@@ -137,6 +141,8 @@ pub fn load_preview_from_local_changelog(version: &str) -> Option<ReleaseNotes> 
     })
 }
 
+// Only reachable through the debug-only local-changelog preview above, plus its own unit test.
+#[cfg(any(debug_assertions, test))]
 fn extract_version_section(content: &str, version: &str) -> Option<String> {
     let header = format!("## [{version}]");
     let mut collecting = false;

@@ -218,6 +218,13 @@ fn spawn_server_process(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_zynk"));
     cmd.arg("server");
+    // ADR 0014 debug seam: identity reports and receipts are accepted only from the
+    // TARGET pane's process tree, and this harness process is outside every pane. The
+    // seam makes this server treat each accepted connection as the pane's own child.
+    // It is compiled only under `#[cfg(debug_assertions)]`, so it cannot exist in a
+    // release binary, and the tests that must exercise the REAL binding spawn a
+    // server without it.
+    cmd.env("ZYNK_TEST_TRUST_PEER_PID", "pane-child");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("ZYNK_SOCKET_PATH", socket_path);
@@ -1107,8 +1114,9 @@ fn partial_freshness_honest_bm25_fallback() {
 
 // C4 (M5c) — Hybrid RRF end-to-end. Uses the FAST-WORKER fixture + a BOUNDED POLL
 // (never a fixed sleep). A message with a distinctive multi-token body is sent; the
-// worker embeds it within ~1s. We poll `zynk query` until ranking becomes "rrf" (the
-// vector index gains the row → the query goes hybrid), bounded at 20s. With the
+// worker embeds it within ~1s. We poll `zynk query` until ranking becomes "rrf" AND
+// the worker queue drains, bounded at 20s. RRF can already use landed vectors
+// while jobs remain pending, so ranking alone does not establish readiness. With the
 // instant FakeEmbedder a 50ms-poll worker reaches this in <1s, so the bound only
 // guards a real regression.
 //
@@ -1127,18 +1135,22 @@ fn hybrid_rrf_end_to_end() {
     let body = "hybrid embedding fusion sentinel";
     let mid = agent_send(&fixture, "codex", "review", body);
 
-    // BOUNDED POLL: assert the system REACHES the hybrid (RRF) state within 20s.
+    // BOUNDED POLL: wait for the same hybrid/readiness contract asserted below.
     let (v, reached, took) = poll_query_until(
         &fixture,
         &[body],
         Duration::from_secs(20),
         Duration::from_millis(250),
-        |json| json["ranking"] == "rrf",
+        |json| {
+            json["ranking"] == "rrf"
+                && json["vector_index"]["ready"] == true
+                && json["vector_index"]["pending_jobs"] == 0
+        },
     );
     assert!(
         reached,
-        "query never reached ranking==\"rrf\" within 20s (worker should embed the body \
-         and the vector index gain the row) — last JSON: {v}"
+        "query never reached ready ranking==\"rrf\" within 20s (worker should embed the body \
+         and drain its queue) — last JSON: {v}"
     );
     println!("hybrid_rrf_end_to_end: ranking reached \"rrf\" in {took:?}");
 

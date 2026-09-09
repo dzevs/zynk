@@ -122,13 +122,31 @@ never bypass the gate.
 ## Licensing
 
 zynk is licensed under the GNU Affero General Public License v3.0 or later
-(AGPL-3.0-or-later), the same license as upstream herdr. By contributing, you
-agree that your contribution is licensed under AGPL-3.0-or-later as part of the
-combined work.
+(AGPL-3.0-or-later). By contributing, you agree that your contribution is
+licensed under AGPL-3.0-or-later as part of the combined work.
 
-Preserve the upstream copyright and the herdr attribution carried in
-[`NOTICE`](./NOTICE) and [`LICENSE`](./LICENSE) in all builds — the license
-demands it.
+Those are zynk's terms, not the upstream project's. Upstream code through
+upstream tag v0.7.1 was received under AGPL-3.0-or-later. Upstream relicensed
+to the Apache License 2.0 at upstream commit `cd5ea1be`, so upstream code taken
+from that commit onward was received under Apache-2.0 and is redistributed
+inside zynk's AGPL-3.0-or-later combined work, which Apache-2.0 section 4
+permits. zynk's own license is unchanged by that relicense.
+
+Preserve the upstream copyright and attribution carried in
+[`NOTICE`](./NOTICE), [`LICENSE`](./LICENSE) and
+[`LICENSE-APACHE-2.0.upstream`](./LICENSE-APACHE-2.0.upstream) in all builds —
+both licenses demand it. Apache-2.0 section 4(b) requires the modified files
+themselves to carry prominent notices stating that you changed them. When a
+change touches a file that carries post-`cd5ea1be` upstream code, add that file
+to the *Modified files (Apache-2.0 provenance)* list in [`NOTICE`](./NOTICE):
+that central index is this repository's convention for tracking which files
+those are, and it supports that duty rather than proving compliance by itself.
+
+Every listed file also carries the standard two-line notice as its own first
+lines, in that file's comment syntax — copy the wording from any file already
+on the list. The maintenance test `scripts/test_license_docs.py` enforces both
+directions: every listed file carries the notice, and no unlisted file does, so
+a stale or copied notice fails the build.
 
 ## Security
 

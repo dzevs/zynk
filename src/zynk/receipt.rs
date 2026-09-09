@@ -55,6 +55,20 @@ pub struct ReceiptRequest {
     pub receiver_agent_session_hint: Option<serde_json::Value>,
 }
 
+/// The `delivery_events.proof_source` a receipt records (ADR 0014). It names what
+/// the server proved — that a process inside the receiver pane's tree reported the
+/// ingestion — and deliberately NOT that an integration binary ran, which no
+/// same-UID check can establish.
+pub const RECEIPT_PROOF_SOURCE: &str = "pane_tree";
+
+/// The `delivery_events.proof_source` a receipt recorded BEFORE ADR 0014 (Codex Gate-2
+/// `msg_3e339000b75278a4`). That server matched the message ids and the hook-authoritative
+/// receiver identity, but never checked which process the caller was, so the row names an
+/// integration report whose origin nobody verified. It stays in the enumeration so migration
+/// 0004 can leave history alone instead of restating it as proof the old server never had.
+/// This build NEVER writes it: `append_delivery_event_in_transaction` refuses it outright.
+pub const LEGACY_RECEIPT_PROOF_SOURCE: &str = "integration";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptStatus {
     Received,
@@ -428,13 +442,15 @@ async fn append_received_event_in_tx(
 
     // Defense in depth: route the append through the shared validated path, which
     // re-checks `submitted -> received`, allocates the authoritative
-    // `delivery_events.seq`, and inserts with `proof_source='integration'`.
+    // `delivery_events.seq`, and inserts with `proof_source='pane_tree'` — the
+    // truthful provenance under ADR 0014: a process inside the receiver pane's
+    // tree reported ingestion, which is not a proof that the integration ran.
     append_delivery_event_in_transaction(
         conn,
         DeliveryEventInput {
             message_id: &request.message_id,
             event_type: DeliveryEventType::Received,
-            proof_source: "integration",
+            proof_source: RECEIPT_PROOF_SOURCE,
             timestamp: effective_timestamp,
             payload,
         },
@@ -677,8 +693,103 @@ mod tests {
         crate::zynk::db::block_on(f).unwrap();
     }
 
+    /// Every `proof_source` field initializer under `src/`, as `(path relative to src, value)`.
+    /// Type ascriptions are dropped: a `&str` in a struct or a signature declares the field, it
+    /// never writes one.
+    fn proof_source_initializers() -> Vec<(String, String)> {
+        // Assembled at runtime, so this scanner is not itself one of the initializers it counts.
+        let needle = format!("{}: ", "proof_source");
+        let needle = needle.as_str();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+        fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    rust_sources(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let mut sources = Vec::new();
+        rust_sources(&root, &mut sources);
+        sources.sort();
+        let mut found = Vec::new();
+        for path in sources {
+            let text = std::fs::read_to_string(&path).expect("read source");
+            let relative = path
+                .strip_prefix(&root)
+                .expect("under src")
+                .display()
+                .to_string();
+            for line in text.lines() {
+                for (index, _) in line.match_indices(needle) {
+                    let rest = &line[index + needle.len()..];
+                    let value = rest.split(',').next().unwrap_or(rest).trim();
+                    if value.starts_with('&') {
+                        continue;
+                    }
+                    found.push((relative.clone(), value.to_string()));
+                }
+            }
+        }
+        found
+    }
+
     #[test]
-    fn valid_receipt_records_received_with_integration_proof() {
+    fn no_write_path_records_the_legacy_proof_source() {
+        // ADR 0014 amendment (Codex Gate-2 `msg_3e339000b75278a4`). Migration 0004 keeps the
+        // pre-ADR-0014 provenance in the `delivery_events` CHECK so historical receipts keep
+        // saying what they were, which also means the schema alone no longer refuses a new
+        // write of it. `append_delivery_event_in_transaction` does, and this pins the other
+        // half: every provenance any source file assigns is listed here, so adding one is a
+        // deliberate edit, and the legacy value is assigned in exactly one place — the
+        // persistence test that proves the write path rejects it.
+        let initializers = proof_source_initializers();
+        assert!(
+            initializers.len() > 10,
+            "the scan found almost nothing and would pass vacuously: {initializers:?}"
+        );
+
+        let mut values: Vec<&str> = initializers
+            .iter()
+            .map(|(_, value)| value.as_str())
+            .collect();
+        values.sort_unstable();
+        values.dedup();
+        assert_eq!(
+            values,
+            vec![
+                "\"pane.send_input\"",
+                "\"pane.send_text\"",
+                "\"system.recovery\"",
+                "RECEIPT_PROOF_SOURCE",
+                "crate::zynk::receipt::LEGACY_RECEIPT_PROOF_SOURCE",
+                "crate::zynk::receipt::RECEIPT_PROOF_SOURCE",
+            ],
+            "an unpinned proof_source is assigned somewhere under src/"
+        );
+
+        let legacy: Vec<&(String, String)> = initializers
+            .iter()
+            .filter(|(_, value)| {
+                value.contains("LEGACY_RECEIPT_PROOF_SOURCE")
+                    || value.trim_matches('"') == LEGACY_RECEIPT_PROOF_SOURCE
+            })
+            .collect();
+        assert_eq!(
+            legacy.len(),
+            1,
+            "the legacy provenance must be assigned exactly once — in the test that proves it \
+             is refused: {legacy:?}"
+        );
+        assert_eq!(legacy[0].0, "zynk/persistence.rs");
+    }
+
+    #[test]
+    fn valid_receipt_records_received_with_pane_tree_proof() {
         run(async {
             let path = temp_db_path();
             let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
@@ -696,7 +807,11 @@ mod tests {
             assert_eq!(accepted.status, ReceiptStatus::Received);
             assert_eq!(
                 latest_event(&mut conn, "msg_v").await,
-                ("received".into(), "integration".into())
+                ("received".into(), RECEIPT_PROOF_SOURCE.into())
+            );
+            assert_ne!(
+                RECEIPT_PROOF_SOURCE, LEGACY_RECEIPT_PROOF_SOURCE,
+                "a receipt this build records must never carry the pre-ADR-0014 provenance"
             );
             let _ = std::fs::remove_file(path);
             Ok(())

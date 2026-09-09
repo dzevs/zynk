@@ -34,10 +34,25 @@ struct PaneRestoreStartup<'a> {
     reserved_agent_session: Option<String>,
 }
 
+/// What KIND of restore this is, so the two flags that differ between a cold restore and
+/// a live handoff travel together instead of as two more positional booleans.
+#[derive(Debug, Clone, Copy)]
+struct RestoreMode {
+    /// Whether a native agent pane may resume on restore.
+    resume_agents: bool,
+    /// Whether this is a live HANDOFF into a replacement server rather than a cold
+    /// restore of a saved session. Only a handoff re-applies the hook retirement fences:
+    /// after a handoff the agent processes are still running, so a retirement they
+    /// earned in the old process is still true in this one, while after a full restart
+    /// they are gone and a carried fence could only refuse a legitimate resume.
+    handoff: bool,
+}
+
 struct RestoreRuntimeContext<'a> {
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'a>,
     resume_agents_on_restore: bool,
+    handoff: bool,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
@@ -200,7 +215,10 @@ fn restore_with_imports_strict(
         cols,
         scrollback_limit_bytes,
         shell_config,
-        resume_agents_on_restore,
+        RestoreMode {
+            resume_agents: resume_agents_on_restore,
+            handoff: true,
+        },
         imported_panes,
         events,
         render_notify,
@@ -240,7 +258,10 @@ fn restore_with_imports(
         cols,
         scrollback_limit_bytes,
         shell_config,
-        resume_agents_on_restore,
+        RestoreMode {
+            resume_agents: resume_agents_on_restore,
+            handoff: false,
+        },
         imported_panes,
         events,
         render_notify,
@@ -256,7 +277,7 @@ fn restore_with_imports_and_failures(
     cols: u16,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'_>,
-    resume_agents_on_restore: bool,
+    mode: RestoreMode,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
@@ -271,7 +292,8 @@ fn restore_with_imports_and_failures(
         let runtime_context = RestoreRuntimeContext {
             scrollback_limit_bytes,
             shell_config,
-            resume_agents_on_restore,
+            resume_agents_on_restore: mode.resume_agents,
+            handoff: mode.handoff,
             events: events.clone(),
             render_notify: render_notify.clone(),
             render_dirty: render_dirty.clone(),
@@ -420,6 +442,32 @@ fn restore_workspace(
     )
 }
 
+/// Re-apply a pane's hook RETIREMENT fences, and ONLY on a live handoff.
+///
+/// After a handoff the agent processes are still running, so a retirement they earned in
+/// the old server is still true in the new one, and the fences have to be in place before
+/// the replacement accepts a single report — otherwise an ordinary same-session report
+/// re-anchors a released session and the message addressed to it reads `received`
+/// (Gate-3 arbiter `msg_24fa384d30dfa9af`). A COLD restore deliberately ignores the
+/// field: those processes are gone, every session restarts under the fresh-session rule,
+/// and a carried fence could only refuse a legitimate resume.
+fn apply_handoff_hook_retirement(
+    terminal: &mut TerminalState,
+    handoff: bool,
+    retirement: Option<crate::terminal::state::HookRetirementSnapshot>,
+) {
+    if !handoff {
+        return;
+    }
+    if let Some(retirement) = retirement {
+        let imported_at = std::time::Instant::now();
+        terminal.restore_hook_retirement(retirement, imported_at);
+        // The old detector can observe an exit AFTER capture. No snapshot can
+        // prove its transferred identity is still alive when the importer starts.
+        terminal.require_imported_hook_identity_confirmation(imported_at);
+    }
+}
+
 fn restored_worktree_space_membership(
     space: Option<crate::workspace::WorktreeSpaceMembership>,
 ) -> Option<crate::workspace::WorktreeSpaceMembership> {
@@ -481,6 +529,7 @@ fn restore_tab(
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
+        let saved_hook_retirement = saved_pane.and_then(|p| p.hook_retirement.clone());
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
         let startup = {
@@ -555,6 +604,11 @@ fn restore_tab(
             ) {
                 terminal.set_persisted_agent_session(session);
             }
+            apply_handoff_hook_retirement(
+                &mut terminal,
+                runtime_context.handoff,
+                saved_hook_retirement,
+            );
             panes.insert(*id, PaneState::new(terminal_id));
             terminals.push(terminal);
             continue;
@@ -621,6 +675,11 @@ fn restore_tab(
                 ) {
                     terminal.set_persisted_agent_session(session);
                 }
+                apply_handoff_hook_retirement(
+                    &mut terminal,
+                    runtime_context.handoff,
+                    saved_hook_retirement,
+                );
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
@@ -1204,6 +1263,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            hook_retirement: None,
                         },
                     )]),
                     zoomed: false,
@@ -1282,6 +1342,7 @@ mod tests {
                                 agent_name: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                hook_retirement: None,
                             },
                         ),
                         (
@@ -1292,6 +1353,7 @@ mod tests {
                                 agent_name: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                hook_retirement: None,
                             },
                         ),
                     ]),
@@ -1344,6 +1406,7 @@ mod tests {
                     agent_name: None,
                     agent_session: None,
                     launch_argv: None,
+                    hook_retirement: None,
                 },
             )
         };
@@ -1358,6 +1421,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             launch_argv: None,
+            hook_retirement: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1478,6 +1542,246 @@ mod tests {
         assert_eq!(next_public_pane_number, 3);
     }
 
+    /// A one-pane snapshot carrying a retired `zynk:pi` session, the shape a live
+    /// handoff hands the replacement server.
+    fn snapshot_with_hook_retirement(
+        retirement: Option<crate::terminal::state::HookRetirementSnapshot>,
+    ) -> SessionSnapshot {
+        let cwd = std::env::current_dir().unwrap();
+        SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneSnapshot {
+                            cwd,
+                            label: None,
+                            agent_name: None,
+                            agent_session: None,
+                            launch_argv: None,
+                            hook_retirement: retirement,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        }
+    }
+
+    /// The retirement a released `zynk:pi` session leaves behind, exported the way the
+    /// handoff capture exports it.
+    fn released_pi_retirement() -> crate::terminal::state::HookRetirementSnapshot {
+        let mut terminal =
+            TerminalState::new(TerminalId::alloc(), std::env::current_dir().unwrap());
+        terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-1"),
+                Some(20),
+            )
+            .expect("pi authority");
+        terminal
+            .release_agent_with_mutation("zynk:pi", "pi", Some(21))
+            .expect("release");
+        terminal
+            .export_hook_retirement(std::time::Instant::now())
+            .expect("the release is a retirement")
+    }
+
+    /// Whether this owner's ordinary same-session report would be accepted.
+    fn ordinary_pi_report_survives(terminal: &mut TerminalState) -> bool {
+        terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-1"),
+                Some(30),
+            )
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn handoff_restore_carries_the_hook_retirement_fences() {
+        // Gate-3 arbiter finding (msg_24fa384d30dfa9af): after a handoff the agent
+        // processes are still running, so a retirement they earned in the old server is
+        // still true in the new one and must be in place before it accepts any report.
+        let snapshot = snapshot_with_hook_retirement(Some(released_pi_retirement()));
+        let mut imports = HashMap::new();
+        let (_workspaces, terminals, _runtimes) = restore_handoff(
+            &snapshot,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            mpsc::channel(4).0,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("handoff restore");
+        let mut terminal = terminals.into_values().next().expect("restored terminal");
+        assert!(
+            terminal.hook_authority.is_none(),
+            "the restore must re-install the FENCE, never the live authority"
+        );
+        assert!(
+            !ordinary_pi_report_survives(&mut terminal),
+            "an ordinary same-session report re-anchored a released session after a handoff"
+        );
+    }
+
+    #[test]
+    fn imported_hook_identity_needs_a_post_import_process_observation() {
+        use crate::detect::Agent;
+        use std::time::{Duration, Instant};
+
+        let mut original = TerminalState::new(TerminalId::alloc(), PathBuf::from("/"));
+        let before_import = Instant::now() - Duration::from_secs(1);
+        original.record_identity_only_hook_report_at(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("handoff-session"),
+            Some(1),
+            before_import,
+        );
+        let snapshot = original.export_hook_retirement(Instant::now()).unwrap();
+        let mut imported = TerminalState::new(TerminalId::alloc(), PathBuf::from("/"));
+        apply_handoff_hook_retirement(&mut imported, true, Some(snapshot));
+        assert_eq!(
+            imported.confirmed_hook_owner(),
+            None,
+            "a snapshot is not post-import liveness"
+        );
+        imported.record_identity_only_hook_report_at(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("handoff-session"),
+            Some(2),
+            Instant::now(),
+        );
+        assert_eq!(
+            imported.confirmed_hook_owner(),
+            None,
+            "a hook cannot confirm itself"
+        );
+        imported.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            before_import,
+        );
+        assert_eq!(
+            imported.confirmed_hook_owner(),
+            None,
+            "a pre-import observation is too old"
+        );
+        imported.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
+        assert_eq!(
+            imported.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes"))
+        );
+        assert_eq!(
+            imported
+                .persisted_agent_session
+                .as_ref()
+                .unwrap()
+                .session_ref
+                .value,
+            "handoff-session"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_restore_ignores_the_hook_retirement_fences() {
+        // The deliberate asymmetry: after a full restart the agent processes are gone,
+        // every session starts fresh, and a carried fence could only refuse a legitimate
+        // resume.
+        let snapshot = snapshot_with_hook_retirement(Some(released_pi_retirement()));
+        let mut imports = HashMap::new();
+        let (_workspaces, terminals, _runtimes) = restore_with_imports(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            crate::pane::PaneShellConfig::new(
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+            ),
+            false,
+            &mut imports,
+            mpsc::channel(4).0,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut terminal = terminals.into_values().next().expect("restored terminal");
+        assert!(
+            ordinary_pi_report_survives(&mut terminal),
+            "a cold restore carried a fence and refused a legitimate fresh session"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_restore_accepts_a_snapshot_without_hook_retirement() {
+        // An older snapshot has no such field at all, and loads unchanged.
+        let json = serde_json::to_string(&snapshot_with_hook_retirement(None)).unwrap();
+        assert!(
+            !json.contains("hook_retirement"),
+            "the field must be skipped when absent: {json}"
+        );
+        let snapshot: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let mut imports = HashMap::new();
+        let (_workspaces, terminals, _runtimes) = restore_handoff(
+            &snapshot,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            mpsc::channel(4).0,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("handoff restore of a snapshot with no retirement");
+        let mut terminal = terminals.into_values().next().expect("restored terminal");
+        assert!(ordinary_pi_report_survives(&mut terminal));
+    }
+
     #[tokio::test]
     async fn native_agent_restore_defers_runtime_launch() {
         let cwd = std::env::current_dir().unwrap();
@@ -1508,6 +1812,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            hook_retirement: None,
                         },
                     )]),
                     zoomed: false,
@@ -1668,6 +1973,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                hook_retirement: None,
             },
         );
         let history = SessionHistorySnapshot {

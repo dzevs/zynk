@@ -3884,6 +3884,22 @@ mod tests {
         lines.join("\n")
     }
 
+    /// `claude_dialog_screen` with one explicit row printed below the dialog in place of a prose
+    /// work row, so a test can print chrome-shaped output after the dialog was answered.
+    fn claude_dialog_screen_with_work_row(boxed: bool, work_row: &str) -> String {
+        format!("{}\n{work_row}", claude_dialog_screen(boxed, 0))
+    }
+
+    /// A lower box border printed as ordinary work: the shape a tool-result box bottom, a nested
+    /// box or a divider leaves at the bottom of the buffer, plain and padded.
+    fn border_shaped_work_rows() -> [(&'static str, String); 2] {
+        let bar = "\u{2500}".repeat(10);
+        [
+            ("plain", format!("\u{2570}{bar}\u{256F}")),
+            ("padded", format!("  \u{2570}{bar}\u{256F}  ")),
+        ]
+    }
+
     fn claude_pane(cols: u16, screen: &str) -> GhosttyPaneTerminal {
         let (tx, _rx) = mpsc::channel(64);
         let mut terminal = crate::ghostty::Terminal::new(cols, 40, 10_000).unwrap();
@@ -3978,6 +3994,56 @@ mod tests {
                         assert!(detection.visible_working, "{case}");
                         assert!(!detection.visible_blocker, "{case}");
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_unboxed_answer_with_a_border_shaped_work_row_is_working_at_every_width() {
+        // Gate-3 ARB-18C structural variant (msg_ff224e77924eac1e / msg_805b00322058ccfa):
+        // `current_approval_boxed` reaches one logical line past the bottom on the strength of a
+        // border-SHAPED last line alone, so an ANSWERED unboxed footer followed by any single row
+        // that looks like a lower box border — a tool-result box bottom, a nested box, a divider —
+        // read as a current boxed dialog and the pane sat on Blocked while Claude worked.
+        for cols in [80u16, 40, 30, 20] {
+            for (form, work_row) in border_shaped_work_rows() {
+                for title in CLAUDE_BUSY_TITLES {
+                    let screen = claude_dialog_screen_with_work_row(false, &work_row);
+                    let (detection, rule) = claude_detection(cols, &screen, title);
+                    let case = format!("cols={cols} form={form} title={title}");
+                    assert_eq!(
+                        detection.state,
+                        crate::detect::AgentState::Working,
+                        "{case}"
+                    );
+                    assert_eq!(rule.as_deref(), Some("osc_title_working"), "{case}");
+                    assert!(detection.visible_working, "{case}");
+                    assert!(!detection.visible_blocker, "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_boxed_answer_with_a_border_shaped_work_row_is_working_at_every_width() {
+        // The control for the case above: with the BOXED dialog answered, the last two logical
+        // lines are the dialog's own closing border and the work row, so no footer is in range at
+        // all. Working here must come from the structure, not from counting footer hints.
+        for cols in [80u16, 40, 30, 20] {
+            for (form, work_row) in border_shaped_work_rows() {
+                for title in CLAUDE_BUSY_TITLES {
+                    let screen = claude_dialog_screen_with_work_row(true, &work_row);
+                    let (detection, rule) = claude_detection(cols, &screen, title);
+                    let case = format!("cols={cols} form={form} title={title}");
+                    assert_eq!(
+                        detection.state,
+                        crate::detect::AgentState::Working,
+                        "{case}"
+                    );
+                    assert_eq!(rule.as_deref(), Some("osc_title_working"), "{case}");
+                    assert!(detection.visible_working, "{case}");
+                    assert!(!detection.visible_blocker, "{case}");
                 }
             }
         }

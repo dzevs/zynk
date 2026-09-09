@@ -1,5 +1,7 @@
+# Modified by the zynk project: this file differs from the upstream version it was derived from.
+# See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 id = "claude"
-version = "2026.09.09.2"
+version = "2026.09.09.3"
 min_engine_version = 3
 updated_at = "2026-09-09T00:00:00Z"
 aliases = ["claude-code"]
@@ -26,16 +28,24 @@ any = [
 
 [[rules]]
 # The boxed form of the same dialog: Claude draws the footer inside the box, so the last logical line is the
-# box's closing border. Admitting that earlier footer row costs nothing only while the border is PROVEN — the
-# regex is anchored to the end of the region, so any other trailing line (work printed after the dialog was
-# answered, a prompt box, a divider) leaves this rule unmatched. Structure, not a wider window.
+# box's closing border. Admitting that earlier footer row costs nothing only while BOTH of those rows are
+# PROVEN to be the box: the first regex requires a side border on either side of the hint on the footer's own
+# logical line, and the second is anchored to the end of the region, so the closing border must be the last
+# logical line. A hint paired with a border-SHAPED trailing row alone is therefore not a boxed dialog — an
+# answered unboxed footer above one work row that looks like a lower border (a tool-result box bottom, a
+# nested box, a divider) leaves this rule unmatched, as does a half-drawn row carrying one border only. The
+# unboxed CURRENT footer stays `current_approval_footer`'s job. Regexes see the RAW region text, so the
+# footer pattern spells its own `(?i)`. Structure, not a wider window (Gate-3 ARB-18C structural variant).
 id = "current_approval_boxed"
 state = "blocked"
 priority = 990
 region = "bottom_logical_non_empty_lines(2)"
 visible_blocker = true
 contains = ["esc to cancel"]
-regex = ['(?m)^\s*[╰└╚┗][─━═╌╍┄┅┈┉]+[╯┘╝┛]\s*\z']
+regex = [
+  '(?im)^[ \t]*[│┃║][^\n]*esc to cancel[^\n]*[│┃║][ \t]*$',
+  '(?m)^\s*[╰└╚┗][─━═╌╍┄┅┈┉]+[╯┘╝┛]\s*\z',
+]
 any = [
   { contains = ["tab to amend"] },
   { contains = ["enter to select"] },

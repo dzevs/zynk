@@ -29,15 +29,31 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   reload keeps the valid subset of bindings.
 - The raw image-paste shortcut is remote-only: `keys.remote_image_paste` (default `ctrl+v`; empty disables).
 - **Linux x86_64 only** ([ADR 0013](docs/zynk/decisions/0013-linux-only-platform-scope.md)): zynk builds for
-  `x86_64-unknown-linux-gnu`; every other target fails at compile time with a message naming that ADR. There are
+  `x86_64-unknown-linux-gnu`; every other target fails at compile time with a message naming that ADR — the
+  build script skips the native library there, so that message is what the build reports. There are
   no platform tiers, no optional targets and no release artifacts to verify — distribution is source only, from
   this repository or crates.io. CI is one Ubuntu `just check` (which now includes the maintenance unittests).
 - `NOTICE` now records that upstream relicensed from AGPL-3.0-or-later to Apache-2.0 (upstream commit
   `cd5ea1be`), and the repository ships that Apache-2.0 text as `LICENSE-APACHE-2.0.upstream`. zynk's own
-  license is unchanged: AGPL-3.0-or-later, as recorded in `LICENSE`.
+  license is unchanged: AGPL-3.0-or-later, as recorded in `LICENSE`. `CONTRIBUTING.md` and `README.md` now tell
+  that same story — they no longer say zynk carries the same license as the upstream project, and they name
+  both provenance licenses and where each text lives.
 
 **Fixed**
 
+- Live handoff keeps imported hook identity provisional until the new detector
+  observes that owner's process running. An exit after snapshot capture cannot
+  leave a dead session receipt-capable; a still-running session needs no new hook report.
+- Build provenance no longer treats a failed Git status query as a clean checkout.
+  A failed query emits no source attestation, which remote custody refuses.
+- Concurrent database initialization rechecks temporary orphan sidecars under the
+  existing init lock. A sidecar link or a surviving orphan remains a refusal.
+- Remote attach binds executable validation and execution to an open file on the
+  remote host, including bridge startup and live handoff. Replacing an install
+  pathname cannot redirect the checked execution. Linux remote hosts require
+  `sha256sum` and executable procfs access; see `DEVELOPMENT.md` for the trust boundary.
+- Vendoring: source archives are validated before extraction, including on interpreters without tarfile
+  filters. Link traversal is refused, and a failed staged replacement preserves the previous vendor tree.
 - Startup: two zynk processes opening a fresh shared database at the same time (for example two named-session
   servers) no longer make the second one fail closed with a false "foreign database" error — first-time
   initialization is serialized across processes, and a database that holds only an empty migration ledger is
@@ -107,6 +123,9 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 - An agent whose integration reports only its session identity (Hermes) keeps that identity. Its pane still
   shows the session the integration reported, and it can record receipt of a message addressed to it, while
   its status stays screen-detected. A pane carrying a merely detected agent still cannot record a receipt.
+- Captured process exits fence receipts even while the event queue is full, and remain effective across a
+  live handoff before the queued event is handled. Fresh process observations confirm a restarted hook
+  owner without overriding the lifecycle status reported by its integration.
 - That reported identity is also retired for good when the agent ends. After the integration releases the
   pane, clears it, or its process exits, a late hook callback can no longer restore the receipt authority of
   the finished session; a genuinely new session, or a freshly observed process, anchors the pane again.
@@ -117,6 +136,14 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   arriving afterwards waits for the agent to be observed running again, as it did before.
 - Observations that arrive out of order are judged against the last ending seen, not merely against the
   newest evidence held: a report of the agent running that was taken before that ending no longer revives it.
+- Those comparisons use when each observation was **taken**, not when zynk got round to handling it. A report
+  of the agent running that was taken after its ending revives the session even when a busy moment makes both
+  arrive together; one taken before that ending, or at the very same instant, still cannot — and an ending
+  seen while the identity was still being retired is now remembered rather than lost.
+- Releasing or clearing a pane is such an ending too, even though it observes no process of its own: once the
+  integration reports a different session, a resume of the released one still waits for the agent to be seen
+  running again. A report of the agent running that was taken before that release, or at the very same
+  instant, no longer revives the released session, and each further release moves the line forward.
 
 **Removed**
 

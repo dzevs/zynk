@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 mod agents;
+pub(crate) mod caller;
 mod env;
 mod integrations;
 mod layouts;
@@ -214,8 +215,27 @@ impl App {
                 None
             };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
+        let applied_exit = if let AppEvent::StateChanged {
+            pane_id,
+            agent,
+            process_exited: true,
+            observed_at,
+            ..
+        } = &ev
+        {
+            Some((*pane_id, *agent, *observed_at))
+        } else {
+            None
+        };
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
+        if let Some((pane_id, agent, observed_at)) = applied_exit {
+            if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                if let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) {
+                    runtime.acknowledge_process_exit(agent, observed_at);
+                }
+            }
+        }
         if let Some(agents) = manifest_update_agents {
             self.reset_agent_detection_for_agents(&agents);
         }
@@ -753,18 +773,64 @@ impl App {
         runtime.try_send_focus_event(event);
     }
 
+    /// Handle a request that did NOT arrive over the API socket.
+    ///
+    /// The caller is the fail-closed `ApiCaller::default()`, so the pane-bound
+    /// methods of ADR 0014 are refused: nothing inside the server raises one for
+    /// itself, and a future path that did would have to say who it is.
+    ///
+    /// Internal UI dispatch and unit tests use this caller-less entry. Only the
+    /// socket entry carries credentials; internal actions gain no pane identity.
     pub(crate) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
+        self.handle_api_request_from_socket(request, crate::api::ApiCaller::default())
+    }
+
+    /// Handle a request that arrived on the API socket, carrying the peer
+    /// credentials the kernel reported for that connection (ADR 0014).
+    pub(crate) fn handle_api_request_from_socket(
+        &mut self,
+        request: crate::api::schema::Request,
+        caller: crate::api::ApiCaller,
+    ) -> String {
         self.drain_all_internal_events();
-        self.handle_api_request_after_internal_events_drained(request)
+        self.handle_api_request_after_internal_events_drained_from_socket(request, caller)
     }
 
     pub(crate) fn handle_api_request_after_internal_events_drained(
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
+        self.handle_api_request_after_internal_events_drained_from_socket(
+            request,
+            crate::api::ApiCaller::default(),
+        )
+    }
+
+    pub(crate) fn handle_api_request_after_internal_events_drained_from_socket(
+        &mut self,
+        request: crate::api::schema::Request,
+        caller: crate::api::ApiCaller,
+    ) -> String {
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
+
+        // ADR 0014: identity reports and receipts are accepted only from a
+        // process inside the TARGET pane's tree. The check lives here, at the
+        // socket-to-state boundary, so no bound handler can be reached without
+        // it, and the bound set is one greppable list (`pane_bound_target`).
+        if let Some((method, pane_id)) = caller::pane_bound_target(&request.method) {
+            if let Err(rejection) = self.caller_is_inside_pane(pane_id, caller) {
+                let message = rejection.message(pane_id);
+                tracing::warn!(
+                    method,
+                    pane_id,
+                    rejection = ?rejection,
+                    "refusing a pane-bound request from outside the pane (ADR 0014)"
+                );
+                return responses::encode_error(request.id, caller::CALLER_OUTSIDE_PANE, message);
+            }
+        }
 
         let response = match request.method {
             Method::ServerStop(_) => {
@@ -1141,40 +1207,18 @@ mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
 
-    /// Fixture git commands must never inherit the caller's git environment. With `GIT_DIR`
-    /// exported, `git init` initialises the directory that variable names, leaves
-    /// `<fixture>/.git` absent and still exits 0; every later `git -C <fixture> ...` then
-    /// silently reads and writes the OUTER repository. Neutralising the global/system config
-    /// keeps the host's own git settings out of the fixture as well.
-    fn fixture_git_command() -> std::process::Command {
-        let mut command = std::process::Command::new("git");
-        for key in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_COMMON_DIR",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            "GIT_CEILING_DIRECTORIES",
-            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-        ] {
-            command.env_remove(key);
-        }
-        command.env("GIT_CONFIG_GLOBAL", "/dev/null");
-        command.env("GIT_CONFIG_SYSTEM", "/dev/null");
-        command
-    }
-
     fn init_repo(path: &std::path::Path) {
-        let status = fixture_git_command()
+        let mut command = std::process::Command::new("git");
+        crate::workspace::scrub_git_env(&mut command);
+        let status = command
             .args(["init", "-q"])
             .current_dir(path)
             .status()
             .unwrap();
         assert!(status.success(), "git init failed for {}", path.display());
         assert!(
-            path.join(".git").exists(),
-            "git init reported success but left no .git behind, the fixture would operate on a parent repository: {}",
+            path.join(".git").is_dir(),
+            "fixture init left no .git: {}",
             path.display()
         );
     }
@@ -1208,6 +1252,46 @@ mod tests {
             },
         );
         app
+    }
+
+    #[tokio::test]
+    async fn internal_dispatch_has_no_pane_tree_identity() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("internal-caller")];
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let pane_id = app.public_pane_id(0, pane).unwrap();
+        for method in [
+            serde_json::json!({
+                "method": "pane.report_agent",
+                "params": {"pane_id": pane_id, "source": "zynk:pi", "agent": "pi", "state": "idle"}
+            }),
+            serde_json::json!({
+                "method": "pane.report_agent_session",
+                "params": {"pane_id": pane_id, "source": "zynk:pi", "agent": "pi", "agent_session_id": "internal"}
+            }),
+            serde_json::json!({
+                "method": "zynk.message_received",
+                "params": {"pane_id": pane_id, "message_id": "m", "conversation_id": "c",
+                    "conversation_seq": 1, "runtime_session_id": "rt", "socket_namespace": "sock"}
+            }),
+        ] {
+            let response = app
+                .dispatch_api_request("internal-caller", serde_json::from_value(method).unwrap());
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["error"]["code"], "caller_outside_pane");
+            assert!(response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no peer credentials"));
+        }
     }
 
     #[tokio::test]

@@ -1160,6 +1160,66 @@ fn claude_wrapped_current_footer_is_blocked_from_the_logical_tail() {
 }
 
 #[test]
+fn claude_boxed_approval_needs_the_footer_row_inside_the_box() {
+    // Gate-3 ARB-18C structural variant (msg_ff224e77924eac1e / msg_805b00322058ccfa): this rule
+    // admits the second-to-last logical line, so it must prove BOTH rows are the box — the footer
+    // row carries the side borders and the closing border ends the region. A hint paired with any
+    // border-SHAPED last line, or a half-drawn row with one border only, is not a boxed dialog.
+    let bar = "\u{2500}".repeat(10);
+    let unboxed_footer = format!("Esc to cancel \u{B7} Tab to amend\n\u{2570}{bar}\u{256F}");
+    let boxed_footer =
+        format!("\u{2502} Esc to cancel \u{B7} Tab to amend \u{2502}\n\u{2570}{bar}\u{256F}");
+    let half_drawn_footer =
+        format!("\u{2502} Esc to cancel \u{B7} Tab to amend\n\u{2570}{bar}\u{256F}");
+    let wrapped_boxed_logical = "\u{2502} Do you want to proceed? \u{2502}\n\u{2502} \u{276F} 1. Yes \u{2502}\n\
+        \u{2502} Esc to cancel \u{B7} Tab to amend \u{B7} ctrl+e to explain \u{2502}\n\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256F}";
+
+    for (label, screen, expected_state, expected_rule) in [
+        (
+            "unboxed footer above a border-shaped row",
+            unboxed_footer.as_str(),
+            AgentState::Working,
+            "osc_title_working",
+        ),
+        (
+            "footer row inside the box",
+            boxed_footer.as_str(),
+            AgentState::Blocked,
+            "current_approval_boxed",
+        ),
+        (
+            "footer row with a left border only",
+            half_drawn_footer.as_str(),
+            AgentState::Working,
+            "osc_title_working",
+        ),
+        (
+            "wrapped boxed dialog, logical form",
+            wrapped_boxed_logical,
+            AgentState::Blocked,
+            "current_approval_boxed",
+        ),
+    ] {
+        for title in CLAUDE_BUSY_TITLES {
+            let result = osc_explain(Agent::Claude, screen, title, "");
+            assert_eq!(result.state, expected_state, "{label} / {title}");
+            assert_eq!(
+                result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+                Some(expected_rule),
+                "{label} / {title}"
+            );
+            if expected_state == AgentState::Blocked {
+                assert!(result.visible_blocker, "{label} / {title}");
+                assert!(!result.visible_working, "{label} / {title}");
+            } else {
+                assert!(result.visible_working, "{label} / {title}");
+                assert!(!result.visible_blocker, "{label} / {title}");
+            }
+        }
+    }
+}
+
+#[test]
 fn claude_historical_dialog_above_a_later_divider_is_working() {
     for (label, screen, _) in claude_current_dialogs() {
         let historical = format!("{screen}\n──────────\nReading src/main.rs\n{CLAUDE_PROMPT_BOX}");

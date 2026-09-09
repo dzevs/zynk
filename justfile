@@ -1,10 +1,12 @@
+# Modified by the zynk project: this file differs from the upstream version it was derived from.
+# See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 # zynk task runner. Tests are hermetic (each spawns its own temp config/socket), so plain
 # `cargo nextest` / `just test` is safe to run directly.
 
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked scripts.test_hermes_integration_asset
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked scripts.test_hermes_integration_asset scripts.test_license_docs scripts.test_release_binary_audit
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
@@ -28,7 +30,7 @@ ci filter='all()': lint test-ts
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked scripts.test_hermes_integration_asset
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked scripts.test_hermes_integration_asset scripts.test_license_docs scripts.test_release_binary_audit
 
 # Install repo-local git hooks
 install-hooks:
@@ -40,6 +42,13 @@ install-hooks:
 # Build release binary
 build:
     cargo build --release --locked
+
+# Release verification (NOT part of `just check`): build the release binary and audit the ARTIFACT —
+# no debug-only env seam, no update URL constant, `zynk update` fails closed without reaching a
+# downloader. `just check` only runs the hermetic fixture-based unittest for the same script.
+release-audit:
+    cargo build --release --locked
+    python3 scripts/release_binary_audit.py "${CARGO_TARGET_DIR:-target}/release/zynk"
 
 # Build the vendored libghostty-vt source dist
 build-libghostty-vt:

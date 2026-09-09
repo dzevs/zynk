@@ -80,6 +80,8 @@ focused review perspectives. Personas don't invoke other personas; orchestration
 - Freeze the candidate branch and worktree from review submission until the consolidated verdict.
   Collect preliminary findings without editing the candidate; after the verdict, fix the required findings
   in one bounded batch. Review probes stay in isolated copies.
+- Label an unreviewed fix as **IMPLEMENTED / PENDING VERIFICATION**, not closed.
+  A passing author check or fix commit is not a reviewer approval.
 
 ## Current role assignment
 

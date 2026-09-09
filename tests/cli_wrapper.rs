@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 mod support;
 
 use std::fs;
@@ -21,82 +23,10 @@ fn unique_test_dir() -> PathBuf {
     support::test_root().join(format!("hcli-{}-{nanos}", std::process::id()))
 }
 
-/// Fixture git commands must never inherit the caller's git environment. With `GIT_DIR`
-/// exported, `git init` initialises the directory that variable names, leaves
-/// `<fixture>/.git` absent and still exits 0; every later `git -C <fixture> ...` then
-/// silently reads and writes the OUTER repository. Neutralising the global/system config
-/// keeps the host's own git settings out of the fixture as well.
-fn fixture_git_command() -> std::process::Command {
-    let mut command = std::process::Command::new("git");
-    for key in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    ] {
-        command.env_remove(key);
-    }
-    command.env("GIT_CONFIG_GLOBAL", "/dev/null");
-    command.env("GIT_CONFIG_SYSTEM", "/dev/null");
-    command
-}
-
-/// Path of `repo`'s own config file, asserting first that `repo` really is a repository.
-/// `git config` WALKS UP to the nearest parent repository, so an identity written into a
-/// fixture whose `git init` did not take lands in a real checkout's `.git/config`.
-fn fixture_git_config_path(repo: &std::path::Path) -> std::path::PathBuf {
-    assert!(
-        repo.join(".git").exists(),
-        "fixture repo has no .git, refusing to write a git config that would escape into a parent repository: {}",
-        repo.display()
-    );
-    let output = fixture_git_command()
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git rev-parse --git-common-dir failed for {}: {}",
-        repo.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim()).join("config")
-}
-
-/// Seed the fixture identity so the write cannot travel: `--file` names the repository's
-/// own config file and never walks up to a parent repository.
-fn seed_fixture_identity(repo: &std::path::Path) {
-    let config = fixture_git_config_path(repo);
-    let config = config.to_string_lossy().into_owned();
-    run_git(
-        repo,
-        &[
-            "config",
-            "--file",
-            &config,
-            "user.email",
-            "zynk@example.invalid",
-        ],
-    );
-    run_git(
-        repo,
-        &["config", "--file", &config, "user.name", "Zynk Test"],
-    );
-}
-
 fn run_git(repo: &Path, args: &[&str]) {
-    let status = fixture_git_command()
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .status()
-        .unwrap();
+    let mut command = Command::new("git");
+    scrub_git_env(&mut command);
+    let status = command.arg("-C").arg(repo).args(args).status().unwrap();
     assert!(
         status.success(),
         "git command failed: git -C {} {}",
@@ -105,10 +35,73 @@ fn run_git(repo: &Path, args: &[&str]) {
     );
 }
 
+/// Strip every inherited git environment variable that could point a fixture's git command at
+/// ANOTHER repository, and pin the config files it may read.
+///
+/// The arbiter's reproduction: with `GIT_DIR` inherited, `git init` inside a child directory exits
+/// 0 while leaving `child/.git` ABSENT — git initialises the directory `GIT_DIR` names — and the
+/// `git -C child config …` that follows exits 0 too, writing into the OUTER repository, because
+/// `git config` walks up to the nearest parent repository. Every status code is success, so nothing
+/// in the fixture notices, and a real checkout is left authoring commits as
+/// `Zynk Test <zynk@example.invalid>`. A sanitised caller environment hides this, so a fixture
+/// cannot rely on having one.
+fn scrub_git_env(command: &mut Command) -> &mut Command {
+    let names: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .chain(command.get_envs().map(|(name, _)| name.to_owned()))
+        .filter(|name| name.as_encoded_bytes().starts_with(b"GIT_"))
+        .collect();
+    for name in names {
+        command.env_remove(name);
+    }
+    command
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+}
+
+/// Seed the fixture repository's commit identity, with the write unable to leave the fixture.
+///
+/// Containment is asserted BEFORE the write — a `git init` that did not take aborts the test rather
+/// than escaping — and the write then names the config file explicitly, which cannot walk up at all.
+fn set_repo_identity(repo: &Path) {
+    let dot_git = repo.join(".git");
+    assert!(
+        dot_git.exists(),
+        "fixture repository was not initialised, so a config write would escape into a parent repository: {}",
+        repo.display()
+    );
+    let config_path = if dot_git.is_dir() {
+        dot_git.join("config")
+    } else {
+        // A linked worktree or a submodule: `.git` is a FILE naming the real gitdir.
+        let mut command = Command::new("git");
+        scrub_git_env(&mut command);
+        let output = command
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "could not resolve the git dir of {}",
+            repo.display()
+        );
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("config")
+    };
+    let config_path = config_path.to_string_lossy().into_owned();
+    for (key, value) in [
+        ("user.email", "zynk@example.invalid"),
+        ("user.name", "Zynk Test"),
+    ] {
+        run_git(repo, &["config", "--file", &config_path, key, value]);
+    }
+}
+
 fn create_committed_repo(path: &Path) {
     fs::create_dir_all(path).unwrap();
     run_git(path, &["init", "--quiet"]);
-    seed_fixture_identity(path);
+    set_repo_identity(path);
     fs::write(path.join("README.md"), "test\n").unwrap();
     run_git(path, &["add", "README.md"]);
     run_git(path, &["commit", "--quiet", "-m", "initial"]);
@@ -279,6 +272,13 @@ fn spawn_named_server_with_env(
         .env_remove("ZYNK_SOCKET_PATH")
         .env_remove("ZYNK_CLIENT_SOCKET_PATH")
         .env_remove("ZYNK_ENV")
+        // ADR 0014 debug seam: identity reports and receipts are accepted only from the
+        // TARGET pane's process tree, and this harness process is outside every pane. The
+        // seam makes this server treat each accepted connection as the pane's own child.
+        // It is compiled only under `#[cfg(debug_assertions)]`, so it cannot exist in a
+        // release binary, and the tests that must exercise the REAL binding spawn a
+        // server without it.
+        .env("ZYNK_TEST_TRUST_PEER_PID", "pane-child")
         .stdin(std::process::Stdio::null());
     for (key, value) in extra_env {
         command.env(key, value);
@@ -425,6 +425,13 @@ fn spawn_zynk_with_config(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_zynk"));
     cmd.arg("server");
+    // ADR 0014 debug seam: identity reports and receipts are accepted only from the
+    // TARGET pane's process tree, and this harness process is outside every pane. The
+    // seam makes this server treat each accepted connection as the pane's own child.
+    // It is compiled only under `#[cfg(debug_assertions)]`, so it cannot exist in a
+    // release binary, and the tests that must exercise the REAL binding spawn a
+    // server without it.
+    cmd.env("ZYNK_TEST_TRUST_PEER_PID", "pane-child");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("ZYNK_SOCKET_PATH", socket_path);
@@ -2497,6 +2504,103 @@ fn status_commands_report_client_and_server_versions() {
         .is_some_and(|path| !path.is_empty()));
 
     cleanup_spawned_zynk(zynk, base);
+}
+
+#[test]
+fn a_remote_bridge_bootstraps_its_running_image_after_path_replacement() {
+    use interprocess::local_socket::traits::StreamCommon as _;
+    use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket = runtime_dir.join("zynk.sock");
+    fs::create_dir_all(config_home.join("zynk-dev")).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(
+        config_home.join("zynk-dev/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+    let path = base.join("zynk");
+    fs::copy(env!("CARGO_BIN_EXE_zynk"), &path).unwrap();
+    let image = fs::File::open(&path).unwrap();
+    let marker = base.join("wrong-image");
+    let replacement = base.join("replacement");
+    fs::write(
+        &replacement,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    let log_path = base.join("bridge.log");
+    let child = Command::new(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        image.as_raw_fd()
+    ))
+    .arg("remote-client-bridge")
+    .env("XDG_CONFIG_HOME", &config_home)
+    .env("XDG_RUNTIME_DIR", &runtime_dir)
+    .env("ZYNK_SQLITE_HOME", config_home.join("sqlite"))
+    .env("ZYNK_SOCKET_PATH", &socket)
+    .env(
+        "ZYNK_CLIENT_SOCKET_PATH",
+        runtime_dir.join("zynk-client.sock"),
+    )
+    .env_remove("ZYNK_HOME")
+    .env_remove("ZYNK_SESSION")
+    .env_remove("ZYNK_ENV")
+    .env_remove("ZYNK_PANE_ID")
+    .env_remove("ZYNK_TEST_TRUST_PEER_PID")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(fs::File::create(&log_path).unwrap())
+    .spawn()
+    .unwrap();
+    register_spawned_zynk_pid(Some(child.id()));
+    register_runtime_dir(&runtime_dir);
+    let mut bridge = SpawnedServerProcess {
+        child,
+        log_path: log_path.clone(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() && Instant::now() < deadline {
+        if bridge.child.try_wait().unwrap().is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let started = socket.exists();
+    // A copied/deleted executable is invisible to the usual pathname-based PID
+    // scanner. Ask the isolated socket for its real kernel-reported daemon PID.
+    let pid = socket
+        .as_path()
+        .to_fs_name::<GenericFilePath>()
+        .and_then(Stream::connect)
+        .ok()
+        .and_then(|stream| stream.peer_creds().ok().and_then(|creds| creds.pid()))
+        .and_then(|pid| u32::try_from(pid).ok());
+    register_spawned_zynk_pid(pid);
+    let image_meta = image.metadata().unwrap();
+    let same_image = pid.is_some_and(|pid| {
+        fs::metadata(format!("/proc/{pid}/exe"))
+            .is_ok_and(|meta| (meta.dev(), meta.ino()) == (image_meta.dev(), image_meta.ino()))
+    });
+    let diagnostic = fs::read_to_string(&log_path).unwrap_or_default();
+    let wrong_image = marker.exists();
+    if started {
+        let _ = run_cli(&socket, &["server", "stop"]);
+    }
+    drop(bridge);
+    cleanup_test_base(&base);
+    assert!(
+        started && same_image,
+        "bridge did not bootstrap its pinned image: {diagnostic}; pid={pid:?}"
+    );
+    assert!(!wrong_image, "the bridge bootstrapped substituted bytes");
 }
 
 #[test]

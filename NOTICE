@@ -37,9 +37,13 @@ available with any conveyed or network-served build.
 
 Modified files (Apache-2.0 provenance)
 --------------------------------------
-Per Apache-2.0 section 4(b): every file that carries post-cd5ea1be upstream
-code and was changed by zynk is recorded per commit in
-docs/zynk/fork-patch-ledger.md and enumerated here.
+Apache-2.0 section 4(b) requires modified files to carry prominent notices
+stating that they were changed. Every file listed below carries such a notice
+in its own first lines, and this central index tracks the same duty from one
+place: every file that carries post-cd5ea1be upstream code and was changed by
+zynk is recorded per commit in docs/zynk/fork-patch-ledger.md and enumerated
+here. The maintenance test scripts/test_license_docs.py enforces both
+directions — every listed file carries the notice, and no unlisted file does.
 
 <!-- apache-modified-files: begin -->
 - Cargo.toml

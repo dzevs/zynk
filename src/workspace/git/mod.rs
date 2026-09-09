@@ -4,7 +4,7 @@ mod config_tests;
 mod discovery;
 mod status;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use self::{
     discovery::{derive_label_from_cwd, git_branch, git_space_metadata, GitSpaceMetadata},

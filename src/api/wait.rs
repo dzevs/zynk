@@ -61,8 +61,15 @@ pub(super) fn wait_for_output(
                 strip_ansi: params.strip_ansi,
             }),
         };
-        let response =
-            dispatch_to_app_with_timeout(read_request, api_tx, Some(APP_RESPONSE_TIMEOUT));
+        let response = dispatch_to_app_with_timeout(
+            read_request,
+            api_tx,
+            Some(APP_RESPONSE_TIMEOUT),
+            // ADR 0014: this re-dispatch only ever carries a READ method
+            // (`pane.read` / `pane.get`), never a pane-bound one, so the
+            // fail-closed default caller is correct and deliberate.
+            crate::api::ApiCaller::default(),
+        );
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&response) else {
             return Ok(Some(response));
         };

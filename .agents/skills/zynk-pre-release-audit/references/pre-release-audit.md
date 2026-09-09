@@ -59,9 +59,10 @@ Process:
 8. Check version + packaging consistency.
    - `Cargo.toml` `version` must match the intended tag (`vX.Y.Z`), the top `CHANGELOG.md` section, and the
      README version pins.
-   - Confirm `just check` is green and `just gate` is clean; confirm `LICENSE` + `NOTICE` (AGPL-3.0-or-later +
-     the upstream attribution) are intact. `check-required` on the candidate SHA is the only build evidence
-     there is — zynk publishes no binaries (ADR 0013).
+   - Confirm `just check` is green and `just gate` is clean; confirm `LICENSE`, `NOTICE` and
+     `LICENSE-APACHE-2.0.upstream` (AGPL-3.0-or-later, the upstream attribution, and the Apache-2.0 text that
+     post-`cd5ea1be` upstream code travels under) are intact. `check-required` on the candidate SHA is the only
+     build evidence there is — zynk publishes no binaries (ADR 0013).
 
 9. Apply changes only when explicitly asked.
    - Do not edit files during the audit unless the user asks you to apply fixes.

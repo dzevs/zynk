@@ -1,4 +1,6 @@
 #!/bin/sh
+# Modified by the zynk project: this file differs from the upstream version it was derived from.
+# See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 # managed by zynk; reinstalling the integration replaces this file.
 # ZYNK_INTEGRATION_ID=qodercli
 # ZYNK_INTEGRATION_VERSION=3

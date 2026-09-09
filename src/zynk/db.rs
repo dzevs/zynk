@@ -171,16 +171,23 @@ async fn open_migrated_at_with_hook(
     // SQLite discards a stale `-wal` on the first read of a zero-page database (ADR 0011). A HOT
     // rollback journal is refused before any connection too: a read-write pager would play it back
     // on its first shared lock — before any verdict (Codex Gate-2 round 8).
-    refuse_orphan_sidecars(path)?;
-    // A journal that looks hot may belong to a zynk initializer mid journal-mode switch (it holds the
-    // init lock for that): wait for the lock, then re-check; a journal that is still hot afterwards
-    // was left by a crashed or foreign writer and is refused for good.
+    // An apparently orphaned sidecar or hot journal may belong to a zynk initializer
+    // holding the init lock. Wait for that writer, then repeat BOTH guards before
+    // opening SQLite. Sidecar bytes still present after the lock are never discarded.
     let mut early_lock = None;
-    if let Err(err) = refuse_hot_journal(path) {
-        if err.code != "db_hot_journal" {
+    if let Err(err) = refuse_orphan_sidecars(path).and_then(|()| refuse_hot_journal(path)) {
+        if !matches!(err.code, "db_hot_journal" | "db_orphan_sidecar") {
             return Err(err);
         }
-        let lock = InitLock::acquire(path).await?;
+        let lock = InitLock::acquire(path).await.map_err(|lock_err| {
+            DbError::new(
+                lock_err.code,
+                format!(
+                    "{}; pending {}: {}",
+                    lock_err.message, err.code, err.message
+                ),
+            )
+        })?;
         refuse_orphan_sidecars(path)?;
         refuse_hot_journal(path)?;
         early_lock = Some(lock);
@@ -1876,6 +1883,169 @@ mod tests {
         path
     }
 
+    /// A genuine native DB migrated by hand up to (and including) `max_version`,
+    /// with the built-in migrator's own SQL and checksums in the ledger, so a
+    /// later `open_migrated_at` applies exactly the migrations above it.
+    fn plant_native_db_through(tag: &str, max_version: i64) -> std::path::PathBuf {
+        let path = plant_real_sqlx_ledger(tag);
+        let applied: Vec<_> = MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= max_version)
+            .collect();
+        assert!(
+            !applied.is_empty(),
+            "no migrations at or below {max_version}"
+        );
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await?;
+            conn.execute("PRAGMA journal_mode = WAL").await?;
+            for migration in applied {
+                conn.execute(migration.sql.as_ref()).await?;
+                sqlx::query(
+                    "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+                     VALUES (?, ?, 1, ?, 0)",
+                )
+                .bind(migration.version)
+                .bind(migration.description.as_ref())
+                .bind(migration.checksum.as_ref())
+                .execute(&mut conn)
+                .await?;
+            }
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn migration_0004_preserves_legacy_integration_rows() {
+        // ADR 0014 amendment (Codex Gate-2 `msg_3e339000b75278a4`): migration 0004 WIDENS
+        // the CHECK so a receipt this build records can say `pane_tree`; it must not
+        // restate history. A `received` row written before the pane-tree origin check
+        // carries `integration` — the server matched the ids but never checked where the
+        // caller came from — and relabelling it would claim evidence nobody collected.
+        // This walks the real upgrade: a DB at version 3 with an `integration` row,
+        // opened, and the row must come back exactly as it was written.
+        let path = plant_native_db_through("proof-source-legacy", 3);
+        assert_eq!(recorded_versions(&path), vec![1, 2, 3]);
+
+        block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(false),
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO conversations (id, runtime_session_id, socket_namespace, workspace_id, \
+                 tab_id, created_at, last_message_at) \
+                 VALUES ('conv_pre', 'rt', 'ns', 'w1', 't1', '2026-09-09T00:00:00Z', '2026-09-09T00:00:00Z')",
+            )
+            .await?;
+            for (id, label) in [("p1", "codex"), ("p2", "claude")] {
+                sqlx::query(
+                    "INSERT INTO conversation_participants (id, conversation_id, agent_label, \
+                     participant_key, joined_at) VALUES (?, 'conv_pre', ?, ?, '2026-09-09T00:00:00Z')",
+                )
+                .bind(id)
+                .bind(label)
+                .bind(label)
+                .execute(&mut conn)
+                .await?;
+            }
+            conn.execute(
+                "INSERT INTO messages (id, conversation_id, conversation_seq, runtime_session_id, \
+                 socket_namespace, created_at, target_arg, from_participant_id, to_participant_id, \
+                 type, body, body_hash, workspace_id, tab_id) \
+                 VALUES ('msg_pre', 'conv_pre', 1, 'rt', 'ns', '2026-09-09T00:00:00Z', 'claude', \
+                 'p1', 'p2', 'note', 'body', 'hash', 'w1', 't1')",
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) \
+                 VALUES ('evt_submit', 'msg_pre', 'submitted', 'pane.send_input', 1, '2026-09-09T00:00:01Z')",
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp, payload_json) \
+                 VALUES ('evt_receipt', 'msg_pre', 'received', 'integration', 2, '2026-09-09T00:00:02Z', '{\"kept\":true}')",
+            )
+            .await?;
+            conn.close().await?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+
+        let mut conn = block_on(open_migrated_at(&path)).unwrap();
+        let rows: Vec<(String, String, String)> = block_on(async {
+            sqlx::query_as(
+                "SELECT id, proof_source, payload_json FROM delivery_events ORDER BY seq",
+            )
+            .fetch_all(&mut conn)
+            .await
+            .map_err(|err| DbError::new("query", err.to_string()))
+        })
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "evt_submit".to_string(),
+                    "pane.send_input".to_string(),
+                    "{}".to_string()
+                ),
+                (
+                    "evt_receipt".to_string(),
+                    crate::zynk::receipt::LEGACY_RECEIPT_PROOF_SOURCE.to_string(),
+                    "{\"kept\":true}".to_string()
+                ),
+            ],
+            "the legacy receipt row keeps its own provenance, and every other column survives"
+        );
+
+        // The widened CHECK admits what this build actually records.
+        block_on(async {
+            sqlx::query(
+                "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) \
+                 VALUES ('evt_new', 'msg_pre', 'received', ?, 3, '2026-09-09T00:00:03Z')",
+            )
+            .bind(crate::zynk::receipt::RECEIPT_PROOF_SOURCE)
+            .execute(&mut conn)
+            .await
+            .map_err(|err| DbError::new("insert", err.to_string()))
+        })
+        .unwrap();
+
+        // And nothing outside the enumeration: widening is not the same as opening.
+        let refused = block_on(async {
+            let outcome = sqlx::query(
+                "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) \
+                 VALUES ('evt_bogus', 'msg_pre', 'received', 'hearsay', 4, '2026-09-09T00:00:04Z')",
+            )
+            .execute(&mut conn)
+            .await;
+            Ok::<bool, DbError>(outcome.is_err())
+        })
+        .unwrap();
+        assert!(
+            refused,
+            "a proof_source outside the enumeration must still be refused"
+        );
+        block_on(async {
+            conn.close()
+                .await
+                .map_err(|err| DbError::new("close", err.to_string()))
+        })
+        .unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
     fn recorded_versions(path: &std::path::Path) -> Vec<i64> {
         block_on(async {
             let mut conn = SqliteConnection::connect_with(
@@ -3035,6 +3205,41 @@ mod tests {
             let err = block_on(open_migrated_at_without_recovery(&path)).unwrap_err();
             assert_eq!(err.code, "db_orphan_sidecar", "{suffix}: {}", err.message);
             assert_eq!(std::fs::read(sidecar(&path, suffix)).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn a_sidecar_from_an_active_initializer_is_rechecked_under_its_lock() {
+        for journal_survives in [false, true] {
+            let path = tmp_db("active-initializer-sidecar");
+            let journal = sidecar(&path, "-journal");
+            let holder = hold_init_lock(&path);
+            std::fs::write(&path, b"").unwrap();
+            let bytes = vec![0_u8; 512];
+            std::fs::write(&journal, &bytes).unwrap();
+            block_on(async {
+                let mut opening = Box::pin(open_migrated_at_without_recovery(&path));
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), &mut opening).await.is_err(),
+                    "an active initializer's journal must be checked after its init lock is released"
+                );
+                assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+                assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+                if !journal_survives {
+                    std::fs::remove_file(&journal).unwrap();
+                }
+                holder.unlock().unwrap();
+                let result = opening.await;
+                if journal_survives {
+                    assert_eq!(result.unwrap_err().code, "db_orphan_sidecar");
+                    assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+                    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+                } else {
+                    result.unwrap().close().await.unwrap();
+                    assert_eq!(classify_db_at(&path).await.unwrap(), DbClassification::Native);
+                }
+                Ok(())
+            }).unwrap();
         }
     }
 

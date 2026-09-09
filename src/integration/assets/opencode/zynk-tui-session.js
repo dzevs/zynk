@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 // installed by zynk
 // managed by zynk; reinstalling or updating the integration overwrites this file.
 // ZYNK_INTEGRATION_ID=opencode-tui

@@ -356,17 +356,19 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane = ws.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
-        // Hook-reported identity ONLY — never `effective_agent_label()`'s detection fallback.
-        let agent_label = terminal
-            .hook_authority
-            .as_ref()
-            .map(|authority| authority.agent_label.as_str())
-            .or_else(|| {
-                terminal
-                    .hook_identity
-                    .as_ref()
-                    .map(|identity| identity.agent_label.as_str())
-            })?;
+        // Hook-reported identity ONLY — never `effective_agent_label()`'s detection
+        // fallback — and only while it is CONFIRMED: an identity accepted inside the
+        // window between an exit's capture and its handling is held provisional until
+        // the detector sees the process again, and a provisional identity anchors no
+        // receipt (`TerminalState::confirmed_hook_owner`).
+        if self
+            .terminal_runtimes
+            .get(&pane.attached_terminal_id)
+            .is_some_and(|runtime| !runtime.pending_process_exits().is_empty())
+        {
+            return None;
+        }
+        let (_, agent_label) = terminal.confirmed_hook_owner()?;
         // Owner coherence: a persisted session is part of this receiver's identity only when it
         // was reported for the SAME agent the hook identity names; a session another owner
         // persisted on this terminal must not anchor a receipt (Codex Gate-2 R13).
@@ -451,4 +453,223 @@ pub(crate) fn terminal_agent_session_info(
             kind: session.session_ref.kind,
             value: session.session_ref.value.clone(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+    use crate::detect::{Agent, AgentState};
+    use crate::workspace::Workspace;
+    use std::time::{Duration, Instant};
+
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
+
+    #[test]
+    fn authoritative_receiver_identity_is_none_while_the_hook_identity_is_provisional() {
+        // Gate-3 B1 arbiter (msg_c76820d29bbb759b): the receipt gate is where a
+        // provisional identity has to be invisible. The pane still shows its session —
+        // the identity exists — but until the detector has seen the process after the
+        // exit it captured, nothing may anchor a receipt on it, and the CLI answers
+        // `receiver_identity_unverified` exactly as for a pane no hook ever named.
+        let mut app = test_app();
+        let workspace = Workspace::test_new("provisional-receiver");
+        let pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let pane_id = app.public_pane_id(0, pane).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .panes
+            .get(&pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        let exit_at = Instant::now();
+        {
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+            std::thread::sleep(Duration::from_millis(20));
+            terminal
+                .set_agent_session_ref_for_session_start(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("existing-session"),
+                    Some(20),
+                    Some("startup".into()),
+                )
+                .expect("initial session");
+        }
+        assert!(app.authoritative_receiver_identity(&pane_id).is_some());
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Hermes),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                true,
+                exit_at,
+            );
+
+        assert!(
+            app.state.terminals[&terminal_id].hook_identity.is_some(),
+            "the late exit retired an identity it was too old to retire"
+        );
+        assert!(
+            app.authoritative_receiver_identity(&pane_id).is_none(),
+            "a provisional identity was accepted as a receipt anchor"
+        );
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Hermes),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                false,
+                exit_at + Duration::from_millis(5),
+            );
+
+        let receiver = app
+            .authoritative_receiver_identity(&pane_id)
+            .expect("a confirmed identity anchors a receipt again");
+        assert_eq!(receiver.agent_label, "hermes");
+    }
+
+    #[tokio::test]
+    async fn a_captured_exit_blocks_receipts_before_the_event_queue_accepts_it() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("pending-exit");
+        let pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let public_id = app.public_pane_id(0, pane).unwrap();
+        let terminal_id = app.state.workspaces[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("old-session"),
+                Some(10),
+            )
+            .expect("hook authority");
+        assert!(app.authoritative_receiver_identity(&public_id).is_some());
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(crate::events::AppEvent::UpdateReady {
+            version: "test".into(),
+            install_command: String::new(),
+        })
+        .unwrap();
+        let exit_at = Instant::now();
+        {
+            let publish = app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .test_publish_process_exit(tx, pane, Agent::Pi, exit_at);
+            tokio::pin!(publish);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut publish)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                app.authoritative_receiver_identity(&public_id).is_none(),
+                "an exit waiting for queue space must already fence receipt authority"
+            );
+            rx.recv().await.unwrap();
+            publish.await;
+            assert!(
+                app.authoritative_receiver_identity(&public_id).is_none(),
+                "queue acceptance is not application of the exit"
+            );
+        }
+        let response = app.handle_api_request_from_socket(
+            crate::api::schema::Request {
+                id: "pending-exit-receipt".into(),
+                method: crate::api::schema::Method::ZynkMessageReceived(
+                    crate::api::schema::ZynkMessageReceivedParams {
+                        pane_id: public_id.clone(),
+                        message_id: "msg".into(),
+                        conversation_id: "conv".into(),
+                        conversation_seq: 1,
+                        runtime_session_id: "rt".into(),
+                        socket_namespace: "sock".into(),
+                        receiver_seq: None,
+                        timestamp: None,
+                        status: None,
+                        receiver_agent_session: None,
+                    },
+                ),
+            },
+            crate::api::ApiCaller {
+                peer: None,
+                trusted_as_pane_child: true,
+            },
+        );
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "receiver_identity_unverified");
+        app.handle_internal_event(rx.recv().await.unwrap());
+        assert!(app.authoritative_receiver_identity(&public_id).is_none());
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id: pane,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("new-session"),
+                Some(11),
+            )
+            .expect("fresh owner");
+        assert!(
+            app.authoritative_receiver_identity(&public_id).is_some(),
+            "applying an exit must retire its pending fence, not ban a later owner"
+        );
+    }
 }

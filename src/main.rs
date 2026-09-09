@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::io;
 
 use crossterm::event::{
@@ -55,6 +57,7 @@ mod agent_resume;
 mod api;
 mod app;
 mod build_info;
+mod build_sha;
 mod checksum;
 mod cli;
 mod client;
@@ -523,7 +526,7 @@ fn main() -> io::Result<()> {
             ),
             (
                 "zynk update",
-                "(unavailable: no update-manifest hosting yet — update via Homebrew, a release binary, Nix, or source)",
+                "(unavailable: zynk is source-only — rebuild with cargo install --locked)",
             ),
             (
                 "zynk server stop",
@@ -531,7 +534,7 @@ fn main() -> io::Result<()> {
             ),
             (
                 "zynk channel set <stable|preview>",
-                "(unavailable: no update-manifest hosting yet)",
+                "(unavailable: zynk is source-only — there are no release channels)",
             ),
             (
                 "zynk server reload-config",
@@ -634,7 +637,7 @@ fn main() -> io::Result<()> {
     }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("zynk {}", crate::build_info::version());
+        println!("{}", crate::build_info::version_line());
         return Ok(());
     }
 

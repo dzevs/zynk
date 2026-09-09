@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::cell::Cell;
 use std::io;
 use std::path::Path;
@@ -160,8 +162,16 @@ fn active_pending_release(
     }
 }
 
+type PendingProcessExits = Arc<Mutex<Vec<(Option<Agent>, std::time::Instant)>>>;
+
+#[derive(Clone)]
+struct DetectionEventSender {
+    sender: mpsc::Sender<AppEvent>,
+    pending_exits: PendingProcessExits,
+}
+
 async fn publish_state_changed_event(
-    state_events: mpsc::Sender<AppEvent>,
+    state_events: DetectionEventSender,
     pane_id: PaneId,
     agent: Option<Agent>,
     state: AgentState,
@@ -170,10 +180,20 @@ async fn publish_state_changed_event(
     process_exited: bool,
     observed_at: std::time::Instant,
 ) {
+    // Record before the first queue await. Receipt and handoff readers must see
+    // the exit even when the bounded AppEvent channel has no free slot.
+    if process_exited {
+        state_events
+            .pending_exits
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((agent, observed_at));
+    }
     // This runs on the async detector task, not the PTY reader thread.
     // Waiting for queue space here preserves correctness-critical state transitions
     // without blocking pane I/O.
     if let Err(e) = state_events
+        .sender
         .send(AppEvent::StateChanged {
             pane_id,
             agent,
@@ -202,8 +222,37 @@ struct AgentDetectionPublishUpdate {
     process_exited: bool,
 }
 
+async fn skip_screen_detection_under_hook_authority(
+    state_events: DetectionEventSender,
+    pane_id: PaneId,
+    fresh_agent: Option<Agent>,
+    observed_at: std::time::Instant,
+    lifecycle_authority_active: bool,
+    process_exited: bool,
+) -> bool {
+    if !lifecycle_authority_active || process_exited {
+        return false;
+    }
+    // State remains hook-owned, but a fresh process probe must answer a pending
+    // exit even when the agent label did not change. Never use cached presence.
+    if fresh_agent.is_some() {
+        publish_state_changed_event(
+            state_events,
+            pane_id,
+            fresh_agent,
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            observed_at,
+        )
+        .await;
+    }
+    true
+}
+
 async fn apply_agent_detection_publish_update(
-    state_events: mpsc::Sender<AppEvent>,
+    state_events: DetectionEventSender,
     pane_id: PaneId,
     agent: Option<Agent>,
     update: AgentDetectionPublishUpdate,
@@ -558,7 +607,7 @@ fn spawn_basic_detection_task(
     terminal: Arc<PaneTerminal>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
-    state_events: mpsc::Sender<AppEvent>,
+    state_events: DetectionEventSender,
 ) -> (
     tokio::task::AbortHandle,
     Arc<Notify>,
@@ -629,6 +678,7 @@ fn spawn_basic_detection_task(
             release_was_active = suppressed_agent.is_some();
             let pid = child_pid.load(Ordering::Acquire);
             let mut agent_changed = false;
+            let mut fresh_process_agent = None;
             let mut agent = agent_presence.current_agent();
             let lifecycle_authority_active =
                 full_lifecycle_authority_active.load(Ordering::Acquire);
@@ -672,6 +722,7 @@ fn spawn_basic_detection_task(
                     }
                 }
                 let previous_agent = agent_presence.current_agent();
+                fresh_process_agent = new_agent;
                 let changed = match foreground_shell_agent_action(
                     previous_agent,
                     new_agent,
@@ -743,7 +794,16 @@ fn spawn_basic_detection_task(
                 && agent.is_some()
                 && !foreground_shell_exit_reported;
 
-            if lifecycle_authority_active && !process_exited {
+            if skip_screen_detection_under_hook_authority(
+                state_events.clone(),
+                pane_id,
+                fresh_process_agent.filter(|_| !agent_changed),
+                now,
+                lifecycle_authority_active,
+                process_exited,
+            )
+            .await
+            {
                 pending_idle.clear();
                 continue;
             }
@@ -925,11 +985,21 @@ pub struct PaneRuntime {
     io: PaneRuntimeIo,
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
+    /// The start time of the process at `child_pid`, captured when that pid was
+    /// published; `0` means "never captured", which fails closed (ADR 0014).
+    ///
+    /// Published BEFORE `child_pid` and read after it, so a reader that sees a
+    /// pid always sees the start time that belongs to it. That ordering is why
+    /// the pair needs no lock on the PTY path.
+    child_start_time: Arc<AtomicU64>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
+    // A single detector awaits each send, bounding this to queue capacity + one.
+    // Entries retire only after AppState has applied that exact observation.
+    pending_process_exits: PendingProcessExits,
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
@@ -1309,6 +1379,30 @@ fn publish_reported_cwd(
 }
 
 impl PaneRuntime {
+    pub(crate) fn pending_process_exits(&self) -> Vec<(Option<Agent>, std::time::Instant)> {
+        self.pending_process_exits
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn acknowledge_process_exit(
+        &self,
+        agent: Option<Agent>,
+        observed_at: std::time::Instant,
+    ) {
+        let mut pending = self
+            .pending_process_exits
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(index) = pending
+            .iter()
+            .position(|entry| *entry == (agent, observed_at))
+        {
+            pending.remove(index);
+        }
+    }
+
     pub fn shutdown(mut self) {
         self.detect_handle.abort();
         self.io.shutdown();
@@ -1360,10 +1454,12 @@ impl PaneRuntime {
         pane_id: u32,
     ) -> crate::handoff_runtime::HandoffRuntimeState {
         let child_pid = self.child_pid.load(Ordering::Acquire);
+        let child_start_time = self.child_start_time.load(Ordering::Acquire);
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
         crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
+            child_start_time,
             rows,
             cols,
             cell_width_px,
@@ -1551,6 +1647,7 @@ impl PaneRuntime {
         let crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
+            child_start_time,
             rows,
             cols,
             cell_width_px,
@@ -1587,6 +1684,16 @@ impl PaneRuntime {
             pane_terminal.seed_history_ansi(ansi);
         }
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
+        // The handed-over pane keeps its child process, so it must keep the
+        // start time that identifies it (ADR 0014). The exporting server sends
+        // the one it captured; a server that predates this field sends 0, and
+        // the pid is still live here, so re-read it rather than lose the pane's
+        // binding across the upgrade the handoff exists to perform.
+        let child_start_time = Arc::new(AtomicU64::new(if child_start_time > 0 {
+            child_start_time
+        } else {
+            crate::platform::process_start_time(child_pid).unwrap_or(0)
+        }));
         let child_pid = Arc::new(AtomicU32::new(child_pid));
         let reported_cwd = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
@@ -1652,13 +1759,17 @@ impl PaneRuntime {
         };
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let pending_process_exits = Arc::new(Mutex::new(Vec::new()));
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
             pane_id,
             child_pid.clone(),
             terminal.clone(),
             detection_content_seq.clone(),
             full_lifecycle_authority_active.clone(),
-            events,
+            DetectionEventSender {
+                sender: events,
+                pending_exits: pending_process_exits.clone(),
+            },
         );
 
         Ok(Self {
@@ -1667,11 +1778,13 @@ impl PaneRuntime {
             io,
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
             child_pid,
+            child_start_time,
             reported_cwd,
             child_wait_completed: None,
             kitty_keyboard_flags,
             detection_content_seq,
             full_lifecycle_authority_active,
+            pending_process_exits,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: true,
@@ -1715,17 +1828,27 @@ impl PaneRuntime {
 
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
+        let child_start_time = Arc::new(AtomicU64::new(0));
         let reported_cwd = Arc::new(Mutex::new(None));
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let pending_process_exits = Arc::new(Mutex::new(Vec::new()));
         {
             let child_pid = child_pid.clone();
+            let child_start_time = child_start_time.clone();
             let child_wait_completed = child_wait_completed.clone();
             let events = events.clone();
             let rt = tokio::runtime::Handle::current();
             let mut child = spawned.child;
             if let Some(pid) = child.process_id() {
+                // The start time goes first: ADR 0014's principal is the pair,
+                // and a reader that has seen the pid must never find the pane
+                // root as a bare pid it could match a reused one against.
+                child_start_time.store(
+                    crate::platform::process_start_time(pid).unwrap_or(0),
+                    Ordering::Release,
+                );
                 child_pid.store(pid, Ordering::Release);
                 crate::logging::pane_spawned(pane_id.raw(), pid);
             }
@@ -1809,7 +1932,10 @@ impl PaneRuntime {
 
             let child_pid = child_pid.clone();
             let terminal = terminal.clone();
-            let state_events = events.clone();
+            let state_events = DetectionEventSender {
+                sender: events.clone(),
+                pending_exits: pending_process_exits.clone(),
+            };
             let detection_content_seq = detection_content_seq.clone();
             let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
             let render_notify = render_notify.clone();
@@ -1918,6 +2044,7 @@ impl PaneRuntime {
                     };
 
                     let mut agent_changed = false;
+                    let mut fresh_process_agent = None;
                     if should_check_process {
                         last_process_check = now;
                         let had_process_probe = has_process_probe;
@@ -1940,6 +2067,7 @@ impl PaneRuntime {
                             }
 
                             let previous_agent = agent_presence.current_agent();
+                            fresh_process_agent = new_agent;
                             let changed = match foreground_shell_agent_action(
                                 previous_agent,
                                 new_agent,
@@ -2042,7 +2170,16 @@ impl PaneRuntime {
                         && agent.is_some()
                         && !foreground_shell_exit_reported;
 
-                    if lifecycle_authority_active && !process_exited {
+                    if skip_screen_detection_under_hook_authority(
+                        state_events.clone(),
+                        pane_id,
+                        fresh_process_agent.filter(|_| !agent_changed),
+                        now,
+                        lifecycle_authority_active,
+                        process_exited,
+                    )
+                    .await
+                    {
                         pending_idle.clear();
                         continue;
                     }
@@ -2168,11 +2305,13 @@ impl PaneRuntime {
             io,
             current_size: Cell::new((rows, cols, 0, 0)),
             child_pid,
+            child_start_time,
             reported_cwd,
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
             detection_content_seq,
             full_lifecycle_authority_active,
+            pending_process_exits,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: false,
@@ -2527,6 +2666,18 @@ impl PaneRuntime {
         (pid > 0).then_some(pid)
     }
 
+    /// The start time captured for `child_pid()`, which together with the pid is
+    /// ADR 0014's pane-root principal.
+    ///
+    /// Load the pid FIRST: the writer publishes this value before the pid, so a
+    /// reader that has seen a pid is guaranteed to see the start time belonging
+    /// to it. `None` means no start time was ever captured, and the pane-tree
+    /// check refuses rather than fall back to matching a bare pid.
+    pub fn child_start_time(&self) -> Option<u64> {
+        let start_time = self.child_start_time.load(Ordering::Acquire);
+        (start_time > 0).then_some(start_time)
+    }
+
     /// Get the current working directory of the process group controlling the pane PTY.
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Acquire);
@@ -2548,6 +2699,29 @@ impl PaneRuntime {
 
 #[cfg(test)]
 impl PaneRuntime {
+    pub(crate) async fn test_publish_process_exit(
+        &self,
+        tx: mpsc::Sender<AppEvent>,
+        pane_id: PaneId,
+        agent: Agent,
+        observed_at: std::time::Instant,
+    ) {
+        publish_state_changed_event(
+            DetectionEventSender {
+                sender: tx,
+                pending_exits: self.pending_process_exits.clone(),
+            },
+            pane_id,
+            Some(agent),
+            AgentState::Idle,
+            false,
+            false,
+            true,
+            observed_at,
+        )
+        .await;
+    }
+
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[], 4)
     }
@@ -2603,11 +2777,13 @@ impl PaneRuntime {
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
+                child_start_time: Arc::new(AtomicU64::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+                pending_process_exits: Arc::new(Mutex::new(Vec::new())),
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
@@ -3007,11 +3183,13 @@ mod tests {
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
+            child_start_time: Arc::new(AtomicU64::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            pending_process_exits: Arc::new(Mutex::new(Vec::new())),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
@@ -3038,11 +3216,13 @@ mod tests {
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
+            child_start_time: Arc::new(AtomicU64::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            pending_process_exits: Arc::new(Mutex::new(Vec::new())),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
@@ -3693,7 +3873,10 @@ mod tests {
         .unwrap();
 
         let publish = publish_state_changed_event(
-            tx.clone(),
+            DetectionEventSender {
+                sender: tx.clone(),
+                pending_exits: Arc::new(Mutex::new(Vec::new())),
+            },
             pane_id,
             Some(Agent::Pi),
             AgentState::Idle,
@@ -3741,5 +3924,128 @@ mod tests {
                 observed_at: _,
             } if delivered_pane == pane_id
         ));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_same_agent_probe_confirms_a_provisional_lifecycle_owner() {
+        use std::time::{Duration, Instant};
+        let mut terminal =
+            crate::terminal::TerminalState::new(crate::terminal::TerminalId::alloc(), "/".into());
+        let exit_at = Instant::now() - Duration::from_secs(1);
+        terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("restarted"),
+                Some(10),
+            )
+            .expect("new hook owner");
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            exit_at,
+        );
+        assert!(terminal.confirmed_hook_owner().is_none());
+        let mut presence = AgentDetectionPresence::from_agent(Some(Agent::Pi));
+        assert!(
+            !presence.observe_process_probe(Some(Agent::Pi)),
+            "same label is not a state change"
+        );
+        let (tx, mut rx) = mpsc::channel(2);
+        let state_events = DetectionEventSender {
+            sender: tx,
+            pending_exits: Arc::new(Mutex::new(Vec::new())),
+        };
+        assert!(
+            skip_screen_detection_under_hook_authority(
+                state_events.clone(),
+                PaneId::from_raw(42),
+                None,
+                Instant::now(),
+                true,
+                false,
+            )
+            .await
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "cached presence or a missed probe cannot confirm an owner"
+        );
+        assert!(
+            skip_screen_detection_under_hook_authority(
+                state_events,
+                PaneId::from_raw(42),
+                Some(Agent::Pi),
+                Instant::now(),
+                true,
+                false,
+            )
+            .await
+        );
+        let event = rx
+            .try_recv()
+            .expect("a real same-agent probe must reach the state machine");
+        let AppEvent::StateChanged {
+            agent,
+            state,
+            visible_blocker,
+            visible_working,
+            process_exited,
+            observed_at,
+            ..
+        } = event
+        else {
+            panic!("expected process observation");
+        };
+        terminal.set_detected_state_with_screen_signals_at(
+            agent,
+            state,
+            visible_blocker,
+            false,
+            visible_working,
+            process_exited,
+            observed_at,
+        );
+        assert!(terminal.confirmed_hook_owner().is_some());
+        assert_eq!(
+            terminal.state,
+            AgentState::Working,
+            "the hook still owns lifecycle state"
+        );
+    }
+
+    #[tokio::test]
+    async fn acknowledging_one_exit_keeps_other_captured_exits_pending() {
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        let pane = PaneId::from_raw(42);
+        let now = std::time::Instant::now();
+        let later = now + std::time::Duration::from_millis(1);
+        let (tx, _rx) = mpsc::channel(2);
+        runtime
+            .test_publish_process_exit(tx.clone(), pane, Agent::Pi, now)
+            .await;
+        runtime
+            .test_publish_process_exit(tx, pane, Agent::Hermes, later)
+            .await;
+        runtime.acknowledge_process_exit(Some(Agent::Hermes), now);
+        assert_eq!(
+            runtime.pending_process_exits().len(),
+            2,
+            "another owner's event is not an acknowledgement"
+        );
+        runtime.acknowledge_process_exit(Some(Agent::Pi), now);
+        assert_eq!(
+            runtime.pending_process_exits(),
+            vec![(Some(Agent::Hermes), later)]
+        );
+        runtime.acknowledge_process_exit(Some(Agent::Hermes), later);
+        assert!(runtime.pending_process_exits().is_empty());
     }
 }

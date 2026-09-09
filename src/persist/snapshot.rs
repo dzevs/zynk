@@ -105,6 +105,11 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// The pane's hook RETIREMENT fences, so a live handoff cannot void them. Absent in
+    /// every older snapshot and in every pane that has nothing retired; only
+    /// `restore_handoff` applies it (see `crate::persist::restore`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_retirement: Option<crate::terminal::state::HookRetirementSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,6 +414,35 @@ fn capture_tab(
             .and_then(|runtime| runtime.child_pid());
         let launch_argv =
             persisted_agent_launch_argv(agent_session.as_ref(), child_pid, existing_launch_argv);
+        // Ages are relative to ONE capture instant per pane, so every boundary keeps its
+        // gaps when the restoring server re-bases them against its own clock.
+        let hook_retirement = attached_terminal_id
+            .as_ref()
+            .and_then(|tid| terminals.get(tid))
+            .and_then(|terminal| {
+                let pending = terminal_runtimes
+                    .get(&terminal.id)
+                    .map(|runtime| runtime.pending_process_exits())
+                    .unwrap_or_default();
+                if pending.is_empty() {
+                    return terminal.export_hook_retirement(std::time::Instant::now());
+                }
+                // Project captured exits through the existing state machine, without
+                // consuming events or mutating the live state if handoff rolls back.
+                let mut projected = terminal.clone();
+                for (agent, observed_at) in pending {
+                    projected.set_detected_state_with_screen_signals_at(
+                        agent,
+                        crate::detect::AgentState::Idle,
+                        false,
+                        false,
+                        false,
+                        true,
+                        observed_at,
+                    );
+                }
+                projected.export_hook_retirement(std::time::Instant::now())
+            });
         panes.insert(
             id.raw(),
             PaneSnapshot {
@@ -417,6 +451,7 @@ fn capture_tab(
                 agent_name,
                 agent_session,
                 launch_argv,
+                hook_retirement,
             },
         );
     }
@@ -659,6 +694,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                hook_retirement: None,
             },
         );
         panes.insert(
@@ -669,6 +705,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                hook_retirement: None,
             },
         );
 
@@ -1148,6 +1185,184 @@ mod tests {
     }
 
     #[test]
+    fn capture_contract_tracks_hook_retirement() {
+        // Gate-3 arbiter finding (msg_24fa384d30dfa9af): the capture carried the pane's
+        // agent SESSION and nothing of the identity machine, so every retirement the
+        // fork enforces was void across a live handoff.
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        assert!(
+            capture_from_state(&state).workspaces[0].tabs[0].panes[&root.raw()]
+                .hook_retirement
+                .is_none(),
+            "a pane no hook ever reported on must not grow the snapshot"
+        );
+
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                crate::detect::AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-1"),
+                Some(20),
+            )
+            .expect("pi authority");
+
+        // A LIVE session has nothing retired, but it does have a replay fence, and the
+        // fence is exactly what must not reset when the server is replaced.
+        let live = capture_from_state(&state).workspaces[0].tabs[0].panes[&root.raw()]
+            .hook_retirement
+            .clone()
+            .expect("the sequence fence is captured");
+        assert_eq!(live.sequences, vec![("zynk:pi".to_string(), 20)]);
+        assert!(live.suppressed.is_empty() && live.stale.is_empty());
+
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .release_agent_with_mutation("zynk:pi", "pi", Some(21))
+            .expect("release");
+
+        let retirement = capture_from_state(&state).workspaces[0].tabs[0].panes[&root.raw()]
+            .hook_retirement
+            .clone()
+            .expect("the release is a retirement and must be captured");
+        assert_eq!(retirement.sequences, vec![("zynk:pi".to_string(), 21)]);
+        let suppressed = &retirement.suppressed[0];
+        assert_eq!(suppressed.source, "zynk:pi");
+        assert_eq!(suppressed.agent_label, "pi");
+        assert_eq!(
+            suppressed.session_ref.as_ref().map(|s| s.value.as_str()),
+            Some("pi-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_keeps_an_exit_still_waiting_for_event_queue_space() {
+        use crate::detect::{Agent, AgentState};
+        use std::time::{Duration, Instant};
+
+        for captured_before_hook in [false, true] {
+            let earlier_exit = Instant::now() - Duration::from_secs(1);
+            let mut state = state_with_workspaces(&["pending-exit"]);
+            let pane = state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = state.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_agent_session_ref_for_session_start(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("old-session"),
+                    Some(10),
+                    Some("startup".into()),
+                )
+                .expect("hook identity");
+            let mut runtimes = TerminalRuntimeRegistry::new();
+            runtimes.insert(
+                terminal_id.clone(),
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tx.try_send(crate::events::AppEvent::UpdateReady {
+                version: "test".into(),
+                install_command: String::new(),
+            })
+            .unwrap();
+            let publish = runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .test_publish_process_exit(
+                    tx,
+                    pane,
+                    Agent::Hermes,
+                    if captured_before_hook {
+                        earlier_exit
+                    } else {
+                        Instant::now()
+                    },
+                );
+            tokio::pin!(publish);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut publish)
+                    .await
+                    .is_err()
+            );
+
+            let snapshot = capture_from_state_with_runtimes(&state, &runtimes);
+            let retirement = snapshot.workspaces[0].tabs[0].panes[&pane.raw()]
+                .hook_retirement
+                .as_ref()
+                .unwrap();
+            let round_trip =
+                serde_json::from_slice(&serde_json::to_vec(retirement).unwrap()).unwrap();
+            let mut restored = crate::terminal::TerminalState::new(terminal_id.clone(), "/".into());
+            restored.restore_hook_retirement(round_trip, Instant::now());
+            assert!(
+                restored.confirmed_hook_owner().is_none(),
+                "handoff restored a confirmed identity whose exit was captured before the snapshot"
+            );
+            let resume = restored.set_agent_session_ref_for_session_start(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                crate::agent_resume::AgentSessionRef::id("old-session"),
+                Some(11),
+                Some("resume".into()),
+            );
+            if !captured_before_hook {
+                assert!(
+                    resume.is_none(),
+                    "the delayed old report must remain retired after handoff"
+                );
+            }
+            assert!(
+                restored.confirmed_hook_owner().is_none(),
+                "a report after the exit cannot answer its own pending confirmation"
+            );
+            restored.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+            restored
+                .set_agent_session_ref_for_session_start(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("old-session"),
+                    Some(12),
+                    Some("resume".into()),
+                )
+                .expect("a genuinely observed restart can resume");
+            assert!(restored.confirmed_hook_owner().is_some());
+            assert!(
+                state.terminals[&terminal_id]
+                    .confirmed_hook_owner()
+                    .is_some(),
+                "capturing must not mutate AppState or consume the queued exit on rollback"
+            );
+            rx.recv().await.unwrap();
+            publish.await;
+            assert_eq!(
+                capture_from_state_with_runtimes(&state, &runtimes).workspaces[0].tabs[0].panes
+                    [&pane.raw()]
+                    .hook_retirement
+                    .as_ref()
+                    .unwrap()
+                    .hook_identity
+                    .is_none(),
+                !captured_before_hook
+            );
+        }
+    }
+
+    #[test]
     fn capture_contract_preserves_restored_agent_session() {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
@@ -1304,6 +1519,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                hook_retirement: None,
             },
         );
         panes.insert(
@@ -1316,6 +1532,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                hook_retirement: None,
             },
         );
 

@@ -12,6 +12,52 @@ use super::{
 
 pub fn raise_server_nofile_limit() {}
 
+/// The parent PID of `pid` and the start time the kernel stamped on it, from a
+/// SINGLE read of `/proc/<pid>/stat` (ADR 0014).
+///
+/// Both facts come from one read on purpose: the ancestry walk compares the pid
+/// it is standing on against a principal's start time, and two reads could
+/// straddle the moment that pid changed hands.
+///
+/// `None` when the process is gone, when `/proc` cannot be read, or when the
+/// parent is not a real process (a `ppid` of 0 is PID 1, which is inside no
+/// pane) — every one of which is a refusal at the call site.
+pub fn process_parent_and_start_time(pid: u32) -> Option<(u32, u64)> {
+    // /proc/<pid>/stat: "pid (comm) state ppid pgrp ...". The (comm) field can
+    // contain spaces and parens, so the numeric fields are read after the LAST
+    // ')': state(0) ppid(1) ... starttime(19), i.e. stat fields 3 and 22.
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let ppid: i32 = fields.get(1)?.parse().ok()?;
+    let start_time: u64 = fields.get(19)?.parse().ok()?;
+    (ppid > 0).then_some((ppid as u32, start_time))
+}
+
+/// The start time `pid` was stamped with, in clock ticks since boot.
+///
+/// This is the half of a process's identity a pid alone does not carry: pids are
+/// reused, so a pid that outlives its process can be handed to an unrelated one,
+/// and only the start time tells the two apart (ADR 0014,
+/// ARCH-E8-ADR14-PID-REUSE-001). `None` when the process is gone or `/proc`
+/// cannot be read.
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    // starttime is stat field 22, the 20th after `(comm)`. Zero is not a usable
+    // identity here (nothing a pane starts is stamped at boot tick 0), and the
+    // pane-tree check reads it as "no start time captured" and fails closed.
+    let start_time: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    (start_time > 0).then_some(start_time)
+}
+
+/// The effective UID this server runs as. A peer on another UID is refused by
+/// the pane-bound methods before any ancestry is walked (ADR 0014).
+pub fn current_uid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     let tpgid = foreground_process_group_id(child_pid)?;
@@ -511,6 +557,61 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn a_live_process_reports_a_start_time_and_its_parent_from_one_read() {
+        // ADR 0014's principal is (pid, start time), so both facts have to be
+        // readable, and the pair has to come from the same `/proc` read.
+        let me = std::process::id();
+        let start_time = process_start_time(me).expect("this process has a start time");
+        let (parent, paired_start_time) =
+            process_parent_and_start_time(me).expect("this process has a parent");
+        assert_eq!(
+            paired_start_time, start_time,
+            "the paired read must agree with the standalone one"
+        );
+        assert_ne!(parent, 0, "a real parent is a real pid");
+        assert_eq!(
+            process_start_time(me),
+            Some(start_time),
+            "a start time never changes while the process lives"
+        );
+    }
+
+    #[test]
+    fn a_pid_with_no_process_reports_nothing() {
+        // The pid ceiling is well under u32::MAX, so nothing can hold this one.
+        // Both accessors fail closed, which is what every caller relies on.
+        assert_eq!(process_start_time(u32::MAX), None);
+        assert_eq!(process_parent_and_start_time(u32::MAX), None);
+    }
+
+    #[test]
+    fn a_child_starts_later_than_its_parent_and_is_told_apart_by_it() {
+        // The whole point of the second half of the principal: two DIFFERENT
+        // processes are distinguishable even though a pid alone would not say so
+        // (ARCH-E8-ADR14-PID-REUSE-001).
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a child");
+        let child_pid = child.id();
+        let child_start = process_start_time(child_pid).expect("the child has a start time");
+        let (parent, _) = process_parent_and_start_time(child_pid).expect("the child has a parent");
+        assert_eq!(
+            parent,
+            std::process::id(),
+            "this test process is the parent"
+        );
+        assert!(
+            child_start >= process_start_time(std::process::id()).expect("own start time"),
+            "a child cannot have started before its parent"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

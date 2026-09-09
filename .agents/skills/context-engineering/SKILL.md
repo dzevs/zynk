@@ -63,7 +63,7 @@ Create a rules file that persists across sessions. This is the highest-leverage 
 
 ## Boundaries
 - Never commit secrets or maintainer-private paths (private-content gate rejects them)
-- Preserve the upstream copyright + `NOTICE` attribution in all builds (AGPL, legally required)
+- Preserve the upstream copyright + `NOTICE` attribution in all builds (AGPL + Apache-2.0 §4, required)
 - Ask before changing the socket protocol or DB schema/migrations
 - Always run `just check` before committing
 

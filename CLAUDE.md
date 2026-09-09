@@ -14,6 +14,7 @@ in the chat; a chat reply never reaches them.
 - **Lint:** `just lint` = `cargo fmt --check` + `cargo clippy --all-targets --locked -- -D warnings` (dead code fails the lint gate).
 - **Check:** `just check` (= `ci` + maintenance unittests) — run before committing; never bypass a failing check.
 - **Gates:** `just gate` (tracked-path + scrub + gitleaks). **Build:** `just build`. **Hooks:** `just install-hooks` (once per checkout).
+- **Release audit:** `just release-audit` (release verification only, NOT in `just check`) — builds `--release --locked` and audits the ARTIFACT: no debug-only env seam (`ZYNK_FAKE_UPDATE_VERSION`, `ZYNK_TEST_TRUST_PEER_PID`), no update URL constant, `zynk update` fails closed without reaching a PATH-local downloader.
 
 ## Build
 
@@ -54,7 +55,7 @@ in the chat; a chat reply never reaches them.
 - **Hermetic** — each test spawns its own temp config/socket, so `just test` is safe to run directly. Pure state via `AppState::test_new()` / `Workspace::test_new()`; `PaneRuntime` has a `#[cfg(test)] TestChannel` so panes run without a PTY. All tests use the std-only deterministic `FakeEmbedder` and **must not touch the network** (real `fastembed` is behind a feature, absent from the default graph).
 - **Isolated dev runtime is MANDATORY** — never the live socket/config (`~/.config/zynk/`) and never the default `CARGO_TARGET_DIR` (the machine runs `cargo-watch` on it). Set an isolated `CARGO_TARGET_DIR` + isolated `ZYNK_SOCKET_PATH`/`ZYNK_HOME`/`ZYNK_SQLITE_HOME` (and `XDG_*`) so nothing resolves to a live default; the spawned server then binds the isolated socket (`zynk status` reports the active client/server — confirm it's the isolated socket, not the live one; it doesn't print config/DB/target paths). DB tests plant a fake DB in a temp `ZYNK_SQLITE_HOME` — never touch `~/.zynk/zynk.db`.
 - **`ZYNK_TEST_ROOT` moves the integration sandboxes off `/tmp`** (e.g. `ZYNK_TEST_ROOT=/home/user/.zt` — absolute, a REAL dir, not a symlink: cwd assertions compare resolved paths) — needed where `/tmp` is a quota-limited tmpfs; keep the root SHORT or the sandbox Unix sockets blow the 108-byte `sun_path` budget.
-- **Maintenance unittests (Python, in `just test`/`check`):** `test_agent_detection_manifest_check`, `test_vendor_libghostty_vt`, `test_conventional_commits`, `test_check_public_tree`, `test_gitleaks_config`, `test_scrub_check`, `test_skills_catalog`, `test_release_audit_refs`, `test_gitleaks_tracked`, `test_hermes_integration_asset`.
+- **Maintenance unittests (Python, in `just test`/`check`):** `test_agent_detection_manifest_check`, `test_vendor_libghostty_vt`, `test_conventional_commits`, `test_check_public_tree`, `test_gitleaks_config`, `test_scrub_check`, `test_skills_catalog`, `test_release_audit_refs`, `test_gitleaks_tracked`, `test_hermes_integration_asset`, `test_license_docs`, `test_release_binary_audit`.
 - **Characterization/parity tests are REQUIRED for:** wire IDs (`Method` `serde(rename)` — breaks clients), protocol-ID field set (`header::protocol_id_fields` ↔ persisted `protocol_json`), the delivery-transition matrix (only `submitted→received`), receipt invariants, integration-asset version parity (`PI_INTEGRATION_VERSION` ↔ the `// ZYNK_INTEGRATION_VERSION=N` asset marker), and FTS/body purity.
 
 ## Gotchas

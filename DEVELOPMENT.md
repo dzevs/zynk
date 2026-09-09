@@ -27,6 +27,26 @@ Optional, used by some `just` recipes:
 - **vale** — the prose linter for docs (`just docs-lint`).
 - **Python 3** — runs the maintenance-script unit tests in `just check`.
 
+### Remote executable custody
+
+Remote attach supports Linux x86_64 hosts only. The target needs `/bin/sh`,
+`sha256sum`, and mounted procfs with executable access through `/proc/self/fd`.
+The local build also uses procfs when checking its source executable.
+
+Each remote probe opens the executable inside the remote shell and hashes that
+held file before executing its version/status queries. Prepared commands,
+including every bridge connection, revalidate against the expected digest and
+execute through the same descriptor. A bridge starting a daemon uses its running
+image; a live-handoff import names the remote shell's held descriptor until the
+old server has opened it. Atomic replacement of the installation pathname cannot
+redirect those executions. Missing procfs access or a failed hash query refuses
+execution with an ADR 0013 diagnostic.
+
+This assumes a trusted SSH account, kernel and tools. Holding a descriptor binds
+an inode; it does not seal its bytes against an in-place writer or authenticate
+a compromised host. Pre-install discovery of an older server remains a legacy
+compatibility query, not authority to reuse its executable.
+
 ## Getting started
 
 Clone the repository and build the release binary:
@@ -62,7 +82,14 @@ just install-hooks
   never inside `vendor/`. This keeps the vendored source tree pristine, which
   `cargo package` verification requires.
 - The build skips entirely on docs.rs (`DOCS_RS` is set), since rustdoc doesn't
-  link the native library.
+  link the native library. `DOCS_RS` is declared as a `rerun-if-env-changed`
+  input, so a docs-mode result is not reused by a normal build in the same
+  target directory.
+- It also skips on a target zynk does not build for (ADR 0013 — any `target_os`
+  other than Linux), emitting the ADR message as a `cargo:warning` and no link
+  directives. That is deliberate: the diagnostic those users are promised is the
+  `compile_error!` in `src/main.rs`, and rustc only reaches it if the build
+  script does not fail first. `tests/build_script_targets.rs` guards it.
 
 A few env vars tune the native build, chiefly for packaging:
 `LIBGHOSTTY_VT_OPTIMIZE` (default `ReleaseFast`), `LIBGHOSTTY_VT_SIMD`,
@@ -131,6 +158,23 @@ cargo run --release --locked -- status
 paths above — not the production runtime — before you proceed. Use a distinct
 `--session <name>` to keep dev sessions separate from any default session.
 
+### Unreleased migration checksums
+
+Migration 0004 was corrected before merge/release to preserve legacy `integration`
+receipt provenance, as required by ADR 0014's pre-merge amendment. A development
+database initialized with the rejected earlier candidate's 0004 has a different
+SQLx checksum. This build refuses it as `db_foreign_conflict` and does not rewrite
+or wipe it. This limitation applies to databases used with that unreleased
+candidate, not databases from released/main history or databases predating 0004.
+Their normal upgrade preserves legacy provenance.
+
+For an affected development database, select its isolated paths explicitly and
+use `zynk db backup` or `zynk db adopt` to preserve the bundle non-destructively
+before creating a fresh store. Those operations relocate data; they do not repair
+receipt history. The rejected migration erased the distinction between legacy
+and origin-checked rows, so no later operation can reconstruct that evidence.
+This is not a waiver of released-database compatibility.
+
 ## Testing
 
 zynk's tests are hermetic: each test spawns its own temp config and socket, so
@@ -154,6 +198,18 @@ exports above.
   ```bash
   just test-one <filter>      # e.g. just test-one codex_stale_working
   ```
+
+- **Cross-target build diagnostic** (`#[ignore]`d — not hermetic, several
+  minutes): checks the crate for a non-Linux target and asserts the failure is
+  the ADR 0013 `compile_error!`, not a build-script panic.
+
+  ```bash
+  rustup target add x86_64-pc-windows-gnu
+  cargo test --locked --test build_script_targets -- --ignored --nocapture
+  ```
+
+  It writes a throwaway target directory under `$CARGO_TARGET_DIR`;
+  `ZYNK_CROSS_CHECK_TARGET_ROOT` puts it elsewhere.
 
 - **TypeScript asset test (Bun):**
 

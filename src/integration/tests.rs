@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use super::command::*;
 use super::config_edit::*;
 use super::env::*;
@@ -3016,6 +3018,17 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(KILO_PLUGIN_ASSET.contains("pane.report_agent_session"));
     assert!(KILO_PLUGIN_ASSET.contains("reportState"));
     assert!(!KILO_PLUGIN_ASSET.contains("pane.release_agent"));
+    // Hermes (asset v4) reports session identity by SHELLING OUT to the zynk CLI
+    // rather than speaking the socket protocol, so its session ref travels as CLI
+    // flags. `--session-start-source` is what makes a new session repoint the pane;
+    // a lifecycle state report never could.
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = kwargs.get(\"session_id\")"));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("\"report-agent-session\""));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("\"--agent-session-id\""));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("\"--session-start-source\""));
+    assert!(HERMES_PLUGIN_INIT_ASSET.contains("ZYNK_BIN_PATH"));
+    assert!(!HERMES_PLUGIN_INIT_ASSET.contains("pane.report_agent\","));
+    assert!(!HERMES_PLUGIN_INIT_ASSET.contains("pane.release_agent"));
     assert!(QODERCLI_HOOK_ASSET.contains("ZYNK_PANE_ID"));
     assert!(QODERCLI_HOOK_ASSET.contains("session_id"));
     assert!(QODERCLI_HOOK_ASSET.contains("report-agent-session"));

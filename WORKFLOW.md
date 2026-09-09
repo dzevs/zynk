@@ -35,6 +35,8 @@ Transferring implementation ownership does not approve inherited commits.
 8. Review the successor delta and affected invariants. Nonblocking notes do not reopen accepted,
    unchanged areas; reopening requires concrete regression evidence. No fresh broad review fan-out
    while corrections to its parent are in progress. Separate approved milestones require separate worktrees.
+9. Unreviewed fixes are **IMPLEMENTED / PENDING VERIFICATION**, never closed merely because a
+   commit landed or the author's tests passed. Record approval only for the exact reviewed range.
 
 ## Gate overview
 

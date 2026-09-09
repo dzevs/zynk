@@ -244,7 +244,7 @@ fn parse_git_ahead_behind_output(stdout: &str) -> Option<(usize, usize)> {
 mod tests {
     use super::*;
     use crate::workspace::git::test_support::{
-        fixture_git_command, run_git, seed_fixture_identity, temp_test_dir, write_fake_tracked_repo,
+        run_git, scrub_git_env, set_repo_identity, temp_test_dir, write_fake_tracked_repo,
     };
 
     #[test]
@@ -396,7 +396,9 @@ mod tests {
     fn git_status_fingerprint_reads_reftable_branch_identity() {
         let root = temp_test_dir("reftable-fingerprint");
         let root_arg = root.to_string_lossy().to_string();
-        let output = fixture_git_command()
+        let mut command = std::process::Command::new("git");
+        scrub_git_env(&mut command);
+        let output = command
             .args(["init", "--ref-format=reftable", "-b", "main", &root_arg])
             .output()
             .unwrap();
@@ -404,7 +406,7 @@ mod tests {
             std::fs::remove_dir_all(root).unwrap();
             return;
         }
-        seed_fixture_identity(&root);
+        set_repo_identity(&root);
         run_git(&root, &["commit", "--allow-empty", "-m", "initial"]);
 
         let fingerprint = git_status_fingerprint(&root).unwrap();
@@ -430,7 +432,7 @@ mod tests {
         let remote_arg = remote.to_string_lossy().to_string();
         run_git(&base, &["init", "--bare", &remote_arg]);
         run_git(&repo, &["init"]);
-        seed_fixture_identity(&repo);
+        set_repo_identity(&repo);
         run_git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
         run_git(&repo, &["branch", "-M", "main"]);
         run_git(&repo, &["remote", "add", "origin", &remote_arg]);

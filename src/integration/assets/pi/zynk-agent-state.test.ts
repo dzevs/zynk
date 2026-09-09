@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 // zynk fork — bun test suite for the STATE-ONLY pi integration extension in
 // zynk-agent-state.ts. The old footer-receiver / receipt machinery (parseZynkFooter,
 // eligibleZynkReceipt, recordZynkReceipt, the `pi.on("input")` transform-strip, etc.)

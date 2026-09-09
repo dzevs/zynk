@@ -51,6 +51,22 @@ fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket: &Path) -> Sp
     spawn_server_with_env(config_home, runtime_dir, api_socket, &[])
 }
 
+/// A server that enforces the real ADR 0014 pane-tree binding: `extra_env` is
+/// applied after the debug seam, so setting the variable to anything but the
+/// literal `pane-child` turns the seam off.
+fn spawn_server_without_peer_trust(
+    config_home: &Path,
+    runtime_dir: &Path,
+    api_socket: &Path,
+) -> SpawnedZynk {
+    spawn_server_with_env(
+        config_home,
+        runtime_dir,
+        api_socket,
+        &[("ZYNK_TEST_TRUST_PEER_PID", "disabled")],
+    )
+}
+
 fn spawn_server_with_env(
     config_home: &Path,
     runtime_dir: &Path,
@@ -75,6 +91,13 @@ fn spawn_server_with_env(
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_zynk"));
     cmd.arg("server");
+    // ADR 0014 debug seam: identity reports and receipts are accepted only from the
+    // TARGET pane's process tree, and this harness process is outside every pane. The
+    // seam makes this server treat each accepted connection as the pane's own child.
+    // It is compiled only under `#[cfg(debug_assertions)]`, so it cannot exist in a
+    // release binary, and the tests that must exercise the REAL binding spawn a
+    // server without it.
+    cmd.env("ZYNK_TEST_TRUST_PEER_PID", "pane-child");
     cmd.env("XDG_CONFIG_HOME", config_home);
     // #117 DB isolation: pin the global DB to a per-test sqlite home + scrub ZYNK_HOME.
     cmd.env("ZYNK_SQLITE_HOME", config_home.join("sqlite"));
@@ -121,6 +144,13 @@ fn spawn_named_session_server(
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_zynk"));
     cmd.arg("server");
+    // ADR 0014 debug seam: identity reports and receipts are accepted only from the
+    // TARGET pane's process tree, and this harness process is outside every pane. The
+    // seam makes this server treat each accepted connection as the pane's own child.
+    // It is compiled only under `#[cfg(debug_assertions)]`, so it cannot exist in a
+    // release binary, and the tests that must exercise the REAL binding spawn a
+    // server without it.
+    cmd.env("ZYNK_TEST_TRUST_PEER_PID", "pane-child");
     cmd.env("XDG_CONFIG_HOME", config_home);
     // #117 DB isolation: pin the global DB to a per-test sqlite home + scrub ZYNK_HOME.
     cmd.env("ZYNK_SQLITE_HOME", config_home.join("sqlite"));
@@ -2340,4 +2370,548 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
 #[test]
 fn live_handoff_after_restored_failure_rolls_back_old_server() {
     live_handoff_import_failure_rolls_back_old_server_at("after_restored");
+}
+
+/// Probe the receipt identity gate on `pane_id`.
+///
+/// `zynk.message_received` resolves the hook-AUTHORITATIVE receiver before it looks at
+/// the message at all (`src/app/api/zynk.rs`), so a request naming ids no conversation
+/// has answers `receiver_identity_unverified` exactly when the pane holds no usable
+/// hook identity, and something else the moment it does. That is the whole question
+/// these cases ask, and it needs no conversation to ask it.
+fn receipt_identity_error(api_socket: &Path, pane_id: &str) -> String {
+    let response = request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:receipt",
+            "method": "zynk.message_received",
+            "params": {
+                "pane_id": pane_id,
+                "message_id": "msg_handoff_probe",
+                "conversation_id": "conv_handoff_probe",
+                "conversation_seq": 1,
+                "runtime_session_id": "rt_handoff_probe",
+                "socket_namespace": "ns_handoff_probe"
+            }
+        }),
+    );
+    response["error"]["code"].as_str().unwrap_or("").to_string()
+}
+
+fn report_pi_agent(api_socket: &Path, pane_id: &str, seq: u64, session: &str) -> serde_json::Value {
+    request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:report",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": pane_id,
+                "source": "zynk:pi",
+                "agent": "pi",
+                "state": "working",
+                "seq": seq,
+                "agent_session_id": session
+            }
+        }),
+    )
+}
+
+fn handoff_pane_with_pi_session(api_socket: &Path, seq: u64, session: &str) -> String {
+    let created = request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(report_pi_agent(api_socket, &pane_id, seq, session));
+    assert_ne!(
+        receipt_identity_error(api_socket, &pane_id),
+        "receiver_identity_unverified",
+        "the established session was not receipt-capable before the handoff"
+    );
+    pane_id
+}
+
+#[test]
+fn live_handoff_keeps_a_released_session_retired() {
+    // Gate-3 arbiter finding (msg_24fa384d30dfa9af): the snapshot carried the pane's
+    // agent SESSION and nothing of the identity machine, so every retirement guarantee
+    // the fork makes was void across a live handoff. Here the session is released — the
+    // receipt gate refuses it, as it must — and after the handoff an ORDINARY
+    // same-session report with no session-start reason re-anchored it on the new
+    // server, which made the message addressed to the released session `received`.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let pane_id = handoff_pane_with_pi_session(&api_socket, 5, "pi-1");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:release",
+            "method": "pane.release_agent",
+            "params": {"pane_id": pane_id, "source": "zynk:pi", "agent": "pi", "seq": 6}
+        }),
+    ));
+    assert_eq!(
+        receipt_identity_error(&api_socket, &pane_id),
+        "receiver_identity_unverified",
+        "the released session stayed receipt-capable before the handoff"
+    );
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    // The late callback the retirement exists to refuse: same session, higher sequence,
+    // no session-start reason.
+    let late = report_pi_agent(&api_socket, &pane_id, 7, "pi-1");
+    assert!(late.get("error").is_none(), "{late}");
+    let after = receipt_identity_error(&api_socket, &pane_id);
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+    assert_eq!(
+        after, "receiver_identity_unverified",
+        "a live handoff let an ordinary report re-anchor a released session"
+    );
+}
+
+#[test]
+fn live_handoff_admits_a_genuinely_new_session() {
+    // The other side of the same fence: a carried retirement must not ban the owner. A
+    // genuinely NEW session id from the released owner is admitted after the handoff
+    // exactly as it is before one, and receipts for it work.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let pane_id = handoff_pane_with_pi_session(&api_socket, 5, "pi-1");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:release",
+            "method": "pane.release_agent",
+            "params": {"pane_id": pane_id, "source": "zynk:pi", "agent": "pi", "seq": 6}
+        }),
+    ));
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    let restarted = report_pi_agent(&api_socket, &pane_id, 7, "pi-2");
+    assert!(restarted.get("error").is_none(), "{restarted}");
+    let after = receipt_identity_error(&api_socket, &pane_id);
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+    assert_ne!(
+        after, "receiver_identity_unverified",
+        "a carried retirement banned the owner instead of the session it retired"
+    );
+}
+
+#[test]
+fn live_handoff_keeps_the_sequence_fence() {
+    // The replay fence travels too. A report behind the sequence this owner anchored
+    // before the handoff is ignored on the new server, so it cannot re-establish an
+    // identity, and the first report ahead of it is accepted as usual.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let pane_id = handoff_pane_with_pi_session(&api_socket, 5, "pi-1");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    // The live authority is never restored — only the fence is — so the pane starts the
+    // new server with no receipt-capable identity either way.
+    assert_eq!(
+        receipt_identity_error(&api_socket, &pane_id),
+        "receiver_identity_unverified"
+    );
+    let replayed = report_pi_agent(&api_socket, &pane_id, 3, "pi-1");
+    assert!(replayed.get("error").is_none(), "{replayed}");
+    let behind_the_fence = receipt_identity_error(&api_socket, &pane_id);
+
+    let ahead = report_pi_agent(&api_socket, &pane_id, 6, "pi-1");
+    assert!(ahead.get("error").is_none(), "{ahead}");
+    let ahead_of_the_fence = receipt_identity_error(&api_socket, &pane_id);
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+    assert_eq!(
+        behind_the_fence, "receiver_identity_unverified",
+        "a report behind the pre-handoff sequence anchored an identity on the new server"
+    );
+    assert_ne!(
+        ahead_of_the_fence, "receiver_identity_unverified",
+        "the fence refused a report genuinely ahead of it"
+    );
+}
+
+/// The shell line an in-pane reporter runs: report `session` for `pane_id` through
+/// the zynk binary the server exports into every pane, recording the exit status in
+/// `result_file` so the test observes the server's answer rather than pane text.
+fn in_pane_report_line(pane_id: &str, session: &str, result_file: &Path) -> String {
+    format!(
+        "\"$ZYNK_BIN_PATH\" pane report-agent {pane_id} --source zynk:pi --agent pi \
+         --state idle --agent-session-id {session} >{file} 2>&1; echo \"rc=$?\" >>{file}",
+        file = result_file.display()
+    )
+}
+
+fn send_pane_line(api_socket: &Path, pane_id: &str, line: &str) {
+    assert_ok(request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:pane:run",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": line, "keys": ["Enter"]}
+        }),
+    ));
+}
+
+fn read_report_outcome(result_file: &Path) -> String {
+    support::wait_for_file(result_file, Duration::from_secs(20));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let text = fs::read_to_string(result_file).unwrap_or_default();
+        if text.contains("rc=") {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the in-pane reporter never finished: {text:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn handoff_receipt_after_snapshot(agent_exits: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = test_lock();
+    let fixture = handoff_fixture(&[("ZYNK_TEST_TRUST_PEER_PID", "disabled")]);
+    let HandoffFixture {
+        base,
+        config_home,
+        runtime_dir,
+        api_socket,
+        db,
+        pane_id,
+        spawned,
+    } = fixture;
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let path = |name: &str| quote(base.join(name).to_str().unwrap());
+    // The foreground agent is a child of the pane shell, not an exec replacing that
+    // shell. Its reporter remains a real descendant for SO_PEERCRED, with no seam.
+    let receipt_waiter = if agent_exits {
+        String::new()
+    } else {
+        format!(
+            "while ! test -f {}; do sleep .05; done\nsh {}\n",
+            path("receipt.sh"),
+            path("receipt.sh")
+        )
+    };
+    fs::write(
+        base.join("agent.sh"),
+        format!(
+            "echo $$ > {}\n(\nwhile ! test -f {}; do sleep .05; done\n\
+         \"$ZYNK_BIN_PATH\" pane report-agent {} --source zynk:hermes --agent hermes \
+         --state idle --agent-session-id handoff-session > {} 2>&1\n\
+         echo \"rc=$?\" >> {}\n{}\n) &\nexec -a hermes cat\n",
+            path("agent.pid"),
+            path("report-now"),
+            quote(&pane_id),
+            path("hook.txt"),
+            path("hook.txt"),
+            receipt_waiter,
+        ),
+    )
+    .unwrap();
+    send_pane_line(&api_socket, &pane_id, &format!("bash {}", path("agent.sh")));
+    support::wait_for_file(&base.join("agent.pid"), Duration::from_secs(10));
+    let agent_pid: u32 = fs::read_to_string(base.join("agent.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let pane = request(
+            &api_socket,
+            serde_json::json!({
+                "id":"test:detected", "method":"pane.get", "params":{"pane_id":pane_id}
+            }),
+        );
+        if pane["result"]["pane"]["agent"] == "hermes" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "foreground Hermes was not detected: {pane}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    fs::write(base.join("report-now"), "").unwrap();
+    let hook = read_report_outcome(&base.join("hook.txt"));
+    assert!(
+        hook.contains("rc=0"),
+        "real pane-tree hook report failed: {hook}"
+    );
+    let sent = zynk_send(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &pane_id,
+        "post-snapshot receipt",
+    );
+    assert_eq!(sent["delivery_status"], "submitted");
+
+    // This wrapper is spawned only AFTER capture and runtime export. Hold it before
+    // importer startup, so a kill here is unambiguously outside both snapshots.
+    let wrapper = base.join("import.sh");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ntouch {}\nwhile ! test -f {}; do sleep .05; done\nexec {} \"$@\"\n",
+            path("snapshot-taken"),
+            path("import-now"),
+            quote(env!("CARGO_BIN_EXE_zynk")),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handoff_socket = api_socket.clone();
+    thread::spawn(move || {
+        let _ = tx.send(request(&handoff_socket, serde_json::json!({
+            "id":"test:delayed-import", "method":"server.live_handoff", "params":{"import_exe":wrapper}
+        })));
+    });
+    support::wait_for_file(&base.join("snapshot-taken"), Duration::from_secs(10));
+    if agent_exits {
+        let killed = std::process::Command::new("kill")
+            .args(["-TERM", &agent_pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Path::new(&format!("/proc/{agent_pid}")).exists() {
+            assert!(Instant::now() < deadline, "the test agent did not exit");
+            thread::sleep(Duration::from_millis(25));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    fs::write(base.join("import-now"), "").unwrap();
+    assert_ok(rx.recv_timeout(Duration::from_secs(15)).unwrap());
+    register_replacement(&runtime_dir, spawned.child.process_id());
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    let receipt = format!(
+        "\"$ZYNK_BIN_PATH\" zynk message-received --pane-id {} --message-id {} \
+         --conversation-id {} --conversation-seq {} --runtime-session-id {} --socket-namespace {} --json",
+        quote(&pane_id), quote(sent["message_id"].as_str().unwrap()),
+        quote(sent["conversation_id"].as_str().unwrap()), sent["conversation_seq"],
+        quote(sent["runtime_session_id"].as_str().unwrap()), quote(sent["socket_namespace"].as_str().unwrap()),
+    );
+    let script = if agent_exits {
+        format!(
+            "{receipt} > {} 2>&1\necho \"rc=$?\" >> {}\n",
+            path("receipt.txt"),
+            path("receipt.txt")
+        )
+    } else {
+        // Only retry the receipt while the new detector acquires the live process.
+        // No hook or session report after the handoff may confirm the identity.
+        format!(
+            "for attempt in $(seq 1 100); do\n{receipt} > {} 2>&1\nrc=$?\n\
+                 if test $rc -eq 0; then break; fi\nsleep .05\ndone\necho \"rc=$rc\" >> {}\n",
+            path("receipt.txt"),
+            path("receipt.txt")
+        )
+    };
+    fs::write(base.join("receipt-ready.sh"), script).unwrap();
+    fs::rename(base.join("receipt-ready.sh"), base.join("receipt.sh")).unwrap();
+    if agent_exits {
+        send_pane_line(&api_socket, &pane_id, &format!("sh {}", path("receipt.sh")));
+    }
+    let result = read_report_outcome(&base.join("receipt.txt"));
+    let events = delivery_event_types(&db, sent["message_id"].as_str().unwrap());
+    let proof_source: Option<String> = db_block_on(async {
+        sqlx::query_scalar("SELECT proof_source FROM delivery_events WHERE message_id = ? AND event_type = 'received'")
+            .bind(sent["message_id"].as_str().unwrap())
+            .fetch_optional(&mut open_db(&db).await).await.unwrap()
+    });
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+    if agent_exits {
+        assert!(
+            result.contains("receiver_identity_unverified"),
+            "a post-snapshot exit must not receipt: {result}"
+        );
+        assert_eq!(events, ["submitted"], "a dead session must stay submitted");
+    } else {
+        assert!(
+            result.contains("rc=0"),
+            "the detector must confirm the still-live session: {result}"
+        );
+        assert_eq!(events, ["submitted", "received"]);
+        assert_eq!(proof_source.as_deref(), Some("pane_tree"));
+    }
+}
+
+#[test]
+fn live_handoff_refuses_a_receipt_after_an_exit_after_snapshot() {
+    handoff_receipt_after_snapshot(true);
+}
+
+#[test]
+fn live_handoff_reconfirms_the_same_live_session_from_the_detector() {
+    handoff_receipt_after_snapshot(false);
+}
+
+#[test]
+fn live_handoff_keeps_the_pane_tree_binding() {
+    // ADR 0014 binds identity reports to the TARGET pane's process tree, and a live
+    // handoff replaces the server without replacing the panes — the child PIDs it
+    // hands over are the same ones. So the binding has to hold across it, in both
+    // directions: a process the pane started is still accepted, and this harness,
+    // which is outside every pane, is still refused. Run without the debug seam, so
+    // the real check answers every call.
+    //
+    // The principal is (pid, start time), not a pid, so this is also the control on
+    // the handoff carrying that start time: had it been lost, the pane's root would
+    // be a bare pid, the in-pane report below would be refused as unidentified, and
+    // the out-of-pane refusal would come from the pane rather than from the caller's
+    // position. Both halves are asserted, so a degraded binding cannot read as a
+    // pass (ARCH-E8-ADR14-PID-REUSE-001).
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let before_file = base.join("report-before.txt");
+    let after_file = base.join("report-after.txt");
+
+    let spawned = spawn_server_without_peer_trust(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Before the handoff: the harness is refused, the pane's own process is not.
+    assert_eq!(
+        report_pi_agent(&api_socket, &pane_id, 1, "handoff-outside-1")["error"]["code"],
+        "caller_outside_pane",
+        "the harness must be refused before the handoff"
+    );
+    send_pane_line(
+        &api_socket,
+        &pane_id,
+        &in_pane_report_line(&pane_id, "handoff-inside-1", &before_file),
+    );
+    let before = read_report_outcome(&before_file);
+    assert!(
+        before.contains("rc=0"),
+        "an in-pane report must be accepted before the handoff: {before:?}"
+    );
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    // After the handoff the new server walks the SAME pane child PIDs.
+    let outside_after = report_pi_agent(&api_socket, &pane_id, 2, "handoff-outside-2");
+    send_pane_line(
+        &api_socket,
+        &pane_id,
+        &in_pane_report_line(&pane_id, "handoff-inside-2", &after_file),
+    );
+    let after = read_report_outcome(&after_file);
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+
+    assert_eq!(
+        outside_after["error"]["code"], "caller_outside_pane",
+        "a live handoff must not open the pane-tree binding to outside callers"
+    );
+    let outside_message = outside_after["error"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        outside_message.contains("is not inside pane"),
+        "the harness must be refused for being outside the pane, not because the pane \
+         lost its principal across the handoff: {outside_message:?}"
+    );
+    assert!(
+        after.contains("rc=0"),
+        "an in-pane report must still be accepted after the handoff: {after:?}"
+    );
 }

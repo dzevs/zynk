@@ -3,6 +3,8 @@
 Scoped to copied tooling/docs paths; case-insensitive; the CLI integration tests use a real temp git repo
 so the path scoping cannot silently regress (Codex R1). unittest style (run via `python3 -m unittest`)."""
 import importlib.util, pathlib, subprocess, tempfile, unittest
+import shutil
+from scripts.git_test_support import git_env, init_repo, run_git
 
 _s = importlib.util.spec_from_file_location(
     "scrub_check", pathlib.Path(__file__).parent / "scrub_check.py")
@@ -30,13 +32,14 @@ class ScrubHitsTests(unittest.TestCase):
 class ScrubCliTests(unittest.TestCase):  # real-git integration so path scoping can't silently regress
     def _run(self, files):
         d = tempfile.mkdtemp()
-        subprocess.run(["git", "init", "-q", d], check=True)
+        self.addCleanup(shutil.rmtree, d)
+        init_repo(d)
         for path, text in files.items():
             p = pathlib.Path(d) / path
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text)
-        subprocess.run(["git", "-C", d, "add", "-A"], check=True)
-        return subprocess.run(["python3", SCRUB, "--staged"], cwd=d).returncode
+        run_git(d, "add", "-A")
+        return subprocess.run(["python3", SCRUB, "--staged"], cwd=d, env=git_env()).returncode
 
     def test_in_scope_term_fails(self):
         self.assertEqual(self._run({".agents/skills/x/SKILL.md": "adapted from Mastra\n"}), 1)
