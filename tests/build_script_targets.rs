@@ -1,8 +1,21 @@
+//! What `build.rs` promises, checked by really running cargo. Both tests are `#[ignore]`d: they
+//! are neither hermetic nor fast, so `just check` stays clean of them and they are run explicitly.
+//!
 //! ADR 0013 promises one thing to anyone who builds zynk on another platform: a `compile_error!`
 //! naming the ADR (`src/main.rs`). `build.rs` runs BEFORE rustc compiles the crate, so a build
 //! script that failed on an unsupported target would replace that message with a Zig-target panic
-//! and the promise would be false. This test asks cargo to check the crate for a non-Linux target
-//! and asserts the ADR message is what comes back.
+//! and the promise would be false. The first test asks cargo to check the crate for a non-Linux
+//! target and asserts the ADR message is what comes back.
+//!
+//! The second promise is ADR 0013 custody: `ZYNK_BUILD_SHA` names the source this binary was built
+//! from, `-dirty` included. `build_sha_attestation_does_not_survive_a_source_edit` runs the real
+//! clean -> edit -> rebuild -> revert cycle in a scratch clone, because cargo's fingerprinting is
+//! the thing under test and no unit test can observe it. Its scratch directory goes under
+//! `ZYNK_BUILD_SHA_CHECK_ROOT`, else `$CARGO_TARGET_DIR`, else `target/`:
+//!
+//! ```bash
+//! cargo nextest run --locked --test build_script_targets --run-ignored all -E 'test(build_sha)'
+//! ```
 //!
 //! `#[ignore]` because it is not hermetic and not fast: it needs the cross target's std
 //! (`rustup target add x86_64-pc-windows-gnu`) and it checks the whole dependency graph for that
@@ -105,4 +118,202 @@ fn adr_0013_compile_error_is_what_a_non_linux_target_reports() {
         !rendered.contains(BUILD_SCRIPT_FAILURE),
         "build.rs must skip an unsupported target, not fail the build before rustc:\n{rendered}"
     );
+}
+
+/// The marker inserted into a tracked Rust constant to make the source genuinely different.
+const DIRTY_MARKER: &str = "zynk-build-sha-cycle-marker";
+/// The tracked source the cycle edits, and the constant inside it.
+const EDITED_SOURCE: &str = "src/update.rs";
+const EDITED_CONST: &str = "pub(crate) const ZYNK_UPDATE_UNAVAILABLE_MESSAGE: &str = \"";
+
+fn scratch_root() -> PathBuf {
+    env::var_os("ZYNK_BUILD_SHA_CHECK_ROOT")
+        .or_else(|| env::var_os("CARGO_TARGET_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"))
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap_or_else(|err| panic!("run git {args:?} in {}: {err}", dir.display()));
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// `cargo build --locked --bin zynk` in `checkout`, with its target directory OUTSIDE the checkout
+/// so the build never dirties the tree it is attesting. The same directory across calls, because a
+/// COLD rebuild would re-run the build script for reasons that have nothing to do with this test.
+fn build_zynk(checkout: &Path, target_dir: &Path) -> PathBuf {
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .current_dir(checkout)
+        .args(["build", "--locked", "--bin", "zynk"])
+        .env("CARGO_TARGET_DIR", target_dir)
+        .env_remove("DOCS_RS")
+        .env_remove("ZYNK_BUILD_SHA")
+        .output()
+        .expect("run cargo build for the scratch checkout");
+    assert!(
+        output.status.success(),
+        "cargo build in {} failed:\n{}{}",
+        checkout.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    target_dir.join("debug").join("zynk")
+}
+
+fn version_line(binary: &Path) -> String {
+    let output = Command::new(binary)
+        .arg("--version")
+        .output()
+        .expect("run the built zynk --version");
+    assert!(
+        output.status.success(),
+        "{} --version failed: {}",
+        binary.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn binary_contains(binary: &Path, needle: &str) -> bool {
+    let bytes = fs::read(binary).expect("read the built binary");
+    bytes
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+#[test]
+#[ignore = "real build cycle: clones the checkout and builds zynk three times (minutes)"]
+fn build_sha_attestation_does_not_survive_a_source_edit() {
+    // Codex Gate-2 (`msg_3e339000b75278a4`): `build.rs` emitted `cargo:rerun-if-changed` only for
+    // the git HEAD/ref, and an explicit list REPLACES cargo's default file watching. So after a
+    // clean build, editing a tracked Rust source and rebuilding produced a CHANGED executable that
+    // still reported `zynk <version> (<clean sha>)` with no `-dirty` — and `src/remote/unix.rs`
+    // consumes exactly that line as ADR 0013 install custody. Only the real cycle proves the fix:
+    // a unit test cannot observe cargo's fingerprinting.
+    //
+    // The checkout under test is a CLONE at the source checkout's HEAD, so what is exercised is the
+    // committed `build.rs`, and the clone's own `git rev-parse HEAD` is the expected attestation.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let head = git(&manifest, &["rev-parse", "HEAD"]);
+
+    let root = scratch_root();
+    fs::create_dir_all(&root).expect("create the scratch root");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let scratch = root.join(format!("build-sha-cycle-{}-{nanos}", std::process::id()));
+    let checkout = scratch.join("checkout");
+    let target_dir = scratch.join("target");
+    fs::create_dir_all(&scratch).expect("create the scratch directory");
+
+    let cycle = std::panic::catch_unwind(|| {
+        let clone = Command::new("git")
+            .args(["clone", "--quiet"])
+            .arg(&manifest)
+            .arg(&checkout)
+            .output()
+            .expect("clone the checkout under test");
+        assert!(
+            clone.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&clone.stderr)
+        );
+        git(&checkout, &["checkout", "--quiet", "--detach", &head]);
+        assert_eq!(
+            git(
+                &checkout,
+                &["status", "--porcelain", "--untracked-files=no"]
+            ),
+            "",
+            "the scratch checkout must start clean"
+        );
+
+        // 1. Warm clean build: the attestation is the commit, with no `-dirty`.
+        let binary = build_zynk(&checkout, &target_dir);
+        let clean = version_line(&binary);
+        assert!(
+            clean.ends_with(&format!("({head})")),
+            "a clean checkout must attest exactly its own commit: {clean:?}"
+        );
+        assert!(
+            !clean.contains("-dirty"),
+            "a clean checkout is not dirty: {clean:?}"
+        );
+        assert!(
+            !binary_contains(&binary, DIRTY_MARKER),
+            "the clean build already carries the marker"
+        );
+
+        // 2. Edit one tracked Rust constant and rebuild in the SAME target directory.
+        let source = checkout.join(EDITED_SOURCE);
+        let original = fs::read_to_string(&source).expect("read the source to edit");
+        let anchor = original
+            .find(EDITED_CONST)
+            .unwrap_or_else(|| panic!("{EDITED_SOURCE} no longer declares {EDITED_CONST}"));
+        let split = anchor + EDITED_CONST.len();
+        let edited = format!(
+            "{}{DIRTY_MARKER} {}",
+            &original[..split],
+            &original[split..]
+        );
+        fs::write(&source, &edited).expect("write the edited source");
+        assert_ne!(
+            git(
+                &checkout,
+                &["status", "--porcelain", "--untracked-files=no"]
+            ),
+            "",
+            "the edit did not make the tree dirty"
+        );
+
+        let binary = build_zynk(&checkout, &target_dir);
+        let dirty = version_line(&binary);
+        assert!(
+            binary_contains(&binary, DIRTY_MARKER),
+            "the edited constant was not compiled, so the cycle proves nothing: {dirty:?}"
+        );
+        assert_eq!(
+            dirty,
+            clean.replace(&format!("({head})"), &format!("({head}-dirty)")),
+            "a modified tracked source must be attested as dirty: {dirty:?}"
+        );
+
+        // 3. Revert and rebuild: the clean attestation comes back.
+        fs::write(&source, &original).expect("restore the source");
+        assert_eq!(
+            git(
+                &checkout,
+                &["status", "--porcelain", "--untracked-files=no"]
+            ),
+            "",
+            "the revert did not restore the tree"
+        );
+        let binary = build_zynk(&checkout, &target_dir);
+        let restored = version_line(&binary);
+        assert!(
+            !binary_contains(&binary, DIRTY_MARKER),
+            "the reverted source was not recompiled: {restored:?}"
+        );
+        assert_eq!(
+            restored, clean,
+            "reverting the edit must restore the clean attestation"
+        );
+    });
+
+    let _ = fs::remove_dir_all(&scratch);
+    if let Err(panic) = cycle {
+        std::panic::resume_unwind(panic);
+    }
 }

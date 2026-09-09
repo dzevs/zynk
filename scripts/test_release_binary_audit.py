@@ -4,15 +4,19 @@ The audit itself needs a built release binary, which `just check` must never pro
 is neither hermetic nor fast). So this drives the audit against tiny shell-script "binaries": one
 that behaves like a correctly gated release build, and several that reproduce the exact regressions
 the audit exists to catch — a leaked debug-only env var name, a leaked update URL constant, an
-updater that succeeds, and one that reaches a downloader only when `ZYNK_FAKE_UPDATE_VERSION` is set
-(Gate-3 B1 `WARDEN-R14-SOURCE-ONLY-BYPASS-001`). The real binary is audited by `just release-audit`
-during release verification.
+updater that succeeds, one that reaches a downloader only when `ZYNK_FAKE_UPDATE_VERSION` is set
+(Gate-3 B1 `WARDEN-R14-SOURCE-ONLY-BYPASS-001`), and one whose `--version` attests a source commit
+the checkout does not justify (Codex Gate-2 `msg_3e339000b75278a4`). The attestation fixtures use a
+real throwaway `git init` repository — cheap, offline and deterministic — so the audit's own git
+calls are exercised rather than stubbed. The real binary is audited by `just release-audit` during
+release verification.
 
 unittest style (run via `python3 -m unittest`)."""
 
 import os
 import pathlib
 import stat
+import subprocess
 import tempfile
 import unittest
 
@@ -20,15 +24,37 @@ from scripts import release_binary_audit as audit
 
 FAIL_CLOSED_MESSAGE = "zynk update is not available yet: build from source"
 
+# Every fixture must answer `--version`: the audit reads the attested source commit from it. The
+# default fixtures attest NOTHING, which is what a non-git `--source-root` requires of a binary.
+VERSION_STANZA = """if [ "$1" = "--version" ]; then
+  printf 'zynk 3.1.0\\n'
+  exit 0
+fi
+"""
+
+
+def _attesting_binary(attestation):
+    """A correctly gated fixture whose `--version` attests `attestation` (`None` attests nothing)."""
+    suffix = f" ({attestation})" if attestation else ""
+    return (
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then\n'
+        f"  printf 'zynk 3.1.0{suffix}\\n'\n"
+        "  exit 0\n"
+        "fi\n"
+        f"printf '%s\\n' \"{FAIL_CLOSED_MESSAGE}\" >&2\n"
+        "exit 1\n"
+    )
+
 # A correctly gated release build: fails closed, never runs a downloader, no debug seam strings.
 GOOD_BINARY = f"""#!/bin/sh
-printf '%s\\n' "{FAIL_CLOSED_MESSAGE}" >&2
+{VERSION_STANZA}printf '%s\\n' "{FAIL_CLOSED_MESSAGE}" >&2
 exit 1
 """
 
 # The gate is closed, but the retired runtime override reopens it — the regression under audit.
 OVERRIDE_REOPENS_BINARY = f"""#!/bin/sh
-if [ -n "${{ZYNK_FAKE_UPDATE_VERSION:-}}" ]; then
+{VERSION_STANZA}if [ -n "${{ZYNK_FAKE_UPDATE_VERSION:-}}" ]; then
   curl -sfL https://example.invalid/latest.json
   printf 'update failed\\n' >&2
   exit 1
@@ -39,7 +65,7 @@ exit 1
 
 # Fails closed but still runs the downloader first: no fetch may be attempted at all.
 FETCHES_ANYWAY_BINARY = f"""#!/bin/sh
-curl -sfL https://example.invalid/latest.json
+{VERSION_STANZA}curl -sfL https://example.invalid/latest.json
 printf '%s\\n' "{FAIL_CLOSED_MESSAGE}" >&2
 exit 1
 """
@@ -52,7 +78,7 @@ exit 0
 # Records the environment of every run it is given, so the sanitization can be asserted per case.
 ENV_DUMP_SEPARATOR = "=== run ==="
 ENV_DUMP_BINARY = f"""#!/bin/sh
-{{ printf '%s\\n' "{ENV_DUMP_SEPARATOR}"; env; }} >> "$AUDIT_ENV_DUMP"
+{VERSION_STANZA}{{ printf '%s\\n' "{ENV_DUMP_SEPARATOR}"; env; }} >> "$AUDIT_ENV_DUMP"
 printf '%s\\n' "{FAIL_CLOSED_MESSAGE}" >&2
 exit 1
 """
@@ -69,6 +95,43 @@ def _write_binary(directory, name, body):
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path
+
+
+def _init_repo(directory):
+    """A throwaway one-commit git checkout under `directory`, as (path, head sha).
+
+    Cheap, offline and deterministic: `git init` plus one commit. Signing and the ambient user
+    identity are overridden so the operator's own git config cannot reach in."""
+    root = pathlib.Path(directory) / "checkout"
+    root.mkdir(parents=True, exist_ok=True)
+
+    def run(*args):
+        subprocess.run(
+            ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
+        )
+
+    run("init", "--quiet", "-b", "main")
+    (root / "tracked.txt").write_text("clean\n", encoding="utf-8")
+    run("add", "tracked.txt")
+    run(
+        "-c",
+        "user.email=audit@example.invalid",
+        "-c",
+        "user.name=audit",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "initial",
+    )
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return root, head
 
 
 def _write_source_root(directory, source=FAKE_SOURCE):
@@ -241,6 +304,91 @@ class EnvironmentSanitizationTests(unittest.TestCase):
                 "/home/live/.zynk",
                 "the audit must not let the live ZYNK_HOME through",
             )
+
+
+class BuildAttestationTests(unittest.TestCase):
+    """`zynk --version` must name the source the binary was actually built from."""
+
+    def _check(self, tmp, root, attestation):
+        binary = _write_binary(tmp, "zynk", _attesting_binary(attestation))
+        report = []
+        return audit.check_build_attestation(binary, root, report), report
+
+    def test_a_clean_checkout_attested_as_its_own_commit_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, head = _init_repo(tmp)
+            failures, report = self._check(tmp, root, head)
+            self.assertEqual(failures, [], failures)
+            self.assertTrue(any(head in line for line in report), report)
+
+    def test_a_clean_checkout_attested_as_dirty_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, head = _init_repo(tmp)
+            failures, _ = self._check(tmp, root, f"{head}-dirty")
+            self.assertTrue(
+                any("outlived the source it names" in f for f in failures),
+                f"claiming dirty on a clean checkout must fail the audit: {failures}",
+            )
+
+    def test_a_dirty_checkout_attested_as_clean_fails(self):
+        # The exact regression the check exists for (Codex Gate-2 `msg_3e339000b75278a4`): the
+        # attestation survived an edit to the source it names, and the remote-copy path read that
+        # stale line as ADR 0013 install custody.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, head = _init_repo(tmp)
+            (root / "tracked.txt").write_text("edited\n", encoding="utf-8")
+            failures, _ = self._check(tmp, root, head)
+            self.assertTrue(
+                any("outlived the source it names" in f for f in failures),
+                f"a stale clean attestation must fail the audit: {failures}",
+            )
+
+    def test_a_dirty_checkout_attested_as_dirty_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, head = _init_repo(tmp)
+            (root / "tracked.txt").write_text("edited\n", encoding="utf-8")
+            failures, _ = self._check(tmp, root, f"{head}-dirty")
+            self.assertEqual(failures, [], failures)
+
+    def test_a_foreign_commit_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = _init_repo(tmp)
+            failures, _ = self._check(tmp, root, "0" * 40)
+            self.assertTrue(
+                any("outlived the source it names" in f for f in failures),
+                f"attesting another commit must fail the audit: {failures}",
+            )
+
+    def test_a_binary_that_attests_nothing_in_a_checkout_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = _init_repo(tmp)
+            failures, _ = self._check(tmp, root, None)
+            self.assertTrue(
+                any("attests no source commit" in f for f in failures),
+                f"a binary with no attestation must fail the audit: {failures}",
+            )
+
+    def test_a_non_checkout_source_root_requires_no_attestation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "not-a-checkout"
+            root.mkdir(parents=True, exist_ok=True)
+            failures, report = self._check(tmp, root, None)
+            self.assertEqual(failures, [], failures)
+            self.assertTrue(any("not a checkout" in line for line in report), report)
+
+            failures, _ = self._check(tmp, root, "0" * 40)
+            self.assertTrue(
+                any("nothing can verify that claim" in f for f in failures),
+                f"an unverifiable attestation must fail the audit: {failures}",
+            )
+
+    def test_the_real_checkout_justifies_an_attestation(self):
+        # Pins the parser to reality: the audit's own checkout must resolve to a commit, so the
+        # check can never be silently skipped where `just release-audit` runs it.
+        self.assertTrue(
+            audit.expected_build_sha(audit.ROOT),
+            "the audit's own checkout justifies no attestation",
+        )
 
 
 if __name__ == "__main__":

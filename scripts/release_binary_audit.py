@@ -7,7 +7,7 @@ tests say what the compiler *should* do; this script checks the artifact that ac
 peer-trust seam (`ZYNK_TEST_TRUST_PEER_PID`) could not verify from the source alone: that the
 debug-only seam is absent from the built release binary.
 
-Two independent checks:
+Three independent checks:
 
 1. Strings. Neither the debug-only env var names nor any update manifest/asset URL constant may
    appear in the binary. The URL constants are parsed out of the Rust sources at audit time, so
@@ -17,6 +17,12 @@ Two independent checks:
    `ZYNK_FAKE_UPDATE_VERSION=9.9.9` on top — each time with a PATH-local fake `curl` that writes a
    marker file. Both runs must fail closed, and the marker must never be written: no network fetch
    was even attempted.
+3. Attestation. `zynk --version` names the source commit the binary was built from, and ADR 0013
+   install custody is decided on that line (`src/remote/unix.rs`). It must equal `git rev-parse HEAD`
+   of `--source-root`, with `-dirty` appended if and only if `git status --porcelain
+   --untracked-files=no` is non-empty. A stale attestation — the identity outliving an edit to the
+   source it names — fails the audit (Codex Gate-2 `msg_3e339000b75278a4`). When `--source-root` is
+   not a git checkout the binary must attest nothing, because nothing could verify a claim it made.
 
 The real-binary run belongs to the release verification, not to `just check`. Run it with
 `just release-audit`, which builds `--release --locked` into the isolated target and audits the
@@ -56,6 +62,11 @@ URL_CONST_RE = re.compile(r'const\s+([A-Z0-9_]*URL)\s*:\s*&str\s*=\s*"(https?://
 MIN_STRING_LEN = 4
 # The fail-closed message the updater prints; stable across the ADR 0013 UX rewordings.
 FAIL_CLOSED_NEEDLE = "not available"
+# `zynk <version>`, optionally followed by the attested source commit in parentheses. Mirrors
+# `parse_version_line` in src/remote/unix.rs, the consumer that turns this line into install custody.
+VERSION_LINE_RE = re.compile(r"^zynk\s+(?P<version>\S+)(?:\s+\((?P<sha>[^)]*)\))?$")
+# The suffix `build.rs` appends when tracked files differ from the attested commit.
+DIRTY_SUFFIX = "-dirty"
 RUN_TIMEOUT_SECONDS = 120
 
 FAKE_CURL = """#!/bin/sh
@@ -211,12 +222,105 @@ def check_update_fails_closed(binary, report):
     return failures
 
 
+def git_output(source_root, args):
+    """`git -C <source_root> <args>` stdout, or None when git is absent or the command fails."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), *args],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+    except OSError:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def expected_build_sha(source_root):
+    """The attestation the checkout at `source_root` justifies — `<head>` or `<head>-dirty` — or
+    None when `source_root` is not itself a git checkout.
+
+    The toplevel is compared to `source_root` so an ancestor repository (a temp dir that happens to
+    sit inside one) is never mistaken for the checkout the binary was built from."""
+    root = pathlib.Path(source_root).resolve()
+    toplevel = git_output(root, ["rev-parse", "--show-toplevel"])
+    if toplevel is None or pathlib.Path(toplevel.strip()).resolve() != root:
+        return None
+    head = git_output(root, ["rev-parse", "HEAD"])
+    status = git_output(root, ["status", "--porcelain", "--untracked-files=no"])
+    if head is None or status is None or not head.strip():
+        return None
+    head = head.strip()
+    return f"{head}{DIRTY_SUFFIX}" if status.strip() else head
+
+
+def reported_build_sha(binary):
+    """(sha or None, failure or None) from `<binary> --version`, run in an isolated environment."""
+    with tempfile.TemporaryDirectory(prefix="zynk-release-audit-sha-") as tmp:
+        workdir = pathlib.Path(tmp)
+        env = _isolated_env(workdir, workdir / "curl-was-invoked", {})
+        try:
+            result = subprocess.run(
+                [str(binary), "--version"],
+                env=env,
+                cwd=str(workdir),
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=RUN_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return None, f"`zynk --version` did not finish in {RUN_TIMEOUT_SECONDS}s"
+    if result.returncode != 0:
+        return None, f"`zynk --version` failed: {(result.stderr or '').strip()[:300]!r}"
+    lines = (result.stdout or "").strip().splitlines()
+    line = lines[0].strip() if lines else ""
+    match = VERSION_LINE_RE.match(line)
+    if not match:
+        return None, f"the binary does not report a zynk version line: {line!r}"
+    return (match.group("sha") or None), None
+
+
+def check_build_attestation(binary, source_root, report):
+    """The attested source commit must be the one the checkout justifies, dirty flag included."""
+    reported, failure = reported_build_sha(binary)
+    if failure:
+        return [failure]
+
+    expected = expected_build_sha(source_root)
+    if expected is None:
+        if reported:
+            return [
+                f"the binary attests source commit {reported!r}, but --source-root {source_root} "
+                "is not a git checkout, so nothing can verify that claim"
+            ]
+        report.append(
+            f"  ok: no source commit attested, and {source_root} is not a checkout to verify one"
+        )
+        return []
+
+    if reported is None:
+        return [
+            f"the binary attests no source commit; the checkout it was audited against is "
+            f"{expected!r} (ADR 0013 custody needs the exact reviewed source SHA)"
+        ]
+    if reported != expected:
+        return [
+            f"the binary attests {reported!r} but the checkout is {expected!r} — the build identity "
+            "outlived the source it names"
+        ]
+    report.append(f"  ok: attested source commit {reported} matches the checkout")
+    return []
+
+
 def audit(binary, source_root):
-    """Run both checks; return (failures, report_lines)."""
+    """Run all three checks; return (failures, report_lines)."""
     report = [f"auditing release binary: {binary}"]
     failures = check_strings(binary, source_root, report)
     report.append("behaviour: running the binary with a PATH-local fake downloader")
     failures += check_update_fails_closed(binary, report)
+    report.append("attestation: the reported source commit must match the checkout it was built from")
+    failures += check_build_attestation(binary, source_root, report)
     return failures, report
 
 

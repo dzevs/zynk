@@ -45,6 +45,49 @@ fn git_stdout(dir: &str, args: &[&str]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+/// Emit `cargo:rerun-if-changed` for every TRACKED file in `dir`, returning how many were watched.
+///
+/// An explicit `rerun-if-changed` list REPLACES cargo's default file watching, so watching only
+/// the git HEAD/ref left the dirty computation skippable: after a clean build, editing a tracked
+/// Rust source and rebuilding produced a CHANGED executable that still reported the clean SHA with
+/// no `-dirty`, and `src/remote/unix.rs` consumes that attestation as ADR 0013 install custody
+/// (Codex Gate-2 `msg_3e339000b75278a4`). Watching the tracked set makes the dirty computation
+/// unskippable: any edit to a file `git status` would notice re-runs this script.
+///
+/// A path is emitted as recorded even though it is checked for existence first — cargo cannot stat
+/// a path that later disappears, so a DELETED tracked file re-runs the script too.
+///
+/// Returns 0 when git is absent or says nothing — a crates.io `.crate` unpack, a source tarball —
+/// where the SHA is empty anyway and the remote-copy path already refuses to seed a remote host.
+fn watch_tracked_sources(dir: &str) -> usize {
+    let Ok(output) = Command::new("git")
+        .current_dir(dir)
+        .args(["ls-files", "-z"])
+        .output()
+    else {
+        return 0;
+    };
+    if !output.status.success() {
+        return 0;
+    }
+    let root = PathBuf::from(dir);
+    let mut watched = 0;
+    for name in output.stdout.split(|byte| *byte == 0) {
+        if name.is_empty() {
+            continue;
+        }
+        let Ok(name) = std::str::from_utf8(name) else {
+            continue;
+        };
+        let path = root.join(name);
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+            watched += 1;
+        }
+    }
+    watched
+}
+
 /// Export `ZYNK_BUILD_SHA`: the source commit this binary is built from (ADR 0013 custody).
 ///
 /// A remote-copy install has to prove the far end runs the exact reviewed source, and a version
@@ -79,8 +122,14 @@ fn export_build_sha() {
             &reference,
         ]);
     }
+    // And every tracked file, so an edit that makes the tree dirty cannot leave a stale clean
+    // SHA compiled in. The commit alone is not the attestation; the commit PLUS the dirty flag is.
+    // When the tracked set cannot be enumerated the dirty flag cannot be kept fresh, so nothing is
+    // attested at all — ADR 0013 refuses a binary that cannot attest its source, and a stale
+    // attestation is worse than none.
+    let watched = watch_tracked_sources(&dir);
 
-    let sha = match git_stdout(&dir, &["rev-parse", "HEAD"]) {
+    let sha = match git_stdout(&dir, &["rev-parse", "HEAD"]).filter(|_| watched > 0) {
         Some(sha) => {
             let dirty = git_stdout(&dir, &["status", "--porcelain", "--untracked-files=no"]);
             match dirty {
