@@ -74,9 +74,10 @@ pub fn session_ref_from_report(
 
 pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
     match value.as_deref().map(str::trim) {
-        Some(source @ ("startup" | "resume" | "clear" | "compact" | "new" | "fork" | "select")) => {
-            Some(source.to_string())
-        }
+        Some(
+            source @ ("startup" | "resume" | "clear" | "compact" | "branch" | "new" | "fork"
+            | "select"),
+        ) => Some(source.to_string()),
         _ => None,
     }
 }
@@ -233,6 +234,9 @@ fn canonical_resume_argv(
                 session_ref.value.clone(),
             ]
         }
+        ("zynk:qwen", "qwen", AgentSessionRefKind::Id) => {
+            vec!["qwen".into(), "--resume".into(), session_ref.value.clone()]
+        }
         ("zynk:kilo", "kilo", AgentSessionRefKind::Id) => {
             vec!["kilo".into(), "--session".into(), session_ref.value.clone()]
         }
@@ -281,6 +285,7 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("zynk:hermes", "hermes")
             | ("zynk:opencode", "opencode")
             | ("zynk:qodercli", "qodercli")
+            | ("zynk:qwen", "qwen")
             | ("zynk:kilo", "kilo")
             | ("zynk:cursor", "cursor")
             | ("zynk:antigravity_cli", "agy")
@@ -564,6 +569,12 @@ mod tests {
             "zynk:antigravity_cli",
             "agy"
         ));
+        // qwen is session-identity-only for the same reason. Upstream `a4d52ab6` lists
+        // it as reserved-native, but this fork routes the two tiers differently: the
+        // reserved-native branch runs FIRST in `AppEvent::HookAgentStateReported`
+        // (`src/app/actions.rs`) and stores the session WITHOUT recording
+        // `hook_identity`, which would leave a qwen pane unable to receipt.
+        assert!(!is_reserved_native_state_source("zynk:qwen", "qwen"));
         assert!(!is_reserved_native_state_source("zynk:kimi", "kimi"));
         assert!(!is_reserved_native_state_source(
             "zynk:opencode",
@@ -1274,6 +1285,17 @@ mod tests {
         );
         assert_eq!(
             plan(
+                "zynk:qwen",
+                "qwen",
+                &AgentSessionRef::id("qwen-session").unwrap(),
+                None,
+            )
+            .unwrap()
+            .argv,
+            vec!["qwen", "--resume", "qwen-session"]
+        );
+        assert_eq!(
+            plan(
                 "zynk:kilo",
                 "kilo",
                 &AgentSessionRef::id("kilo-session").unwrap(),
@@ -1445,6 +1467,11 @@ mod tests {
         assert_eq!(session_ref.value, "qoder-id");
 
         let session_ref =
+            session_ref_from_report("zynk:qwen", "qwen", Some("qwen-id".into()), None).unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "qwen-id");
+
+        let session_ref =
             session_ref_from_report("zynk:antigravity_cli", "agy", Some("agy-id".into()), None)
                 .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
@@ -1473,6 +1500,10 @@ mod tests {
         assert_eq!(
             normalize_session_start_source(Some("compact".into())),
             Some("compact".into())
+        );
+        assert_eq!(
+            normalize_session_start_source(Some("branch".into())),
+            Some("branch".into())
         );
         assert_eq!(
             normalize_session_start_source(Some("new".into())),

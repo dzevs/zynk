@@ -327,7 +327,7 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
 pub(crate) fn session_identity_only_integration(source: &str, agent_label: &str) -> bool {
     matches!(
         (source, agent_label),
-        ("zynk:hermes", "hermes") | ("zynk:antigravity_cli", "agy")
+        ("zynk:hermes", "hermes") | ("zynk:qwen", "qwen") | ("zynk:antigravity_cli", "agy")
     )
 }
 
@@ -837,6 +837,7 @@ mod tests {
     fn session_identity_integrations_leave_state_to_screen_detection() {
         for (source, label, agent) in [
             ("zynk:hermes", "hermes", Agent::Hermes),
+            ("zynk:qwen", "qwen", Agent::Qwen),
             ("zynk:antigravity_cli", "agy", Agent::Antigravity),
         ] {
             assert!(!full_lifecycle_hook_authority(source, label));

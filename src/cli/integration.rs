@@ -118,13 +118,13 @@ fn parse_integration_target(
 ) -> std::io::Result<Option<IntegrationTarget>> {
     let Some(target) = args.first().map(|arg| arg.as_str()) else {
         eprintln!(
-            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor|mastracode|antigravity-cli|grok>"
+            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|cursor|mastracode|antigravity-cli|grok>"
         );
         return Ok(None);
     };
     if args.len() != 1 {
         eprintln!(
-            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|cursor|mastracode|antigravity-cli|grok>"
+            "usage: zynk integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|cursor|mastracode|antigravity-cli|grok>"
         );
         return Ok(None);
     }
@@ -142,6 +142,7 @@ fn parse_integration_target(
         "kilo" => IntegrationTarget::Kilo,
         "hermes" => IntegrationTarget::Hermes,
         "qodercli" => IntegrationTarget::Qodercli,
+        "qwen" => IntegrationTarget::Qwen,
         "cursor" => IntegrationTarget::Cursor,
         "mastracode" => IntegrationTarget::Mastracode,
         "antigravity-cli" | "antigravity_cli" => IntegrationTarget::AntigravityCli,
@@ -149,7 +150,7 @@ fn parse_integration_target(
         _ => {
             eprintln!("unknown integration target: {target}");
             eprintln!(
-                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, cursor, mastracode, antigravity-cli, grok"
+                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, cursor, mastracode, antigravity-cli, grok"
             );
             return Ok(None);
         }
@@ -172,6 +173,7 @@ fn print_integration_help() {
     eprintln!("  zynk integration install kilo");
     eprintln!("  zynk integration install hermes");
     eprintln!("  zynk integration install qodercli");
+    eprintln!("  zynk integration install qwen");
     eprintln!("  zynk integration install cursor");
     eprintln!("  zynk integration install mastracode");
     eprintln!("  zynk integration install antigravity-cli");
@@ -188,6 +190,7 @@ fn print_integration_help() {
     eprintln!("  zynk integration uninstall kilo");
     eprintln!("  zynk integration uninstall hermes");
     eprintln!("  zynk integration uninstall qodercli");
+    eprintln!("  zynk integration uninstall qwen");
     eprintln!("  zynk integration uninstall cursor");
     eprintln!("  zynk integration uninstall mastracode");
     eprintln!("  zynk integration uninstall antigravity-cli");

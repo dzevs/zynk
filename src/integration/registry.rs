@@ -20,6 +20,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Kilo => "kilo",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
         crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
+        crate::api::schema::IntegrationTarget::Qwen => "qwen",
         crate::api::schema::IntegrationTarget::Cursor => "cursor",
         crate::api::schema::IntegrationTarget::Mastracode => "mastracode",
         crate::api::schema::IntegrationTarget::AntigravityCli => "antigravity-cli",
@@ -49,6 +50,7 @@ pub(crate) fn integration_target_command_names(
         crate::api::schema::IntegrationTarget::Kilo => &["kilo", "kilo-code"],
         crate::api::schema::IntegrationTarget::Hermes => &["hermes"],
         crate::api::schema::IntegrationTarget::Qodercli => qodercli_command_names(),
+        crate::api::schema::IntegrationTarget::Qwen => &["qwen"],
         crate::api::schema::IntegrationTarget::Cursor => cursor_command_names(),
         crate::api::schema::IntegrationTarget::Mastracode => &["mastracode"],
         crate::api::schema::IntegrationTarget::AntigravityCli => &["agy"],
@@ -170,7 +172,7 @@ pub(crate) fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 16] {
+); 17] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -234,6 +236,11 @@ pub(crate) fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Qodercli,
             qodercli_dir().map(|dir| dir.join("hooks").join(super::QODERCLI_HOOK_INSTALL_NAME)),
             super::QODERCLI_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Qwen,
+            qwen_dir().map(|dir| dir.join("hooks").join(super::QWEN_HOOK_INSTALL_NAME)),
+            super::QWEN_INTEGRATION_VERSION,
         ),
         (
             crate::api::schema::IntegrationTarget::Cursor,
@@ -460,6 +467,7 @@ pub(crate) fn expected_integration_id(
         IntegrationTarget::Kilo => "kilo",
         IntegrationTarget::Hermes => "hermes",
         IntegrationTarget::Qodercli => "qodercli",
+        IntegrationTarget::Qwen => "qwen",
         IntegrationTarget::Cursor => "cursor",
         IntegrationTarget::Mastracode => "mastracode",
         IntegrationTarget::AntigravityCli => "antigravity_cli",

@@ -156,6 +156,13 @@ pub(crate) const QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 12] = [
     ("Stop", "idle"),
     ("SessionEnd", "release"),
 ];
+pub(crate) const QWEN_HOOK_INSTALL_NAME: &str = "zynk-agent-session.sh";
+pub(crate) const QWEN_HOOK_ASSET: &str = include_str!("assets/qwen/zynk-agent-session.sh");
+pub(crate) const QWEN_INTEGRATION_VERSION: u32 = 1;
+/// Session-only, like antigravity-cli: `SessionStart` is the one Qwen Code event
+/// that carries `session_id` plus the start reason zynk needs to decide whether a
+/// report may repoint the pane. Lifecycle state stays screen-detected.
+pub(crate) const QWEN_HOOK_EVENTS: [(&str, &str); 1] = [("SessionStart", "session")];
 pub(crate) const CURSOR_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const CURSOR_HOOK_ASSET: &str = include_str!("assets/cursor/zynk-agent-state.sh");
 pub(crate) const CURSOR_INTEGRATION_VERSION: u32 = 1;

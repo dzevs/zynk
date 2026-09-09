@@ -470,6 +470,13 @@ fn start_detected_agy(fixture: &Fixture, pane: &str) {
     start_detected_agent(fixture, pane, "agy");
 }
 
+/// Run a fake `qwen` process in `pane` and wait until DETECTION reports it. Qwen Code
+/// is the third session-identity-only integration, so its receipt tests need the same
+/// really-detected process as hermes and antigravity-cli.
+fn start_detected_qwen(fixture: &Fixture, pane: &str) {
+    start_detected_agent(fixture, pane, "qwen");
+}
+
 /// Run a process whose argv[0] is `agent` in `pane` and wait until DETECTION
 /// reports it. A session-identity-only integration leaves lifecycle to the screen,
 /// so its tests need a really-detected process rather than a hook state report.
@@ -1385,6 +1392,174 @@ fn a_detection_only_antigravity_cli_pane_is_not_receipt_capable() {
     assert!(
         receipt.get("result").is_none(),
         "a detection-only antigravity pane must not receipt: {receipt}"
+    );
+    assert_eq!(
+        receipt["error"]["code"], "receiver_identity_unverified",
+        "{receipt}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
+
+    fixture.cleanup();
+}
+
+#[test]
+fn qwen_session_report_anchors_its_receipt() {
+    // qwen is the third session-identity-only integration (upstream `a4d52ab6`). Its
+    // shipped hook reports the session over `pane.report_agent_session` and NOTHING
+    // else -- no lifecycle state -- so the identity it anchors must come from
+    // `hook_identity`, and the pane must then be able to receipt the message addressed
+    // to it while its status stays screen-detected.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "qwen-identity-receipt");
+    start_detected_qwen(&fixture, &pane);
+    report_session(
+        &fixture.socket_path,
+        &pane,
+        "zynk:qwen",
+        "qwen",
+        "qwen-session-1",
+    );
+
+    let got = pane_get(&fixture.socket_path, &pane);
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/value")
+            .and_then(Value::as_str),
+        Some("qwen-session-1"),
+        "the identity-only session report lost its session identity: {got}"
+    );
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/source")
+            .and_then(Value::as_str),
+        Some("zynk:qwen"),
+        "{got}"
+    );
+    assert_eq!(
+        got.pointer("/result/pane/agent_session/agent")
+            .and_then(Value::as_str),
+        Some("qwen"),
+        "{got}"
+    );
+
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "for the qwen session"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send: stderr={} {sent}", out.stderr);
+    assert_eq!(sent["delivery_status"], "submitted", "{sent}");
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let receipt = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    assert!(
+        receipt.get("error").is_none(),
+        "the hook-identified qwen addressee could not receipt its own message: {receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["delivery_status"], "received",
+        "{receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["receiver_agent_label"], "qwen",
+        "{receipt}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "received");
+
+    fixture.cleanup();
+}
+
+#[test]
+fn a_same_label_qwen_pane_with_another_session_cannot_receipt() {
+    // Owner coherence and the stored target triple are unweakened by adding qwen to
+    // the identity-only tier: two panes both detected as qwen, each with its own
+    // reported session. Only the addressed session may receipt.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let target = create_root_pane(&fixture.socket_path, "qwen-target");
+    let impostor = create_root_pane(&fixture.socket_path, "qwen-impostor");
+    start_detected_qwen(&fixture, &target);
+    start_detected_qwen(&fixture, &impostor);
+    report_session(
+        &fixture.socket_path,
+        &target,
+        "zynk:qwen",
+        "qwen",
+        "qwen-target-1",
+    );
+    report_session(
+        &fixture.socket_path,
+        &impostor,
+        "zynk:qwen",
+        "qwen",
+        "qwen-impostor-2",
+    );
+
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &target, "--", "bound to the qwen target session"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send: stderr={} {sent}", out.stderr);
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let wrong = send_json(&fixture.socket_path, &receipt_request(&sent, &impostor));
+    assert_eq!(
+        wrong["error"]["code"], "receiver_identity_mismatch",
+        "a same-label qwen pane holding another session must not receipt: {wrong}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
+
+    let right = send_json(&fixture.socket_path, &receipt_request(&sent, &target));
+    assert!(
+        right.get("error").is_none(),
+        "the addressed qwen session's own receipt failed: {right}"
+    );
+    assert_eq!(latest_event(&fixture, &message_id).0, "received");
+
+    fixture.cleanup();
+}
+
+#[test]
+fn a_detection_only_qwen_pane_is_not_receipt_capable() {
+    // The negative half for the new integration: a really detected `qwen` process that
+    // never reported through its hook carries a detection-derived label only. Adding
+    // qwen to `session_identity_only_integration` must not let detection manufacture
+    // receipt identity for it.
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "qwen-detection-only");
+    start_detected_qwen(&fixture, &pane);
+
+    let got = pane_get(&fixture.socket_path, &pane);
+    assert_eq!(
+        got.pointer("/result/pane/agent").and_then(Value::as_str),
+        Some("qwen"),
+        "precondition: the pane carries a detection-only label: {got}"
+    );
+    assert!(
+        got.pointer("/result/pane/agent_session").is_none()
+            || got
+                .pointer("/result/pane/agent_session")
+                .map(Value::is_null)
+                == Some(true),
+        "precondition: no hook reported a session: {got}"
+    );
+
+    let out = run_cli(
+        &fixture,
+        None,
+        &["send", &pane, "--", "to a detected-only qwen pane"],
+    );
+    let sent = parse_outcome(&out);
+    assert_eq!(out.code, 0, "send: stderr={} {sent}", out.stderr);
+    let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    let receipt = send_json(&fixture.socket_path, &receipt_request(&sent, &pane));
+    assert!(
+        receipt.get("result").is_none(),
+        "a detection-only qwen pane must not receipt: {receipt}"
     );
     assert_eq!(
         receipt["error"]["code"], "receiver_identity_unverified",
