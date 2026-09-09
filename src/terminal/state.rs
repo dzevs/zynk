@@ -47,8 +47,40 @@ pub struct HookIdentity {
 struct SuppressedHookReport {
     agent_label: String,
     session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    /// WHEN the observation or operation that retired this owner was CAPTURED, never
+    /// when the App got round to handling it. The detector stamps every screen
+    /// observation at capture time and `publish_state_changed_event` carries that stamp
+    /// through the queue, but the queue holds 256 events and each drain is bounded at
+    /// 64, so handling routinely lags capture. Were this handler time, an observation
+    /// the detector genuinely took AFTER the exit could still look older than the
+    /// retirement, and the running process it proves would decide nothing
+    /// (`detected_state_observed_before_release_suppression`). API clear and release
+    /// carry no observation of their own, so those pass their own handling instant.
     observed_at: Instant,
+    /// WHEN this owner's process was last OBSERVED GONE while it was still only
+    /// suppressed — its own exit, or a different agent detected in its place. A
+    /// retirement spends a window here before any running observation converts it into
+    /// a `StaleHookSession`, and a loss seen during that window is recorded nowhere
+    /// else; without it the converted session starts with no boundary at all and a
+    /// running observation captured BEFORE that loss re-arms a process already seen
+    /// gone. It is carried into `StaleHookSession::last_loss_observed_at` on conversion.
+    last_loss_observed_at: Option<Instant>,
     reason: HookSuppressionReason,
+}
+
+impl SuppressedHookReport {
+    /// Advance the loss boundary this suppression will hand to the stale session it
+    /// becomes. Only the NEWEST loss is kept, for the same reason
+    /// `StaleHookSession::observe_process_loss` keeps it: a reordered older observation
+    /// must not roll the boundary back over a newer one.
+    fn observe_process_loss(&mut self, observed_at: Instant) {
+        if self
+            .last_loss_observed_at
+            .is_none_or(|lost_at| lost_at < observed_at)
+        {
+            self.last_loss_observed_at = Some(observed_at);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +102,7 @@ struct StaleHookSession {
     ///
     /// The timestamp is what bounds its LIFETIME. The evidence asserts a process that is
     /// still RUNNING, so a later observation showing that process gone expires it again
-    /// (`expire_stale_session_evidence_on_process_loss`), while an observation captured
+    /// (`observe_process_loss_for_retired_owners`), while an observation captured
     /// before it decides nothing.
     fresh_process_evidence: Option<Instant>,
     /// WHEN this owner's process was last OBSERVED GONE: its own exit, or a different
@@ -118,10 +150,25 @@ impl StaleHookSession {
         }
         if self
             .fresh_process_evidence
-            .is_some_and(|recorded_at| recorded_at < observed_at)
+            .is_some_and(|recorded_at| recorded_at <= observed_at)
         {
             self.fresh_process_evidence = None;
         }
+    }
+
+    /// Whether this session currently holds evidence a resume may reclaim it on.
+    ///
+    /// The rule is the documented one and it is STRICT: evidence has to be newer than
+    /// the latest loss, never merely as new. `record_fresh_process_evidence` and
+    /// `observe_process_loss` already enforce exactly that on the way in, from both
+    /// sides; re-checking it at the reclaim keeps the two sides from silently drifting
+    /// apart, so no future path that touches a field directly can leave evidence armed
+    /// against a loss that already outdates it.
+    fn has_reclaimable_process_evidence(&self) -> bool {
+        self.fresh_process_evidence.is_some_and(|recorded_at| {
+            self.last_loss_observed_at
+                .is_none_or(|lost_at| lost_at < recorded_at)
+        })
     }
 }
 
@@ -333,7 +380,7 @@ impl TerminalState {
                 .hook_authority
                 .as_ref()
                 .map(|authority| authority.source.clone());
-            self.suppress_current_hook_authority(HookSuppressionReason::ProcessExit);
+            self.suppress_current_hook_authority(HookSuppressionReason::ProcessExit, now);
             if let Some(source) = cleared_source {
                 self.hook_report_sequences.remove(&source);
             }
@@ -353,16 +400,19 @@ impl TerminalState {
                 }))
                 || self.hook_identity_conflicts_with_detected_agent(agent))
         {
-            self.retire_hook_identity(if process_exited {
-                HookSuppressionReason::ProcessExit
-            } else {
-                HookSuppressionReason::HookClear
-            });
+            self.retire_hook_identity(
+                if process_exited {
+                    HookSuppressionReason::ProcessExit
+                } else {
+                    HookSuppressionReason::HookClear
+                },
+                now,
+            );
         }
         // Pending reclaim evidence OUTLIVES the identity it was recorded against, so
         // its lifetime cannot be bounded by the block above: that block runs only while
         // an identity is installed, and the window a delayed resume arrives in has none.
-        self.expire_stale_session_evidence_on_process_loss(agent, process_exited, now);
+        self.observe_process_loss_for_retired_owners(agent, process_exited, now);
         // Identity and its session go together: the session survives only while a
         // still-live identity (one this observation was too old to retire) anchors it.
         if process_exited
@@ -392,7 +442,7 @@ impl TerminalState {
                     }
                 })
             });
-            self.suppress_current_hook_authority(HookSuppressionReason::HookClear);
+            self.suppress_current_hook_authority(HookSuppressionReason::HookClear, now);
             self.hook_authority = None;
             self.persisted_agent_session = durable_session;
         }
@@ -729,12 +779,17 @@ impl TerminalState {
         accepted_session_ref: Option<&crate::agent_resume::AgentSessionRef>,
     ) {
         if let Some(suppressed) = self.suppressed_hook_reports.remove(source) {
+            // The other conversion out of the suppression window, and it carries the
+            // same boundary for the same reason: a loss seen while this owner was only
+            // suppressed must survive into the stale session it becomes (Gate-3 B1).
+            let last_loss_observed_at = suppressed.last_loss_observed_at;
             if let Some(suppressed_ref) = suppressed.session_ref {
                 self.remember_stale_hook_session(
                     source.to_string(),
                     suppressed.agent_label,
                     suppressed_ref,
                     None,
+                    last_loss_observed_at,
                 );
             }
         }
@@ -791,12 +846,16 @@ impl TerminalState {
     /// Retire the current hook identity the way the authority path retires
     /// `hook_authority`: the owner is suppressed WITH the session it anchored, so a
     /// late callback cannot bring the same session back on a higher sequence alone.
-    fn retire_hook_identity(&mut self, reason: HookSuppressionReason) -> Option<HookIdentity> {
+    fn retire_hook_identity(
+        &mut self,
+        reason: HookSuppressionReason,
+        observed_at: Instant,
+    ) -> Option<HookIdentity> {
         let identity = self.hook_identity.take()?;
         if reason == HookSuppressionReason::ProcessExit {
             self.hook_report_sequences.remove(&identity.source);
         }
-        self.suppress_hook_report(&identity.source, &identity.agent_label, reason);
+        self.suppress_hook_report(&identity.source, &identity.agent_label, reason, observed_at);
         Some(identity)
     }
 
@@ -843,7 +902,11 @@ impl TerminalState {
             .is_some_and(|session| session.source == source && session.agent == agent)
     }
 
-    fn suppress_current_hook_authority(&mut self, reason: HookSuppressionReason) {
+    fn suppress_current_hook_authority(
+        &mut self,
+        reason: HookSuppressionReason,
+        observed_at: Instant,
+    ) {
         if let Some((source, agent_label, session_ref)) =
             self.hook_authority.as_ref().and_then(|authority| {
                 crate::detect::full_lifecycle_hook_authority(
@@ -859,7 +922,13 @@ impl TerminalState {
                 })
             })
         {
-            self.suppress_hook_report_with_session_ref(source, agent_label, session_ref, reason);
+            self.suppress_hook_report_with_session_ref(
+                source,
+                agent_label,
+                session_ref,
+                reason,
+                observed_at,
+            );
         }
     }
 
@@ -868,6 +937,7 @@ impl TerminalState {
         source: &str,
         agent_label: &str,
         reason: HookSuppressionReason,
+        observed_at: Instant,
     ) {
         if Self::hook_report_retirement_applies(source, agent_label) {
             let session_ref = self.owned_session_ref(source, agent_label);
@@ -876,16 +946,26 @@ impl TerminalState {
                 agent_label.to_string(),
                 session_ref,
                 reason,
+                observed_at,
             );
         }
     }
 
+    /// Record a retirement, stamped with WHEN the thing that caused it was observed.
+    ///
+    /// `observed_at` is the detector's capture time on every path that has one, and the
+    /// operation's own instant only for an API clear or release, which observes no
+    /// process at all. That distinction is the whole of Gate-3 B1
+    /// WARDEN-R13-OBSERVED-AT-001: handler time turned a legitimate post-exit
+    /// observation into a pre-retirement one whenever the App drained the queue late,
+    /// and the resumed owner then never regained its session.
     fn suppress_hook_report_with_session_ref(
         &mut self,
         source: String,
         agent_label: String,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         reason: HookSuppressionReason,
+        observed_at: Instant,
     ) {
         // Evidence is scoped to the LATEST retirement: a process observed before this
         // one proves nothing about a session retired now, so a resume must wait for a
@@ -898,12 +978,18 @@ impl TerminalState {
                 stale.fresh_process_evidence = None;
             }
         }
+        // A retirement on an observed process EXIT is itself a loss observation, so it
+        // seeds the boundary the converted stale session will have to beat. An API
+        // clear or release observes no process and seeds none.
+        let last_loss_observed_at =
+            (reason == HookSuppressionReason::ProcessExit).then_some(observed_at);
         self.suppressed_hook_reports.insert(
             source,
             SuppressedHookReport {
                 agent_label,
                 session_ref,
-                observed_at: Instant::now(),
+                observed_at,
+                last_loss_observed_at,
                 reason,
             },
         );
@@ -1013,7 +1099,7 @@ impl TerminalState {
     /// arrives with no process seen since the retirement is still suppressed, and a
     /// late callback with no session-start reason is still stale, however fresh the
     /// process is. Evidence a later observation has since expired counts as none
-    /// (`expire_stale_session_evidence_on_process_loss`). WHY this exists at all: the
+    /// (`observe_process_loss_for_retired_owners`). WHY this exists at all: the
     /// Hermes resume command reuses
     /// `session_ref.value` (`src/agent_resume.rs`), so a new id would be a NEW session
     /// — a real resume can only ever name the retired one.
@@ -1040,7 +1126,7 @@ impl TerminalState {
                 stale_sessions.iter().any(|stale| {
                     stale.agent_label == agent_label
                         && &stale.session_ref == incoming_ref
-                        && stale.fresh_process_evidence.is_some()
+                        && stale.has_reclaimable_process_evidence()
                 })
             })
     }
@@ -1091,6 +1177,7 @@ impl TerminalState {
                         source.clone(),
                         suppressed.agent_label.clone(),
                         session_ref,
+                        suppressed.last_loss_observed_at,
                     ));
                 }
             }
@@ -1100,8 +1187,17 @@ impl TerminalState {
         // its agent is the detected process again. The session it anchored stays stale
         // — a late callback must not resurrect it — but the observation is recorded on
         // it, so the agent's own explicit resume of that session can reclaim it.
-        for (source, agent_label, session_ref) in stale_sessions {
-            self.remember_stale_hook_session(source, agent_label, session_ref, Some(observed_at));
+        // Any loss seen while this owner was only suppressed comes WITH it: the session
+        // it becomes must not start life with a clean boundary, or this very observation
+        // could arm it against a process a newer loss already showed gone.
+        for (source, agent_label, session_ref, last_loss_observed_at) in stale_sessions {
+            self.remember_stale_hook_session(
+                source,
+                agent_label,
+                session_ref,
+                Some(observed_at),
+                last_loss_observed_at,
+            );
         }
         // The same observation re-arms sessions that were ALREADY stale, including one
         // whose earlier evidence a process exit has since expired: seeing this owner's
@@ -1117,32 +1213,52 @@ impl TerminalState {
             .retain(|source, _| !Self::hook_report_retirement_applies(source, detected_label));
     }
 
+    /// Record a retired session, applying the loss boundary BEFORE the evidence so the
+    /// boundary can refuse it: an observation is only evidence of a process alive now if
+    /// it is newer than the latest loss, and that holds just as much for the very
+    /// observation that converts a suppression into a stale session as for every later
+    /// one. Both arguments are applied through `StaleHookSession`'s own accessors, so a
+    /// session already present keeps whichever of the two is newer.
     fn remember_stale_hook_session(
         &mut self,
         source: String,
         agent_label: String,
         session_ref: crate::agent_resume::AgentSessionRef,
         fresh_process_evidence: Option<Instant>,
+        last_loss_observed_at: Option<Instant>,
     ) {
         let source_stale_sessions = self.stale_hook_sessions.entry(source).or_default();
-        if let Some(existing) = source_stale_sessions.iter_mut().find(|existing| {
+        if !source_stale_sessions.iter().any(|existing| {
             existing.agent_label == agent_label && existing.session_ref == session_ref
         }) {
-            if let Some(observed_at) = fresh_process_evidence {
-                existing.record_fresh_process_evidence(observed_at);
-            }
-            return;
+            source_stale_sessions.push(StaleHookSession {
+                agent_label: agent_label.clone(),
+                session_ref: session_ref.clone(),
+                fresh_process_evidence: None,
+                last_loss_observed_at: None,
+            });
         }
-        source_stale_sessions.push(StaleHookSession {
-            agent_label,
-            session_ref,
-            fresh_process_evidence,
-            last_loss_observed_at: None,
-        });
+        for stale in source_stale_sessions.iter_mut().filter(|existing| {
+            existing.agent_label == agent_label && existing.session_ref == session_ref
+        }) {
+            if let Some(lost_at) = last_loss_observed_at {
+                stale.observe_process_loss(lost_at);
+            }
+            if let Some(observed_at) = fresh_process_evidence {
+                stale.record_fresh_process_evidence(observed_at);
+            }
+        }
     }
 
     /// Record that a LATER observation shows this owner's process gone, expiring any
     /// pending reclaim evidence it outdates.
+    ///
+    /// It runs over BOTH representations a retired owner can be in. A retirement lands
+    /// first in `suppressed_hook_reports` and only becomes a `StaleHookSession` when a
+    /// running observation converts it, so a loss seen during that window has no stale
+    /// session to land on; recorded only on the sessions, it would be forgotten, and the
+    /// session the conversion then creates would carry no boundary for a delayed running
+    /// observation captured before that loss to fail against (Gate-3 B1).
     ///
     /// The evidence asserts a process that is still running, so it dies on the same
     /// observation that retires an identity for that owner: this owner's process seen
@@ -1161,19 +1277,25 @@ impl TerminalState {
     /// also erase the fact that a loss was seen, or losses after the first would decide
     /// nothing and a running observation captured before the latest exit could re-arm
     /// a retired session (`StaleHookSession::last_loss_observed_at`).
-    fn expire_stale_session_evidence_on_process_loss(
+    fn observe_process_loss_for_retired_owners(
         &mut self,
         detected_agent: Option<Agent>,
         process_exited: bool,
         observed_at: Instant,
     ) {
+        let shows_loss_of = |agent_label: &str| {
+            crate::detect::parse_agent_label(agent_label).is_some_and(|owner_agent| {
+                (process_exited && detected_agent == Some(owner_agent))
+                    || detected_agent.is_some_and(|detected_agent| detected_agent != owner_agent)
+            })
+        };
+        for suppressed in self.suppressed_hook_reports.values_mut() {
+            if shows_loss_of(&suppressed.agent_label) {
+                suppressed.observe_process_loss(observed_at);
+            }
+        }
         for stale in self.stale_hook_sessions.values_mut().flatten() {
-            let Some(stale_agent) = crate::detect::parse_agent_label(&stale.agent_label) else {
-                continue;
-            };
-            if (process_exited && detected_agent == Some(stale_agent))
-                || detected_agent.is_some_and(|detected_agent| detected_agent != stale_agent)
-            {
+            if shows_loss_of(&stale.agent_label) {
                 stale.observe_process_loss(observed_at);
             }
         }
@@ -1482,10 +1604,10 @@ impl TerminalState {
         // Scope each suppression to the owner actually being cleared: an obsolete
         // identity's own clear must not suppress a DIFFERENT owner's live authority.
         if should_clear_authority {
-            self.suppress_current_hook_authority(HookSuppressionReason::HookClear);
+            self.suppress_current_hook_authority(HookSuppressionReason::HookClear, now);
         }
         let cleared_identity = if should_clear_identity {
-            self.retire_hook_identity(HookSuppressionReason::HookClear)
+            self.retire_hook_identity(HookSuppressionReason::HookClear, now)
         } else {
             None
         };
@@ -1572,7 +1694,7 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
-        self.suppress_hook_report(source, agent_label, HookSuppressionReason::HookClear);
+        self.suppress_hook_report(source, agent_label, HookSuppressionReason::HookClear, now);
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
@@ -3679,6 +3801,249 @@ mod tests {
             identity_session_start(&mut terminal, "existing-session", 32, "resume").is_some(),
             "evidence genuinely newer than the latest loss must still allow a resume"
         );
+    }
+
+    /// Drive the identity-only owner through a retirement and a following running
+    /// observation at CAPTURE timestamps the caller chooses, so a test can reproduce
+    /// the order the detector saw independently of when the app handled it.
+    fn observe_at(
+        terminal: &mut TerminalState,
+        agent: Option<Agent>,
+        process_exited: bool,
+        observed_at: Instant,
+    ) {
+        terminal.set_detected_state_with_screen_signals_at(
+            agent,
+            if agent.is_some() {
+                AgentState::Idle
+            } else {
+                AgentState::Unknown
+            },
+            false,
+            false,
+            false,
+            process_exited,
+            observed_at,
+        );
+    }
+
+    #[test]
+    fn queued_running_observation_newer_than_its_exit_outlives_handler_delay() {
+        // Gate-3 B1 WARDEN-R13-OBSERVED-AT-001: the retirement boundary was the moment
+        // the app HANDLED the exit, not the moment the detector OBSERVED it. The
+        // 256-event channel and the 64-event bounded drain make handler delay an
+        // ordinary execution mode, so a running observation captured AFTER the exit but
+        // handled after that later moment was discarded as pre-retirement. Its session
+        // then never gained fresh evidence and the agent's explicit same-session resume
+        // was refused — an availability failure that withholds receipt authority from a
+        // legitimately resumed owner.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+
+        // Captured in causal order by the detector, none of them handled yet.
+        let exit_at = Instant::now();
+        let absent_at = exit_at + Duration::from_millis(1);
+        let running_at = exit_at + Duration::from_millis(2);
+        // The app drains the queue later than every one of those captures.
+        std::thread::sleep(Duration::from_millis(20));
+
+        observe_at(&mut terminal, Some(Agent::Hermes), true, exit_at);
+        observe_at(&mut terminal, None, false, absent_at);
+        observe_at(&mut terminal, Some(Agent::Hermes), false, running_at);
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_some(),
+            "a running observation captured after the exit was discarded solely because the app handled the exit later"
+        );
+        assert!(terminal.hook_identity.is_some());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("existing-session")
+        );
+    }
+
+    #[test]
+    fn queued_running_observation_older_than_its_exit_stays_retired() {
+        // The negative half of the same rule, and why the fix is a CAPTURE-time
+        // boundary rather than no boundary at all: an observation the detector took
+        // BEFORE the exit proves nothing about a process the exit showed gone, however
+        // late it is delivered. A genuinely newer capture still re-arms.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+
+        let exit_at = Instant::now() + Duration::from_secs(4);
+        std::thread::sleep(Duration::from_millis(20));
+
+        observe_at(&mut terminal, Some(Agent::Hermes), true, exit_at);
+        observe_at(&mut terminal, None, false, exit_at + Duration::from_secs(1));
+        // Delivered after the exit, captured a second before it.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            exit_at - Duration::from_secs(1),
+        );
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_none(),
+            "a running observation captured before the exit re-armed the retired session"
+        );
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+
+        // Equal capture times decide nothing either: the documented rule is
+        // strictly-newer, so an observation taken at the exit's own instant is not
+        // evidence of a process alive after it.
+        observe_at(&mut terminal, None, false, exit_at + Duration::from_secs(2));
+        observe_at(&mut terminal, Some(Agent::Hermes), false, exit_at);
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 31, "resume").is_none(),
+            "a running observation captured at the exit's own instant re-armed the retired session"
+        );
+        assert!(terminal.hook_identity.is_none());
+
+        // A genuinely newer capture is still the evidence the resume needs.
+        observe_at(&mut terminal, None, false, exit_at + Duration::from_secs(3));
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            exit_at + Duration::from_secs(4),
+        );
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 32, "resume").is_some(),
+            "evidence genuinely newer than the exit was refused"
+        );
+        assert!(terminal.hook_identity.is_some());
+    }
+
+    #[test]
+    fn equal_time_process_loss_invalidates_resume_evidence() {
+        // Gate-3 B1 (arbiter preliminary msg_e524c27dd0759d82): `observe_process_loss`
+        // advanced the loss boundary at equality but expired evidence only strictly
+        // older than the loss, so evidence recorded at the loss's own instant survived
+        // it. The two sides must agree — the boundary the loss sets is exactly the
+        // boundary evidence has to beat.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+        terminal.release_agent_with_mutation("zynk:hermes", "hermes", Some(21));
+
+        let observed = Instant::now() + Duration::from_secs(1);
+        observe_at(&mut terminal, Some(Agent::Hermes), false, observed);
+        observe_at(&mut terminal, Some(Agent::Hermes), true, observed);
+        observe_at(
+            &mut terminal,
+            None,
+            false,
+            observed + Duration::from_secs(1),
+        );
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_none(),
+            "process-loss evidence at the same timestamp left stale resume evidence armed"
+        );
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn process_loss_while_suppressed_fences_an_older_running_observation() {
+        // Gate-3 B1 (arbiter preliminary msg_e524c27dd0759d82): a retired owner spends a
+        // window in `suppressed_hook_reports` before any running observation converts it
+        // into a `StaleHookSession`. A process loss seen during THAT window was recorded
+        // nowhere, so the session it later became carried no loss boundary and a running
+        // observation captured before the loss re-armed it. The boundary has to survive
+        // the conversion.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+        terminal.release_agent_with_mutation("zynk:hermes", "hermes", Some(21));
+        assert!(terminal.hook_identity.is_none());
+
+        let retired = Instant::now();
+        // Observed gone while the owner is still only suppressed: nothing has converted
+        // it into a stale session yet, so this is the loss that must not be forgotten.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            true,
+            retired + Duration::from_secs(5),
+        );
+        observe_at(&mut terminal, None, false, retired + Duration::from_secs(6));
+
+        // Delivered later, captured before that loss.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            retired + Duration::from_secs(3),
+        );
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_none(),
+            "a running observation older than a loss seen while suppression was pending re-armed the retired session"
+        );
+        assert!(terminal.hook_identity.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+
+        // The carried boundary voids the reclaim, it does not ban the session: a
+        // capture newer than that loss is evidence in its own right.
+        observe_at(&mut terminal, None, false, retired + Duration::from_secs(7));
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            retired + Duration::from_secs(8),
+        );
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 31, "resume").is_some(),
+            "a resume backed by a capture newer than the carried loss boundary was refused"
+        );
+        assert!(terminal.hook_identity.is_some());
+    }
+
+    #[test]
+    fn a_different_agent_seen_while_suppressed_fences_an_older_running_observation() {
+        // The second limb of a process loss — a DIFFERENT agent detected in this
+        // owner's place — has to be remembered across the same suppression window.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+        terminal.release_agent_with_mutation("zynk:hermes", "hermes", Some(21));
+
+        let retired = Instant::now();
+        observe_at(
+            &mut terminal,
+            Some(Agent::Codex),
+            false,
+            retired + Duration::from_secs(5),
+        );
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            retired + Duration::from_secs(3),
+        );
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_none(),
+            "a running observation older than a replacement agent seen while suppression was pending re-armed the retired session"
+        );
+        assert!(terminal.hook_identity.is_none());
     }
 
     #[test]

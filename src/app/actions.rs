@@ -4527,6 +4527,95 @@ mod tests {
     }
 
     #[test]
+    fn queued_state_events_keep_a_running_observation_newer_than_its_exit() {
+        // Gate-3 B1 WARDEN-R13-OBSERVED-AT-001, end to end over the path the finding
+        // names: the detector task stamps `observed_at` at CAPTURE time and
+        // `publish_state_changed_event` carries it into the queue, but the App may drain
+        // that queue much later — the channel holds 256 events and each drain is bounded
+        // at 64. An exit and the running observation that followed it therefore arrive
+        // together, long after both were captured. The identity retirement must be
+        // ordered by those capture stamps, or the resumed agent never regains its
+        // session and its receipt authority with it.
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Hermes),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "zynk:hermes".into(),
+            agent_label: "hermes".into(),
+            seq: Some(20),
+            session_ref: crate::agent_resume::AgentSessionRef::id("existing-session"),
+            session_start_source: Some("startup".into()),
+        });
+        assert!(state
+            .terminals
+            .get(&terminal_id)
+            .unwrap()
+            .hook_identity
+            .is_some());
+
+        // Captured in causal order, none of them handled yet.
+        let exit_at = std::time::Instant::now();
+        let absent_at = exit_at + std::time::Duration::from_millis(1);
+        let running_at = exit_at + std::time::Duration::from_millis(2);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        for (agent, agent_state, process_exited, observed_at) in [
+            (Some(Agent::Hermes), AgentState::Idle, true, exit_at),
+            (None, AgentState::Unknown, false, absent_at),
+            (Some(Agent::Hermes), AgentState::Idle, false, running_at),
+        ] {
+            state.handle_app_event(AppEvent::StateChanged {
+                pane_id,
+                agent,
+                state: agent_state,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited,
+                observed_at,
+            });
+        }
+
+        state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "zynk:hermes".into(),
+            agent_label: "hermes".into(),
+            seq: Some(30),
+            session_ref: crate::agent_resume::AgentSessionRef::id("existing-session"),
+            session_start_source: Some("resume".into()),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert!(
+            terminal.hook_identity.is_some(),
+            "the resumed owner lost its identity because the App handled its exit after the running observation was captured"
+        );
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("existing-session")
+        );
+    }
+
+    #[test]
     fn identity_only_state_report_records_identity_without_overriding_screen_state() {
         // The sibling of `reserved_native_state_report_does_not_override_screen_state`
         // for the third branch of the `HookStateReported` dispatch: the shipped

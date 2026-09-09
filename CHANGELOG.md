@@ -117,6 +117,10 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   arriving afterwards waits for the agent to be observed running again, as it did before.
 - Observations that arrive out of order are judged against the last ending seen, not merely against the
   newest evidence held: a report of the agent running that was taken before that ending no longer revives it.
+- Those comparisons use when each observation was **taken**, not when zynk got round to handling it. A report
+  of the agent running that was taken after its ending revives the session even when a busy moment makes both
+  arrive together; one taken before that ending, or at the very same instant, still cannot — and an ending
+  seen while the identity was still being retired is now remembered rather than lost.
 
 **Removed**
 
