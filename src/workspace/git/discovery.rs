@@ -282,7 +282,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::workspace::git::test_support::run_git;
+    use crate::workspace::git::test_support::{run_git, scrub_git_env, set_repo_identity};
 
     fn temp_test_dir(name: &str) -> PathBuf {
         let unique = format!(
@@ -450,7 +450,9 @@ mod tests {
     fn git_rev_parse_verify_reads_reftable_refs() {
         let root = temp_test_dir("reftable-ref-oid");
         let root_arg = root.to_string_lossy().to_string();
-        let output = std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        scrub_git_env(&mut command);
+        let output = command
             .args(["init", "--ref-format=reftable", "-b", "main", &root_arg])
             .output()
             .unwrap();
@@ -459,8 +461,7 @@ mod tests {
             return;
         }
 
-        run_git(&root, &["config", "user.email", "zynk@example.invalid"]);
-        run_git(&root, &["config", "user.name", "Zynk Test"]);
+        set_repo_identity(&root);
         run_git(&root, &["commit", "--allow-empty", "-m", "initial"]);
 
         let head_oid = git_rev_parse_verify(&root, "HEAD").unwrap();
