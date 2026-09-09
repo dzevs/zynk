@@ -37,6 +37,46 @@ fn apply_pane_base_env_exports_zynk_socket_path() {
 }
 
 #[test]
+fn apply_pane_base_env_exports_the_running_binary_path() {
+    // Hook assets shell out to `zynk pane report-agent-session` instead of
+    // speaking the socket protocol, so every pane needs the path of the running
+    // binary rather than whatever `zynk` a PATH lookup would find.
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    apply_pane_base_env(&mut cmd);
+
+    let executable = std::env::current_exe().unwrap();
+    assert_eq!(
+        cmd.get_env("ZYNK_BIN_PATH"),
+        Some(executable.as_os_str()),
+        "ZYNK_BIN_PATH must be exported to the pane"
+    );
+}
+
+#[test]
+fn hermes_dir_honors_the_hermes_home_override() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let original_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &base);
+
+    assert_eq!(hermes_dir().unwrap(), base.join(".hermes"));
+
+    let relocated = base.join("relocated-hermes");
+    std::env::set_var(HERMES_HOME_ENV_VAR, &relocated);
+    assert_eq!(hermes_dir().unwrap(), relocated);
+
+    std::env::set_var(HERMES_HOME_ENV_VAR, "");
+    assert_eq!(hermes_dir().unwrap(), base.join(".hermes"));
+
+    std::env::remove_var(HERMES_HOME_ENV_VAR);
+    if let Some(home) = original_home {
+        std::env::set_var("HOME", home);
+    } else {
+        std::env::remove_var("HOME");
+    }
+}
+
+#[test]
 fn extract_version_triple_parses_common_outputs() {
     assert_eq!(extract_version_triple("0.14.0"), Some((0, 14, 0)));
     assert_eq!(extract_version_triple("v1.2.3"), Some((1, 2, 3)));
@@ -126,6 +166,7 @@ fn clear_integration_path_env() {
     std::env::remove_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(GROK_CONFIG_DIR_ENV_VAR);
     std::env::remove_var(GROK_HOME_ENV_VAR);
+    std::env::remove_var(HERMES_HOME_ENV_VAR);
 }
 
 fn kimi_hook_command(hook_path: &Path, action: &str) -> String {
@@ -3404,14 +3445,10 @@ fn install_cursor_writes_hook_and_updates_hooks_json() {
     let hooks = hooks_file.get("hooks").and_then(Value::as_object).unwrap();
     let session_start = hooks.get("sessionStart").and_then(Value::as_array).unwrap();
     assert_eq!(session_start.len(), 1);
-    assert!(session_start[0]
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|command| {
-            command.starts_with("bash ")
-                && command.contains("zynk-agent-state.sh")
-                && command.ends_with(" session")
-        }));
+    assert_eq!(
+        session_start[0].get("command").and_then(Value::as_str),
+        Some(hook_command(&installed.hook_path, Some("session")).as_str())
+    );
     assert!(hooks.get("beforeSubmitPrompt").is_none());
     assert!(hooks.get("beforeShellExecution").is_none());
     let stop = hooks.get("stop").and_then(Value::as_array).unwrap();
@@ -3578,9 +3615,7 @@ fn install_mastracode_writes_hook_and_updates_hooks_json() {
         let entries = hooks.get(event).and_then(Value::as_array).unwrap();
         assert_eq!(entries.len(), 1, "{event} should have one zynk hook");
         let command = entries[0].get("command").and_then(Value::as_str).unwrap();
-        assert!(command.starts_with("bash "));
-        assert!(command.contains(MASTRACODE_HOOK_INSTALL_NAME));
-        assert!(command.ends_with(action));
+        assert_eq!(command, hook_command(&installed.hook_path, Some(action)));
         assert_eq!(
             entries[0].get("type").and_then(Value::as_str),
             Some("command")

@@ -32,6 +32,10 @@ pub(crate) const GROK_CONFIG_DIR_ENV_VAR: &str = "GROK_CONFIG_DIR";
 /// The grok CLI's own config-home override (documented alongside
 /// `$GROK_HOME/config.toml` and `$GROK_HOME/auth.json`).
 pub(crate) const GROK_HOME_ENV_VAR: &str = "GROK_HOME";
+/// Hermes' own config-home override. Deliberately NOT renamed to a `ZYNK_*`
+/// name: it is hermes' variable, so the plugin must be installed where hermes
+/// itself will look for it.
+pub(crate) const HERMES_HOME_ENV_VAR: &str = "HERMES_HOME";
 
 /// Export the Zynk-branded base env (`ZYNK_SOCKET_PATH`) that every spawned pane
 /// receives regardless of whether it carries a pane/tab/workspace identity. The
@@ -42,6 +46,12 @@ pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
         crate::api::ZYNK_SOCKET_PATH_ENV_VAR,
         crate::api::socket_path(),
     );
+    // Integration hook assets shell out to the zynk binary rather than speaking
+    // the socket protocol themselves, so they need the path of the running
+    // binary; a bare `zynk` on PATH may be a different build or absent.
+    if let Ok(executable) = std::env::current_exe() {
+        cmd.env("ZYNK_BIN_PATH", executable);
+    }
 }
 
 pub(crate) fn pi_extension_dir() -> io::Result<PathBuf> {
@@ -104,6 +114,10 @@ pub(crate) fn kilo_dir() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn hermes_dir() -> io::Result<PathBuf> {
+    if let Some(value) = std::env::var_os(HERMES_HOME_ENV_VAR).filter(|value| !value.is_empty()) {
+        return expand_tilde_path(PathBuf::from(value));
+    }
+
     Ok(home_dir()?.join(".hermes"))
 }
 

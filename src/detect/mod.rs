@@ -599,6 +599,11 @@ fn agent_name_from_known_package_path(path: &str) -> Option<String> {
             return Some(agent_label(Agent::Qwen).to_string());
         }
     }
+    for window in components.windows(4) {
+        if window == ["node_modules", "mastracode", "dist", "cli"] {
+            return Some(agent_label(Agent::Mastracode).to_string());
+        }
+    }
     None
 }
 
@@ -1019,6 +1024,25 @@ mod tests {
                 Some((Agent::Qwen, "qwen".to_string()))
             );
         }
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_node_wrapped_mastracode_package_cli() {
+        // A globally npm-installed mastracode runs as `node .../dist/cli.js`, so
+        // only the package path in argv identifies the agent.
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "node",
+                &["node", "/usr/lib/node_modules/mastracode/dist/cli.js"],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Mastracode, "mastracode".to_string()))
+        );
     }
 
     #[test]

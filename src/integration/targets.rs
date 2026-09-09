@@ -939,8 +939,7 @@ pub(crate) fn install_cursor() -> io::Result<CursorInstallPaths> {
         "cursor hooks file",
         "cursor hooks file hooks",
     )?;
-    let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
-    let session_command = format!("bash {quoted_hook_path} session");
+    let session_command = hook_command(&hook_path, Some("session"));
     remove_simple_command_hook(hooks, "beforeSubmitPrompt", &session_command)?;
     remove_simple_command_hook(hooks, "beforeShellExecution", &session_command)?;
     remove_simple_command_hook(hooks, "beforeMCPExecution", &session_command)?;
@@ -1019,8 +1018,7 @@ pub(crate) fn uninstall_cursor() -> io::Result<CursorUninstallResult> {
             "cursor hooks file",
             "cursor hooks file hooks",
         )? {
-            let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
-            let session_command = format!("bash {quoted_hook_path} session");
+            let session_command = hook_command(&hook_path, Some("session"));
             updated_hooks |= remove_simple_command_hook(hooks, "sessionStart", &session_command)?;
             updated_hooks |=
                 remove_simple_command_hook(hooks, "beforeSubmitPrompt", &session_command)?;
@@ -1072,12 +1070,11 @@ pub(crate) fn install_mastracode() -> io::Result<MastracodeInstallPaths> {
         ))
     })?;
 
-    let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
     for (event, action) in MASTRACODE_HOOK_EVENTS {
         ensure_flat_command_hook(
             hooks,
             event,
-            format!("bash {quoted_hook_path} {action}"),
+            hook_command(&hook_path, Some(action)),
             MASTRACODE_HOOK_TIMEOUT_MS,
         )?;
     }
@@ -1110,13 +1107,9 @@ pub(crate) fn uninstall_mastracode() -> io::Result<MastracodeUninstallResult> {
             ))
         })?;
 
-        let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
         for (event, action) in MASTRACODE_HOOK_EVENTS {
-            updated_hooks |= remove_flat_command_hook(
-                hooks,
-                event,
-                &format!("bash {quoted_hook_path} {action}"),
-            )?;
+            updated_hooks |=
+                remove_flat_command_hook(hooks, event, &hook_command(&hook_path, Some(action)))?;
         }
 
         if updated_hooks {
