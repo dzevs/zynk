@@ -419,7 +419,30 @@ fn capture_tab(
         let hook_retirement = attached_terminal_id
             .as_ref()
             .and_then(|tid| terminals.get(tid))
-            .and_then(|terminal| terminal.export_hook_retirement(std::time::Instant::now()));
+            .and_then(|terminal| {
+                let pending = terminal_runtimes
+                    .get(&terminal.id)
+                    .map(|runtime| runtime.pending_process_exits())
+                    .unwrap_or_default();
+                if pending.is_empty() {
+                    return terminal.export_hook_retirement(std::time::Instant::now());
+                }
+                // Project captured exits through the existing state machine, without
+                // consuming events or mutating the live state if handoff rolls back.
+                let mut projected = terminal.clone();
+                for (agent, observed_at) in pending {
+                    projected.set_detected_state_with_screen_signals_at(
+                        agent,
+                        crate::detect::AgentState::Idle,
+                        false,
+                        false,
+                        false,
+                        true,
+                        observed_at,
+                    );
+                }
+                projected.export_hook_retirement(std::time::Instant::now())
+            });
         panes.insert(
             id.raw(),
             PaneSnapshot {
@@ -1220,6 +1243,123 @@ mod tests {
             suppressed.session_ref.as_ref().map(|s| s.value.as_str()),
             Some("pi-1")
         );
+    }
+
+    #[tokio::test]
+    async fn capture_keeps_an_exit_still_waiting_for_event_queue_space() {
+        use crate::detect::{Agent, AgentState};
+        use std::time::{Duration, Instant};
+
+        for captured_before_hook in [false, true] {
+            let earlier_exit = Instant::now() - Duration::from_secs(1);
+            let mut state = state_with_workspaces(&["pending-exit"]);
+            let pane = state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = state.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_agent_session_ref_for_session_start(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("old-session"),
+                    Some(10),
+                    Some("startup".into()),
+                )
+                .expect("hook identity");
+            let mut runtimes = TerminalRuntimeRegistry::new();
+            runtimes.insert(
+                terminal_id.clone(),
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tx.try_send(crate::events::AppEvent::UpdateReady {
+                version: "test".into(),
+                install_command: String::new(),
+            })
+            .unwrap();
+            let publish = runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .test_publish_process_exit(
+                    tx,
+                    pane,
+                    Agent::Hermes,
+                    if captured_before_hook {
+                        earlier_exit
+                    } else {
+                        Instant::now()
+                    },
+                );
+            tokio::pin!(publish);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut publish)
+                    .await
+                    .is_err()
+            );
+
+            let snapshot = capture_from_state_with_runtimes(&state, &runtimes);
+            let retirement = snapshot.workspaces[0].tabs[0].panes[&pane.raw()]
+                .hook_retirement
+                .as_ref()
+                .unwrap();
+            let round_trip =
+                serde_json::from_slice(&serde_json::to_vec(retirement).unwrap()).unwrap();
+            let mut restored = crate::terminal::TerminalState::new(terminal_id.clone(), "/".into());
+            restored.restore_hook_retirement(round_trip, Instant::now());
+            assert!(
+                restored.confirmed_hook_owner().is_none(),
+                "handoff restored a confirmed identity whose exit was captured before the snapshot"
+            );
+            let resume = restored.set_agent_session_ref_for_session_start(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                crate::agent_resume::AgentSessionRef::id("old-session"),
+                Some(11),
+                Some("resume".into()),
+            );
+            if !captured_before_hook {
+                assert!(
+                    resume.is_none(),
+                    "the delayed old report must remain retired after handoff"
+                );
+            }
+            assert!(
+                restored.confirmed_hook_owner().is_none(),
+                "a report after the exit cannot answer its own pending confirmation"
+            );
+            restored.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+            restored
+                .set_agent_session_ref_for_session_start(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("old-session"),
+                    Some(12),
+                    Some("resume".into()),
+                )
+                .expect("a genuinely observed restart can resume");
+            assert!(restored.confirmed_hook_owner().is_some());
+            assert!(
+                state.terminals[&terminal_id]
+                    .confirmed_hook_owner()
+                    .is_some(),
+                "capturing must not mutate AppState or consume the queued exit on rollback"
+            );
+            rx.recv().await.unwrap();
+            publish.await;
+            assert_eq!(
+                capture_from_state_with_runtimes(&state, &runtimes).workspaces[0].tabs[0].panes
+                    [&pane.raw()]
+                    .hook_retirement
+                    .as_ref()
+                    .unwrap()
+                    .hook_identity
+                    .is_none(),
+                !captured_before_hook
+            );
+        }
     }
 
     #[test]

@@ -356,6 +356,13 @@ impl App {
         // window between an exit's capture and its handling is held provisional until
         // the detector sees the process again, and a provisional identity anchors no
         // receipt (`TerminalState::confirmed_hook_owner`).
+        if self
+            .terminal_runtimes
+            .get(&pane.attached_terminal_id)
+            .is_some_and(|runtime| !runtime.pending_process_exits().is_empty())
+        {
+            return None;
+        }
         let (_, agent_label) = terminal.confirmed_hook_owner()?;
         // Owner coherence: a persisted session is part of this receiver's identity only when it
         // was reported for the SAME agent the hook identity names; a session another owner
@@ -541,5 +548,123 @@ mod tests {
             .authoritative_receiver_identity(&pane_id)
             .expect("a confirmed identity anchors a receipt again");
         assert_eq!(receiver.agent_label, "hermes");
+    }
+
+    #[tokio::test]
+    async fn a_captured_exit_blocks_receipts_before_the_event_queue_accepts_it() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("pending-exit");
+        let pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let public_id = app.public_pane_id(0, pane).unwrap();
+        let terminal_id = app.state.workspaces[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("old-session"),
+                Some(10),
+            )
+            .expect("hook authority");
+        assert!(app.authoritative_receiver_identity(&public_id).is_some());
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(crate::events::AppEvent::UpdateReady {
+            version: "test".into(),
+            install_command: String::new(),
+        })
+        .unwrap();
+        let exit_at = Instant::now();
+        {
+            let publish = app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .test_publish_process_exit(tx, pane, Agent::Pi, exit_at);
+            tokio::pin!(publish);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut publish)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                app.authoritative_receiver_identity(&public_id).is_none(),
+                "an exit waiting for queue space must already fence receipt authority"
+            );
+            rx.recv().await.unwrap();
+            publish.await;
+            assert!(
+                app.authoritative_receiver_identity(&public_id).is_none(),
+                "queue acceptance is not application of the exit"
+            );
+        }
+        let response = app.handle_api_request_from_socket(
+            crate::api::schema::Request {
+                id: "pending-exit-receipt".into(),
+                method: crate::api::schema::Method::ZynkMessageReceived(
+                    crate::api::schema::ZynkMessageReceivedParams {
+                        pane_id: public_id.clone(),
+                        message_id: "msg".into(),
+                        conversation_id: "conv".into(),
+                        conversation_seq: 1,
+                        runtime_session_id: "rt".into(),
+                        socket_namespace: "sock".into(),
+                        receiver_seq: None,
+                        timestamp: None,
+                        status: None,
+                        receiver_agent_session: None,
+                    },
+                ),
+            },
+            crate::api::ApiCaller {
+                peer: None,
+                trusted_as_pane_child: true,
+            },
+        );
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "receiver_identity_unverified");
+        app.handle_internal_event(rx.recv().await.unwrap());
+        assert!(app.authoritative_receiver_identity(&public_id).is_none());
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id: pane,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("new-session"),
+                Some(11),
+            )
+            .expect("fresh owner");
+        assert!(
+            app.authoritative_receiver_identity(&public_id).is_some(),
+            "applying an exit must retire its pending fence, not ban a later owner"
+        );
     }
 }

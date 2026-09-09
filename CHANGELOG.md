@@ -110,6 +110,9 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 - An agent whose integration reports only its session identity (Hermes) keeps that identity. Its pane still
   shows the session the integration reported, and it can record receipt of a message addressed to it, while
   its status stays screen-detected. A pane carrying a merely detected agent still cannot record a receipt.
+- Captured process exits fence receipts even while the event queue is full, and remain effective across a
+  live handoff before the queued event is handled. Fresh process observations confirm a restarted hook
+  owner without overriding the lifecycle status reported by its integration.
 - That reported identity is also retired for good when the agent ends. After the integration releases the
   pane, clears it, or its process exits, a late hook callback can no longer restore the receipt authority of
   the finished session; a genuinely new session, or a freshly observed process, anchors the pane again.

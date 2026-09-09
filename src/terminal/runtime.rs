@@ -15,6 +15,20 @@ use crate::layout::PaneId;
 pub struct TerminalRuntime(crate::pane::PaneRuntime);
 
 impl TerminalRuntime {
+    pub(crate) fn pending_process_exits(
+        &self,
+    ) -> Vec<(Option<crate::detect::Agent>, std::time::Instant)> {
+        self.0.pending_process_exits()
+    }
+
+    pub(crate) fn acknowledge_process_exit(
+        &self,
+        agent: Option<crate::detect::Agent>,
+        observed_at: std::time::Instant,
+    ) {
+        self.0.acknowledge_process_exit(agent, observed_at);
+    }
+
     pub fn shutdown(self) {
         self.0.shutdown();
     }
@@ -420,6 +434,18 @@ impl TerminalRuntime {
 
 #[cfg(test)]
 impl TerminalRuntime {
+    pub(crate) async fn test_publish_process_exit(
+        &self,
+        tx: mpsc::Sender<AppEvent>,
+        pane_id: PaneId,
+        agent: crate::detect::Agent,
+        observed_at: std::time::Instant,
+    ) {
+        self.0
+            .test_publish_process_exit(tx, pane_id, agent, observed_at)
+            .await;
+    }
+
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         let (runtime, rx) = crate::pane::PaneRuntime::test_with_channel(cols, rows);
         (Self(runtime), rx)

@@ -185,8 +185,27 @@ impl App {
                 None
             };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
+        let applied_exit = if let AppEvent::StateChanged {
+            pane_id,
+            agent,
+            process_exited: true,
+            observed_at,
+            ..
+        } = &ev
+        {
+            Some((*pane_id, *agent, *observed_at))
+        } else {
+            None
+        };
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
+        if let Some((pane_id, agent, observed_at)) = applied_exit {
+            if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                if let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) {
+                    runtime.acknowledge_process_exit(agent, observed_at);
+                }
+            }
+        }
         if let Some(agents) = manifest_update_agents {
             self.reset_agent_detection_for_agents(&agents);
         }
