@@ -38,7 +38,27 @@ pub(crate) struct WorkspaceGitRefreshOutput {
     pub(crate) cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
 }
 
+fn retain_custom_command_after_wait(
+    pid: u32,
+    result: std::io::Result<Option<std::process::ExitStatus>>,
+) -> bool {
+    match result {
+        Ok(None) => true,
+        Ok(Some(_)) => false,
+        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => true,
+        Err(err) => {
+            tracing::warn!(pid, err = %err, "failed to reap detached custom command");
+            false
+        }
+    }
+}
+
 impl App {
+    pub(crate) fn reap_finished_custom_commands(&mut self) {
+        self.detached_custom_command_children
+            .retain_mut(|child| retain_custom_command_after_wait(child.id(), child.try_wait()));
+    }
+
     pub(crate) fn shutdown_detached_terminal_runtimes(&mut self) {
         let terminal_ids = std::mem::take(&mut self.state.terminal_runtime_shutdowns);
         for terminal_id in terminal_ids {
@@ -158,6 +178,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {
+                self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
                 if self.state.redraw_on_focus_gained {
                     self.request_full_redraw();
                 }
@@ -166,6 +187,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusLost => {
+                self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
                 self.state.outer_terminal_focus = Some(false);
                 false
             }
@@ -683,6 +705,13 @@ mod tests {
     use crate::app::state;
     use crate::workspace::Workspace;
     use std::path::PathBuf;
+
+    #[test]
+    fn interrupted_custom_command_wait_keeps_child_for_retry() {
+        let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "test interrupt");
+
+        assert!(retain_custom_command_after_wait(42, Err(interrupted)));
+    }
 
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {
         let mut app = super::super::App::new(

@@ -136,6 +136,7 @@ pub struct App {
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
+    pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) persist_pane_history: bool,
     pub(crate) last_render_at: Option<Instant>,
     pub(crate) suppressed_repeat_keys:
@@ -727,6 +728,7 @@ impl App {
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
             session_save_thread: None,
+            detached_custom_command_children: Vec::new(),
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
             persist_pane_history: config.experimental.pane_history,
@@ -840,6 +842,7 @@ impl App {
         let mut host_mouse_capture_active = self.state.mouse_capture;
 
         while !self.state.should_quit {
+            self.reap_finished_custom_commands();
             if self.render_dirty.load(Ordering::Acquire) {
                 needs_render = true;
             }
@@ -1561,8 +1564,12 @@ impl App {
                         }
                     }
                 }
-                crate::raw_input::RawInputEvent::OuterFocusGained
-                | crate::raw_input::RawInputEvent::OuterFocusLost => {}
+                crate::raw_input::RawInputEvent::OuterFocusGained => {
+                    self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
+                }
+                crate::raw_input::RawInputEvent::OuterFocusLost => {
+                    self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
+                }
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                     if apply_host_terminal_theme {
                         self.update_host_terminal_theme(kind, color);
@@ -3057,6 +3064,113 @@ mod tests {
         assert!(handled);
         assert_eq!(app.state.outer_terminal_focus, Some(true));
         assert!(!app.full_redraw_pending);
+    }
+
+    #[tokio::test]
+    async fn monolithic_outer_focus_events_reach_reporting_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("focus-reporting");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?1004h",
+                4,
+            );
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
+                .await
+        );
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded focus gained report"),
+            bytes::Bytes::from_static(b"\x1b[I")
+        );
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusLost)
+                .await
+        );
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded focus lost report"),
+            bytes::Bytes::from_static(b"\x1b[O")
+        );
+    }
+
+    #[tokio::test]
+    async fn outer_focus_events_reconcile_pending_pane_focus() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("focus-transition");
+        let previous_pane = workspace.tabs[0].root_pane;
+        let next_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(previous_pane);
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?1004h",
+                4,
+            );
+        workspace.insert_test_runtime(next_pane, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.last_focus = Some((0, previous_pane));
+
+        assert!(app.state.focus_pane_in_workspace(0, next_pane));
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusLost)
+                .await
+        );
+        app.sync_focus_events();
+        assert_eq!(
+            input_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[O")
+        );
+        assert!(input_rx.try_recv().is_err());
+
+        assert!(app.state.focus_pane_in_workspace(0, previous_pane));
+        app.sync_focus_events();
+        assert_eq!(
+            input_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[O")
+        );
+        assert!(app.state.focus_pane_in_workspace(0, next_pane));
+        app.sync_focus_events();
+        assert_eq!(
+            input_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[O")
+        );
+
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
+                .await
+        );
+        assert_eq!(
+            input_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[I")
+        );
+
+        assert!(app.state.focus_pane_in_workspace(0, previous_pane));
+        app.sync_focus_events();
+        assert_eq!(
+            input_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[O")
+        );
+        assert!(app.state.focus_pane_in_workspace(0, next_pane));
+        app.sync_focus_events();
+        assert_eq!(
+            input_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[I")
+        );
     }
 
     #[tokio::test]

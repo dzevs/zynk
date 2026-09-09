@@ -24,7 +24,7 @@ pub(crate) struct AgentPanelEntry {
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
     /// Tab name — the grouped agents panel uses this as the group header label. Always populated
-    /// (unlike `primary_tab_label`, which the flat/mobile path only sets when multi-tab).
+    /// (unlike `primary_tab_label`, which the flat/mobile path sets for multiple or renamed tabs).
     pub tab_label: String,
     pub agent_label: Option<String>,
     pub state: AgentState,
@@ -128,20 +128,26 @@ fn agent_panel_entries_with_runtimes(
             let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
             ws.pane_details(&app.terminals)
                 .into_iter()
-                .map(move |detail| AgentPanelEntry {
-                    ws_idx,
-                    tab_idx: detail.tab_idx,
-                    pane_id: detail.pane_id,
-                    primary_label: workspace_label.clone(),
-                    // clone: `primary_tab_label` below also consumes `detail.tab_label`
-                    tab_label: detail.tab_label.clone(),
-                    primary_tab_label: multi_tab.then_some(detail.tab_label),
-                    agent_label: Some(detail.agent_label),
-                    state: detail.state,
-                    seen: detail.seen,
-                    last_agent_state_change_seq: detail.last_agent_state_change_seq,
-                    custom_status: detail.custom_status,
-                    state_labels: detail.state_labels,
+                .map(move |detail| {
+                    let show_tab = multi_tab
+                        || ws
+                            .tabs
+                            .get(detail.tab_idx)
+                            .is_some_and(|tab| !tab.is_auto_named());
+                    AgentPanelEntry {
+                        ws_idx,
+                        tab_idx: detail.tab_idx,
+                        pane_id: detail.pane_id,
+                        primary_label: workspace_label.clone(),
+                        tab_label: detail.tab_label.clone(),
+                        primary_tab_label: show_tab.then_some(detail.tab_label),
+                        agent_label: Some(detail.agent_label),
+                        state: detail.state,
+                        seen: detail.seen,
+                        last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                        custom_status: detail.custom_status,
+                        state_labels: detail.state_labels,
+                    }
                 })
         })
         .collect();
@@ -694,11 +700,6 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         }
     }
 
-    let detail_ws_idx = if is_navigating {
-        Some(app.selected)
-    } else {
-        app.active
-    };
     let detail_content_area = Rect::new(
         detail_area.x,
         detail_area.y,
@@ -706,31 +707,23 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         detail_area.height.saturating_sub(1),
     );
     if detail_content_area != Rect::default() {
-        if let Some(ws_idx) = detail_ws_idx {
-            if let Some(ws) = app.workspaces.get(ws_idx) {
-                for (detail_idx, detail) in ws.pane_details(&app.terminals).iter().enumerate() {
-                    let y = detail_content_area.y + detail_idx as u16;
-                    if y >= detail_content_area.y + detail_content_area.height {
-                        break;
-                    }
-                    let pane_num = ws
-                        .public_pane_number(detail.pane_id)
-                        .unwrap_or(detail_idx + 1);
-                    let pane_style = Style::default().fg(p.overlay0);
-                    // Collapsed rail is a one-icon-per-pane strip (no tree), but uses the same sidebar
-                    // agents grammar as the expanded panel.
-                    let (icon, icon_style) =
-                        sidebar_agent_icon(detail.state, detail.seen, app.spinner_tick, p);
-                    frame.render_widget(
-                        Paragraph::new(Line::from(vec![
-                            Span::styled(format!("{pane_num}"), pane_style),
-                            Span::styled(" ", pane_style),
-                            Span::styled(icon, icon_style),
-                        ])),
-                        Rect::new(detail_content_area.x, y, detail_content_area.width, 1),
-                    );
-                }
+        for (detail_idx, detail) in agent_panel_entries(app).iter().enumerate() {
+            let y = detail_content_area.y + detail_idx as u16;
+            if y >= detail_content_area.y + detail_content_area.height {
+                break;
             }
+            let position = detail_idx + 1;
+            let position_style = Style::default().fg(p.overlay0);
+            // Collapsed rail uses the expanded panel's sidebar-agent icon grammar.
+            let (icon, icon_style) =
+                sidebar_agent_icon(detail.state, detail.seen, app.spinner_tick, p);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{position:<2}"), position_style),
+                    Span::styled(icon, icon_style),
+                ])),
+                Rect::new(detail_content_area.x, y, detail_content_area.width, 1),
+            );
         }
     }
 
@@ -1381,6 +1374,104 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
+    fn collapsed_sidebar_uses_all_workspaces_agent_panel_order() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let urgent_pane = app.workspaces[1].test_split(ratatui::layout::Direction::Horizontal);
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
+
+        for (ws_idx, pane, state) in [
+            (0, app.workspaces[0].tabs[0].root_pane, AgentState::Working),
+            (1, app.workspaces[1].tabs[0].root_pane, AgentState::Working),
+            (1, urgent_pane, AgentState::Blocked),
+        ] {
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = state;
+        }
+
+        assert_eq!(app.workspaces[1].public_pane_number(urgent_pane), Some(2));
+        assert_eq!(agent_panel_entries(&app)[0].pane_id, urgent_pane);
+        let area = Rect::new(0, 0, 4, 16);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .expect("collapsed sidebar should render");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(detail_area.x, detail_area.y)].symbol(), "1");
+        assert_eq!(buffer[(detail_area.x, detail_area.y + 1)].symbol(), "2");
+        assert_eq!(buffer[(detail_area.x, detail_area.y + 2)].symbol(), "3");
+        assert_eq!(buffer[(detail_area.x + 2, detail_area.y)].symbol(), "◉");
+        assert_eq!(
+            buffer[(detail_area.x + 2, detail_area.y)].style().fg,
+            Some(app.palette.red)
+        );
+    }
+
+    #[test]
+    fn collapsed_sidebar_numbers_grouped_agents_by_list_position() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        for ws_idx in 0..app.workspaces.len() {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        }
+        let area = Rect::new(0, 0, 4, 12);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .expect("collapsed sidebar should render");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(detail_area.x, detail_area.y)].symbol(), "1");
+        assert_eq!(buffer[(detail_area.x, detail_area.y + 1)].symbol(), "2");
+    }
+
+    #[test]
+    fn collapsed_sidebar_keeps_status_visible_for_two_digit_positions() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = (1..=10)
+            .map(|idx| Workspace::test_new(&format!("workspace-{idx}")))
+            .collect();
+        app.ensure_test_terminals();
+        for ws_idx in 0..app.workspaces.len() {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = AgentState::Idle;
+        }
+        let area = Rect::new(0, 0, 4, 25);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .expect("collapsed sidebar should render");
+        let tenth_row = detail_area.y + 9;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(detail_area.x, tenth_row)].symbol(), "1");
+        assert_eq!(buffer[(detail_area.x + 1, tenth_row)].symbol(), "0");
+        assert_eq!(buffer[(detail_area.x + 2, tenth_row)].symbol(), "○");
+    }
+
+    #[test]
     fn render_sidebar_toggle_draws_expanded_collapse_icon() {
         let app = crate::app::state::AppState::test_new();
         let area = Rect::new(0, 0, 26, 20);
@@ -1442,6 +1533,49 @@ mod tests {
         assert_eq!(entries[1].primary_label, "two");
         assert_eq!(entries[1].primary_tab_label.as_deref(), Some("logs"));
         assert_eq!(entries[1].agent_label.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn agent_panel_tab_label_visibility_tracks_tab_identity() {
+        let mut app = crate::app::state::AppState::test_new();
+        let single_auto = Workspace::test_new("auto");
+        let mut single_custom = Workspace::test_new("custom");
+        single_custom.tabs[0].set_custom_name("focus".into());
+        let mut multi = Workspace::test_new("multi");
+        multi.test_add_tab(Some("logs"));
+        app.workspaces = vec![single_auto, single_custom, multi];
+        app.ensure_test_terminals();
+        for (ws_idx, tab_idx, agent) in [
+            (0, 0, Agent::Pi),
+            (1, 0, Agent::Claude),
+            (2, 0, Agent::Codex),
+            (2, 1, Agent::Pi),
+        ] {
+            let pane_id = app.workspaces[ws_idx].tabs[tab_idx].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(agent);
+        }
+        let entries = agent_panel_entries(&app);
+        let labels: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.primary_label.as_str(),
+                    entry.primary_tab_label.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("auto", None),
+                ("custom", Some("focus")),
+                ("multi", Some("1")),
+                ("multi", Some("logs")),
+            ]
+        );
     }
 
     #[test]
@@ -1716,6 +1850,9 @@ mod tests {
             workspace_with_worktree_space("issue", Some("repo-key"), "/repo/zynk-issue"),
             Workspace::test_new("notes"),
         ];
+        for workspace in &mut app.workspaces {
+            workspace.cached_git_branch = Some("main".into());
+        }
         app.collapsed_space_keys.insert("repo-key".into());
         app.active = None;
         app.mode = Mode::Terminal;
