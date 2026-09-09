@@ -25,6 +25,36 @@ enum RuntimeExitAction {
 }
 
 impl App {
+    pub(crate) fn dispatch_tui_api_request(
+        &mut self,
+        id: &'static str,
+        method: crate::api::schema::Method,
+    ) -> String {
+        self.handle_api_request(crate::api::schema::Request {
+            id: id.to_string(),
+            method,
+        })
+    }
+
+    pub(crate) fn dispatch_tui_deferred_api_request(
+        &mut self,
+        id: &'static str,
+        method: crate::api::schema::Method,
+    ) -> Option<String> {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        if !self.handle_deferred_worktree_api_request(
+            crate::api::schema::Request {
+                id: id.to_string(),
+                method,
+            },
+            respond_to,
+        ) {
+            return None;
+        }
+
+        response_rx.try_recv().ok()
+    }
+
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
@@ -820,6 +850,9 @@ impl App {
             Method::WorkspaceRename(params) => {
                 return self.handle_workspace_rename(request.id, params);
             }
+            Method::WorkspaceMove(params) => {
+                return self.handle_workspace_move(request.id, params);
+            }
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target)
             }
@@ -851,6 +884,7 @@ impl App {
             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),
             Method::TabFocus(target) => return self.handle_tab_focus(request.id, target),
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
+            Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::AgentList(_) => return self.handle_agent_list(request.id),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
@@ -870,6 +904,9 @@ impl App {
             }
             Method::LayoutExport(params) => return self.handle_layout_export(request.id, params),
             Method::LayoutApply(params) => return self.handle_layout_apply(request.id, params),
+            Method::LayoutSetSplitRatio(params) => {
+                return self.handle_layout_set_split_ratio(request.id, params);
+            }
             Method::PaneNeighbor(params) => return self.handle_pane_neighbor(request.id, params),
             Method::PaneEdges(params) => return self.handle_pane_edges(request.id, params),
             Method::PaneFocusDirection(params) => {
@@ -879,6 +916,7 @@ impl App {
             Method::PaneList(params) => return self.handle_pane_list(request.id, params),
             Method::PaneCurrent(params) => return self.handle_pane_current(request.id, params),
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
+            Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
             Method::PaneReportAgent(params) => {

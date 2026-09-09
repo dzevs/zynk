@@ -71,6 +71,8 @@ pub enum Method {
     WorkspaceFocus(WorkspaceTarget),
     #[serde(rename = "workspace.rename")]
     WorkspaceRename(WorkspaceRenameParams),
+    #[serde(rename = "workspace.move")]
+    WorkspaceMove(WorkspaceMoveParams),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceTarget),
     #[serde(rename = "worktree.list")]
@@ -91,6 +93,8 @@ pub enum Method {
     TabFocus(TabTarget),
     #[serde(rename = "tab.rename")]
     TabRename(TabRenameParams),
+    #[serde(rename = "tab.move")]
+    TabMove(TabMoveParams),
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
     #[serde(rename = "agent.list")]
@@ -125,6 +129,8 @@ pub enum Method {
     LayoutExport(LayoutExportParams),
     #[serde(rename = "layout.apply")]
     LayoutApply(LayoutApplyParams),
+    #[serde(rename = "layout.set_split_ratio")]
+    LayoutSetSplitRatio(LayoutSetSplitRatioParams),
     #[serde(rename = "pane.neighbor")]
     PaneNeighbor(PaneNeighborParams),
     #[serde(rename = "pane.edges")]
@@ -139,6 +145,8 @@ pub enum Method {
     PaneCurrent(PaneCurrentParams),
     #[serde(rename = "pane.get")]
     PaneGet(PaneTarget),
+    #[serde(rename = "pane.focus")]
+    PaneFocus(PaneTarget),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
     #[serde(rename = "pane.send_text")]
@@ -668,5 +676,230 @@ mod tests {
                 agent_status: AgentStatus::Done,
             }
         );
+    }
+
+    /// Every wire id `serde` will accept for a [`Method`], in declaration order.
+    /// Each entry is a published socket value: renaming one, reordering the enum,
+    /// or adding a variant without pinning its id here silently breaks existing
+    /// clients. Mirrors `integration_target_wire_ids_are_stable`
+    /// (`src/api/schema/integrations.rs`) for the method contract itself.
+    const METHOD_WIRE_IDS: &[&str] = &[
+        "ping",
+        "server.stop",
+        "server.live_handoff",
+        "server.reload_config",
+        "server.agent_manifests",
+        "server.reload_agent_manifests",
+        "notification.show",
+        "client.window_title.set",
+        "client.window_title.clear",
+        "workspace.create",
+        "workspace.list",
+        "workspace.get",
+        "workspace.focus",
+        "workspace.rename",
+        "workspace.move",
+        "workspace.close",
+        "worktree.list",
+        "worktree.create",
+        "worktree.open",
+        "worktree.remove",
+        "tab.create",
+        "tab.list",
+        "tab.get",
+        "tab.focus",
+        "tab.rename",
+        "tab.move",
+        "tab.close",
+        "agent.list",
+        "agent.get",
+        "agent.read",
+        "agent.explain",
+        "agent.send",
+        "agent.rename",
+        "agent.focus",
+        "agent.start",
+        "pane.split",
+        "pane.swap",
+        "pane.move",
+        "pane.zoom",
+        "pane.layout",
+        "pane.process_info",
+        "layout.export",
+        "layout.apply",
+        "layout.set_split_ratio",
+        "pane.neighbor",
+        "pane.edges",
+        "pane.focus_direction",
+        "pane.resize",
+        "pane.list",
+        "pane.current",
+        "pane.get",
+        "pane.focus",
+        "pane.rename",
+        "pane.send_text",
+        "pane.send_keys",
+        "pane.send_input",
+        "pane.read",
+        "pane.report_agent",
+        "pane.report_agent_session",
+        "pane.report_metadata",
+        "pane.clear_agent_authority",
+        "pane.release_agent",
+        "pane.close",
+        "events.subscribe",
+        "events.wait",
+        "pane.wait_for_output",
+        "integration.install",
+        "integration.uninstall",
+        "plugin.link",
+        "plugin.list",
+        "plugin.unlink",
+        "plugin.enable",
+        "plugin.disable",
+        "plugin.action.list",
+        "plugin.action.invoke",
+        "plugin.log.list",
+        "plugin.pane.open",
+        "plugin.pane.focus",
+        "plugin.pane.close",
+        "zynk.message_received",
+    ];
+
+    /// The ids `serde` itself reports as acceptable for the `method` tag, taken
+    /// from the `unknown variant` error so the list cannot drift from the enum.
+    fn serde_declared_method_wire_ids() -> Vec<String> {
+        let error = serde_json::from_value::<Method>(serde_json::json!({
+            "method": "zynk.__not_a_method__",
+            "params": {}
+        }))
+        .expect_err("an unknown method tag must not deserialize")
+        .to_string();
+        let (_, expected) = error
+            .split_once("expected")
+            .unwrap_or_else(|| panic!("serde must report the accepted variants: {error}"));
+        expected
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn method_wire_ids_are_stable() {
+        assert_eq!(
+            serde_declared_method_wire_ids(),
+            METHOD_WIRE_IDS,
+            "the Method wire contract changed: every id is published to clients"
+        );
+    }
+
+    /// The four runtime-authority mutation methods (upstream 1a4e94e5) named by
+    /// variant, so removing or renaming one is a compile error here and a wire
+    /// break is caught by the assertions.
+    #[test]
+    fn authority_mutation_method_wire_ids_are_pinned() {
+        let samples = [
+            (
+                Method::WorkspaceMove(WorkspaceMoveParams {
+                    workspace_id: "w1".into(),
+                    insert_index: 2,
+                }),
+                "workspace.move",
+            ),
+            (
+                Method::TabMove(TabMoveParams {
+                    tab_id: "w1:1".into(),
+                    insert_index: 1,
+                }),
+                "tab.move",
+            ),
+            (
+                Method::LayoutSetSplitRatio(LayoutSetSplitRatioParams {
+                    tab_id: Some("w1:1".into()),
+                    pane_id: None,
+                    path: vec![false, true],
+                    ratio: 0.6,
+                }),
+                "layout.set_split_ratio",
+            ),
+            (
+                Method::PaneFocus(PaneTarget {
+                    pane_id: "w1:1".into(),
+                }),
+                "pane.focus",
+            ),
+        ];
+
+        for (method, wire_id) in samples {
+            assert!(
+                METHOD_WIRE_IDS.contains(&wire_id),
+                "{wire_id} must be pinned in METHOD_WIRE_IDS"
+            );
+            let request = Request {
+                id: "req_authority".into(),
+                method,
+            };
+            let json = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                json["method"], wire_id,
+                "{wire_id} must serialize as its wire id"
+            );
+            let restored: Request = serde_json::from_value(json).unwrap();
+            assert_eq!(restored, request, "{wire_id} must round trip");
+        }
+    }
+
+    #[test]
+    fn authority_mutation_requests_round_trip() {
+        let workspace_move = Request {
+            id: "move_ws".into(),
+            method: Method::WorkspaceMove(WorkspaceMoveParams {
+                workspace_id: "w1".into(),
+                insert_index: 2,
+            }),
+        };
+        let json = serde_json::to_value(&workspace_move).unwrap();
+        assert_eq!(json["method"], "workspace.move");
+        let restored: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, workspace_move);
+
+        let tab_move = Request {
+            id: "move_tab".into(),
+            method: Method::TabMove(TabMoveParams {
+                tab_id: "w1:1".into(),
+                insert_index: 1,
+            }),
+        };
+        let json = serde_json::to_value(&tab_move).unwrap();
+        assert_eq!(json["method"], "tab.move");
+        let restored: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, tab_move);
+
+        let pane_focus = Request {
+            id: "focus_pane".into(),
+            method: Method::PaneFocus(PaneTarget {
+                pane_id: "w1:1".into(),
+            }),
+        };
+        let json = serde_json::to_value(&pane_focus).unwrap();
+        assert_eq!(json["method"], "pane.focus");
+        let restored: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, pane_focus);
+
+        let split_ratio = Request {
+            id: "set_ratio".into(),
+            method: Method::LayoutSetSplitRatio(LayoutSetSplitRatioParams {
+                tab_id: Some("w1:1".into()),
+                pane_id: None,
+                path: vec![false, true],
+                ratio: 0.6,
+            }),
+        };
+        let json = serde_json::to_value(&split_ratio).unwrap();
+        assert_eq!(json["method"], "layout.set_split_ratio");
+        let restored: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, split_ratio);
     }
 }

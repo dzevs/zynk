@@ -857,13 +857,31 @@ impl App {
 
             if self.state.request_new_workspace {
                 self.state.request_new_workspace = false;
-                self.create_workspace();
+                self.dispatch_tui_api_request(
+                    "tui.workspace.create",
+                    crate::api::schema::Method::WorkspaceCreate(
+                        crate::api::schema::WorkspaceCreateParams {
+                            cwd: None,
+                            focus: true,
+                            label: None,
+                        },
+                    ),
+                );
                 needs_render = true;
             }
 
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
-                self.create_tab();
+                let label = self.state.requested_new_tab_name.take();
+                self.dispatch_tui_api_request(
+                    "tui.tab.create",
+                    crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+                        workspace_id: None,
+                        cwd: None,
+                        focus: true,
+                        label,
+                    }),
+                );
                 needs_render = true;
             }
 
@@ -878,10 +896,16 @@ impl App {
             }
 
             if let Some(cwd) = self.state.request_new_workspace_cwd.take() {
-                if let Err(err) = self.create_workspace_with_events(cwd, true) {
-                    tracing::error!(err = %err, "failed to create workspace at requested cwd");
-                    self.state.mode = Mode::Navigate;
-                }
+                self.dispatch_tui_api_request(
+                    "tui.workspace.create_cwd",
+                    crate::api::schema::Method::WorkspaceCreate(
+                        crate::api::schema::WorkspaceCreateParams {
+                            cwd: Some(cwd.display().to_string()),
+                            focus: true,
+                            label: None,
+                        },
+                    ),
+                );
                 needs_render = true;
             }
 
@@ -892,19 +916,19 @@ impl App {
 
             if self.state.request_submit_worktree_create {
                 self.state.request_submit_worktree_create = false;
-                self.start_worktree_add();
+                self.submit_worktree_create_via_api();
                 needs_render = true;
             }
 
             if self.state.request_submit_worktree_open {
                 self.state.request_submit_worktree_open = false;
-                self.open_selected_existing_worktree();
+                self.submit_worktree_open_via_api();
                 needs_render = true;
             }
 
             if self.state.request_submit_worktree_remove {
                 self.state.request_submit_worktree_remove = false;
-                self.start_worktree_remove();
+                self.submit_worktree_remove_via_api();
                 needs_render = true;
             }
 

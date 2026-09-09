@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
-    WorkspaceRenameParams, WorkspaceTarget,
+    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceTarget,
 };
 use crate::app::App;
 
@@ -117,6 +117,41 @@ impl App {
         )
     }
 
+    pub(super) fn handle_workspace_move(
+        &mut self,
+        id: String,
+        params: WorkspaceMoveParams,
+    ) -> String {
+        let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        if self.state.workspaces.get(index).is_none() {
+            return workspace_not_found(id, &params.workspace_id);
+        }
+        if params.insert_index > self.state.workspaces.len() {
+            return encode_error(
+                id,
+                "workspace_move_failed",
+                format!("insert_index {} is out of bounds", params.insert_index),
+            );
+        }
+
+        self.state.move_workspace(index, params.insert_index);
+
+        encode_success(
+            id,
+            ResponseResult::WorkspaceList {
+                workspaces: self
+                    .state
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, _)| self.workspace_info(idx))
+                    .collect(),
+            },
+        )
+    }
+
     pub(super) fn handle_workspace_close(&mut self, id: String, target: WorkspaceTarget) -> String {
         let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
             return workspace_not_found(id, &target.workspace_id);
@@ -185,5 +220,40 @@ mod tests {
         assert_eq!(success.id, "req");
         assert_eq!(app.state.request_remove_linked_worktree, None);
         assert!(app.state.workspaces.is_empty());
+    }
+
+    #[test]
+    fn api_workspace_move_reorders_workspaces() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![
+            Workspace::test_new("one"),
+            Workspace::test_new("two"),
+            Workspace::test_new("three"),
+        ];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let moved_id = app.public_workspace_id(0);
+
+        let response = app.handle_workspace_move(
+            "req".into(),
+            WorkspaceMoveParams {
+                workspace_id: moved_id.clone(),
+                insert_index: 3,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorkspaceList { workspaces } = success.result else {
+            panic!("expected workspace list");
+        };
+        assert_eq!(workspaces[2].workspace_id, moved_id);
+        assert_eq!(app.state.workspaces[2].display_name(), "one");
     }
 }

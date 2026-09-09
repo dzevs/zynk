@@ -375,6 +375,12 @@ impl App {
         self.pending_api_worktree_creates.remove(&checkout_key);
 
         if let Err(err) = result.result {
+            if let Some(create) = &mut self.state.worktree_create {
+                if create.checkout_path == result.path {
+                    create.creating = false;
+                    create.error = Some(err.clone());
+                }
+            }
             Self::send_api_response(
                 api.respond_to,
                 encode_error(api.id, "worktree_create_failed", err),
@@ -429,6 +435,17 @@ impl App {
             if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
                 ws.set_custom_name(label);
             }
+        }
+        if self
+            .state
+            .worktree_create
+            .as_ref()
+            .is_some_and(|create| create.checkout_path == result.path)
+        {
+            self.state.worktree_create = None;
+            self.state.name_input.clear();
+            self.state.name_input_replace_on_type = false;
+            self.state.mode = crate::app::Mode::Terminal;
         }
         self.state.mark_session_dirty();
         if created_workspace {
@@ -500,6 +517,17 @@ impl App {
                 } else {
                     "worktree_remove_failed"
                 };
+            if let Some(remove) = &mut self.state.worktree_remove {
+                if remove.workspace_id == result.workspace_id && remove.path == result.path {
+                    remove.removing = false;
+                    if code == "dirty_worktree_requires_force" && !remove.force_confirmation {
+                        remove.force_confirmation = true;
+                        remove.error = None;
+                    } else {
+                        remove.error = Some(message.clone());
+                    }
+                }
+            }
             Self::send_api_response(api.respond_to, encode_error(api.id, code, message));
             return;
         }
@@ -540,6 +568,16 @@ impl App {
             workspace_id = snapshot.workspace_id.clone();
         }
 
+        if self.state.worktree_remove.as_ref().is_some_and(|remove| {
+            remove.workspace_id == result.workspace_id && remove.path == result.path
+        }) {
+            self.state.worktree_remove = None;
+            self.state.mode = if self.state.active.is_some() {
+                crate::app::Mode::Terminal
+            } else {
+                crate::app::Mode::Navigate
+            };
+        }
         let response = encode_success(
             api.id,
             ResponseResult::WorktreeRemoved {

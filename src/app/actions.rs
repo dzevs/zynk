@@ -257,7 +257,10 @@ impl AppState {
         })
     }
 
-    fn pane_focus_target_indices(&self, target: &PaneFocusTarget) -> Option<(usize, usize)> {
+    pub(crate) fn pane_focus_target_indices(
+        &self,
+        target: &PaneFocusTarget,
+    ) -> Option<(usize, usize)> {
         let ws_idx = self
             .workspaces
             .iter()
@@ -1223,16 +1226,6 @@ impl AppState {
         self.refresh_tab_bar_view();
     }
 
-    pub fn move_tab(&mut self, source_idx: usize, insert_idx: usize) {
-        if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
-            if ws.move_tab(source_idx, insert_idx) {
-                self.mark_session_dirty();
-                self.tab_scroll_follow_active = true;
-                self.refresh_tab_bar_view();
-            }
-        }
-    }
-
     pub fn next_tab(&mut self) {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
@@ -1307,7 +1300,7 @@ impl AppState {
         self.focus_agent_entry(target_idx);
     }
 
-    fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
+    pub(crate) fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
         if self.sidebar_collapsed {
             return;
         }
@@ -1478,7 +1471,7 @@ impl AppState {
         }
     }
 
-    fn refresh_tab_bar_view(&mut self) {
+    pub(crate) fn refresh_tab_bar_view(&mut self) {
         let area = self.view.tab_bar_rect;
         let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
             self.tab_scroll = 0;

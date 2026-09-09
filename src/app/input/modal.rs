@@ -2,8 +2,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 
 use crate::{
-    app::state::{
-        AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+    app::{
+        state::{
+            AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+        },
+        App,
     },
     input::TerminalKey,
     layout::NavDirection,
@@ -895,6 +898,366 @@ pub(crate) fn handle_context_menu_key(
         }
         _ => {}
     }
+}
+
+impl App {
+    pub(crate) fn handle_rename_key_via_api(&mut self, key: KeyEvent) {
+        if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
+            match action {
+                ModalAction::Save => self.save_rename_modal_via_api(),
+                ModalAction::Clear => {
+                    self.state.name_input.clear();
+                    self.state.name_input_replace_on_type = false;
+                }
+                ModalAction::Cancel => cancel_rename_modal(&mut self.state),
+                _ => {}
+            }
+            return;
+        }
+
+        handle_rename_key(&mut self.state, key);
+    }
+
+    fn save_rename_modal_via_api(&mut self) {
+        let new_name = if self.state.name_input.trim().is_empty() {
+            self.state.name_input.clone()
+        } else {
+            self.state.name_input.trim().to_string()
+        };
+
+        match self.state.mode {
+            Mode::RenameWorkspace if !self.state.workspaces.is_empty() && !new_name.is_empty() => {
+                let workspace_id = self.public_workspace_id(self.state.selected);
+                self.dispatch_tui_api_request(
+                    "tui.workspace.rename",
+                    crate::api::schema::Method::WorkspaceRename(
+                        crate::api::schema::WorkspaceRenameParams {
+                            workspace_id,
+                            label: new_name,
+                        },
+                    ),
+                );
+            }
+            Mode::RenameTab if self.state.creating_new_tab => {
+                let default_name = next_new_tab_default_name(&self.state);
+                let label = if new_name.is_empty() || new_name == default_name {
+                    None
+                } else {
+                    Some(new_name)
+                };
+                self.dispatch_tui_api_request(
+                    "tui.tab.create_named",
+                    crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+                        workspace_id: None,
+                        cwd: None,
+                        focus: true,
+                        label,
+                    }),
+                );
+            }
+            Mode::RenameTab if !new_name.is_empty() => {
+                let Some(ws_idx) = self.state.active else {
+                    cancel_rename_modal(&mut self.state);
+                    return;
+                };
+                let tab_idx = self.state.workspaces[ws_idx].active_tab;
+                let keep_auto_name = self.state.workspaces[ws_idx]
+                    .tabs
+                    .get(tab_idx)
+                    .is_some_and(|tab| tab.is_auto_named())
+                    && self.state.workspaces[ws_idx]
+                        .tab_display_name(tab_idx)
+                        .is_some_and(|name| new_name == name);
+                if !keep_auto_name {
+                    if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
+                        self.dispatch_tui_api_request(
+                            "tui.tab.rename",
+                            crate::api::schema::Method::TabRename(
+                                crate::api::schema::TabRenameParams {
+                                    tab_id,
+                                    label: new_name,
+                                },
+                            ),
+                        );
+                    }
+                }
+            }
+            Mode::RenamePane => {
+                if let (Some(ws_idx), Some(pane_id)) =
+                    (self.state.active, self.state.rename_pane_target)
+                {
+                    if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                        self.dispatch_tui_api_request(
+                            "tui.pane.rename",
+                            crate::api::schema::Method::PaneRename(
+                                crate::api::schema::PaneRenameParams {
+                                    pane_id,
+                                    label: Some(new_name),
+                                },
+                            ),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        cancel_rename_modal(&mut self.state);
+    }
+
+    pub(crate) fn handle_resize_key_via_api(&mut self, raw_key: TerminalKey) {
+        let key = raw_key.as_key_event();
+        if key.code == KeyCode::Esc
+            || key.code == KeyCode::Enter
+            || self.state.keybinds.resize_mode.matches_prefix_key(raw_key)
+            || self.state.keybinds.resize_mode.matches_direct_key(raw_key)
+        {
+            self.state.mode = if self.state.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+            return;
+        }
+
+        let direction = match key.code {
+            KeyCode::Char('h') | KeyCode::Left => Some(NavDirection::Left),
+            KeyCode::Char('l') | KeyCode::Right => Some(NavDirection::Right),
+            KeyCode::Char('j') | KeyCode::Down => Some(NavDirection::Down),
+            KeyCode::Char('k') | KeyCode::Up => Some(NavDirection::Up),
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            self.dispatch_tui_api_request(
+                "tui.pane.resize",
+                crate::api::schema::Method::PaneResize(crate::api::schema::PaneResizeParams {
+                    pane_id: None,
+                    direction: super::navigate::api_pane_direction(direction),
+                    amount: None,
+                }),
+            );
+        }
+    }
+
+    pub(crate) fn handle_confirm_close_key_via_api(&mut self, key: KeyEvent) {
+        match modal_action_from_key(&key, CONFIRM_CLOSE_ACTIONS) {
+            Some(ModalAction::Confirm) => {
+                let ws_idx = self.state.selected;
+                if ws_idx < self.state.workspaces.len() {
+                    self.close_workspace_idx_via_api(ws_idx);
+                }
+                self.state.mode = if self.state.active.is_some() {
+                    Mode::Terminal
+                } else {
+                    Mode::Navigate
+                };
+            }
+            Some(ModalAction::Cancel) => confirm_close_cancel(&mut self.state),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn handle_context_menu_key_via_api(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.state.context_menu = None;
+                leave_modal(&mut self.state);
+            }
+            KeyCode::Up => {
+                if let Some(menu) = &mut self.state.context_menu {
+                    menu.list.move_prev();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(menu) = &mut self.state.context_menu {
+                    menu.list.move_next(menu.items().len());
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(menu) = self.state.context_menu.take() {
+                    let idx = menu.list.highlighted;
+                    self.apply_context_menu_action_via_api(menu, idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
+        let item = menu.items().get(idx).copied();
+        match (menu.kind, item) {
+            (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
+                self.state.request_new_linked_worktree = Some(ws_idx);
+                leave_modal(&mut self.state);
+            }
+            (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("Delete worktree checkout...")) => {
+                self.state.request_remove_linked_worktree = Some(ws_idx);
+                leave_modal(&mut self.state);
+            }
+            (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("Open worktree...")) => {
+                self.state.request_open_existing_worktree = Some(ws_idx);
+                leave_modal(&mut self.state);
+            }
+            (
+                ContextMenuKind::GitWorkspace {
+                    ws_idx, collapsed, ..
+                },
+                Some("Collapse" | "Expand"),
+            ) => {
+                if let Some(key) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.worktree_space())
+                    .map(|space| space.key.clone())
+                {
+                    if collapsed {
+                        self.state.collapsed_space_keys.remove(&key);
+                    } else {
+                        self.state.collapsed_space_keys.insert(key);
+                    }
+                    self.state.mark_session_dirty();
+                }
+                leave_modal(&mut self.state);
+            }
+            (
+                ContextMenuKind::Workspace { ws_idx }
+                | ContextMenuKind::GitWorkspace { ws_idx, .. },
+                Some("Rename"),
+            ) => open_rename_workspace(&mut self.state, &self.terminal_runtimes, ws_idx),
+            (
+                ContextMenuKind::Workspace { ws_idx }
+                | ContextMenuKind::GitWorkspace { ws_idx, .. },
+                Some("Close" | "Close group"),
+            ) => {
+                self.state.selected = ws_idx;
+                if self.state.confirm_close {
+                    open_confirm_close(&mut self.state);
+                } else {
+                    self.close_workspace_idx_via_api(ws_idx);
+                    self.state.mode = Mode::Navigate;
+                }
+            }
+            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
+                self.focus_workspace_idx_via_api(ws_idx);
+                self.focus_tab_idx_via_api(tab_idx);
+                open_new_tab_dialog(&mut self.state);
+            }
+            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Rename")) => {
+                self.focus_workspace_idx_via_api(ws_idx);
+                self.focus_tab_idx_via_api(tab_idx);
+                open_rename_active_tab(&mut self.state, false);
+            }
+            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close")) => {
+                self.focus_workspace_idx_via_api(ws_idx);
+                self.focus_tab_idx_via_api(tab_idx);
+                self.close_active_tab_via_api();
+            }
+            (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
+                open_rename_pane(&mut self.state, pane_id);
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
+                Some("Clear pane name"),
+            ) => {
+                if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                    self.dispatch_tui_api_request(
+                        "tui.pane.clear_name",
+                        crate::api::schema::Method::PaneRename(
+                            crate::api::schema::PaneRenameParams {
+                                pane_id,
+                                label: None,
+                            },
+                        ),
+                    );
+                }
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx,
+                    pane_id,
+                    source_pane_id: Some(source_pane_id),
+                    ..
+                },
+                Some("Swap with focused pane"),
+            ) => {
+                let source_public_id = self.public_pane_id(ws_idx, source_pane_id);
+                let target_public_id = self.public_pane_id(ws_idx, pane_id);
+                if let (Some(source_public_id), Some(target_public_id)) =
+                    (source_public_id, target_public_id)
+                {
+                    self.dispatch_tui_api_request(
+                        "tui.pane.swap_exact",
+                        crate::api::schema::Method::PaneSwap(crate::api::schema::PaneSwapParams {
+                            pane_id: None,
+                            direction: None,
+                            source_pane_id: Some(source_public_id),
+                            target_pane_id: Some(target_public_id),
+                        }),
+                    );
+                    self.focus_pane_internal_via_api(ws_idx, source_pane_id);
+                }
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
+                Some("Split right"),
+            ) => {
+                self.focus_pane_internal_via_api(ws_idx, pane_id);
+                self.split_focused_pane_via_api(crate::api::schema::SplitDirection::Right);
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
+                Some("Split down"),
+            ) => {
+                self.focus_pane_internal_via_api(ws_idx, pane_id);
+                self.split_focused_pane_via_api(crate::api::schema::SplitDirection::Down);
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
+                Some("Zoom"),
+            ) => {
+                self.focus_pane_internal_via_api(ws_idx, pane_id);
+                self.zoom_focused_pane_via_api();
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
+                Some("Close pane"),
+            ) => {
+                self.focus_pane_internal_via_api(ws_idx, pane_id);
+                self.close_focused_pane_via_api();
+                self.state.mode = if self.state.active.is_some() {
+                    Mode::Terminal
+                } else {
+                    Mode::Navigate
+                };
+            }
+            _ => leave_modal(&mut self.state),
+        }
+    }
+}
+
+fn cancel_rename_modal(state: &mut AppState) {
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
+    state.rename_pane_target = None;
+    state.name_input.clear();
+    state.name_input_replace_on_type = false;
+    leave_modal(state);
 }
 
 impl AppState {

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, TabCreateParams, TabListParams,
-    TabRenameParams, TabTarget,
+    TabMoveParams, TabRenameParams, TabTarget,
 };
 use crate::app::{App, Mode};
 
@@ -169,6 +169,51 @@ impl App {
         encode_success(id, ResponseResult::TabInfo { tab })
     }
 
+    pub(super) fn handle_tab_move(&mut self, id: String, params: TabMoveParams) -> String {
+        let Some((ws_idx, tab_idx)) = self.parse_tab_id(&params.tab_id) else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        if params.insert_index > ws.tabs.len() {
+            return encode_error(
+                id,
+                "tab_move_failed",
+                format!("insert_index {} is out of bounds", params.insert_index),
+            );
+        }
+
+        let moved = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .is_some_and(|ws| ws.move_tab(tab_idx, params.insert_index));
+        if moved {
+            self.schedule_session_save();
+            if self.state.active == Some(ws_idx) {
+                self.state.tab_scroll_follow_active = true;
+                self.state.refresh_tab_bar_view();
+            }
+        }
+
+        encode_success(
+            id,
+            ResponseResult::TabList {
+                tabs: self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .map(|ws| {
+                        (0..ws.tabs.len())
+                            .filter_map(|idx| self.tab_info(ws_idx, idx))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            },
+        )
+    }
+
     pub(super) fn handle_tab_close(&mut self, id: String, target: TabTarget) -> String {
         let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
             return tab_not_found(id, &target.tab_id);
@@ -220,4 +265,45 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
 
 fn tab_not_found(id: String, tab_id: &str) -> String {
     encode_error(id, "tab_not_found", format!("tab {tab_id} not found"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
+
+    #[test]
+    fn api_tab_move_reorders_tabs_in_target_workspace() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("tabs");
+        workspace.test_add_tab(Some("two"));
+        workspace.test_add_tab(Some("three"));
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let moved_root = app.state.workspaces[0].tabs[0].root_pane;
+        let moved_id = app.public_tab_id(0, 0).unwrap();
+
+        let response = app.handle_tab_move(
+            "req".into(),
+            TabMoveParams {
+                tab_id: moved_id,
+                insert_index: 3,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::TabList { tabs } = success.result else {
+            panic!("expected tab list");
+        };
+        assert_eq!(app.state.workspaces[0].tabs[2].root_pane, moved_root);
+        assert_eq!(tabs[2].tab_id, app.public_tab_id(0, 2).unwrap());
+    }
 }
