@@ -655,14 +655,25 @@ fn unique_temp_path(name: &str) -> std::path::PathBuf {
 
 #[cfg(test)]
 fn wait_for_file(path: &std::path::Path) -> String {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    // Wait for the file to exist AND be non-empty. A writer that creates the file
+    // before filling it (`cp`, an editor's open-then-write) leaves a window where
+    // the path exists with zero length; returning that empty string races the
+    // caller's content assertion. Do not drop this guard.
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
         if let Ok(content) = std::fs::read_to_string(path) {
-            return content;
+            if !content.is_empty() {
+                return content;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    panic!("timed out waiting for {}", path.display());
+    panic!(
+        "timed out after {:?} waiting for non-empty {}",
+        start.elapsed(),
+        path.display()
+    );
 }
 
 #[cfg(test)]
