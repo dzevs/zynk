@@ -910,6 +910,13 @@ pub struct PaneRuntime {
     io: PaneRuntimeIo,
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
+    /// The start time of the process at `child_pid`, captured when that pid was
+    /// published; `0` means "never captured", which fails closed (ADR 0014).
+    ///
+    /// Published BEFORE `child_pid` and read after it, so a reader that sees a
+    /// pid always sees the start time that belongs to it. That ordering is why
+    /// the pair needs no lock on the PTY path.
+    child_start_time: Arc<AtomicU64>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
@@ -1345,10 +1352,12 @@ impl PaneRuntime {
         pane_id: u32,
     ) -> crate::handoff_runtime::HandoffRuntimeState {
         let child_pid = self.child_pid.load(Ordering::Acquire);
+        let child_start_time = self.child_start_time.load(Ordering::Acquire);
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
         crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
+            child_start_time,
             rows,
             cols,
             cell_width_px,
@@ -1536,6 +1545,7 @@ impl PaneRuntime {
         let crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
+            child_start_time,
             rows,
             cols,
             cell_width_px,
@@ -1572,6 +1582,16 @@ impl PaneRuntime {
             pane_terminal.seed_history_ansi(ansi);
         }
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
+        // The handed-over pane keeps its child process, so it must keep the
+        // start time that identifies it (ADR 0014). The exporting server sends
+        // the one it captured; a server that predates this field sends 0, and
+        // the pid is still live here, so re-read it rather than lose the pane's
+        // binding across the upgrade the handoff exists to perform.
+        let child_start_time = Arc::new(AtomicU64::new(if child_start_time > 0 {
+            child_start_time
+        } else {
+            crate::platform::process_start_time(child_pid).unwrap_or(0)
+        }));
         let child_pid = Arc::new(AtomicU32::new(child_pid));
         let reported_cwd = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
@@ -1652,6 +1672,7 @@ impl PaneRuntime {
             io,
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
             child_pid,
+            child_start_time,
             reported_cwd,
             child_wait_completed: None,
             kitty_keyboard_flags,
@@ -1700,17 +1721,26 @@ impl PaneRuntime {
 
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
+        let child_start_time = Arc::new(AtomicU64::new(0));
         let reported_cwd = Arc::new(Mutex::new(None));
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         {
             let child_pid = child_pid.clone();
+            let child_start_time = child_start_time.clone();
             let child_wait_completed = child_wait_completed.clone();
             let events = events.clone();
             let rt = tokio::runtime::Handle::current();
             let mut child = spawned.child;
             if let Some(pid) = child.process_id() {
+                // The start time goes first: ADR 0014's principal is the pair,
+                // and a reader that has seen the pid must never find the pane
+                // root as a bare pid it could match a reused one against.
+                child_start_time.store(
+                    crate::platform::process_start_time(pid).unwrap_or(0),
+                    Ordering::Release,
+                );
                 child_pid.store(pid, Ordering::Release);
                 crate::logging::pane_spawned(pane_id.raw(), pid);
             }
@@ -2153,6 +2183,7 @@ impl PaneRuntime {
             io,
             current_size: Cell::new((rows, cols, 0, 0)),
             child_pid,
+            child_start_time,
             reported_cwd,
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
@@ -2484,6 +2515,18 @@ impl PaneRuntime {
         (pid > 0).then_some(pid)
     }
 
+    /// The start time captured for `child_pid()`, which together with the pid is
+    /// ADR 0014's pane-root principal.
+    ///
+    /// Load the pid FIRST: the writer publishes this value before the pid, so a
+    /// reader that has seen a pid is guaranteed to see the start time belonging
+    /// to it. `None` means no start time was ever captured, and the pane-tree
+    /// check refuses rather than fall back to matching a bare pid.
+    pub fn child_start_time(&self) -> Option<u64> {
+        let start_time = self.child_start_time.load(Ordering::Acquire);
+        (start_time > 0).then_some(start_time)
+    }
+
     /// Get the current working directory of the process group controlling the pane PTY.
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Acquire);
@@ -2560,6 +2603,7 @@ impl PaneRuntime {
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
+                child_start_time: Arc::new(AtomicU64::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
@@ -2933,6 +2977,7 @@ mod tests {
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
+            child_start_time: Arc::new(AtomicU64::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
@@ -2964,6 +3009,7 @@ mod tests {
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
+            child_start_time: Arc::new(AtomicU64::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),

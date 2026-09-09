@@ -15,6 +15,12 @@ pub(crate) type LocalStream = interprocess::local_socket::Stream;
 /// client. It is the only route to those credentials here: the local-socket
 /// `Stream` deliberately exposes no raw fd. `None` (no pid, no euid, or the
 /// option unavailable) is a refusal for every caller.
+///
+/// The peer's start time is read here, at accept, so the connection is bound to
+/// a PROCESS rather than to a pid the kernel may hand to someone else before the
+/// request is checked (ARCH-E8-ADR14-PID-REUSE-001). A start time that cannot be
+/// read means the peer is already gone, and travels as `None` so the pane-tree
+/// check refuses it by name instead of silently passing a bare pid.
 pub(crate) fn stream_peer_credentials(
     stream: &LocalStream,
 ) -> Option<crate::platform::PeerCredentials> {
@@ -24,9 +30,11 @@ pub(crate) fn stream_peer_credentials(
     if pid <= 0 {
         return None;
     }
+    let pid = pid as u32;
     Some(crate::platform::PeerCredentials {
-        pid: pid as u32,
+        pid,
         uid: credentials.euid()?,
+        start_time: crate::platform::process_start_time(pid),
     })
 }
 

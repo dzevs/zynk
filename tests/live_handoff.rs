@@ -2639,6 +2639,13 @@ fn live_handoff_keeps_the_pane_tree_binding() {
     // directions: a process the pane started is still accepted, and this harness,
     // which is outside every pane, is still refused. Run without the debug seam, so
     // the real check answers every call.
+    //
+    // The principal is (pid, start time), not a pid, so this is also the control on
+    // the handoff carrying that start time: had it been lost, the pane's root would
+    // be a bare pid, the in-pane report below would be refused as unidentified, and
+    // the out-of-pane refusal would come from the pane rather than from the caller's
+    // position. Both halves are asserted, so a degraded binding cannot read as a
+    // pass (ARCH-E8-ADR14-PID-REUSE-001).
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -2706,6 +2713,14 @@ fn live_handoff_keeps_the_pane_tree_binding() {
     assert_eq!(
         outside_after["error"]["code"], "caller_outside_pane",
         "a live handoff must not open the pane-tree binding to outside callers"
+    );
+    let outside_message = outside_after["error"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        outside_message.contains("is not inside pane"),
+        "the harness must be refused for being outside the pane, not because the pane \
+         lost its principal across the handoff: {outside_message:?}"
     );
     assert!(
         after.contains("rc=0"),

@@ -115,3 +115,38 @@ Decision 2's rename applies to the receipts **this build records**. It does not 
   operator | system.recovery`.
 - No CLI, API or document may present an `integration` row as a pane-tree receipt. Its provenance is a
   claim about which check ran, and for those rows the origin check did not run.
+
+## Amendment 2026-09-09 (pre-merge; ARCH-E8-ADR14-PID-REUSE-001)
+
+Decision 1 is stated in pids. **A pid is not an identity.** The kernel reuses pids, so a pid outlives
+the process it named, and the check as first written treated whatever holds a number as the process
+that used to hold it. Both ends of the comparison are therefore **`(pid, start time)` principals**, read
+from `/proc/<pid>/stat` field 22.
+
+- **The pane's principal** is its PTY child's pid together with the start time captured when that pid
+  was published. If the pane's root has been reaped, its pid is free, and an unrelated same-UID process
+  that receives it — or any child that process forks — reaches that pid by ordinary ancestry. The
+  pid-only predicate placed such a caller *inside the pane*, which is the pane's whole standing:
+  reporting its identity, and receipting its messages. The reviewer demonstrated acceptance at the
+  predicate, not an end-to-end `received` event; a receipt additionally needs a stale identity and a
+  delayed pane-died signal. The predicate is the principal, so the hole is in the principal.
+- **The caller's principal** is the `SO_PEERCRED` pid together with the start time read at accept. The
+  second window is between the peer's `connect()` and the server's `/proc` read: the peer could exit and
+  its pid be handed to another process — possibly one genuinely inside the pane. The connection was
+  never that process's, so a start time that no longer matches is a refusal.
+- **Fail closed, by name.** A pane root that was published without a start time, a pane root that is
+  gone from `/proc`, a pane root whose pid now holds a different process, a caller whose start time was
+  unreadable at accept or has changed since, any failed `/proc` read, and the existing hop bound are all
+  refusals. In particular, **a reaped pane root refuses every caller**: nothing can be inside a tree
+  whose root no longer exists. They stay one F4 code, `caller_outside_pane`, with the reason in the
+  message, because the socket `ErrorBody` carries only a code and a message.
+- **A live handoff keeps the principal.** The handed-over pane keeps its child process, so it keeps that
+  process's start time: the exporting server sends it, and a server that predates the field sends none,
+  in which case the importer re-reads it from the still-live child rather than let an upgrade — the very
+  thing a live handoff exists to perform — leave every pane unidentifiable.
+- **`SO_PEERPIDFD` is the future strengthening, and is not used yet.** A pidfd taken by the kernel at
+  connect would remove the caller-side window entirely and would let each hop of the ancestry walk be
+  pinned rather than re-read. It needs Linux >= 6.5, and this fork's users include Ubuntu 22.04 on the
+  5.15 kernel, so adopting it now would fail closed on a supported platform. Until that floor moves,
+  `(pid, start time)` is the mechanism; the residual window is that the walk reads each hop at a
+  different instant, with the two endpoints pinned.

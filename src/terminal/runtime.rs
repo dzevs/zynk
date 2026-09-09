@@ -409,6 +409,10 @@ impl TerminalRuntime {
         self.0.child_pid()
     }
 
+    pub fn child_start_time(&self) -> Option<u64> {
+        self.0.child_start_time()
+    }
+
     pub(crate) fn current_size(&self) -> (u16, u16) {
         self.0.current_size()
     }

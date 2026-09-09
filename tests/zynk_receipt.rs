@@ -1779,6 +1779,14 @@ fn an_identity_report_from_outside_the_pane_is_refused() {
         message.contains(&pane) && message.contains("ADR 0014"),
         "the refusal must name the pane and the decision: {message:?}"
     );
+    // The principal is (pid, start time): the refusal must be about where the
+    // caller IS, not about the pane failing to identify its own root, or a pane
+    // that had quietly lost its principal would refuse everyone and read green
+    // (ARCH-E8-ADR14-PID-REUSE-001).
+    assert!(
+        message.contains("is not inside pane"),
+        "the refusal must be the caller's position, not a degraded pane root: {message:?}"
+    );
 
     // The state-report shape carries identity too, and is bound the same way.
     let refused_state = try_report_state(&fixture.socket_path, &pane, "pi", "outside-2");
