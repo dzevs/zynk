@@ -486,6 +486,9 @@ impl TerminalState {
                 now,
             );
         }
+        if self.opencode_state_report_is_cross_talk(&source, &agent_label, &session_ref) {
+            return None;
+        }
         if !self.hook_report_survives_retirement(&source, &agent_label, &session_ref, None) {
             return None;
         }
@@ -1068,6 +1071,42 @@ impl TerminalState {
             .is_some_and(|(current, incoming)| current != incoming)
     }
 
+    /// Upstream's `opencode_cross_talk` gate, in this fork's arbitration order.
+    ///
+    /// One opencode server is shared by every client attached to it, and the bundled
+    /// server plugin reports activity for EVERY root session that server holds. A state
+    /// report naming a session other than the one THIS pane anchored is therefore another
+    /// client's activity, and the pane must not adopt it: clamping the session id (what
+    /// `conflicting_same_owner_session_ref` does) would still let the other client's state
+    /// drive this pane, so the report is dropped whole. The pane's own selection arrives
+    /// on the session-start path from the TUI plugin instead.
+    ///
+    /// The anchor is the stored session triple through `owned_session_ref` —
+    /// `hook_authority` first, then the persisted session, which is what a local TUI
+    /// selection leaves behind. Identity stays hook-authoritative throughout: `source`,
+    /// `agent_label` and `session_ref` all come off the hook report, and `detected_agent`
+    /// is read only as upstream's `process_present` evidence that the agent's own process
+    /// is in the foreground — the same use the session-start path already makes of it,
+    /// never as a source of the pane's identity.
+    fn opencode_state_report_is_cross_talk(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &Option<crate::agent_resume::AgentSessionRef>,
+    ) -> bool {
+        if (source, agent_label) != ("zynk:opencode", "opencode") {
+            return false;
+        }
+        let process_present = crate::detect::parse_agent_label(agent_label)
+            .is_some_and(|known_agent| self.detected_agent == Some(known_agent));
+        if !process_present {
+            return false;
+        }
+        self.owned_session_ref(source, agent_label)
+            .zip(session_ref.as_ref())
+            .is_some_and(|(anchored, incoming)| &anchored != incoming)
+    }
+
     fn same_owner_full_lifecycle_hook_authority_session_ref(
         &self,
         source: &str,
@@ -1297,7 +1336,11 @@ impl TerminalState {
                 // moved; the identity-only `process_present` gate below still requires
                 // the agent to be the detected foreground process before it may repoint.
                 | ("zynk:antigravity_cli", "agy", None)
-                | ("zynk:opencode", "opencode", Some("new"))
+                // `select` is reported ONLY by the opencode TUI plugin, for the root
+                // session this pane's own TUI has selected. `new`/`resume` come from the
+                // shared server and may name an attached client's session, so neither
+                // may repoint this pane.
+                | ("zynk:opencode", "opencode", Some("select"))
                 | ("zynk:pi", "pi", Some("new" | "resume" | "fork"))
                 | (
                     "zynk:omp",
@@ -1305,6 +1348,28 @@ impl TerminalState {
                     Some("startup" | "new" | "resume" | "fork")
                 )
         )
+    }
+
+    /// A `select` report from the opencode TUI plugin, which carries no sequence.
+    ///
+    /// The TUI plugin and the server plugin share the `zynk:opencode` source, and only
+    /// the server plugin numbers its reports, so the shared sequence fence would refuse
+    /// every unsequenced selection once the server has reported once. A report with no
+    /// sequence carries no ordering the fence could ever use, so this shape is exempted
+    /// from it rather than silently dropped.
+    ///
+    /// It is a pure function of the four values the hook report itself carries — never
+    /// of `detected_agent`, `hook_authority` or `hook_identity` — and is pinned to the
+    /// one `(source, agent_label)` pair `crate::detect::full_lifecycle_hook_authority`
+    /// already owns, so it cannot widen any other owner.
+    fn is_unsequenced_opencode_selection(
+        source: &str,
+        agent_label: &str,
+        session_start_source: Option<&str>,
+        seq: Option<u64>,
+    ) -> bool {
+        (source, agent_label, session_start_source, seq)
+            == ("zynk:opencode", "opencode", Some("select"), None)
     }
 
     pub fn set_persisted_agent_session(
@@ -1345,7 +1410,13 @@ impl TerminalState {
         {
             return None;
         }
-        if !self.accept_hook_report(&source, seq) {
+        let unsequenced_selection = Self::is_unsequenced_opencode_selection(
+            &source,
+            &agent_label,
+            session_start_source.as_deref(),
+            seq,
+        );
+        if !unsequenced_selection && !self.accept_hook_report(&source, seq) {
             return None;
         }
         if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
@@ -3181,7 +3252,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_new_session_ref_replaces_existing_session_ref() {
+    fn opencode_tui_selection_replaces_existing_session_ref() {
         let mut terminal = test_terminal();
         terminal
             .set_agent_session_ref(
@@ -3196,11 +3267,11 @@ mod tests {
             .set_agent_session_ref_for_session_start(
                 "zynk:opencode".into(),
                 "opencode".into(),
-                crate::agent_resume::AgentSessionRef::id("opencode-new"),
-                Some(21),
-                Some("new".into()),
+                crate::agent_resume::AgentSessionRef::id("opencode-selected"),
+                None,
+                Some("select".into()),
             )
-            .expect("new should replace the session");
+            .expect("a local TUI selection should replace the session");
 
         assert!(mutation.session_ref_changed);
         assert_eq!(
@@ -3208,8 +3279,307 @@ mod tests {
                 .persisted_agent_session
                 .as_ref()
                 .map(|session| session.session_ref.value.as_str()),
-            Some("opencode-new")
+            Some("opencode-selected")
         );
+    }
+
+    #[test]
+    fn opencode_server_new_does_not_replace_existing_session_ref() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        terminal
+            .set_agent_session_ref_for_session_start(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                crate::agent_resume::AgentSessionRef::id("opencode-visible"),
+                None,
+                Some("select".into()),
+            )
+            .expect("local selection should be accepted");
+
+        let mutation = terminal.set_agent_session_ref_for_session_start(
+            "zynk:opencode".into(),
+            "opencode".into(),
+            crate::agent_resume::AgentSessionRef::id("opencode-attached-client"),
+            Some(21),
+            Some("new".into()),
+        );
+
+        assert!(mutation.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("opencode-visible")
+        );
+    }
+
+    #[test]
+    fn opencode_server_resume_does_not_replace_existing_session_ref() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        terminal
+            .set_agent_session_ref_for_session_start(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                crate::agent_resume::AgentSessionRef::id("opencode-visible"),
+                None,
+                Some("select".into()),
+            )
+            .expect("local selection should be accepted");
+
+        let mutation = terminal.set_agent_session_ref_for_session_start(
+            "zynk:opencode".into(),
+            "opencode".into(),
+            crate::agent_resume::AgentSessionRef::id("opencode-attached-client"),
+            Some(21),
+            Some("resume".into()),
+        );
+
+        assert!(mutation.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("opencode-visible")
+        );
+    }
+
+    #[test]
+    fn opencode_tui_selection_is_exempt_from_the_shared_sequence_fence() {
+        // The TUI plugin sends no `seq` and shares `zynk:opencode` with the numbered
+        // server plugin, so without the exemption the fence would refuse every
+        // selection once the server had reported once.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("opencode-server-session"),
+                Some(4_100),
+            )
+            .expect("the server plugin should anchor the first session it reports");
+        assert!(terminal
+            .set_agent_session_ref(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                crate::agent_resume::AgentSessionRef::id("opencode-unsequenced"),
+                None,
+            )
+            .is_none());
+
+        let selected = terminal
+            .set_agent_session_ref_for_session_start(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                crate::agent_resume::AgentSessionRef::id("opencode-selected"),
+                None,
+                Some("select".into()),
+            )
+            .expect("an unsequenced local selection should still be accepted");
+
+        assert!(selected.session_ref_changed);
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("opencode-selected")
+        );
+        // The exemption bypasses the fence, it does not rewrite it: the server
+        // plugin's own numbering is left exactly where it was.
+        assert_eq!(
+            terminal.hook_report_sequences.get("zynk:opencode"),
+            Some(&4_100)
+        );
+    }
+
+    #[test]
+    fn opencode_tui_selection_anchors_before_the_process_is_detected() {
+        // Upstream stashes a selection reported before its process is detected and
+        // replays it on detection. This fork has no such process gate on the
+        // session-start path, so the selection anchors immediately and detection
+        // then finds the session already in place — the same end state.
+        let mut terminal = test_terminal();
+        let startup_selection = terminal
+            .set_agent_session_ref_for_session_start(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                crate::agent_resume::AgentSessionRef::id("opencode-startup-selection"),
+                None,
+                Some("select".into()),
+            )
+            .expect("a selection reported before detection should still anchor");
+        assert!(startup_selection.session_ref_changed);
+
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("opencode-startup-selection")
+        );
+    }
+
+    #[test]
+    fn opencode_tui_selection_reanchors_full_lifecycle_authority() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        let old_session = crate::agent_resume::AgentSessionRef::id("opencode-newer").unwrap();
+        let selected_session =
+            crate::agent_resume::AgentSessionRef::id("opencode-selected-older").unwrap();
+        let attached_session =
+            crate::agent_resume::AgentSessionRef::id("opencode-attached-client").unwrap();
+        terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                AgentState::Idle,
+                None,
+                None,
+                Some(old_session.clone()),
+                Some(20),
+            )
+            .expect("initial session should own lifecycle state");
+        let attached = terminal.set_hook_authority_with_session_ref(
+            "zynk:opencode".into(),
+            "opencode".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(attached_session.clone()),
+            Some(21),
+        );
+        assert!(attached.is_none());
+        assert_eq!(terminal.state, AgentState::Idle);
+
+        let selected = terminal
+            .set_agent_session_ref_for_session_start(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                Some(selected_session.clone()),
+                None,
+                Some("select".into()),
+            )
+            .expect("the selected session should replace the previous session");
+
+        assert!(selected.session_ref_changed);
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&selected_session)
+        );
+
+        terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                AgentState::Working,
+                None,
+                None,
+                Some(selected_session.clone()),
+                Some(22),
+            )
+            .expect("the selected session should regain lifecycle authority");
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(
+            terminal
+                .hook_authority
+                .as_ref()
+                .and_then(|authority| authority.session_ref.as_ref()),
+            Some(&selected_session)
+        );
+
+        let late_old_session = terminal.set_hook_authority_with_session_ref(
+            "zynk:opencode".into(),
+            "opencode".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(old_session),
+            Some(23),
+        );
+        assert!(late_old_session.is_none());
+        assert_eq!(terminal.state, AgentState::Working);
+
+        let late_attached_session = terminal.set_hook_authority_with_session_ref(
+            "zynk:opencode".into(),
+            "opencode".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(attached_session),
+            Some(24),
+        );
+        assert!(late_attached_session.is_none());
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn opencode_state_report_for_another_root_session_is_ignored() {
+        // The shared opencode server reports activity for every root session it holds,
+        // so a report naming a session this pane never selected is an attached client's
+        // and must move neither the pane's state nor its session.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        terminal
+            .set_agent_session_ref_for_session_start(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                crate::agent_resume::AgentSessionRef::id("opencode-visible"),
+                None,
+                Some("select".into()),
+            )
+            .expect("local selection should be accepted");
+
+        let cross_talk = terminal.set_hook_authority_with_session_ref(
+            "zynk:opencode".into(),
+            "opencode".into(),
+            AgentState::Working,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("opencode-attached-client"),
+            Some(31),
+        );
+
+        assert!(cross_talk.is_none());
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("opencode-visible")
+        );
+        // The ignored report must not consume the shared sequence either.
+        assert!(!terminal.hook_report_sequences.contains_key("zynk:opencode"));
+
+        let visible = terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:opencode".into(),
+                "opencode".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("opencode-visible"),
+                Some(32),
+            )
+            .expect("the anchored session's own report should still be accepted");
+
+        assert!(visible.effective_state_change.is_some());
+        assert_eq!(terminal.state, AgentState::Working);
     }
 
     #[test]

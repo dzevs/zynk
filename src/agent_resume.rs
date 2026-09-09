@@ -74,7 +74,7 @@ pub fn session_ref_from_report(
 
 pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
     match value.as_deref().map(str::trim) {
-        Some(source @ ("startup" | "resume" | "clear" | "compact" | "new" | "fork")) => {
+        Some(source @ ("startup" | "resume" | "clear" | "compact" | "new" | "fork" | "select")) => {
             Some(source.to_string())
         }
         _ => None,
@@ -1481,6 +1481,10 @@ mod tests {
         assert_eq!(
             normalize_session_start_source(Some("fork".into())),
             Some("fork".into())
+        );
+        assert_eq!(
+            normalize_session_start_source(Some("select".into())),
+            Some("select".into())
         );
         assert_eq!(
             normalize_session_start_source(Some(" resume ".into())),

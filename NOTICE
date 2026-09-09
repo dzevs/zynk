@@ -64,12 +64,17 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 - src/integration/assets/grok/zynk-agent-state.sh
 - src/integration/assets/hermes/__init__.py
 - src/integration/assets/omp/zynk-agent-state.ts
+- src/integration/assets/opencode/zynk-agent-state.js
+- src/integration/assets/opencode/zynk-agent-state.test.ts
+- src/integration/assets/opencode/zynk-tui-session.js
+- src/integration/assets/opencode/zynk-tui-session.test.ts
 - src/integration/assets/pi/zynk-agent-state.test.ts
 - src/integration/assets/pi/zynk-agent-state.ts
 - src/integration/assets/zynk-agent-state.test.ts
 - src/integration/claude_settings.rs
 - src/integration/env.rs
 - src/integration/mod.rs
+- src/integration/opencode_config.rs
 - src/integration/registry.rs
 - src/integration/targets.rs
 - src/integration/tests.rs

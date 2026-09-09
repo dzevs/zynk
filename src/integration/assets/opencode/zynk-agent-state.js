@@ -2,7 +2,7 @@
 // managed by zynk; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // ZYNK_INTEGRATION_ID=opencode
-// ZYNK_INTEGRATION_VERSION=9
+// ZYNK_INTEGRATION_VERSION=10
 
 import net from "node:net";
 
@@ -99,15 +99,11 @@ function requestOnce(method, params) {
   });
 }
 
-function reportSession(sessionID, sessionStartSource) {
+function reportSession(sessionID) {
   if (!sessionID) {
     return Promise.resolve();
   }
-  const params = { agent_session_id: sessionID };
-  if (sessionStartSource) {
-    params.session_start_source = sessionStartSource;
-  }
-  return request("pane.report_agent_session", params);
+  return request("pane.report_agent_session", { agent_session_id: sessionID });
 }
 
 function reportState(state, sessionID) {
@@ -154,10 +150,9 @@ export const ZynkAgentStatePlugin = async () => {
 
       switch (type) {
         case "session.created":
-          // A root session.created is a genuine new-session start (subagent
-          // creates are dropped above). Signal it so zynk replaces the pane's
-          // prior session id instead of treating the change as cross-talk.
-          await reportSession(sessionID, "new");
+          // Creation is server-global, so an attached client may own it. The
+          // TUI plugin separately reports the root selected in this pane.
+          reportedRootSessionID = sessionID;
           break;
         case "session.updated":
           if (sessionID && sessionID !== reportedRootSessionID) {

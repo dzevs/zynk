@@ -311,6 +311,29 @@ fn grok_hook_config_is_valid(hook_path: &Path) -> bool {
         .is_some_and(|config| config == super::targets::grok_hook_config(hook_path))
 }
 
+/// Whether opencode's SECOND installed artifact is present, current and registered.
+///
+/// opencode loads the TUI selection plugin only when `tui.jsonc` lists it, so a
+/// current server plugin beside a missing, stale or unregistered TUI plugin is a
+/// half-install that silently stops reporting the locally selected session.
+/// `integration_specs()` keys one path per target, so this reaches the sibling
+/// artifact from the registered plugin path (`<config>/plugins/<name>` -> `<config>`).
+fn opencode_tui_integration_is_valid(plugin_path: &Path, expected_version: u32) -> bool {
+    let Some(config_dir) = plugin_path.parent().and_then(Path::parent) else {
+        return false;
+    };
+    let tui_plugin_path = config_dir.join(super::OPENCODE_TUI_PLUGIN_INSTALL_NAME);
+    let tui_plugin_current = fs::read_to_string(tui_plugin_path)
+        .ok()
+        .and_then(|content| parse_integration_version(&content))
+        .is_some_and(|version| version >= expected_version);
+    tui_plugin_current
+        && super::opencode_config::tui_plugin_is_configured(
+            config_dir,
+            super::OPENCODE_TUI_PLUGIN_SPEC,
+        )
+}
+
 pub(crate) fn integration_status_at(
     target: crate::api::schema::IntegrationTarget,
     path: PathBuf,
@@ -352,6 +375,12 @@ pub(crate) fn integration_status_at(
     if target == crate::api::schema::IntegrationTarget::Grok
         && state == super::IntegrationStatusKind::Current
         && !grok_hook_config_is_valid(&resolved)
+    {
+        state = super::IntegrationStatusKind::Outdated;
+    }
+    if target == crate::api::schema::IntegrationTarget::Opencode
+        && state == super::IntegrationStatusKind::Current
+        && !opencode_tui_integration_is_valid(&resolved, expected_version)
     {
         state = super::IntegrationStatusKind::Outdated;
     }

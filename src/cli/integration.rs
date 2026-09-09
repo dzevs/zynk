@@ -52,6 +52,16 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
             crate::integration::IntegrationStatusKind::Current => {
                 format!("current ({version})")
             }
+            // An install at (or above) the expected version that is still Outdated failed a
+            // completeness check, not a version check — opencode's second artifact, or grok's
+            // hook config. "outdated (v10 < v10)" would read as a bug, so name the real fix.
+            crate::integration::IntegrationStatusKind::Outdated
+                if status
+                    .installed_version
+                    .is_some_and(|installed| installed >= status.expected_version) =>
+            {
+                format!("needs repair ({version})")
+            }
             crate::integration::IntegrationStatusKind::Outdated => {
                 format!("outdated ({version} < v{})", status.expected_version)
             }

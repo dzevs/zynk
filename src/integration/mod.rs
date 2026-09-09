@@ -4,6 +4,7 @@ mod command;
 mod config_edit;
 mod env;
 mod file_ops;
+mod opencode_config;
 mod registry;
 mod targets;
 mod types;
@@ -121,7 +122,11 @@ pub(crate) const DROID_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 9] = [
 ];
 pub(crate) const OPENCODE_PLUGIN_INSTALL_NAME: &str = "zynk-agent-state.js";
 pub(crate) const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/zynk-agent-state.js");
-pub(crate) const OPENCODE_INTEGRATION_VERSION: u32 = 9;
+pub(crate) const OPENCODE_TUI_PLUGIN_INSTALL_NAME: &str = "zynk-tui-session.js";
+pub(crate) const OPENCODE_TUI_PLUGIN_SPEC: &str = "./zynk-tui-session.js";
+pub(crate) const OPENCODE_TUI_PLUGIN_ASSET: &str =
+    include_str!("assets/opencode/zynk-tui-session.js");
+pub(crate) const OPENCODE_INTEGRATION_VERSION: u32 = 10;
 pub(crate) const KILO_PLUGIN_INSTALL_NAME: &str = "zynk-agent-state.js";
 pub(crate) const KILO_PLUGIN_ASSET: &str = include_str!("assets/kilo/zynk-agent-state.js");
 pub(crate) const KILO_INTEGRATION_VERSION: u32 = 3;
