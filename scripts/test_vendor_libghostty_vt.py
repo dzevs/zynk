@@ -10,9 +10,129 @@ from unittest import mock
 
 from scripts.vendor_libghostty_vt import (
     ensure_dist_archive,
+    extract_archive,
     parse_archive_root,
     require_clean_checkout,
 )
+
+ARCHIVE_ROOT = "libghostty-vt-1.0.0"
+
+
+def _write_archive(archive: Path, members: list[tarfile.TarInfo]) -> None:
+    """Build a .tar.gz whose members are taken verbatim, escapes and all."""
+    with tarfile.open(archive, "w:gz") as tar:
+        for info in members:
+            if info.isreg():
+                data = b"payload"
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+            else:
+                tar.addfile(info)
+
+
+def _regular(name: str) -> tarfile.TarInfo:
+    return tarfile.TarInfo(name)
+
+
+def _symlink(name: str, target: str) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.SYMTYPE
+    info.linkname = target
+    return info
+
+
+def _hardlink(name: str, target: str) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.LNKTYPE
+    info.linkname = target
+    return info
+
+
+def _device(name: str) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.CHRTYPE
+    info.devmajor = 1
+    info.devminor = 3
+    return info
+
+
+class UnsafeArchiveMemberTests(unittest.TestCase):
+    """INSPECTOR-D03-003 / INSPECTOR-B1-003: only the first path component was ever validated, so a
+    member like `libghostty-vt-1.0.0/../../escaped.txt` shared the expected root and still wrote
+    outside the extraction directory. Every member is checked now, on every interpreter."""
+
+    def _extract(self, members: list[tarfile.TarInfo]):
+        """Extract into <tmp>/deep/root so an escaping member still lands inside <tmp>."""
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+        archive = base / "dist.tar.gz"
+        _write_archive(archive, members)
+        root = base / "deep" / "root"
+        root.mkdir(parents=True)
+        return archive, root, base
+
+    def _assert_refused(self, members: list[tarfile.TarInfo], escaped_name: str) -> None:
+        archive, root, base = self._extract(members)
+        with self.assertRaises(ValueError) as raised:
+            extract_archive(archive, root)
+        message = str(raised.exception)
+        self.assertIn("refusing to extract", message)
+        escaped = base / "deep" / escaped_name
+        self.assertFalse(escaped.exists(), f"{escaped} was written outside the extraction root")
+
+    def test_a_traversal_member_is_refused(self) -> None:
+        self._assert_refused(
+            [_regular(f"{ARCHIVE_ROOT}/README.md"), _regular(f"{ARCHIVE_ROOT}/../../escaped.txt")],
+            "escaped.txt",
+        )
+
+    def test_an_absolute_member_is_refused(self) -> None:
+        archive, root, _ = self._extract(
+            [_regular(f"{ARCHIVE_ROOT}/README.md"), _regular("/etc/zynk-escaped.txt")]
+        )
+        with self.assertRaisesRegex(ValueError, "refusing to extract"):
+            extract_archive(archive, root)
+        self.assertFalse(Path("/etc/zynk-escaped.txt").exists())
+
+    def test_a_symlink_escaping_the_root_is_refused(self) -> None:
+        self._assert_refused(
+            [
+                _regular(f"{ARCHIVE_ROOT}/README.md"),
+                _symlink(f"{ARCHIVE_ROOT}/link", "../../escaped.txt"),
+            ],
+            "escaped.txt",
+        )
+
+    def test_a_hardlink_escaping_the_root_is_refused(self) -> None:
+        self._assert_refused(
+            [
+                _regular(f"{ARCHIVE_ROOT}/README.md"),
+                _hardlink(f"{ARCHIVE_ROOT}/link", "../../escaped.txt"),
+            ],
+            "escaped.txt",
+        )
+
+    def test_a_device_member_is_refused(self) -> None:
+        archive, root, _ = self._extract(
+            [_regular(f"{ARCHIVE_ROOT}/README.md"), _device(f"{ARCHIVE_ROOT}/null")]
+        )
+        with self.assertRaisesRegex(ValueError, "refusing to extract"):
+            extract_archive(archive, root)
+        self.assertFalse((root / ARCHIVE_ROOT / "null").exists())
+
+    def test_a_clean_archive_still_extracts(self) -> None:
+        archive, root, _ = self._extract(
+            [
+                _regular(f"{ARCHIVE_ROOT}/README.md"),
+                _regular(f"{ARCHIVE_ROOT}/src/lib_vt.zig"),
+                _symlink(f"{ARCHIVE_ROOT}/src/alias.zig", "lib_vt.zig"),
+            ]
+        )
+        extract_archive(archive, root)
+        self.assertEqual((root / ARCHIVE_ROOT / "README.md").read_bytes(), b"payload")
+        self.assertTrue((root / ARCHIVE_ROOT / "src" / "lib_vt.zig").exists())
+        self.assertTrue((root / ARCHIVE_ROOT / "src" / "alias.zig").is_symlink())
 
 
 class VendorLibghosttyVtTests(unittest.TestCase):
