@@ -588,13 +588,17 @@ impl TerminalState {
         // nothing about capture), where retiring would strand a genuinely restarted
         // agent whose first session-start report lands exactly there: the owner is held
         // PROVISIONAL instead, and answers no receipt until the detector confirms it.
-        if process_exited
-            && self.hook_authority.as_ref().is_some_and(|authority| {
-                crate::detect::parse_agent_label(&authority.agent_label) == agent
+        let exited_authority_owner = process_exited
+            .then(|| {
+                self.hook_authority.as_ref().and_then(|authority| {
+                    (crate::detect::parse_agent_label(&authority.agent_label) == agent)
+                        .then(|| authority.agent_label.clone())
+                })
             })
-        {
+            .flatten();
+        if let Some(owner_label) = exited_authority_owner {
             if self.hook_authority_not_newer_than(now)
-                || self.hook_owner_has_unanswered_exit_older_than(now)
+                || self.hook_owner_has_unanswered_exit_older_than(&owner_label, now)
             {
                 let cleared_source = self
                     .hook_authority
@@ -606,7 +610,7 @@ impl TerminalState {
                 }
                 self.hook_authority = None;
             } else {
-                self.hold_hook_owner_unconfirmed(now);
+                self.hold_hook_owner_unconfirmed(&owner_label, now);
             }
         }
         // A session-identity-only integration lives and dies with its process: it
@@ -619,17 +623,21 @@ impl TerminalState {
         // The exit limb takes the three-way rule above; the CONFLICT limb — a different
         // agent detected in this one's place — keeps the ordering rule unchanged,
         // because a contradicting label is not an unanswered question about a process.
-        let identity_exit_matches = process_exited
-            && self.hook_identity.as_ref().is_some_and(|identity| {
-                crate::detect::parse_agent_label(&identity.agent_label) == agent
-            });
-        if identity_exit_matches {
+        let exited_identity_owner = process_exited
+            .then(|| {
+                self.hook_identity.as_ref().and_then(|identity| {
+                    (crate::detect::parse_agent_label(&identity.agent_label) == agent)
+                        .then(|| identity.agent_label.clone())
+                })
+            })
+            .flatten();
+        if let Some(owner_label) = exited_identity_owner {
             if self.hook_identity_not_newer_than(now)
-                || self.hook_owner_has_unanswered_exit_older_than(now)
+                || self.hook_owner_has_unanswered_exit_older_than(&owner_label, now)
             {
                 self.retire_hook_identity(HookSuppressionReason::ProcessExit, now);
             } else {
-                self.hold_hook_owner_unconfirmed(now);
+                self.hold_hook_owner_unconfirmed(&owner_label, now);
             }
         } else if self.hook_identity_not_newer_than(now)
             && self.hook_identity_conflicts_with_detected_agent(agent)
@@ -815,6 +823,7 @@ impl TerminalState {
             self.hook_identity = None;
         }
         self.persisted_agent_session = None;
+        let unconfirmed_since = self.unanswered_exit_to_inherit(&agent_label);
         self.hook_authority = Some(HookAuthority {
             source,
             agent_label,
@@ -823,7 +832,7 @@ impl TerminalState {
             custom_status,
             reported_at: now,
             session_ref,
-            unconfirmed_since: self.unanswered_exit_to_inherit(),
+            unconfirmed_since,
         });
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
@@ -913,7 +922,7 @@ impl TerminalState {
             source: source.clone(),
             agent_label: agent_label.clone(),
             reported_at: now,
-            unconfirmed_since: self.unanswered_exit_to_inherit(),
+            unconfirmed_since: self.unanswered_exit_to_inherit(&agent_label),
         });
         if let Some(session_ref) = session_ref {
             self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
@@ -966,59 +975,80 @@ impl TerminalState {
             .then_some((identity.source.as_str(), identity.agent_label.as_str()))
     }
 
-    /// The unanswered exit a hook identity recorded NOW has to inherit.
+    /// The unanswered exit an owner recorded NOW has to inherit, for the INCOMING
+    /// `agent_label`.
     ///
     /// A report is not process evidence — only the detector is — so an exit that no
     /// running observation has answered yet taints the identity that replaces the one
     /// holding it, including a genuinely new session start from the same owner. The
     /// OLDEST pending exit wins, the same keep-the-oldest rule the exit path applies,
     /// so the confirmation bar never moves forward on its own.
-    fn unanswered_exit_to_inherit(&self) -> Option<Instant> {
+    ///
+    /// The fence is OWNER-SCOPED: only a pending exit recorded for THIS `agent_label`
+    /// carries over, whether it sits on the outgoing authority, on the outgoing identity
+    /// or in the terminal's own copy. A DIFFERENT label starts unfenced, because the exit
+    /// asked an unanswered question about the previous agent's process and the detector's
+    /// observation of THAT agent is the only thing that answers it. Unscoped, a retired
+    /// owner's pending exit was inherited by every successor while
+    /// `confirm_pending_hook_owner` could only clear it on an observation of the RETIRED
+    /// label, so an already-confirmed new owner lost its receipt authority on its next
+    /// ordinary report and could never regain it (Codex Gate-2 `msg_3e339000b75278a4`).
+    ///
+    /// The accepted consequence: a fence for an agent that never returns simply lingers.
+    /// It gates that label alone, and it rides the handoff snapshot as it already did —
+    /// `UnansweredExitSnapshot` has always carried the label.
+    fn unanswered_exit_to_inherit(&self, agent_label: &str) -> Option<Instant> {
         [
             self.hook_authority
                 .as_ref()
+                .filter(|authority| authority.agent_label == agent_label)
                 .and_then(|authority| authority.unconfirmed_since),
             self.hook_identity
                 .as_ref()
+                .filter(|identity| identity.agent_label == agent_label)
                 .and_then(|identity| identity.unconfirmed_since),
-            self.unanswered_hook_exit.as_ref().map(|(_, at)| *at),
+            self.unanswered_hook_exit
+                .as_ref()
+                .filter(|(pending_label, _)| pending_label == agent_label)
+                .map(|(_, at)| *at),
         ]
         .into_iter()
         .flatten()
         .min()
     }
 
-    /// Hold this terminal's live hook owner PROVISIONAL against an exit captured at
-    /// `observed_at`, keeping the OLDEST unanswered exit when one is already pending: a
-    /// newer exit must not move the bar the detector has to clear.
-    fn hold_hook_owner_unconfirmed(&mut self, observed_at: Instant) {
+    /// Hold `agent_label`'s live hook owner PROVISIONAL against an exit captured at
+    /// `observed_at`, keeping the OLDEST unanswered exit when one is already pending FOR
+    /// THAT OWNER: a newer exit must not move the bar the detector has to clear, and
+    /// another owner's older exit is not this owner's question to answer.
+    fn hold_hook_owner_unconfirmed(&mut self, agent_label: &str, observed_at: Instant) {
         // The terminal's own copy, so the exit outlives the owner that recorded it
         // across a live handoff. Same keep-the-oldest rule, same label — the owner whose
-        // process the exit was observed for.
-        if let Some(agent_label) = self
+        // process the exit was observed for. A pending exit stored under a DIFFERENT
+        // label is replaced rather than merged: it belonged to an owner this one
+        // succeeded, and relabelling its instant would fence this owner behind a bar set
+        // for someone else's process.
+        let pending = match self.unanswered_hook_exit.as_ref() {
+            Some((pending_label, at)) if pending_label == agent_label => (*at).min(observed_at),
+            _ => observed_at,
+        };
+        self.unanswered_hook_exit = Some((agent_label.to_string(), pending));
+        if let Some(authority) = self
             .hook_authority
-            .as_ref()
-            .map(|authority| authority.agent_label.clone())
-            .or_else(|| {
-                self.hook_identity
-                    .as_ref()
-                    .map(|identity| identity.agent_label.clone())
-            })
+            .as_mut()
+            .filter(|authority| authority.agent_label == agent_label)
         {
-            let pending = self
-                .unanswered_hook_exit
-                .as_ref()
-                .map_or(observed_at, |(_, at)| (*at).min(observed_at));
-            self.unanswered_hook_exit = Some((agent_label, pending));
-        }
-        if let Some(authority) = self.hook_authority.as_mut() {
             authority.unconfirmed_since = Some(
                 authority
                     .unconfirmed_since
                     .map_or(observed_at, |pending| pending.min(observed_at)),
             );
         }
-        if let Some(identity) = self.hook_identity.as_mut() {
+        if let Some(identity) = self
+            .hook_identity
+            .as_mut()
+            .filter(|identity| identity.agent_label == agent_label)
+        {
             identity.unconfirmed_since = Some(
                 identity
                     .unconfirmed_since
@@ -1031,8 +1061,12 @@ impl TerminalState {
     /// own capture time — is strictly newer than. That means the detector never saw the
     /// process alive between the two exits, so the second one retires the identity the
     /// first one only held provisional.
-    fn hook_owner_has_unanswered_exit_older_than(&self, observed_at: Instant) -> bool {
-        self.unanswered_exit_to_inherit()
+    fn hook_owner_has_unanswered_exit_older_than(
+        &self,
+        agent_label: &str,
+        observed_at: Instant,
+    ) -> bool {
+        self.unanswered_exit_to_inherit(agent_label)
             .is_some_and(|pending| pending < observed_at)
     }
 
@@ -2076,7 +2110,7 @@ impl TerminalState {
                 source: source.clone(),
                 agent_label: agent_label.clone(),
                 reported_at: Instant::now(),
-                unconfirmed_since: self.unanswered_exit_to_inherit(),
+                unconfirmed_since: self.unanswered_exit_to_inherit(&agent_label),
             });
         }
         self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
@@ -5089,6 +5123,81 @@ mod tests {
                 .any(|stale| stale.has_reclaimable_process_evidence()),
             "the converted session carries no reclaimable evidence"
         );
+
+        // An UNANSWERED exit is a fence too, and since Codex Gate-2 `msg_3e339000b75278a4`
+        // it is owner-scoped, so the round trip has to carry its label as well as its age.
+        // The exit is captured BEFORE the report it would erase, which is the shape that
+        // holds an owner provisional instead of retiring it.
+        gap();
+        let fence_at = Instant::now();
+        // Accepted, but it names the identity and session already installed, so it reports
+        // no mutation — what matters is that it re-stamps `reported_at` past the exit.
+        source_terminal.record_identity_only_hook_report_at(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("second-session"),
+            Some(41),
+            fence_at + Duration::from_millis(5),
+        );
+        assert!(
+            source_terminal
+                .hook_identity
+                .as_ref()
+                .is_some_and(|identity| identity.reported_at > fence_at),
+            "the later Hermes report was refused, so the exit would retire instead of fence"
+        );
+        observe_at(&mut source_terminal, Some(Agent::Hermes), true, fence_at);
+        assert_eq!(
+            source_terminal
+                .unanswered_hook_exit
+                .as_ref()
+                .map(|(agent_label, _)| agent_label.as_str()),
+            Some("hermes"),
+            "the reorder-window exit recorded no labelled fence"
+        );
+        assert!(source_terminal.confirmed_hook_owner().is_none());
+
+        gap();
+        let fence_captured_at = Instant::now();
+        let fence_snapshot = source_terminal
+            .export_hook_retirement(fence_captured_at)
+            .expect("the fence is a retirement fact of its own");
+        assert_eq!(
+            fence_snapshot
+                .unanswered_exit
+                .as_ref()
+                .map(|exit| exit.agent_label.as_str()),
+            Some("hermes"),
+            "the exported fence lost its owner"
+        );
+        let fence_restored_at = fence_captured_at + Duration::from_millis(250);
+        let mut fenced_terminal = test_terminal();
+        fenced_terminal.restore_hook_retirement(fence_snapshot.clone(), fence_restored_at);
+        assert_eq!(
+            fenced_terminal
+                .export_hook_retirement(fence_restored_at)
+                .expect("the restored terminal carries the fence"),
+            fence_snapshot,
+            "the labelled fence lost a boundary across the round trip"
+        );
+        // It still gates the label it names, and only the detector's own observation of
+        // THAT agent, captured after the restored fence, answers it.
+        assert!(
+            fenced_terminal.confirmed_hook_owner().is_none(),
+            "the restored fence stopped gating its own owner"
+        );
+        observe_at(
+            &mut fenced_terminal,
+            Some(Agent::Hermes),
+            false,
+            fence_restored_at + Duration::from_millis(10),
+        );
+        assert_eq!(
+            fenced_terminal.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes")),
+            "a running observation newer than the restored fence did not answer it"
+        );
+        assert!(fenced_terminal.unanswered_hook_exit.is_none());
     }
 
     #[test]
@@ -5252,6 +5361,299 @@ mod tests {
         assert_eq!(
             terminal.confirmed_hook_owner(),
             Some(("zynk:hermes", "hermes"))
+        );
+    }
+
+    #[test]
+    fn an_old_owners_pending_exit_does_not_retaint_a_confirmed_new_owner() {
+        // Codex Gate-2 P2 2 (`msg_3e339000b75278a4`). The terminal-wide pending exit was
+        // folded into the inherited minimum WITHOUT its label, while the field itself was
+        // cleared only by a running observation of the label that RECORDED it. So once
+        // Hermes retired, every ordinary Pi report took the Hermes timestamp again and
+        // `confirmed_hook_owner()` fell back from the confirmed Pi owner to `None`,
+        // repeatedly and permanently. Ordered detector captures and past instants make the
+        // sequence deterministic.
+        let base = Instant::now() - Duration::from_secs(10);
+        let mut terminal = test_terminal();
+        observe_at(&mut terminal, Some(Agent::Hermes), false, base);
+        terminal
+            .record_identity_only_hook_report_at(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                crate::agent_resume::AgentSessionRef::id("hermes-before-pi"),
+                Some(1),
+                base + Duration::from_secs(2),
+            )
+            .expect("initial Hermes identity");
+
+        // An exit CAPTURED before that report arrived: it retires nothing and holds the
+        // Hermes owner provisional, recording the terminal-wide fence under its label.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            true,
+            base + Duration::from_secs(1),
+        );
+        assert!(terminal.confirmed_hook_owner().is_none());
+
+        // The next exit answers the question the other way: Hermes is retired, and the
+        // fence outlives it — still naming Hermes.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            true,
+            base + Duration::from_millis(2500),
+        );
+        assert!(
+            terminal.hook_identity.is_none(),
+            "the next exit retires Hermes"
+        );
+        assert!(terminal.persisted_agent_session.is_none());
+
+        // Pi takes the pane, is accepted, and a newer running observation confirms it.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Pi),
+            false,
+            base + Duration::from_secs(3),
+        );
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-after-hermes"),
+                Some(1),
+                base + Duration::from_secs(4),
+            )
+            .expect("the new Pi owner is accepted");
+        observe_at(
+            &mut terminal,
+            Some(Agent::Pi),
+            false,
+            base + Duration::from_secs(5),
+        );
+        assert_eq!(terminal.confirmed_hook_owner(), Some(("zynk:pi", "pi")));
+
+        // The regression: an ordinary same-session Pi lifecycle follow-up.
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Idle,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-after-hermes"),
+                Some(2),
+                base + Duration::from_secs(6),
+            )
+            .expect("ordinary Pi lifecycle follow-up");
+        assert_eq!(
+            terminal.confirmed_hook_owner(),
+            Some(("zynk:pi", "pi")),
+            "Hermes's pending exit made an already-confirmed Pi owner non-receipt-capable again"
+        );
+        // The fence is not silently dropped either: it still stands, for Hermes alone.
+        assert_eq!(
+            terminal
+                .unanswered_hook_exit
+                .as_ref()
+                .map(|(agent_label, _)| agent_label.as_str()),
+            Some("hermes"),
+            "scoping the fence must not discard it"
+        );
+    }
+
+    #[test]
+    fn a_pending_exit_still_fences_a_new_session_from_the_same_owner() {
+        // The control for the scope above: it must not become an escape hatch. A pending
+        // exit is a question about THIS owner's process, so a genuinely new session start
+        // from the same owner still inherits it — a report is not process evidence — and
+        // only a running observation of that owner, captured after the exit, answers it.
+        let base = Instant::now() - Duration::from_secs(10);
+        let mut terminal = test_terminal();
+        observe_at(&mut terminal, Some(Agent::Hermes), false, base);
+        terminal
+            .record_identity_only_hook_report_at(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                crate::agent_resume::AgentSessionRef::id("hermes-one"),
+                Some(1),
+                base + Duration::from_secs(2),
+            )
+            .expect("initial Hermes identity");
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            true,
+            base + Duration::from_secs(1),
+        );
+        assert_eq!(
+            terminal.unanswered_hook_exit,
+            Some(("hermes".to_string(), base + Duration::from_secs(1))),
+            "the reorder-window exit recorded no labelled fence"
+        );
+        assert!(terminal.confirmed_hook_owner().is_none());
+
+        identity_session_start(&mut terminal, "hermes-two", 2, "startup")
+            .expect("a new session start from the same owner");
+        assert!(
+            terminal.confirmed_hook_owner().is_none(),
+            "a new session from the fenced owner escaped its own pending exit"
+        );
+        assert_eq!(
+            terminal
+                .hook_identity
+                .as_ref()
+                .and_then(|identity| identity.unconfirmed_since),
+            Some(base + Duration::from_secs(1)),
+            "the OLDEST pending exit must survive the new session"
+        );
+
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            base + Duration::from_secs(3),
+        );
+        assert_eq!(
+            terminal.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes")),
+            "the detector's own observation did not answer the fence"
+        );
+        assert!(terminal.unanswered_hook_exit.is_none());
+    }
+
+    #[test]
+    fn a_fence_recorded_for_one_owner_never_gates_another_live_or_after_a_handoff() {
+        // The cross-owner control in the other direction, with the two representations
+        // swapped: the fence sits on a full-lifecycle authority (`pi`) and the successor is
+        // an identity-only owner (`hermes`). The successor's evidence is the detector's
+        // observation of ITS process; the retired owner's unanswered exit says nothing
+        // about it, live or across a live handoff.
+        let base = Instant::now() - Duration::from_secs(10);
+        let mut terminal = test_terminal();
+        observe_at(&mut terminal, Some(Agent::Pi), false, base);
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-one"),
+                Some(1),
+                base + Duration::from_secs(2),
+            )
+            .expect("the Pi owner is accepted");
+        observe_at(
+            &mut terminal,
+            Some(Agent::Pi),
+            true,
+            base + Duration::from_secs(1),
+        );
+        assert!(terminal.confirmed_hook_owner().is_none());
+        observe_at(
+            &mut terminal,
+            Some(Agent::Pi),
+            true,
+            base + Duration::from_millis(2500),
+        );
+        assert!(
+            terminal.hook_authority.is_none(),
+            "the second exit retires Pi"
+        );
+        assert!(terminal.persisted_agent_session.is_none());
+        assert_eq!(
+            terminal
+                .unanswered_hook_exit
+                .as_ref()
+                .map(|(agent_label, _)| agent_label.as_str()),
+            Some("pi"),
+            "the fence must name the owner it was recorded for"
+        );
+
+        // Live: Hermes takes the pane and its own identity report is receipt-capable at
+        // once — nothing about Pi's process is evidence about this one.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            base + Duration::from_secs(3),
+        );
+        terminal
+            .record_identity_only_hook_report_at(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                crate::agent_resume::AgentSessionRef::id("hermes-after-pi"),
+                Some(1),
+                base + Duration::from_secs(4),
+            )
+            .expect("the new Hermes identity is accepted");
+        assert_eq!(
+            terminal.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes")),
+            "Pi's pending exit gated an owner whose process it never observed"
+        );
+
+        // And across a live handoff: the exported fence still names Pi, and the restored
+        // terminal decides the same way for a fresh Hermes owner.
+        let mut fenced = test_terminal();
+        observe_at(&mut fenced, Some(Agent::Pi), false, base);
+        fenced
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-one"),
+                Some(1),
+                base + Duration::from_secs(2),
+            )
+            .expect("the Pi owner is accepted");
+        observe_at(
+            &mut fenced,
+            Some(Agent::Pi),
+            true,
+            base + Duration::from_secs(1),
+        );
+        observe_at(
+            &mut fenced,
+            Some(Agent::Pi),
+            true,
+            base + Duration::from_millis(2500),
+        );
+        let captured_at = base + Duration::from_secs(3);
+        let snapshot = fenced
+            .export_hook_retirement(captured_at)
+            .expect("a retired owner and its fence are exportable");
+        assert_eq!(
+            snapshot
+                .unanswered_exit
+                .as_ref()
+                .map(|exit| exit.agent_label.as_str()),
+            Some("pi"),
+            "the exported fence lost its owner"
+        );
+        let restored_at = captured_at + Duration::from_millis(250);
+        let mut restored = test_terminal();
+        restored.restore_hook_retirement(snapshot, restored_at);
+        restored
+            .record_identity_only_hook_report_at(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                crate::agent_resume::AgentSessionRef::id("hermes-after-handoff"),
+                Some(1),
+                restored_at + Duration::from_millis(10),
+            )
+            .expect("the new Hermes identity is accepted on the replacement server");
+        assert_eq!(
+            restored.confirmed_hook_owner(),
+            Some(("zynk:hermes", "hermes")),
+            "a restored fence gated an owner it was never recorded for"
         );
     }
 
