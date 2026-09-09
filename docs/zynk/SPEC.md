@@ -72,7 +72,8 @@ state native, so they are **deleted, not ported**. D8 ("authoritative input-stat
 - **Upstream relicensed after the fork** (upstream `cd5ea1be`, 2026-07-22), so the bullets above
   describe only the pre-relicense provenance. Upstream code taken from that commit onward arrives
   under **Apache-2.0**, not AGPL, and is redistributed inside zynk's AGPL combined work under
-  Apache-2.0 §4 — text in `LICENSE-APACHE-2.0.upstream`, §4(b) modified-file list in `NOTICE`.
+  Apache-2.0 §4 — text in `LICENSE-APACHE-2.0.upstream`; the modified-file index in `NOTICE` tracks the
+  change notices §4(b) requires in modified files (a convention, not compliance proof by itself).
   zynk's own license is unchanged. `NOTICE` is authoritative on provenance.
 
 ## 3. Feature set (FINAL)

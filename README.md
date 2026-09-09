@@ -259,7 +259,8 @@ tag v0.7.1 was received under AGPL-3.0-or-later, and upstream code from upstream
 the **Apache License 2.0**, redistributed here inside the AGPL combined work as Apache-2.0 section 4 permits.
 Upstream copyright notices and both license texts are preserved — see [`LICENSE`](LICENSE),
 [`LICENSE-APACHE-2.0.upstream`](LICENSE-APACHE-2.0.upstream) and [`NOTICE`](NOTICE), which also carries the
-Apache-2.0 section 4(b) list of modified files.
+index of files changed by zynk that hold post-relicense upstream code (the repository's convention for
+tracking the change notices Apache-2.0 section 4(b) requires in modified files).
 
 - Copyright © ogulcancelik and the herdr contributors (upstream herdr).
 - Copyright © 2026 Zevs &lt;hi@zevs.gg&gt; — the zynk fork and its additions.
