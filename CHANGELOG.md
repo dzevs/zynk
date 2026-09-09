@@ -34,7 +34,9 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   this repository or crates.io. CI is one Ubuntu `just check` (which now includes the maintenance unittests).
 - `NOTICE` now records that upstream relicensed from AGPL-3.0-or-later to Apache-2.0 (upstream commit
   `cd5ea1be`), and the repository ships that Apache-2.0 text as `LICENSE-APACHE-2.0.upstream`. zynk's own
-  license is unchanged: AGPL-3.0-or-later, as recorded in `LICENSE`.
+  license is unchanged: AGPL-3.0-or-later, as recorded in `LICENSE`. `CONTRIBUTING.md` and `README.md` now tell
+  that same story — they no longer say zynk carries the same license as the upstream project, and they name
+  both provenance licenses and where each text lives.
 
 **Fixed**
 

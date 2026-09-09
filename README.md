@@ -254,8 +254,12 @@ multi-agent conversation layer (global persistence, structured protocol metadata
 honest delivery, and hybrid retrieval).
 
 zynk is distributed under the **GNU Affero General Public License v3.0 or later** (AGPL-3.0-or-later); the fork
-preserves that license unchanged. Upstream copyright notices and the AGPL license are preserved — see
-[`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+preserves that license unchanged. Upstream's own license changed after the fork: upstream code through upstream
+tag v0.7.1 was received under AGPL-3.0-or-later, and upstream code from upstream commit `cd5ea1be` onward under
+the **Apache License 2.0**, redistributed here inside the AGPL combined work as Apache-2.0 section 4 permits.
+Upstream copyright notices and both license texts are preserved — see [`LICENSE`](LICENSE),
+[`LICENSE-APACHE-2.0.upstream`](LICENSE-APACHE-2.0.upstream) and [`NOTICE`](NOTICE), which also carries the
+Apache-2.0 section 4(b) list of modified files.
 
 - Copyright © ogulcancelik and the herdr contributors (upstream herdr).
 - Copyright © 2026 Zevs &lt;hi@zevs.gg&gt; — the zynk fork and its additions.

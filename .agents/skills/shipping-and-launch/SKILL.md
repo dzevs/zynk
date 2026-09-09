@@ -40,7 +40,7 @@ For this repo, "launch" means cutting a versioned release of `zynk`: tagging a v
 - [ ] No untrusted input reaches a shell, path, or process spawn without validation
 - [ ] The private-content gate (`scripts/check_public_tree.py` + `.gitleaks.toml`) passes — no maintainer-private paths leak into the published tree
 - [ ] Fail-closed defaults preserved (e.g. updater, DB cutover) — no fail-open regressions
-- [ ] AGPL `NOTICE` / `LICENSE` upstream attribution preserved in the build (legally required)
+- [ ] `NOTICE`, `LICENSE` and `LICENSE-APACHE-2.0.upstream` upstream attribution preserved in the build (legally required — AGPL for zynk, Apache-2.0 §4 for post-`cd5ea1be` upstream code)
 
 ### Performance
 

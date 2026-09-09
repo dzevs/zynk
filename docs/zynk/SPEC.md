@@ -69,6 +69,11 @@ state native, so they are **deleted, not ported**. D8 ("authoritative input-stat
   package, one version line. NO second package, no "zynk-terminal".
 - Operator's own NEW modules MAY also be released as standalone MIT crates (reusable), but the
   shipped zynk binary (= zynk + zynk code) is AGPL.
+- **Upstream relicensed after the fork** (upstream `cd5ea1be`, 2026-07-22), so the bullets above
+  describe only the pre-relicense provenance. Upstream code taken from that commit onward arrives
+  under **Apache-2.0**, not AGPL, and is redistributed inside zynk's AGPL combined work under
+  Apache-2.0 §4 — text in `LICENSE-APACHE-2.0.upstream`, §4(b) modified-file list in `NOTICE`.
+  zynk's own license is unchanged. `NOTICE` is authoritative on provenance.
 
 ## 3. Feature set (FINAL)
 
