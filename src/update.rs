@@ -32,13 +32,23 @@ const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade zynk";
 const MISE_UPDATE_COMMAND: &str = "mise upgrade zynk";
 const NIX_UPDATE_COMMAND: &str = "update through Nix";
 const MISE_INSTALLS_DIR_ENV: &str = "MISE_INSTALLS_DIR";
+// WARDEN-R14-SOURCE-ONLY-BYPASS-001: the release-machinery test seam is compiled ONLY into
+// debug/test builds. A released binary carries no env switch that can reopen the updater, and the
+// env var names below are not present in it at all — see `release_infra_open` and the
+// `scripts/release_binary_audit.py` probe that asserts this against a real release build.
+#[cfg(debug_assertions)]
 const FAKE_UPDATE_VERSION_ENV: &str = "ZYNK_FAKE_UPDATE_VERSION";
+#[cfg(debug_assertions)]
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "ZYNK_FAKE_UPDATE_NOTES_VERSION";
+#[cfg(debug_assertions)]
 const DEFAULT_FAKE_UPDATE_NOTES_VERSION: &str = "0.3.0";
 const SERVER_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
 const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Stub release notes for the debug-only fake-update seam (see `FAKE_UPDATE_VERSION_ENV`).
+#[cfg(debug_assertions)]
 fn fake_release_notes_body(version: &str) -> String {
     let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
         .ok()
@@ -1858,10 +1868,10 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 /// hosting, which is not set up; releases exist and are installed manually).
 pub(crate) const ZYNK_UPDATE_UNAVAILABLE_MESSAGE: &str = "zynk update is not available yet: self-update needs release-manifest hosting, which is not set up. Update manually — Homebrew: brew upgrade dzevs/tap/zynk; prebuilt binary: https://github.com/dzevs/zynk/releases; Nix: nix run github:dzevs/zynk; source: cargo install zynk --locked (Rust + Zig 0.15.2). Then run `zynk server stop` so the new binary takes effect.";
 
-/// True when a release-machinery test override is active. The update tests simulate a published
-/// release via `ZYNK_FAKE_UPDATE_VERSION` (`FAKE_UPDATE_VERSION_ENV`); when that env is set and
-/// non-empty the real machinery runs so those tests still exercise it. The production path (no
-/// fake-version env) fails closed while `ZYNK_RELEASE_INFRA_AVAILABLE` is false.
+/// True when a release-machinery test override is active. Debug/test builds only: the update tests
+/// simulate a published release via `ZYNK_FAKE_UPDATE_VERSION` (`FAKE_UPDATE_VERSION_ENV`), and
+/// when that env is set and non-empty the real machinery runs so those tests still exercise it.
+#[cfg(debug_assertions)]
 fn release_infra_test_override_active() -> bool {
     env::var(FAKE_UPDATE_VERSION_ENV)
         .ok()
@@ -1869,9 +1879,19 @@ fn release_infra_test_override_active() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the updater may consult the release manifests. Closed in production until manifest hosting exists.
+/// Whether the updater may consult the release manifests. Closed in production until manifest
+/// hosting exists; the debug-only test override may open it in debug/test builds.
+#[cfg(debug_assertions)]
 pub(crate) fn release_infra_open() -> bool {
     ZYNK_RELEASE_INFRA_AVAILABLE || release_infra_test_override_active()
+}
+
+/// Release builds have no override at all (WARDEN-R14-SOURCE-ONLY-BYPASS-001): the gate is exactly
+/// `ZYNK_RELEASE_INFRA_AVAILABLE`, so no environment a released binary is started with can reopen
+/// the updater.
+#[cfg(not(debug_assertions))]
+pub(crate) fn release_infra_open() -> bool {
+    ZYNK_RELEASE_INFRA_AVAILABLE
 }
 
 // ---------------------------------------------------------------------------
@@ -1993,6 +2013,7 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
     }
 
     crate::logging::update_check_started();
+    #[cfg(debug_assertions)]
     if let Ok(version) = env::var(FAKE_UPDATE_VERSION_ENV) {
         let version = version.trim();
         if !version.is_empty() {
@@ -2146,6 +2167,11 @@ mod tests {
     };
     use std::sync::{Mutex, OnceLock};
     use std::thread;
+
+    // The debug-only override's env var name, spelled out here so the fail-closed tests compile in
+    // BOTH profiles: `FAKE_UPDATE_VERSION_ENV` itself exists only under `debug_assertions`. Test
+    // code is never compiled into a `--release` build of the binary.
+    const FAKE_UPDATE_VERSION_ENV_NAME: &str = "ZYNK_FAKE_UPDATE_VERSION";
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -2500,6 +2526,8 @@ mod tests {
         );
     }
 
+    // Exercises the debug-only fake-update seam; absent from release-profile builds.
+    #[cfg(debug_assertions)]
     #[test]
     fn fake_release_notes_default_to_local_changelog_section() {
         let _guard = env_lock().lock().unwrap();
@@ -2525,6 +2553,8 @@ mod tests {
         assert!(body.contains("Added tabs within workspaces"), "{body}");
     }
 
+    // Exercises the debug-only fake-update seam; absent from release-profile builds.
+    #[cfg(debug_assertions)]
     #[test]
     fn fake_release_notes_fallback_include_version_and_context() {
         let _guard = env_lock().lock().unwrap();
@@ -3328,22 +3358,64 @@ mod tests {
     fn self_update_fails_closed_to_source_build_without_release_infra() {
         // Production gate: with no release infra and no test override, `zynk update` returns the
         // not-available message and performs NO network fetch (returns before any manifest call).
-        let old = std::env::var_os(FAKE_UPDATE_VERSION_ENV);
-        std::env::remove_var(FAKE_UPDATE_VERSION_ENV);
+        let _guard = env_lock().lock().unwrap();
+        let old = std::env::var_os(FAKE_UPDATE_VERSION_ENV_NAME);
+        std::env::remove_var(FAKE_UPDATE_VERSION_ENV_NAME);
         assert!(
             !release_infra_open(),
             "release infra must be closed in production"
         );
         let err = self_update(SelfUpdateOptions::default()).unwrap_err();
         match old {
-            Some(value) => std::env::set_var(FAKE_UPDATE_VERSION_ENV, value),
-            None => std::env::remove_var(FAKE_UPDATE_VERSION_ENV),
+            Some(value) => std::env::set_var(FAKE_UPDATE_VERSION_ENV_NAME, value),
+            None => std::env::remove_var(FAKE_UPDATE_VERSION_ENV_NAME),
         }
         assert!(err.contains("not available"), "fail-closed message: {err}");
         assert!(
             err.contains("Zig 0.15.2") && err.contains("nix run github:dzevs/zynk"),
             "message points to source/Nix build: {err}"
         );
+    }
+
+    /// WARDEN-R14-SOURCE-ONLY-BYPASS-001, debug half: the seam still opens the gate where the
+    /// release-machinery tests need it, so gating it did not silently disable them.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn release_infra_override_opens_the_gate_in_debug_builds() {
+        let _guard = env_lock().lock().unwrap();
+        let old = std::env::var_os(FAKE_UPDATE_VERSION_ENV_NAME);
+        std::env::set_var(FAKE_UPDATE_VERSION_ENV_NAME, "9.9.9");
+        let open = release_infra_open();
+        match old {
+            Some(value) => std::env::set_var(FAKE_UPDATE_VERSION_ENV_NAME, value),
+            None => std::env::remove_var(FAKE_UPDATE_VERSION_ENV_NAME),
+        }
+        assert!(
+            open,
+            "the debug-only fake-version override must still open the release-infra gate"
+        );
+    }
+
+    /// WARDEN-R14-SOURCE-ONLY-BYPASS-001, release half: no environment can reopen the updater in a
+    /// release build, because the override is not compiled into one. Run with
+    /// `cargo nextest run --release --locked --bin zynk release_infra_override`.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_infra_override_is_not_compiled_into_release_builds() {
+        let _guard = env_lock().lock().unwrap();
+        let old = std::env::var_os(FAKE_UPDATE_VERSION_ENV_NAME);
+        std::env::set_var(FAKE_UPDATE_VERSION_ENV_NAME, "9.9.9");
+        let open = release_infra_open();
+        let err = self_update(SelfUpdateOptions::default()).unwrap_err();
+        match old {
+            Some(value) => std::env::set_var(FAKE_UPDATE_VERSION_ENV_NAME, value),
+            None => std::env::remove_var(FAKE_UPDATE_VERSION_ENV_NAME),
+        }
+        assert!(
+            !open,
+            "a release build must have no env override for the release-infra gate"
+        );
+        assert!(err.contains("not available"), "fail-closed message: {err}");
     }
 
     #[test]
