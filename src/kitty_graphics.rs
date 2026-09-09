@@ -373,7 +373,7 @@ fn encode_graphics_update(
     // could not re-upload an image freed mid-loop. Free a superseded image only
     // once every source in the frame has been registered.
     for previous in superseded_images {
-        release_superseded_image(
+        release_unreferenced_image(
             bytes,
             sources,
             host_images,
@@ -394,29 +394,56 @@ fn encode_graphics_update(
         encode_delete_placement(bytes, host_id, host_placement_id);
         host_placements.remove(&(host_id, host_placement_id));
     }
+
+    // A source that simply disappeared from the frame supersedes nothing, so
+    // the loop above never sees it and its host image would stay uploaded for
+    // the rest of the process. Sweep those out here, the way upstream's
+    // end-of-frame dead-source pass does: an image referenced by no source in
+    // `sources` has lost its last reference. This runs after the whole
+    // per-placement loop, so the `4a71ece` guarantee still holds — nothing is
+    // freed while a later source in the same frame could still adopt it — and
+    // after the stale-placement deletes, so a view change keeps tearing those
+    // placements down explicitly instead of only implying it through `d=I`.
+    let referenced: HashSet<u32> = sources.values().copied().collect();
+    let mut unreferenced_images: Vec<u32> = host_images
+        .keys()
+        .copied()
+        .filter(|host_id| !referenced.contains(host_id))
+        .collect();
+    unreferenced_images.sort_unstable();
+    for host_id in unreferenced_images {
+        release_unreferenced_image(
+            bytes,
+            sources,
+            host_images,
+            host_placements,
+            &mut current_placements,
+            host_id,
+        );
+    }
 }
 
-/// Deletes a host image a source moved away from, once no source in the
-/// current frame references it any more.
-fn release_superseded_image(
+/// Deletes a host image no source of the current frame references any more —
+/// one a source moved away from, or one whose only source disappeared.
+fn release_unreferenced_image(
     bytes: &mut Vec<u8>,
     sources: &HashMap<(PaneId, u32), u32>,
     host_images: &mut HashMap<u32, ImageSignature>,
     host_placements: &mut HashMap<(u32, u32), PlacementSignature>,
     current_placements: &mut HashSet<(u32, u32)>,
-    previous: u32,
+    host_id: u32,
 ) {
-    if sources.values().any(|id| *id == previous) {
+    if sources.values().any(|id| *id == host_id) {
         return;
     }
-    // Already freed by an earlier supersede in this same frame.
-    if host_images.remove(&previous).is_none() {
+    // Already freed earlier in this same frame.
+    if host_images.remove(&host_id).is_none() {
         return;
     }
-    encode_delete_image(bytes, previous);
+    encode_delete_image(bytes, host_id);
     // The `d=I` delete also removes the image's placements host-side.
     host_placements.retain(|(image_id, placement_id), _| {
-        if *image_id == previous {
+        if *image_id == host_id {
             current_placements.remove(&(*image_id, *placement_id));
             false
         } else {
@@ -1380,12 +1407,13 @@ mod tests {
     }
 
     #[test]
-    fn stale_placement_deletes_placement_not_image_immediately() {
+    fn stale_placement_deletes_placement_and_the_now_unreferenced_image() {
         let mut images = HashMap::new();
         let mut placements = HashMap::new();
         let mut sources = HashMap::new();
         let mut bytes = Vec::new();
         let placement = test_placement(0, 0);
+        let host_id = host_image_id(placement.pane_id, &placement.placement);
 
         encode_graphics_update(
             &mut bytes,
@@ -1407,10 +1435,106 @@ mod tests {
             &mut sources,
         );
         let delete = String::from_utf8_lossy(&bytes);
-        assert!(delete.contains("a=d,d=i"));
-        assert!(!delete.contains("d=I"));
+        assert!(delete.contains("a=d,d=i"), "the stale placement is deleted");
+        assert!(
+            delete.contains(&format!("a=d,d=I,i={host_id}")),
+            "the image no source references any more is released"
+        );
         assert!(placements.is_empty());
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn stale_sole_source_releases_unreferenced_host_image() {
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+        let placement = test_placement(0, 0);
+        let host_id = host_image_id(placement.pane_id, &placement.placement);
+
+        encode_graphics_update(
+            &mut bytes,
+            &[placement],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
         assert_eq!(images.len(), 1);
+        assert_eq!(sources.len(), 1);
+
+        // The pane stopped drawing the image: its only source is gone, so the
+        // host image it kept alive has to be released.
+        bytes.clear();
+        encode_graphics_update(
+            &mut bytes,
+            &[],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        let update = String::from_utf8_lossy(&bytes);
+        assert!(
+            update.contains(&format!("a=d,d=I,i={host_id}")),
+            "the last reference went away, so the host image is deleted"
+        );
+        assert!(images.is_empty(), "no host image is left behind");
+        assert!(placements.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn shared_host_image_survives_when_one_source_disappears() {
+        fn twin_placement() -> HostPlacement {
+            let mut twin = test_placement(5, 5);
+            twin.placement.image_id = 8;
+            twin.placement.placement_id = 4;
+            twin
+        }
+
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+        let survivor = test_placement(0, 0);
+        let host_id = host_image_id(survivor.pane_id, &survivor.placement);
+
+        encode_graphics_update(
+            &mut bytes,
+            &[survivor, twin_placement()],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+        assert_eq!(images.len(), 1, "same content dedups to one host image");
+        assert_eq!(placements.len(), 2);
+
+        // Only the twin stops being drawn: the shared host image still backs a
+        // live source, so only the twin's placement may be deleted.
+        bytes.clear();
+        encode_graphics_update(
+            &mut bytes,
+            &[test_placement(0, 0)],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        let update = String::from_utf8_lossy(&bytes);
+        assert!(
+            !update.contains("d=I"),
+            "a source still references this host image"
+        );
+        assert!(update.contains("a=d,d=i"), "the twin placement is deleted");
+        assert!(images.contains_key(&host_id));
+        assert_eq!(images.len(), 1);
+        assert_eq!(placements.len(), 1);
+        assert_eq!(sources.len(), 1);
     }
 
     #[test]
