@@ -1970,6 +1970,7 @@ mod tests {
             cursor_col: 0,
             entry_offset_from_bottom: 0,
             selection: None,
+            search: Default::default(),
         });
         let closing_public = app.public_pane_id(0, closing).unwrap();
 
@@ -2228,6 +2229,7 @@ mod tests {
             cursor_col: 0,
             entry_offset_from_bottom: 0,
             selection: None,
+            search: Default::default(),
         });
         let source_public = app.public_pane_id(0, source).unwrap();
         let target_public = app.public_pane_id(0, target).unwrap();
@@ -2820,6 +2822,7 @@ mod tests {
             cursor_col: 0,
             entry_offset_from_bottom: 0,
             selection: None,
+            search: Default::default(),
         });
         let source_public = app.public_pane_id(0, source).unwrap();
 

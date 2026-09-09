@@ -346,6 +346,7 @@ mod tests {
             cursor_col: 0,
             entry_offset_from_bottom: 0,
             selection: None,
+            search: Default::default(),
         });
         let closing_tab_id = app.public_tab_id(0, closing_tab).unwrap();
 

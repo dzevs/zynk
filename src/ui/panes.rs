@@ -331,6 +331,17 @@ pub(super) fn render_panes(
                 }
             }
 
+            let (copy_search_top, copy_search_bottom, copy_search_matches) =
+                validated_copy_mode_search_matches(app, info, rt);
+            render_copy_mode_search_highlights(
+                app,
+                frame,
+                info,
+                copy_search_top,
+                copy_search_bottom,
+                &copy_search_matches,
+                false,
+            );
             render_selection_highlight(
                 &app.selection,
                 frame,
@@ -339,6 +350,15 @@ pub(super) fn render_panes(
                 rt.scroll_metrics(),
                 &app.palette,
                 app.host_terminal_theme,
+            );
+            render_copy_mode_search_highlights(
+                app,
+                frame,
+                info,
+                copy_search_top,
+                copy_search_bottom,
+                &copy_search_matches,
+                true,
             );
             render_copy_mode_cursor(app, frame, info);
         }
@@ -598,7 +618,7 @@ fn render_copy_mode_cursor(app: &AppState, frame: &mut Frame, info: &PaneInfo) {
     if app.mode != Mode::Copy {
         return;
     }
-    let Some(copy_mode) = app.copy_mode else {
+    let Some(copy_mode) = app.copy_mode.as_ref() else {
         return;
     };
     if copy_mode.pane_id != info.id
@@ -617,6 +637,96 @@ fn render_copy_mode_cursor(app: &AppState, frame: &mut Frame, info: &PaneInfo) {
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
+}
+
+fn validated_copy_mode_search_matches(
+    app: &AppState,
+    info: &PaneInfo,
+    rt: &crate::terminal::TerminalRuntime,
+) -> (u32, u32, Vec<(usize, crate::pane::TerminalTextMatch)>) {
+    let Some(copy_mode) = app.copy_mode.as_ref() else {
+        return (0, 0, Vec::new());
+    };
+    if copy_mode.pane_id != info.id {
+        return (0, 0, Vec::new());
+    }
+    let Some(metrics) = rt.scroll_metrics() else {
+        return (0, 0, Vec::new());
+    };
+    let top = metrics
+        .max_offset_from_bottom
+        .saturating_sub(metrics.offset_from_bottom)
+        .min(u32::MAX as usize) as u32;
+    let bottom = top.saturating_add(u32::from(info.inner_rect.height.saturating_sub(1)));
+    let first_visible = copy_mode
+        .search
+        .matches
+        .partition_point(|text_match| text_match.end.row < top);
+    let visible = &copy_mode.search.matches[first_visible..];
+    let visible_len = visible.partition_point(|text_match| text_match.start.row <= bottom);
+    let candidates = visible[..visible_len].to_vec();
+    let validity = rt.text_matches_are_current(&candidates);
+
+    let matches = candidates
+        .into_iter()
+        .zip(validity)
+        .enumerate()
+        .filter_map(|(offset, (text_match, is_current))| {
+            is_current.then_some((first_visible + offset, text_match))
+        })
+        .collect();
+    (top, bottom, matches)
+}
+
+fn render_copy_mode_search_highlights(
+    app: &AppState,
+    frame: &mut Frame,
+    info: &PaneInfo,
+    top: u32,
+    bottom: u32,
+    matches: &[(usize, crate::pane::TerminalTextMatch)],
+    current_only: bool,
+) {
+    let Some(copy_mode) = app.copy_mode.as_ref() else {
+        return;
+    };
+    let current = copy_mode.search.current;
+    let style = if current_only {
+        Style::default()
+            .fg(panel_contrast_fg(&app.palette))
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface1)
+    };
+
+    for &(index, text_match) in matches {
+        if (current == Some(index)) != current_only {
+            continue;
+        }
+        let start_row = text_match.start.row.max(top);
+        let end_row = text_match.end.row.min(bottom);
+        for absolute_row in start_row..=end_row {
+            let viewport_row = absolute_row.saturating_sub(top) as u16;
+            let start_col = if absolute_row == text_match.start.row {
+                text_match.start.col
+            } else {
+                0
+            };
+            let end_col = if absolute_row == text_match.end.row {
+                text_match.end.col
+            } else {
+                info.inner_rect.width.saturating_sub(1)
+            };
+            for col in start_col..=end_col.min(info.inner_rect.width.saturating_sub(1)) {
+                let x = info.inner_rect.x.saturating_add(col);
+                let y = info.inner_rect.y.saturating_add(viewport_row);
+                frame.buffer_mut()[(x, y)].set_style(style);
+            }
+        }
+    }
 }
 
 fn render_selection_highlight(
