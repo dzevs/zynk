@@ -74,9 +74,9 @@ describe("receiver/footer/receipt surface is fully removed (state-only)", () => 
 // ---------------------------------------------------------------------------
 
 describe("install markers + identity are preserved", () => {
-  test("integration id stays pi and version is bumped to 8", () => {
+  test("integration id stays pi and version is bumped to 9", () => {
     expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_ID=pi");
-    expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_VERSION=8");
+    expect(ASSET_SRC).toContain("// ZYNK_INTEGRATION_VERSION=9");
   });
 
   test("ZYNK_* env reads keep the ZYNK_* fallback", () => {
@@ -204,12 +204,14 @@ describe("state-only lifecycle drives pane.report_agent / pane.release_agent", (
     expect(fake.has("input")).toBe(false);
   });
 
-  // The lifecycle handlers only fire for a root (hasUI) session — a non-root pi
-  // instance must not publish/release pane state. Every test below activates the
-  // root session via session_start with `hasUI: true`.
+  // The lifecycle handlers only fire for a root TUI session — a non-root or
+  // headless (RPC/JSON/print) pi instance must not publish/release pane state.
+  // Every test below activates the root session via session_start with
+  // `mode: "tui"`; `hasUI` alone is not enough because RPC also reports it.
   function rootSessionContext() {
     return {
       hasUI: true,
+      mode: "tui",
       sessionManager: {
         getSessionId: () => "sess-xyz",
         getSessionFile: () => "/tmp/pi/session.json",

@@ -22,17 +22,17 @@ pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, Integration
 
 pub(crate) const PI_EXTENSION_INSTALL_NAME: &str = "zynk-agent-state.ts";
 pub(crate) const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/zynk-agent-state.ts");
-pub(crate) const PI_INTEGRATION_VERSION: u32 = 8;
+pub(crate) const PI_INTEGRATION_VERSION: u32 = 9;
 pub(crate) const OMP_EXTENSION_INSTALL_NAME: &str = "zynk-omp-agent-state.ts";
 // Pre-rebrand on-disk name of the omp extension; uninstall strips it too.
 pub(crate) const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/zynk-agent-state.ts");
-pub(crate) const OMP_INTEGRATION_VERSION: u32 = 6;
+pub(crate) const OMP_INTEGRATION_VERSION: u32 = 7;
 pub(crate) const CLAUDE_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/zynk-agent-state.sh");
 pub(crate) const CLAUDE_INTEGRATION_VERSION: u32 = 7;
 pub(crate) const CODEX_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/zynk-agent-state.sh");
-pub(crate) const CODEX_INTEGRATION_VERSION: u32 = 6;
+pub(crate) const CODEX_INTEGRATION_VERSION: u32 = 7;
 pub(crate) const KIMI_HOOK_INSTALL_NAME: &str = "zynk-agent-state.sh";
 pub(crate) const KIMI_HOOK_ASSET: &str = include_str!("assets/kimi/zynk-agent-state.sh");
 pub(crate) const KIMI_INTEGRATION_VERSION: u32 = 5;

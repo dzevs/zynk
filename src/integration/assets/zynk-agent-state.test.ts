@@ -125,6 +125,7 @@ for (const integration of integrations) {
       { reason: "reload" },
       {
         hasUI: true,
+        mode: "tui",
         isIdle: () => false,
         sessionManager: {
           getSessionFile: () => undefined,
@@ -155,6 +156,17 @@ for (const integration of integrations) {
   });
 }
 
+test("OMP accepts POSIX and Windows session paths", async () => {
+  const { isAbsoluteSessionPath } = await importFresh("./omp/zynk-agent-state.ts");
+
+  expect(isAbsoluteSessionPath("/tmp/omp-session.jsonl")).toBe(true);
+  expect(isAbsoluteSessionPath("C:\\Users\\User\\.omp\\agent\\sessions\\omp-session.jsonl")).toBe(
+    true,
+  );
+  expect(isAbsoluteSessionPath("C:/Users/User/.omp/agent/sessions/omp-session.jsonl")).toBe(true);
+  expect(isAbsoluteSessionPath("relative/omp-session.jsonl")).toBe(false);
+});
+
 test("Pi reports idle only after the agent settles", async () => {
   const requests = await startRecordingServer("pi-settled");
   const { handlers, pi } = createExtensionHarness();
@@ -183,6 +195,25 @@ test("Pi reports idle only after the agent settles", async () => {
   handlers.get("agent_settled")?.({}, context);
   await waitFor(() => requestStates(requests).length === 3);
   expect(requestStates(requests)).toEqual(["idle", "working", "idle"]);
+});
+
+test("Pi ignores RPC sessions even when UI APIs are available", async () => {
+  const requests = await startRecordingServer("pi-rpc");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/zynk-agent-state.ts");
+  install(pi);
+
+  const context = {
+    ...piContext(() => true),
+    hasUI: true,
+    mode: "rpc",
+  };
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  handlers.get("agent_start")?.({}, context);
+  handlers.get("agent_settled")?.({}, context);
+  await Bun.sleep(25);
+
+  expect(requests).toEqual([]);
 });
 
 test("Pi settlement preserves explicit blocked-state precedence", async () => {
@@ -224,6 +255,7 @@ test("Pi reports the session replacement source", async () => {
     { reason: "new" },
     {
       hasUI: true,
+      mode: "tui",
       isIdle: () => true,
       sessionManager: {
         getSessionFile: () => "/tmp/pi-new.jsonl",
@@ -287,6 +319,7 @@ test("Pi waits for a replacement session report before publishing state", async 
     { reason: "new" },
     {
       hasUI: true,
+      mode: "tui",
       isIdle: () => false,
       sessionManager: {
         getSessionFile: () => "/tmp/pi-new.jsonl",
@@ -406,6 +439,7 @@ test("Pi retries working state after an unanswered socket attempt", async () => 
     { reason: "startup" },
     {
       hasUI: true,
+      mode: "tui",
       isIdle: () => false,
       sessionManager: {
         getSessionFile: () => undefined,
@@ -441,6 +475,7 @@ function completionHandlers(handlers: Map<string, Handler>): string[] {
 function piContext(isIdle: () => boolean) {
   return {
     hasUI: true,
+    mode: "tui",
     isIdle,
     sessionManager: {
       getSessionFile: () => undefined,

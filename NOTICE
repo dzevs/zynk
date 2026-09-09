@@ -60,8 +60,13 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 - src/detect/mod.rs
 - src/integration/actions.rs
 - src/integration/assets/antigravity_cli/zynk-agent-state.sh
+- src/integration/assets/codex/zynk-agent-state.sh
 - src/integration/assets/grok/zynk-agent-state.sh
 - src/integration/assets/hermes/__init__.py
+- src/integration/assets/omp/zynk-agent-state.ts
+- src/integration/assets/pi/zynk-agent-state.test.ts
+- src/integration/assets/pi/zynk-agent-state.ts
+- src/integration/assets/zynk-agent-state.test.ts
 - src/integration/env.rs
 - src/integration/mod.rs
 - src/integration/registry.rs
@@ -69,7 +74,9 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 - src/integration/tests.rs
 - src/integration/types.rs
 - src/main.rs
+- src/pane.rs
 - src/terminal/state.rs
+- tests/cli_wrapper.rs
 - tests/client_mode.rs
 - tests/zynk_receipt.rs
 <!-- apache-modified-files: end -->

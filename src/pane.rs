@@ -57,6 +57,11 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     cmd.env("COLORTERM", PANE_COLORTERM);
 }
 
+/// Codex exports its active thread id to child processes. A pane spawned from
+/// inside a codex session would otherwise hand the nested codex the outer
+/// session's id, and the nested hook would report it as this pane's identity.
+const CODEX_THREAD_ID_ENV_VAR: &str = "CODEX_THREAD_ID";
+
 /// The environment a pane is launched with: caller-supplied `extra` env vars plus
 /// an optional `identity` (workspace/tab/pane public ids). Built via
 /// [`PaneLaunchEnv::from_extra`] (+ [`PaneLaunchEnv::with_identity`]) and applied
@@ -101,8 +106,15 @@ impl PaneLaunchEnv {
 /// the host-protocol "running inside the multiplexer" flag (`ZYNK_ENV`, ADR
 /// 0010), the Zynk base env (`ZYNK_SOCKET_PATH`), and — when the launch env
 /// carries an identity — the `ZYNK_WORKSPACE_ID`/`ZYNK_TAB_ID`/`ZYNK_PANE_ID`
-/// triple so hooks know which pane they belong to.
+/// triple so hooks know which pane they belong to. It also scrubs
+/// [`CODEX_THREAD_ID_ENV_VAR`] so a nested codex session cannot inherit the
+/// outer session's thread id.
 fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
+    // A codex session nested inside another codex session inherits the outer
+    // `CODEX_THREAD_ID`. The codex hook asset compares that env var against the
+    // session id in its own hook payload and stays silent when they differ, so a
+    // pane spawned from inside a codex session must not carry the outer id in.
+    cmd.env_remove(CODEX_THREAD_ID_ENV_VAR);
     for (key, value) in &launch_env.extra {
         cmd.env(key, value);
     }
@@ -2578,6 +2590,19 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_launch_env_removes_outer_codex_thread_id() {
+        // A pane spawned from inside a codex session must not inherit that
+        // session's thread id: the nested codex hook keys its "am I nested?"
+        // check off `CODEX_THREAD_ID` vs the session id in its hook payload.
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env(CODEX_THREAD_ID_ENV_VAR, "outer-session");
+
+        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
+
+        assert!(cmd.get_env(CODEX_THREAD_ID_ENV_VAR).is_none());
+    }
 
     #[test]
     fn pane_launch_env_exports_zynk_env_and_socket_without_identity() {

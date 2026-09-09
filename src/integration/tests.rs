@@ -1060,7 +1060,7 @@ fn codex_v2_integration_status_is_outdated() {
 
     assert_eq!(codex.path, hook_path);
     assert_eq!(codex.installed_version, Some(2));
-    assert_eq!(codex.expected_version, 6);
+    assert_eq!(codex.expected_version, 7);
     assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -2637,8 +2637,8 @@ fn pi_asset_is_state_only_no_receiver() {
     assert!(PI_EXTENSION_ASSET.contains("pane.report_agent_session"));
     assert!(PI_EXTENSION_ASSET.contains("pane.release_agent"));
 
-    // the asset version marker is bumped to the portable-extension-path revision.
-    assert_eq!(parse_integration_version(PI_EXTENSION_ASSET), Some(8));
+    // the asset version marker is bumped to the tui-only session-gate revision.
+    assert_eq!(parse_integration_version(PI_EXTENSION_ASSET), Some(9));
 }
 
 #[test]
@@ -2709,6 +2709,11 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(PI_EXTENSION_ASSET.contains("agent_session_path: currentAgentSessionPath"));
     assert!(PI_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
     assert!(PI_EXTENSION_ASSET.contains("publishState(true)"));
+    // Pi activates its root session on the TUI mode, not on `hasUI` — RPC sessions
+    // also report `hasUI: true`. omp still gates on `hasUI` (see
+    // `omp_root_session_guard_is_instance_scoped`), so this stays pi-scoped.
+    assert!(PI_EXTENSION_ASSET.contains("ctx?.mode !== \"tui\""));
+    assert!(!PI_EXTENSION_ASSET.contains("ctx?.hasUI !== true"));
     // Pi settles through its own `agent_settled` event; the hand-rolled idle
     // debounce behind `agent_end` is gone. omp still registers `agent_end`, so the
     // negative assertion has to stay pi-scoped.
@@ -2725,6 +2730,7 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(!CLAUDE_HOOK_ASSET.contains("\"state\": action"));
     assert!(!CLAUDE_HOOK_ASSET.contains("pane.release_agent"));
     assert!(CODEX_HOOK_ASSET.contains("ZYNK_HOOK_INPUT_FILE"));
+    assert!(CODEX_HOOK_ASSET.contains("CODEX_THREAD_ID"));
     assert!(CODEX_HOOK_ASSET.contains("agent_session_id"));
     assert!(CODEX_HOOK_ASSET.contains("pane.report_agent_session"));
     assert!(!CODEX_HOOK_ASSET.contains("\"state\": action"));

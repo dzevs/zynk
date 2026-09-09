@@ -620,6 +620,15 @@ fn run_copilot_hook(hook_input: &str) -> Option<serde_json::Value> {
 }
 
 fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<serde_json::Value> {
+    run_shell_hook_with_env(asset_path, args, hook_input, &[])
+}
+
+fn run_shell_hook_with_env(
+    asset_path: &str,
+    args: &[&str],
+    hook_input: &str,
+    extra_env: &[(&str, &str)],
+) -> Option<serde_json::Value> {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
     let socket_path = base.join("zynk.sock");
@@ -655,6 +664,8 @@ fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<s
         .env("ZYNK_ENV", "1")
         .env("ZYNK_SOCKET_PATH", &socket_path)
         .env("ZYNK_PANE_ID", "p_test")
+        .env_remove("CODEX_THREAD_ID")
+        .envs(extra_env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -720,16 +731,48 @@ fn claude_hook_reports_session_id_from_stdin() {
 }
 
 #[test]
-fn codex_hook_reports_session_id_from_stdin() {
+fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_sessions() {
+    // Identity stays hook-payload-authoritative: the asset reports only a codex
+    // session that persists a transcript, and only when the inherited
+    // `CODEX_THREAD_ID` (if any) names that same session. A codex sub-session
+    // nested inside another codex session would otherwise steal the pane.
     let request = run_codex_hook(
         "session",
-        r#"{"hook_event_name":"SessionStart","session_id":"codex-session"}"#,
+        r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
     )
     .expect("codex hook should report session identity");
 
     assert_eq!(request["method"], "pane.report_agent_session");
     assert_eq!(request["params"]["agent_session_id"], "codex-session");
     assert!(request["params"].get("state").is_none());
+
+    let matching_request = run_shell_hook_with_env(
+        "src/integration/assets/codex/zynk-agent-state.sh",
+        &["session"],
+        r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
+        &[("CODEX_THREAD_ID", "codex-session")],
+    )
+    .expect("matching inherited session should still report");
+    assert_eq!(
+        matching_request["params"]["agent_session_id"],
+        "codex-session"
+    );
+
+    assert!(run_codex_hook(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"side-session","transcript_path":null}"#,
+    )
+    .is_none());
+
+    assert!(
+        run_shell_hook_with_env(
+            "src/integration/assets/codex/zynk-agent-state.sh",
+            &["session"],
+            r#"{"hook_event_name":"SessionStart","session_id":"nested-session","transcript_path":"/tmp/nested-session.jsonl"}"#,
+            &[("CODEX_THREAD_ID", "parent-session")],
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -2210,7 +2253,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));
     let status_stdout = String::from_utf8_lossy(&integration_status.stdout);
-    assert!(status_stdout.contains("pi: current (v8)"));
+    assert!(status_stdout.contains("pi: current (v9)"));
     assert!(status_stdout.contains("claude: not installed"));
 
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_zynk"))
