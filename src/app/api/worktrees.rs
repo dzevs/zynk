@@ -785,21 +785,7 @@ mod tests {
     /// `Zynk Test <zynk@example.invalid>`. A sanitised caller environment hides this, so a fixture
     /// cannot rely on having one.
     fn scrub_git_env(command: &mut std::process::Command) -> &mut std::process::Command {
-        for name in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_COMMON_DIR",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            "GIT_CEILING_DIRECTORIES",
-            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-        ] {
-            command.env_remove(name);
-        }
-        command
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        crate::workspace::scrub_git_env(command)
     }
 
     /// Seed the fixture repository's commit identity, with the write unable to leave the fixture.

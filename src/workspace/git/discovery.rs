@@ -334,21 +334,50 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn git_branch_reads_symbolic_head_from_reftable_repo() {
-        let root = temp_test_dir("reftable-branch");
+    fn init_reftable_fixture(root: &Path, command: &mut std::process::Command) -> bool {
         let root_arg = root.to_string_lossy().to_string();
-        let output = std::process::Command::new("git")
+        scrub_git_env(command);
+        let output = command
             .args(["init", "--ref-format=reftable", "-b", "main", &root_arg])
             .output()
             .unwrap();
         if !output.status.success() {
+            return false;
+        }
+        assert!(
+            root.join(".git").is_dir(),
+            "reftable fixture was not initialized locally"
+        );
+        true
+    }
+
+    #[test]
+    fn git_branch_reads_symbolic_head_from_reftable_repo() {
+        let root = temp_test_dir("reftable-branch");
+        if !init_reftable_fixture(&root, &mut std::process::Command::new("git")) {
             std::fs::remove_dir_all(root).unwrap();
             return;
         }
 
         assert_eq!(git_branch(&root).as_deref(), Some("main"));
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reftable_fixture_does_not_initialize_an_inherited_git_dir() {
+        let root = temp_test_dir("reftable-env");
+        let sentinel = root.join("absent-outer-git-dir");
+        let mut command = std::process::Command::new("git");
+        command.env("GIT_DIR", &sentinel);
+        let supported = init_reftable_fixture(&root, &mut command);
+        assert!(
+            !sentinel.exists(),
+            "reftable fixture initialized the inherited GIT_DIR"
+        );
+        if supported {
+            assert!(root.join(".git").is_dir());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

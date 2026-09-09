@@ -44,16 +44,12 @@ fn run_git(repo: &Path, args: &[&str]) {
 /// `Zynk Test <zynk@example.invalid>`. A sanitised caller environment hides this, so a fixture
 /// cannot rely on having one.
 fn scrub_git_env(command: &mut Command) -> &mut Command {
-    for name in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    ] {
+    let names: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .chain(command.get_envs().map(|(name, _)| name.to_owned()))
+        .filter(|name| name.as_encoded_bytes().starts_with(b"GIT_"))
+        .collect();
+    for name in names {
         command.env_remove(name);
     }
     command

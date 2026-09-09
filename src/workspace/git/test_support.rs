@@ -58,16 +58,14 @@ pub(super) fn run_git(cwd: &Path, args: &[&str]) {
 /// `Zynk Test <zynk@example.invalid>`. A sanitised caller environment hides this, so a fixture
 /// cannot rely on having one.
 pub(crate) fn scrub_git_env(command: &mut std::process::Command) -> &mut std::process::Command {
-    for name in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    ] {
+    // Include command-local overrides as well as the ambient environment. In particular,
+    // indexed GIT_CONFIG_* settings can run hooks even when repository routing is scrubbed.
+    let names: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .chain(command.get_envs().map(|(name, _)| name.to_owned()))
+        .filter(|name| name.as_encoded_bytes().starts_with(b"GIT_"))
+        .collect();
+    for name in names {
         command.env_remove(name);
     }
     command
@@ -123,6 +121,57 @@ impl Drop for GitDirEnvGuard {
     fn drop(&mut self) {
         std::env::remove_var("GIT_DIR");
     }
+}
+
+#[test]
+fn fixture_commits_ignore_injected_git_config_and_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_test_dir("fixture-config-env");
+    run_git(&root, &["init", "--quiet"]);
+    set_repo_identity(&root);
+    let hooks = root.join("external-hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    let marker = root.join("external-hook-ran");
+    let hook = hooks.join("post-commit");
+    std::fs::write(&hook, "#!/bin/sh\n: > \"$HOOK_ESCAPE_MARKER\"\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut commit = std::process::Command::new("git");
+    commit
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", &hooks)
+        .env("GIT_CONFIG_PARAMETERS", "'alias.unwanted=external'")
+        .env("GIT_NAMESPACE", "unwanted")
+        .env("HOOK_ESCAPE_MARKER", &marker);
+    scrub_git_env(&mut commit);
+    let result = commit
+        .arg("-C")
+        .arg(&root)
+        .args(["commit", "--allow-empty", "--quiet", "-m", "fixture"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert!(
+        !marker.exists(),
+        "an inherited Git config executed an external hook"
+    );
+    for key in [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_NAMESPACE",
+    ] {
+        assert!(
+            commit
+                .get_envs()
+                .any(|(name, value)| name == key && value.is_none()),
+            "{key} was not removed"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
