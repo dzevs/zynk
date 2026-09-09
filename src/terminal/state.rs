@@ -413,7 +413,7 @@ impl TerminalState {
         }
         self.detected_agent = agent;
         if !process_exited {
-            self.clear_hook_suppression_for_detected_agent(previous_detected_agent, agent, now);
+            self.clear_hook_suppression_for_detected_agent(agent, now);
         }
         self.fallback_state = fallback_state;
         self.fallback_visible_blocker = visible_blocker && fallback_state == AgentState::Blocked;
@@ -1210,24 +1210,42 @@ impl TerminalState {
             .is_some_and(|(current, incoming)| current != incoming)
     }
 
+    /// Convert this owner's retirement into a stale session, and re-arm the sessions it
+    /// already holds, on a RUNNING observation of its own process.
+    ///
+    /// The trigger is the observation itself, never a CHANGE of detected agent. An agent
+    /// restarted in place is observed under the SAME label across its own exit — the
+    /// screen still shows it, and the detector's miss-confirmation window may never
+    /// report the agent gone — so keying the conversion on a label change left exactly
+    /// that retirement with no way back and the agent's own explicit resume refused
+    /// forever (Gate-3 B1 arbiter `msg_fbcdf59a01d6f70d`).
+    ///
+    /// What makes an observation evidence is TIME, and the gate is applied HERE so it
+    /// holds however the caller reaches this: a suppression is lifted only by an
+    /// observation captured strictly after BOTH the retirement itself and any loss seen
+    /// while the owner was only suppressed — the same bar `StaleHookSession` applies to
+    /// evidence, so a queued observation captured before the exit cannot lift the
+    /// retirement it predates. An older or equal capture leaves the suppression
+    /// untouched.
     fn clear_hook_suppression_for_detected_agent(
         &mut self,
-        previous_detected_agent: Option<Agent>,
         detected_agent: Option<Agent>,
         observed_at: Instant,
     ) {
         let Some(detected_agent) = detected_agent else {
             return;
         };
-        if previous_detected_agent == Some(detected_agent) {
-            return;
-        }
-        let detected_label = crate::detect::agent_label(detected_agent);
+        let mut cleared_a_suppression = false;
         let mut stale_sessions = Vec::new();
         self.suppressed_hook_reports.retain(|source, suppressed| {
-            let should_clear =
-                crate::detect::parse_agent_label(&suppressed.agent_label) == Some(detected_agent);
+            let should_clear = crate::detect::parse_agent_label(&suppressed.agent_label)
+                == Some(detected_agent)
+                && suppressed.observed_at < observed_at
+                && suppressed
+                    .last_loss_observed_at
+                    .is_none_or(|lost_at| lost_at < observed_at);
             if should_clear {
+                cleared_a_suppression = true;
                 if let Some(session_ref) = suppressed.session_ref.clone() {
                     stale_sessions.push((
                         source.clone(),
@@ -1240,8 +1258,9 @@ impl TerminalState {
             }
             !should_clear
         });
-        // Reaching here IS the fresh process observation: this owner was retired, and
-        // its agent is the detected process again. The session it anchored stays stale
+        // Every entry collected above IS a fresh process observation: this owner was
+        // retired, its agent is the detected process again, and the observation is
+        // newer than every boundary the retirement left. The session it anchored stays stale
         // — a late callback must not resurrect it — but the observation is recorded on
         // it, so the agent's own explicit resume of that session can reclaim it.
         // The retirement itself, and any loss seen while this owner was only
@@ -1270,8 +1289,15 @@ impl TerminalState {
                 stale.record_fresh_process_evidence(observed_at);
             }
         }
-        self.hook_report_sequences
-            .retain(|source, _| !Self::hook_report_retirement_applies(source, detected_label));
+        // A restarted process gets a fresh sequence window EXACTLY ONCE, at the
+        // conversion. Now that this runs on every running observation, resetting the
+        // fence unconditionally would leave the window open for as long as the agent is
+        // detected at all, and any older report could replay through it.
+        if cleared_a_suppression {
+            let detected_label = crate::detect::agent_label(detected_agent);
+            self.hook_report_sequences
+                .retain(|source, _| !Self::hook_report_retirement_applies(source, detected_label));
+        }
     }
 
     /// Record a retired session, applying BOTH boundaries — the retirement that made it
@@ -4062,9 +4088,10 @@ mod tests {
             Some("third-session")
         );
 
-        // A gap in the detected agent first: the conversion path only looks at a
-        // CHANGE of detected agent, so an unbroken run of Hermes observations records
-        // nothing further.
+        // A gap in the detected agent first — the shape this case was written against.
+        // The conversion is keyed on the observation's CAPTURE TIME, so the gap decides
+        // nothing here; what admits the resume below is a capture newer than every
+        // retirement.
         observe_at(&mut terminal, None, false, Instant::now());
         observe_at(&mut terminal, Some(Agent::Hermes), false, Instant::now());
         assert!(
@@ -4096,8 +4123,8 @@ mod tests {
         );
 
         // The process is seen again, which converts the suppression into a stale
-        // session and arms it. The gap in the detected agent is what makes the second
-        // observation a CHANGE the conversion path looks at.
+        // session and arms it. The gap in the detected agent is incidental: the
+        // conversion turns on the observation being captured after the exit.
         observe_at(&mut terminal, None, false, Instant::now());
         let seen_running_at = Instant::now();
         observe_at(&mut terminal, Some(Agent::Hermes), false, seen_running_at);
@@ -4173,9 +4200,9 @@ mod tests {
         let base = Instant::now();
         std::thread::sleep(Duration::from_millis(20));
 
-        // The gap in the detected agent is what makes the next observation a CHANGE the
-        // conversion path looks at: it converts the release's suppression into a stale
-        // session for `old-session` and arms it with post-retirement evidence.
+        // The next observation is captured after the release, which is what converts
+        // the release's suppression into a stale session for `old-session` and arms it
+        // with post-retirement evidence; the agent gap before it decides nothing.
         observe_at(&mut terminal, None, false, base + Duration::from_millis(1));
         observe_at(
             &mut terminal,
@@ -4279,8 +4306,8 @@ mod tests {
                         .expect("replacement session");
                     }
 
-                    // The agent gap first, so the running observation below is the CHANGE
-                    // the conversion path reads.
+                    // The agent gap first, as the original case was written; the
+                    // conversion below turns on the observation's capture time alone.
                     observe_at(&mut terminal, None, false, Instant::now());
                     let running_at = match timing {
                         -1 => last_retired_at - Duration::from_nanos(1),
@@ -4399,6 +4426,166 @@ mod tests {
             "evidence genuinely newer than the exit was refused"
         );
         assert!(terminal.hook_identity.is_some());
+    }
+
+    #[test]
+    fn same_label_running_observation_after_an_exit_re_arms_the_retired_session() {
+        // Gate-3 B1 arbiter (msg_fbcdf59a01d6f70d): the conversion out of a retirement
+        // was keyed on a CHANGE of detected agent, so it never ran for the shape
+        // production actually produces. An agent restarted in place is observed under
+        // the SAME label across its own exit — the screen still shows it, and the
+        // detector's miss-confirmation window may never report the agent gone — so the
+        // retirement had no way back and the agent's own explicit resume was refused
+        // forever, withholding receipt authority from a live owner.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+
+        let exit_at = Instant::now();
+        observe_at(&mut terminal, Some(Agent::Hermes), true, exit_at);
+        assert!(
+            terminal.hook_identity.is_none(),
+            "the observed exit retired nothing"
+        );
+
+        // The restarted process, seen under the same label with NO `None` in between.
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            exit_at + Duration::from_millis(2),
+        );
+
+        assert!(
+            !terminal.suppressed_hook_reports.contains_key("zynk:hermes"),
+            "a running observation newer than the exit left the owner suppressed"
+        );
+        assert!(
+            terminal.stale_hook_sessions["zynk:hermes"]
+                .iter()
+                .any(|stale| stale.session_ref.value == "existing-session"
+                    && stale.has_reclaimable_process_evidence()),
+            "the converted session carries no reclaimable process evidence"
+        );
+
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 30, "resume").is_some(),
+            "an explicit same-session resume was refused after the agent restarted in place"
+        );
+        assert!(terminal.hook_identity.is_some());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("existing-session")
+        );
+    }
+
+    #[test]
+    fn same_label_running_observation_not_newer_than_the_exit_does_not_lift_it() {
+        // The negative half: dropping the label-change trigger must not drop the
+        // boundary. A same-label observation the detector captured AT or BEFORE the
+        // exit proves nothing about a process that exit showed gone, however late it is
+        // delivered, so the retirement stands until a genuinely newer capture arrives.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+
+        let exit_at = Instant::now() + Duration::from_secs(1);
+        observe_at(&mut terminal, Some(Agent::Hermes), true, exit_at);
+
+        for (label, running_at) in [
+            ("at the exit's own instant", exit_at),
+            (
+                "a millisecond before it",
+                exit_at - Duration::from_millis(1),
+            ),
+        ] {
+            observe_at(&mut terminal, Some(Agent::Hermes), false, running_at);
+            assert!(
+                terminal.suppressed_hook_reports.contains_key("zynk:hermes"),
+                "a running observation captured {label} lifted the retirement"
+            );
+            assert!(
+                identity_session_start(&mut terminal, "existing-session", 30, "resume").is_none(),
+                "a running observation captured {label} re-armed the retired session"
+            );
+            assert!(terminal.hook_identity.is_none());
+        }
+
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            exit_at + Duration::from_millis(1),
+        );
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 31, "resume").is_some(),
+            "a running observation genuinely newer than the exit was refused"
+        );
+        assert!(terminal.hook_identity.is_some());
+    }
+
+    #[test]
+    fn sequence_fence_is_reset_only_when_a_suppression_is_cleared() {
+        // The replay fence a restarted process needs exactly once. Running the
+        // conversion on EVERY observation must not run the sequence reset on every
+        // observation too: a restarted process re-anchors its sequence at the moment
+        // its retirement is converted, and from then on the fence has to hold, or an
+        // owner whose process is simply detected keeps an open replay window forever.
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        identity_session_start(&mut terminal, "existing-session", 20, "startup")
+            .expect("initial session report");
+        assert_eq!(terminal.hook_report_sequences.get("zynk:hermes"), Some(&20));
+
+        // Nothing is retired, so this observation converts nothing and the fence stays.
+        observe_at(&mut terminal, Some(Agent::Hermes), false, Instant::now());
+        assert_eq!(
+            terminal.hook_report_sequences.get("zynk:hermes"),
+            Some(&20),
+            "a running observation reopened the sequence window with nothing retired"
+        );
+
+        let exit_at = Instant::now();
+        observe_at(&mut terminal, Some(Agent::Hermes), true, exit_at);
+        // The exit retires the identity and drops its sequence anchor with it, so the
+        // restarted process starts a fresh window and may re-anchor LOWER than before.
+        assert!(!terminal.hook_report_sequences.contains_key("zynk:hermes"));
+        observe_at(
+            &mut terminal,
+            Some(Agent::Hermes),
+            false,
+            exit_at + Duration::from_millis(2),
+        );
+        assert!(
+            identity_session_start(&mut terminal, "existing-session", 5, "resume").is_some(),
+            "the restarted process could not re-anchor after its retirement was converted"
+        );
+        assert_eq!(terminal.hook_report_sequences.get("zynk:hermes"), Some(&5));
+
+        // Every FURTHER running observation finds no suppression to clear, so it must
+        // leave the fence where the re-anchored owner put it.
+        observe_at(&mut terminal, Some(Agent::Hermes), false, Instant::now());
+        assert_eq!(
+            terminal.hook_report_sequences.get("zynk:hermes"),
+            Some(&5),
+            "a running observation with no suppression to clear reopened the sequence window"
+        );
+        terminal.record_identity_only_hook_report(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("existing-session"),
+            Some(4),
+        );
+        assert_eq!(
+            terminal.hook_report_sequences.get("zynk:hermes"),
+            Some(&5),
+            "a replayed report behind the fence was accepted after a plain running observation"
+        );
     }
 
     #[test]

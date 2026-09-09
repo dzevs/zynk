@@ -4616,6 +4616,84 @@ mod tests {
     }
 
     #[test]
+    fn queued_state_events_re_arm_an_agent_restarted_in_place() {
+        // Gate-3 B1 arbiter (msg_fbcdf59a01d6f70d), end to end over the same dispatch:
+        // an agent restarted in place produces NO `None` observation between its exit
+        // and the process that replaces it — the screen keeps showing the same label.
+        // The conversion out of the retirement therefore has to key on the observation
+        // itself, not on a change of detected agent, or the restarted owner never
+        // regains its session and its receipt authority with it.
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Hermes),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "zynk:hermes".into(),
+            agent_label: "hermes".into(),
+            seq: Some(20),
+            session_ref: crate::agent_resume::AgentSessionRef::id("existing-session"),
+            session_start_source: Some("startup".into()),
+        });
+
+        let exit_at = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        for (process_exited, observed_at) in [
+            (true, exit_at),
+            (false, exit_at + std::time::Duration::from_millis(2)),
+        ] {
+            state.handle_app_event(AppEvent::StateChanged {
+                pane_id,
+                agent: Some(Agent::Hermes),
+                state: AgentState::Idle,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited,
+                observed_at,
+            });
+        }
+
+        state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "zynk:hermes".into(),
+            agent_label: "hermes".into(),
+            seq: Some(30),
+            session_ref: crate::agent_resume::AgentSessionRef::id("existing-session"),
+            session_start_source: Some("resume".into()),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert!(
+            terminal.hook_identity.is_some(),
+            "an agent restarted in place stayed retired because no `None` observation \
+             separated its exit from the process that replaced it"
+        );
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("existing-session")
+        );
+    }
+
+    #[test]
     fn identity_only_state_report_records_identity_without_overriding_screen_state() {
         // The sibling of `reserved_native_state_report_does_not_override_screen_state`
         // for the third branch of the `HookStateReported` dispatch: the shipped
