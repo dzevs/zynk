@@ -17,6 +17,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 
 const KITTY_CHUNK_BYTES: usize = 3072;
 const HOST_IMAGE_ID_BASE: u32 = 10_000;
+const HOST_IMAGE_ID_SPAN: u32 = 900_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct HostCellSize {
@@ -298,37 +299,33 @@ fn encode_graphics_update(
         let Some((clipped, format_code)) = clipped else {
             continue;
         };
-        let host_id = host_image_id(placement.pane_id, &placement.placement);
-        let host_placement_id = host_placement_id(placement.pane_id, &placement.placement);
         let image_signature = image_signature(placement, format_code);
+        let Some(host_id) = resolve_host_image_id(placement.pane_id, image_signature, host_images)
+        else {
+            tracing::warn!(
+                pane_id = ?placement.pane_id,
+                source_image_id = placement.placement.image_id,
+                "host image id namespace is full; skipping this placement"
+            );
+            continue;
+        };
+        let host_placement_id = host_placement_id(placement.pane_id, &placement.placement);
         let placement_signature =
             placement_signature(clipped, placement.placement.z, placement.scrollback_offset);
         let placement_key = (host_id, host_placement_id);
         current_placements.insert(placement_key);
 
-        match host_images.get(&host_id).copied() {
-            Some(existing) if existing == image_signature => {}
-            Some(_) => {
-                encode_delete_image(bytes, host_id);
-                host_placements.retain(|(image_id, placement_id), _| {
-                    if *image_id == host_id {
-                        current_placements.remove(&(*image_id, *placement_id));
-                        false
-                    } else {
-                        true
-                    }
-                });
-                if !encode_upload_image(bytes, placement, format_code, host_id) {
-                    continue;
-                }
-                host_images.insert(host_id, image_signature);
+        // `resolve_host_image_id` yields either a free id or one already
+        // holding this exact signature, so the id can never be occupied by
+        // *different* content here. The arm this match used to carry for that
+        // case - delete the resident image, drop its placements and re-upload
+        // in its slot - is what made a hash collision lose the other source's
+        // placement, and it is gone with the collision.
+        if host_images.get(&host_id) != Some(&image_signature) {
+            if !encode_upload_image(bytes, placement, format_code, host_id) {
+                continue;
             }
-            None => {
-                if !encode_upload_image(bytes, placement, format_code, host_id) {
-                    continue;
-                }
-                host_images.insert(host_id, image_signature);
-            }
+            host_images.insert(host_id, image_signature);
         }
 
         if let Some(previous) =
@@ -556,8 +553,11 @@ fn collect_visible_placements(
         for placement in runtime.kitty_image_placements_with_data_filter(|descriptor| {
             let format_code = kitty_format_code(descriptor.format);
             let signature = image_signature_from_descriptor(descriptor, format_code);
-            let host_id = host_image_id_for_signature(info.id, signature);
-            uploaded_images.get(&host_id).copied() != Some(signature)
+            // Probe exactly the way the encode pass will, so a signature
+            // parked at a probed id still counts as already uploaded.
+            resolve_host_image_id(info.id, signature, uploaded_images)
+                .and_then(|host_id| uploaded_images.get(&host_id).copied())
+                != Some(signature)
         }) {
             let scrollback_offset = runtime
                 .scroll_metrics()
@@ -579,25 +579,38 @@ fn collect_visible_placements(
     placements
 }
 
-fn host_image_id(pane_id: PaneId, placement: &KittyImagePlacement) -> u32 {
-    let format_code = kitty_format_code(placement.format);
-    host_image_id_for_signature(
-        pane_id,
-        ImageSignature {
-            image_width: placement.image_width,
-            image_height: placement.image_height,
-            format_code,
-            data_len: placement.data_len,
-            data_fingerprint: placement.data_fingerprint,
-        },
-    )
+/// Resolves the host image id a signature is uploaded at.
+///
+/// The hash is only where the search starts. `host_image_id_for_signature`
+/// truncates a 64-bit hash into a `HOST_IMAGE_ID_SPAN`-wide namespace and the
+/// result is the cache key, so two distinct signatures can claim one id: the
+/// second one used to evict the first one's live image and take its slot,
+/// which lost the first source's placement for as long as both stayed visible.
+/// Probe forward from the hashed id instead, past every slot holding
+/// *different* content, and stop at the first free slot or at one already
+/// holding this exact signature - so content dedup still shares a single host
+/// image. `None` means the whole namespace is occupied by other content; the
+/// caller skips that placement rather than overwriting a live image.
+fn resolve_host_image_id(
+    pane_id: PaneId,
+    signature: ImageSignature,
+    host_images: &HashMap<u32, ImageSignature>,
+) -> Option<u32> {
+    let start = host_image_id_for_signature(pane_id, signature) - HOST_IMAGE_ID_BASE;
+    (0..HOST_IMAGE_ID_SPAN).find_map(|step| {
+        let host_id = HOST_IMAGE_ID_BASE + (start + step) % HOST_IMAGE_ID_SPAN;
+        match host_images.get(&host_id) {
+            Some(existing) if *existing != signature => None,
+            _ => Some(host_id),
+        }
+    })
 }
 
 fn host_image_id_for_signature(pane_id: PaneId, signature: ImageSignature) -> u32 {
     let mut hasher = DefaultHasher::new();
     pane_id.raw().hash(&mut hasher);
     signature.hash(&mut hasher);
-    HOST_IMAGE_ID_BASE + ((hasher.finish() as u32) % 900_000)
+    HOST_IMAGE_ID_BASE + ((hasher.finish() as u32) % HOST_IMAGE_ID_SPAN)
 }
 
 fn host_placement_id(pane_id: PaneId, placement: &KittyImagePlacement) -> u32 {
@@ -891,6 +904,38 @@ fn encode_kitty_data(out: &mut Vec<u8>, control: &str, data: &[u8]) {
 mod tests {
     use super::*;
     use crate::ghostty::KittyPlacementRenderInfo;
+
+    /// The id a signature hashes to, before any collision probing. Tests that
+    /// need the *resolved* id read it back from the cache instead.
+    fn hashed_host_image_id(placement: &HostPlacement) -> u32 {
+        host_image_id_for_signature(
+            placement.pane_id,
+            image_signature(placement, kitty_format_code(placement.placement.format)),
+        )
+    }
+
+    /// Two distinct image signatures for one pane whose hashed host image ids
+    /// collide. `DefaultHasher` is deterministic inside a build, so the search
+    /// is repeatable, but its output is not stable across Rust versions - hence
+    /// searching for a colliding pair instead of hard-coding one.
+    fn colliding_data_fingerprints(pane_id: PaneId) -> (u64, u64) {
+        let template = image_signature(
+            &test_placement(0, 0),
+            kitty_format_code(KittyImageFormat::Rgba),
+        );
+        let mut seen: HashMap<u32, u64> = HashMap::new();
+        for data_fingerprint in 0..10_000_000u64 {
+            let signature = ImageSignature {
+                data_fingerprint,
+                ..template
+            };
+            let host_id = host_image_id_for_signature(pane_id, signature);
+            if let Some(previous) = seen.insert(host_id, data_fingerprint) {
+                return (previous, data_fingerprint);
+            }
+        }
+        panic!("no colliding host image ids in the search range");
+    }
 
     fn test_placement(viewport_col: i32, viewport_row: i32) -> HostPlacement {
         HostPlacement {
@@ -1189,7 +1234,7 @@ mod tests {
         let mut sources = HashMap::new();
         let mut bytes = Vec::new();
         let first = test_placement(0, 0);
-        let old_host_id = host_image_id(first.pane_id, &first.placement);
+        let old_host_id = hashed_host_image_id(&first);
         encode_graphics_update(
             &mut bytes,
             &[first],
@@ -1206,7 +1251,7 @@ mod tests {
         new_source.placement.placement_id = 4;
         // Production collects against the pre-update cache and omits data
         // for a signature already uploaded to the host.
-        assert!(images.contains_key(&host_image_id(new_source.pane_id, &new_source.placement)));
+        assert!(images.contains_key(&hashed_host_image_id(&new_source)));
         new_source.placement.data.clear();
         bytes.clear();
         encode_graphics_update(
@@ -1232,7 +1277,7 @@ mod tests {
         let mut sources = HashMap::new();
         let mut bytes = Vec::new();
         let first = test_placement(0, 0);
-        let old_host_id = host_image_id(first.pane_id, &first.placement);
+        let old_host_id = hashed_host_image_id(&first);
         encode_graphics_update(
             &mut bytes,
             &[first],
@@ -1413,7 +1458,7 @@ mod tests {
         let mut sources = HashMap::new();
         let mut bytes = Vec::new();
         let placement = test_placement(0, 0);
-        let host_id = host_image_id(placement.pane_id, &placement.placement);
+        let host_id = hashed_host_image_id(&placement);
 
         encode_graphics_update(
             &mut bytes,
@@ -1451,7 +1496,7 @@ mod tests {
         let mut sources = HashMap::new();
         let mut bytes = Vec::new();
         let placement = test_placement(0, 0);
-        let host_id = host_image_id(placement.pane_id, &placement.placement);
+        let host_id = hashed_host_image_id(&placement);
 
         encode_graphics_update(
             &mut bytes,
@@ -1500,7 +1545,7 @@ mod tests {
         let mut sources = HashMap::new();
         let mut bytes = Vec::new();
         let survivor = test_placement(0, 0);
-        let host_id = host_image_id(survivor.pane_id, &survivor.placement);
+        let host_id = hashed_host_image_id(&survivor);
 
         encode_graphics_update(
             &mut bytes,
@@ -1533,6 +1578,138 @@ mod tests {
         assert!(update.contains("a=d,d=i"), "the twin placement is deleted");
         assert!(images.contains_key(&host_id));
         assert_eq!(images.len(), 1);
+        assert_eq!(placements.len(), 1);
+        assert_eq!(sources.len(), 1);
+    }
+
+    #[test]
+    fn host_image_id_collision_preserves_both_visible_placements() {
+        let pane_id = PaneId::from_raw(1);
+        let (first_fingerprint, second_fingerprint) = colliding_data_fingerprints(pane_id);
+
+        let mut first = test_placement(0, 0);
+        first.placement.data_fingerprint = first_fingerprint;
+        let mut second = test_placement(5, 5);
+        second.placement.image_id = 8;
+        second.placement.placement_id = 4;
+        second.placement.data_fingerprint = second_fingerprint;
+        assert_eq!(
+            hashed_host_image_id(&first),
+            hashed_host_image_id(&second),
+            "the two signatures must hash to the same host image id"
+        );
+
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+        encode_graphics_update(
+            &mut bytes,
+            &[first, second],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        let update = String::from_utf8_lossy(&bytes);
+        assert!(
+            !update.contains("d=I"),
+            "a colliding id must not delete the other source's live image"
+        );
+        assert_eq!(
+            update.matches("a=t").count(),
+            2,
+            "both images are uploaded to the host"
+        );
+        assert_eq!(images.len(), 2, "each signature gets its own host image");
+        assert_eq!(placements.len(), 2, "both placements stay visible");
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn colliding_signature_dedups_only_identical_content() {
+        // Probing moves an id only when the slot holds *different* content:
+        // two sources showing the same image still share one host upload.
+        let mut twin = test_placement(5, 5);
+        twin.placement.image_id = 8;
+        twin.placement.placement_id = 4;
+
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+        encode_graphics_update(
+            &mut bytes,
+            &[test_placement(0, 0), twin],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        let update = String::from_utf8_lossy(&bytes);
+        assert_eq!(
+            update.matches("a=t").count(),
+            1,
+            "identical content is uploaded once"
+        );
+        assert_eq!(images.len(), 1, "identical content shares one host image");
+        assert_eq!(placements.len(), 2);
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn probing_keeps_the_superseded_release_correct() {
+        let pane_id = PaneId::from_raw(1);
+        let (first_fingerprint, second_fingerprint) = colliding_data_fingerprints(pane_id);
+
+        let mut first = test_placement(0, 0);
+        first.placement.data_fingerprint = first_fingerprint;
+        let hashed_id = hashed_host_image_id(&first);
+
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut sources = HashMap::new();
+        let mut bytes = Vec::new();
+        encode_graphics_update(
+            &mut bytes,
+            &[first],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+        assert_eq!(images.keys().copied().collect::<Vec<_>>(), vec![hashed_id]);
+
+        // The one source moves to content that hashes onto the id its own old
+        // content still occupies: the new image is probed to a free id and the
+        // old one is released through the superseded path, not overwritten.
+        let mut changed = test_placement(0, 0);
+        changed.placement.data_fingerprint = second_fingerprint;
+        assert_eq!(hashed_host_image_id(&changed), hashed_id);
+        bytes.clear();
+        encode_graphics_update(
+            &mut bytes,
+            &[changed],
+            false,
+            &mut images,
+            &mut placements,
+            &mut sources,
+        );
+
+        let update = String::from_utf8_lossy(&bytes);
+        assert!(update.contains("a=t"), "the new content is uploaded");
+        assert!(
+            update.contains(&format!("a=d,d=I,i={hashed_id}")),
+            "the superseded image is released"
+        );
+        assert_eq!(images.len(), 1);
+        let surviving = *images.keys().next().expect("one host image");
+        assert_ne!(
+            surviving, hashed_id,
+            "the new content lives at a probed id, not on top of the old one"
+        );
         assert_eq!(placements.len(), 1);
         assert_eq!(sources.len(), 1);
     }
