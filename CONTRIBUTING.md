@@ -135,10 +135,12 @@ permits. zynk's own license is unchanged by that relicense.
 Preserve the upstream copyright and attribution carried in
 [`NOTICE`](./NOTICE), [`LICENSE`](./LICENSE) and
 [`LICENSE-APACHE-2.0.upstream`](./LICENSE-APACHE-2.0.upstream) in all builds —
-both licenses demand it. When a change touches a file that carries
-post-`cd5ea1be` upstream code, add that file to the *Modified files
-(Apache-2.0 provenance)* list in [`NOTICE`](./NOTICE); Apache-2.0 section 4(b)
-requires it.
+both licenses demand it. Apache-2.0 section 4(b) requires the modified files
+themselves to carry prominent notices stating that you changed them. When a
+change touches a file that carries post-`cd5ea1be` upstream code, add that file
+to the *Modified files (Apache-2.0 provenance)* list in [`NOTICE`](./NOTICE):
+that central index is this repository's convention for tracking which files
+those are, and it supports that duty rather than proving compliance by itself.
 
 ## Security
 
