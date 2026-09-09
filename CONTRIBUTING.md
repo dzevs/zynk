@@ -142,6 +142,12 @@ to the *Modified files (Apache-2.0 provenance)* list in [`NOTICE`](./NOTICE):
 that central index is this repository's convention for tracking which files
 those are, and it supports that duty rather than proving compliance by itself.
 
+Every listed file also carries the standard two-line notice as its own first
+lines, in that file's comment syntax — copy the wording from any file already
+on the list. The maintenance test `scripts/test_license_docs.py` enforces both
+directions: every listed file carries the notice, and no unlisted file does, so
+a stale or copied notice fails the build.
+
 ## Security
 
 Report security issues in private — see [`SECURITY.md`](./SECURITY.md). Don't
