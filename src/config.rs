@@ -20,9 +20,9 @@ pub use self::{
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
         ConfigReloadStatus, HeaderOptions, NewTerminalCwdConfig, ShellModeConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastZynkPosition, UpdateChannelConfig,
-        HEADER_VERBOSE_ENV_VAR, MAX_HEADER_MAX_WIDTH, MAX_TOAST_DELAY_SECONDS,
-        MIN_HEADER_MAX_WIDTH,
+        SidebarCollapsedModeConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        ToastZynkPosition, UpdateChannelConfig, HEADER_VERBOSE_ENV_VAR, MAX_HEADER_MAX_WIDTH,
+        MAX_TOAST_DELAY_SECONDS, MIN_HEADER_MAX_WIDTH,
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},

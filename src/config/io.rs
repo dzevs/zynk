@@ -1376,6 +1376,50 @@ agent_panel_scope = "all"
         );
     }
 
+    // The two keys M5-07 registers get the fork's standard new-key pair: the key itself
+    // round-trips through the live loader, and a misspelled sibling in the same section is
+    // reported with its FULL path so a typo is never mistaken for the real key.
+    #[test]
+    fn load_live_config_registers_sidebar_collapsed_mode_and_reports_misspelled_sibling() {
+        let loaded = load_live_config_from_str(
+            r#"
+[ui]
+sidebar_collapsed_mode = "hidden"
+sidebar_collapsed_mod = "hidden"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            loaded.config.ui.sidebar_collapsed_mode,
+            super::super::SidebarCollapsedModeConfig::Hidden
+        );
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key ui.sidebar_collapsed_mod; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_registers_hide_tab_bar_when_single_tab_and_reports_misspelled_sibling() {
+        let loaded = load_live_config_from_str(
+            r#"
+[ui]
+hide_tab_bar_when_single_tab = true
+hide_tab_bar_when_single_tabb = true
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded.config.ui.hide_tab_bar_when_single_tab);
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key ui.hide_tab_bar_when_single_tabb; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
     #[test]
     fn startup_config_load_accepts_the_shipped_default_config() {
         // `zynk --default-config` is what users copy to config.toml; every key it ships

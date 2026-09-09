@@ -242,6 +242,9 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Maximum sidebar width when expanded (columns)
 # sidebar_max_width = 36
 
+# Collapsed sidebar presentation: "compact" keeps the narrow status rail, "hidden" uses zero width.
+# sidebar_collapsed_mode = "compact"
+
 # Terminal width at or below which Zynk uses the mobile single-column layout.
 # Increase this for foldables, tablets, or wide phone terminals.
 # mobile_width_threshold = 64
@@ -278,6 +281,10 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 
 # Show detected/reported agent labels in split pane borders when no manual pane name is set.
 # show_agent_labels_on_pane_borders = false
+
+# Hide the tab row when a workspace has exactly one tab.
+# New tabs can still be created with the configured keybinding.
+# hide_tab_bar_when_single_tab = false
 
 # Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
 # "workspaces" is accepted as an alias for "spaces".

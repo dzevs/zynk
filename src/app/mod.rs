@@ -595,6 +595,7 @@ impl App {
             sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
+            sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
             agent_panel_sort,
             next_agent_state_change_seq: 0,
@@ -608,6 +609,7 @@ impl App {
             pane_borders: config.ui.pane_borders,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
+            hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
@@ -1307,6 +1309,7 @@ impl App {
                 }
                 self.state.sidebar_min_width = config.ui.sidebar_min_width;
                 self.state.sidebar_max_width = config.ui.sidebar_max_width;
+                self.state.sidebar_collapsed_mode = config.ui.sidebar_collapsed_mode;
                 self.state.mobile_width_threshold = config.ui.mobile_width_threshold;
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
@@ -1328,6 +1331,7 @@ impl App {
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
+                self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.agent_panel_scroll = 0;
@@ -2318,6 +2322,52 @@ mod tests {
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.default_sidebar_width, 35);
         assert_eq!(app.state.sidebar_width, 31);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_updates_sidebar_collapsed_mode() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-collapsed-mode");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.sidebar_collapsed_mode,
+            crate::config::SidebarCollapsedModeConfig::Compact
+        );
+
+        std::fs::write(&path, "[ui]\nsidebar_collapsed_mode = \"hidden\"\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.state.sidebar_collapsed_mode,
+            crate::config::SidebarCollapsedModeConfig::Hidden
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // Fork addition: upstream wired `hide_tab_bar_when_single_tab` into `reload_config` without a
+    // test. The reload path is the only way the key reaches a running app, so it gets one here.
+    #[test]
+    fn reload_config_updates_hide_tab_bar_when_single_tab() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-hide-tab-bar-single-tab");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert!(!app.state.hide_tab_bar_when_single_tab);
+
+        std::fs::write(&path, "[ui]\nhide_tab_bar_when_single_tab = true\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(app.state.hide_tab_bar_when_single_tab);
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
