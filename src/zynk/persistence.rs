@@ -361,6 +361,20 @@ pub(crate) async fn append_delivery_event_in_transaction(
     conn: &mut SqliteConnection,
     input: DeliveryEventInput<'_>,
 ) -> Result<(), DbError> {
+    // `integration` is the LEGACY receipt provenance (ADR 0014 amendment): it names a
+    // receipt recorded before the server checked the caller's origin. Migration 0004 keeps
+    // it in the CHECK so those historical rows stay readable and honest — not so this build
+    // can write more of them. A receipt records `RECEIPT_PROOF_SOURCE` (`pane_tree`) and
+    // nothing else, so the only write path fails closed on the legacy value.
+    if input.proof_source == crate::zynk::receipt::LEGACY_RECEIPT_PROOF_SOURCE {
+        return Err(DbError::new(
+            "legacy_proof_source",
+            format!(
+                "`{}` is the pre-ADR-0014 receipt provenance and is never recorded by this build",
+                crate::zynk::receipt::LEGACY_RECEIPT_PROOF_SOURCE
+            ),
+        ));
+    }
     validate_delivery_transition(conn, input.message_id, input.event_type).await?;
     let seq_row = sqlx::query(
         "UPDATE messages SET delivery_seq = delivery_seq + 1 WHERE id = ? RETURNING delivery_seq",
@@ -764,6 +778,82 @@ mod tests {
             .await
             .unwrap_err();
             assert_eq!(wrong_after_submitted.code, "invalid_delivery_transition");
+
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn the_legacy_integration_proof_source_is_never_recorded() {
+        // ADR 0014 amendment (Codex Gate-2 `msg_3e339000b75278a4`). Migration 0004 keeps
+        // `integration` in the CHECK so pre-ADR-0014 receipts stay readable as what they
+        // were: a report whose caller's origin the server never checked. The enumeration is
+        // wide; the write path is not. Every delivery event this build appends goes through
+        // `append_delivery_event_in_transaction`, so refusing there is complete coverage.
+        // The message is already `submitted`, so `received` is a VALID transition here and
+        // the legacy provenance is the only thing left to refuse it.
+        crate::zynk::db::block_on(async {
+            let path = temp_db_path();
+            let mut conn = crate::zynk::db::open_migrated_at(&path).await?;
+            let message = create_test_message(&mut conn, "msg_legacy", SendCommand::PaneRun).await;
+            append_delivery_event_async(
+                &mut conn,
+                DeliveryEventInput {
+                    message_id: &message.message_id,
+                    event_type: DeliveryEventType::Submitted,
+                    proof_source: "pane.send_input",
+                    timestamp: "2026-09-09T00:00:01Z",
+                    payload: serde_json::json!({}),
+                },
+            )
+            .await?;
+
+            let refused = append_delivery_event_async(
+                &mut conn,
+                DeliveryEventInput {
+                    message_id: &message.message_id,
+                    event_type: DeliveryEventType::Received,
+                    proof_source: crate::zynk::receipt::LEGACY_RECEIPT_PROOF_SOURCE,
+                    timestamp: "2026-09-09T00:00:02Z",
+                    payload: serde_json::json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(refused.code, "legacy_proof_source");
+
+            // The same event with the provenance this build actually proves is accepted, so
+            // the refusal is about the value and not about the transition.
+            append_delivery_event_async(
+                &mut conn,
+                DeliveryEventInput {
+                    message_id: &message.message_id,
+                    event_type: DeliveryEventType::Received,
+                    proof_source: crate::zynk::receipt::RECEIPT_PROOF_SOURCE,
+                    timestamp: "2026-09-09T00:00:03Z",
+                    payload: serde_json::json!({}),
+                },
+            )
+            .await?;
+            let recorded: Vec<String> = sqlx::query(
+                "SELECT proof_source FROM delivery_events WHERE message_id = ? ORDER BY seq",
+            )
+            .bind(&message.message_id)
+            .fetch_all(&mut conn)
+            .await?
+            .iter()
+            .map(|row| row.try_get::<String, _>("proof_source").unwrap())
+            .collect();
+            assert_eq!(
+                recorded,
+                vec![
+                    "pane.send_input".to_string(),
+                    crate::zynk::receipt::RECEIPT_PROOF_SOURCE.to_string()
+                ],
+                "the refused write must have appended nothing"
+            );
 
             let _ = std::fs::remove_file(path);
             Ok(())

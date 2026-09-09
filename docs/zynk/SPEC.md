@@ -253,7 +253,7 @@ not denormalized onto every message.
   — `from_participant_id`/`to_participant_id` reference `conversation_participants` (the agent/session
   snapshot, with decomposed `source`/`kind`/`value`), instead of denormalizing `agent_session` per row.
 - `delivery_events(id, message_id, event_type drafted|submitted|received|processed|failed,
-  proof_source pane.send_text|pane.send_input|pane.submit|integration|operator|system.recovery,
+  proof_source pane.send_text|pane.send_input|pane.submit|integration|pane_tree|operator|system.recovery,
   zynk_event_id NULL, seq, timestamp, payload_json)`
 - `messages_fts` — FTS5 external-content over `body` + selected searchable metadata (written synchronously
   on insert — keyword search is always fresh)

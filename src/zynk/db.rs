@@ -1917,14 +1917,15 @@ mod tests {
     }
 
     #[test]
-    fn migration_0004_rewrites_the_retired_integration_proof_source() {
-        // ADR 0014: `received` is recorded as `pane_tree`, the provenance the server
-        // can actually prove. Rows written before that carried `integration`, and a
-        // CHECK constraint means the value cannot simply be updated in place — so
-        // migration 0004 rebuilds the table. This walks the real upgrade: a DB at
-        // version 3 with an `integration` row, opened, and the row must come back
-        // rewritten with everything else about it intact.
-        let path = plant_native_db_through("proof-source-rewrite", 3);
+    fn migration_0004_preserves_legacy_integration_rows() {
+        // ADR 0014 amendment (Codex Gate-2 `msg_3e339000b75278a4`): migration 0004 WIDENS
+        // the CHECK so a receipt this build records can say `pane_tree`; it must not
+        // restate history. A `received` row written before the pane-tree origin check
+        // carries `integration` — the server matched the ids but never checked where the
+        // caller came from — and relabelling it would claim evidence nobody collected.
+        // This walks the real upgrade: a DB at version 3 with an `integration` row,
+        // opened, and the row must come back exactly as it was written.
+        let path = plant_native_db_through("proof-source-legacy", 3);
         assert_eq!(recorded_versions(&path), vec![1, 2, 3]);
 
         block_on(async {
@@ -1994,18 +1995,31 @@ mod tests {
                 ),
                 (
                     "evt_receipt".to_string(),
-                    "pane_tree".to_string(),
+                    crate::zynk::receipt::LEGACY_RECEIPT_PROOF_SOURCE.to_string(),
                     "{\"kept\":true}".to_string()
                 ),
             ],
-            "the receipt row is rewritten and every other column survives"
+            "the legacy receipt row keeps its own provenance, and every other column survives"
         );
 
-        // And the rebuilt CHECK constraint refuses the retired value outright.
+        // The widened CHECK admits what this build actually records.
+        block_on(async {
+            sqlx::query(
+                "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) \
+                 VALUES ('evt_new', 'msg_pre', 'received', ?, 3, '2026-09-09T00:00:03Z')",
+            )
+            .bind(crate::zynk::receipt::RECEIPT_PROOF_SOURCE)
+            .execute(&mut conn)
+            .await
+            .map_err(|err| DbError::new("insert", err.to_string()))
+        })
+        .unwrap();
+
+        // And nothing outside the enumeration: widening is not the same as opening.
         let refused = block_on(async {
             let outcome = sqlx::query(
                 "INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) \
-                 VALUES ('evt_old', 'msg_pre', 'received', 'integration', 3, '2026-09-09T00:00:03Z')",
+                 VALUES ('evt_bogus', 'msg_pre', 'received', 'hearsay', 4, '2026-09-09T00:00:04Z')",
             )
             .execute(&mut conn)
             .await;
@@ -2014,7 +2028,7 @@ mod tests {
         .unwrap();
         assert!(
             refused,
-            "the retired `integration` proof_source must no longer be writable"
+            "a proof_source outside the enumeration must still be refused"
         );
         block_on(async {
             conn.close()

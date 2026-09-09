@@ -95,3 +95,23 @@ That one the kernel can answer.
 - **Cryptographic attestation of the integration** — sign reports with a key only the integration holds.
   Rejected: there is no key material on either side, no way to provision one that the user cannot read, and
   no trusted party to vouch for a same-UID process.
+
+## Amendment 2026-09-09 (pre-merge; Codex Gate-2 msg_3e339000b75278a4)
+
+Decision 2's rename applies to the receipts **this build records**. It does not reach back.
+
+- A `delivery_events` row written before the origin check carries `integration`. That server matched the
+  message ids and the receiver's hook-authoritative identity, but never established which process the
+  caller was, so `pane_tree` — "a process inside the receiver pane's tree reported the ingestion" — is
+  evidence it never held. The consequence was reproduced on a real upgrade of one database: a receipt taken
+  by a process outside every pane, recorded by the previous binary, read back as `received`/`pane_tree`
+  once the next binary opened the same file, with no new receipt.
+- **No historical row is relabelled.** Migration 0004 WIDENS the `proof_source` CHECK instead of rewriting
+  rows. `integration` stays in the enumeration as the LEGACY, origin-unverified value
+  (`receipt::LEGACY_RECEIPT_PROOF_SOURCE`), and this build never writes it:
+  `append_delivery_event_in_transaction` refuses that value outright.
+- The ADR 0003 enumeration amendment stated in Decision 2 therefore **adds** `pane_tree` rather than
+  replacing `integration`: `pane.send_text | pane.send_input | pane.submit | integration | pane_tree |
+  operator | system.recovery`.
+- No CLI, API or document may present an `integration` row as a pane-tree receipt. Its provenance is a
+  claim about which check ran, and for those rows the origin check did not run.
