@@ -1941,6 +1941,34 @@ mod tests {
             .to_string()
     }
 
+    /// The instant the production code ACTUALLY stamped on the hook authority it just
+    /// recorded.
+    ///
+    /// Observations derive from this, never from a baseline captured before the setup
+    /// ran. The ordering rules compare an observation against the RECORDED stamp
+    /// (`hook_authority_not_newer_than`, and every retirement boundary built on it), and
+    /// the setter stamps `Instant::now()` itself, so a pre-setup baseline plus a
+    /// millisecond offset silently becomes an OLDER observation whenever the setup takes
+    /// longer than the offset — a scheduling delay, a saturated test runner or a slow
+    /// `test_session_path` is enough — and the decision under test flips.
+    fn authority_reported_at(terminal: &TerminalState) -> Instant {
+        terminal
+            .hook_authority
+            .as_ref()
+            .expect("hook authority")
+            .reported_at
+    }
+
+    /// `authority_reported_at` for the session-identity-only shape, which records
+    /// `hook_identity` and never takes lifecycle authority.
+    fn identity_reported_at(terminal: &TerminalState) -> Instant {
+        terminal
+            .hook_identity
+            .as_ref()
+            .expect("hook identity")
+            .reported_at
+    }
+
     #[test]
     fn stabilization_uses_raw_policy_state() {
         let detection = AgentDetection {
@@ -2179,7 +2207,6 @@ mod tests {
     #[test]
     fn late_full_lifecycle_hook_with_same_session_after_process_exit_does_not_reacquire_authority()
     {
-        let now = Instant::now();
         let mut terminal = test_terminal();
         let session_path = test_session_path("pi.jsonl");
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
@@ -2192,6 +2219,7 @@ mod tests {
             crate::agent_resume::AgentSessionRef::path(session_path.clone()),
             Some(20),
         );
+        let reported_at = authority_reported_at(&terminal);
 
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
@@ -2200,7 +2228,7 @@ mod tests {
             true,
             false,
             true,
-            now + Duration::from_millis(1),
+            reported_at + Duration::from_millis(1),
         );
         let late = terminal.set_hook_authority_with_session_ref(
             "zynk:pi".into(),
@@ -2850,7 +2878,6 @@ mod tests {
 
     #[test]
     fn release_suppression_ignores_same_agent_idle_publish() {
-        let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority(
@@ -2861,7 +2888,10 @@ mod tests {
             Some(20),
         );
         terminal.release_agent("zynk:pi", "pi", Some(21));
+        let retired_at = terminal.suppressed_hook_reports["zynk:pi"].observed_at;
 
+        // Captured BEFORE the release that retired this owner, derived from the
+        // retirement the release actually stamped: the publish has to lose to it.
         let change = terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
             AgentState::Idle,
@@ -2869,7 +2899,7 @@ mod tests {
             true,
             false,
             false,
-            now,
+            retired_at - Duration::from_millis(1),
         );
         let late = terminal.set_hook_authority(
             "zynk:pi".into(),
@@ -3604,9 +3634,9 @@ mod tests {
         // A process exit retires the identity until a FRESH process is observed —
         // the same evidence bar the full-lifecycle path applies.
         let mut terminal = test_terminal();
-        let observed = Instant::now();
         terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
         identity_report(&mut terminal, 20);
+        let observed = identity_reported_at(&terminal);
 
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Hermes),
@@ -3732,10 +3762,10 @@ mod tests {
         // retired session, made after the agent's process was observed again, is the
         // legitimate reclaim — the same evidence bar the restart path applies.
         let mut terminal = test_terminal();
-        let observed = Instant::now();
         terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
         identity_session_start(&mut terminal, "existing-session", 20, "startup")
             .expect("initial session report");
+        let observed = identity_reported_at(&terminal);
 
         retire_then_observe_a_fresh_process(&mut terminal, observed, process_exit);
 
@@ -3784,10 +3814,10 @@ mod tests {
         // only a running observation strictly newer than it is evidence of a process
         // alive now.
         let mut terminal = test_terminal();
-        let observed = Instant::now();
         terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
         identity_session_start(&mut terminal, "existing-session", 20, "startup")
             .expect("initial session report");
+        let observed = identity_reported_at(&terminal);
         retire_then_observe_a_fresh_process(&mut terminal, observed, false);
 
         terminal.set_detected_state_with_screen_signals_at(
@@ -4510,10 +4540,10 @@ mod tests {
         // newer exit observation proves that process is gone, and a resume arriving after
         // it is the late callback the retirement exists to refuse.
         let mut terminal = test_terminal();
-        let observed = Instant::now();
         terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
         identity_session_start(&mut terminal, "existing-session", 20, "startup")
             .expect("initial session report");
+        let observed = identity_reported_at(&terminal);
         retire_then_observe_a_fresh_process(&mut terminal, observed, false);
         assert!(terminal.hook_identity.is_none());
 
@@ -4555,10 +4585,10 @@ mod tests {
         // and the explicit same-session resume it backs is admitted exactly as the first
         // one was.
         let mut terminal = test_terminal();
-        let observed = Instant::now();
         terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
         identity_session_start(&mut terminal, "existing-session", 20, "startup")
             .expect("initial session report");
+        let observed = identity_reported_at(&terminal);
         retire_then_observe_a_fresh_process(&mut terminal, observed, false);
 
         // The replacement process exits, expiring the evidence it had left behind.
@@ -4619,10 +4649,10 @@ mod tests {
         // erase decides nothing, exactly as `hook_identity_not_newer_than` already holds
         // for the identity itself.
         let mut terminal = test_terminal();
-        let observed = Instant::now();
         terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
         identity_session_start(&mut terminal, "existing-session", 20, "startup")
             .expect("initial session report");
+        let observed = identity_reported_at(&terminal);
         retire_then_observe_a_fresh_process(&mut terminal, observed, false);
 
         terminal.set_detected_state_with_screen_signals_at(
@@ -4647,10 +4677,10 @@ mod tests {
         // a process observation AFTER the retirement, a `resume` naming the retired
         // session is exactly the late callback the retirement exists to refuse.
         let mut terminal = test_terminal();
-        let observed = Instant::now();
         terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
         identity_session_start(&mut terminal, "existing-session", 20, "startup")
             .expect("initial session report");
+        let observed = identity_reported_at(&terminal);
         if process_exit {
             terminal.set_detected_state_with_screen_signals_at(
                 Some(Agent::Hermes),
@@ -4692,10 +4722,10 @@ mod tests {
         // a session report with no reason, or a reason this owner never starts on —
         // stays retired however fresh the process is.
         let mut terminal = test_terminal();
-        let observed = Instant::now();
         terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
         identity_session_start(&mut terminal, "existing-session", 20, "startup")
             .expect("initial session report");
+        let observed = identity_reported_at(&terminal);
 
         retire_then_observe_a_fresh_process(&mut terminal, observed, false);
 
