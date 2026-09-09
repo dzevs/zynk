@@ -27,6 +27,26 @@ Optional, used by some `just` recipes:
 - **vale** — the prose linter for docs (`just docs-lint`).
 - **Python 3** — runs the maintenance-script unit tests in `just check`.
 
+### Remote executable custody
+
+Remote attach supports Linux x86_64 hosts only. The target needs `/bin/sh`,
+`sha256sum`, and mounted procfs with executable access through `/proc/self/fd`.
+The local build also uses procfs when checking its source executable.
+
+Each remote probe opens the executable inside the remote shell and hashes that
+held file before executing its version/status queries. Prepared commands,
+including every bridge connection, revalidate against the expected digest and
+execute through the same descriptor. A bridge starting a daemon uses its running
+image; a live-handoff import names the remote shell's held descriptor until the
+old server has opened it. Atomic replacement of the installation pathname cannot
+redirect those executions. Missing procfs access or a failed hash query refuses
+execution with an ADR 0013 diagnostic.
+
+This assumes a trusted SSH account, kernel and tools. Holding a descriptor binds
+an inode; it does not seal its bytes against an in-place writer or authenticate
+a compromised host. Pre-install discovery of an older server remains a legacy
+compatibility query, not authority to reuse its executable.
+
 ## Getting started
 
 Clone the repository and build the release binary:

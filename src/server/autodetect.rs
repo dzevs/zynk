@@ -134,6 +134,10 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
         )
     })?;
 
+    spawn_server_daemon_at(exe)
+}
+
+pub(crate) fn spawn_server_daemon_at(exe: PathBuf) -> io::Result<u32> {
     info!(exe = %exe.display(), "spawning server daemon");
 
     let mut command = build_server_daemon_command(exe);

@@ -41,6 +41,10 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 
 **Fixed**
 
+- Remote attach binds executable validation and execution to an open file on the
+  remote host, including bridge startup and live handoff. Replacing an install
+  pathname cannot redirect the checked execution. Linux remote hosts require
+  `sha256sum` and executable procfs access; see `DEVELOPMENT.md` for the trust boundary.
 - Vendoring: source archives are validated before extraction, including on interpreters without tarfile
   filters. Link traversal is refused, and a failed staged replacement preserves the previous vendor tree.
 - Startup: two zynk processes opening a fresh shared database at the same time (for example two named-session

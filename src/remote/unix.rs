@@ -229,7 +229,9 @@ fn ensure_remote_server_running() -> io::Result<()> {
         ));
     }
 
-    crate::server::autodetect::spawn_server_daemon()?;
+    // The bridge was executed through a verified open file. Do not reopen its
+    // install pathname when it starts a daemon after a concurrent replacement.
+    crate::server::autodetect::spawn_server_daemon_at(PathBuf::from("/proc/self/exe"))?;
     crate::server::autodetect::wait_for_server_socket(&socket_path, Duration::from_secs(5))
 }
 
@@ -274,6 +276,7 @@ struct RemoteZynk {
     install_suffix: String,
     shell_path: String,
     platform: RemotePlatform,
+    expected_sha256: Option<String>,
 }
 
 impl RemoteZynk {
@@ -284,11 +287,17 @@ impl RemoteZynk {
             install_suffix,
             shell_path,
             platform,
+            expected_sha256: None,
         }
     }
 
     fn with_shell_path(mut self, shell_path: String) -> Self {
         self.shell_path = shell_path;
+        self
+    }
+
+    fn with_custody(mut self, custody: &InstallCustody) -> Self {
+        self.expected_sha256 = Some(custody.sha256.clone());
         self
     }
 }
@@ -360,14 +369,14 @@ fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<P
             remote_binary_is_the_reviewed_one(target, candidate, &custody).unwrap_or(false)
         }) {
             return Ok(PreparedRemoteZynk {
-                remote_zynk: path_remote_zynk.clone(),
+                remote_zynk: path_remote_zynk.clone().with_custody(&custody),
                 installed_or_replaced: false,
                 stop_after_install_approved: false,
             });
         }
         if remote_binary_is_the_reviewed_one(target, &remote_zynk, &custody)? {
             return Ok(PreparedRemoteZynk {
-                remote_zynk,
+                remote_zynk: remote_zynk.with_custody(&custody),
                 installed_or_replaced: false,
                 stop_after_install_approved: false,
             });
@@ -407,7 +416,7 @@ fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<P
     warn_if_remote_bin_not_on_path(target)?;
 
     Ok(PreparedRemoteZynk {
-        remote_zynk,
+        remote_zynk: remote_zynk.with_custody(&custody),
         installed_or_replaced: true,
         stop_after_install_approved,
     })
@@ -457,14 +466,41 @@ fn remote_zynk_from_path_discovery(remote_zynk: &RemoteZynk, stdout: &str) -> Op
     Some(remote_zynk.clone().with_shell_path(shell_quote(path)))
 }
 
-/// One round trip that asks a remote binary for everything custody turns on: its bytes, the source
-/// commit it attests, its version and its protocol. One probe rather than three, so a decision is
-/// made about one snapshot of the file instead of straddling several.
-fn remote_custody_probe(target: &str, remote_zynk: &RemoteZynk) -> io::Result<Output> {
-    let command = format!(
-        "test -x {0} && sha256sum {0} | cut -d ' ' -f 1 && {0} --version && {0} status client --json",
-        remote_zynk.shell_path
-    );
+/// Open fd 3 INSIDE the remote shell, hash it, and run every command through that
+/// same descriptor. Atomic pathname replacement cannot change the inode selected.
+/// This trusts the SSH account/kernel and tools, not a hostile in-place writer.
+fn remote_executable_script(remote_zynk: &RemoteZynk, sha256: &str, body: &str) -> String {
+    format!(
+        r#"test -d /proc/self/fd || {{ printf '%s\n' 'ADR 0013 remote custody requires mounted procfs with /proc/self/fd access' >&2; exit 78; }}
+exec 3<{path}
+test -f /proc/self/fd/3 && test -x /proc/self/fd/3 || {{ printf '%s\n' 'ADR 0013 remote custody requires an executable regular file accessible through /proc/self/fd/3' >&2; exit 78; }}
+actual=$(sha256sum /proc/self/fd/3) || {{ printf '%s\n' 'ADR 0013 remote custody: sha256sum failed; executable not run' >&2; exit 78; }}
+actual=${{actual%% *}}
+test "$actual" = {sha256} || {{ printf '%s\n' 'ADR 0013 remote custody: executable bytes changed; refusing execution' >&2; exit 1; }}
+{body}
+"#,
+        path = remote_zynk.shell_path,
+        sha256 = shell_quote(sha256),
+    )
+}
+
+fn prepared_remote_script(remote_zynk: &RemoteZynk, body: &str) -> io::Result<String> {
+    let sha256 = remote_zynk
+        .expected_sha256
+        .as_deref()
+        .ok_or_else(|| io::Error::other("remote executable has no prepared custody (ADR 0013)"))?;
+    Ok(remote_executable_script(remote_zynk, sha256, body))
+}
+
+/// One remote round trip, with bytes and metadata bound to the descriptor opened
+/// there. The hash is checked BEFORE executing even the version/status queries.
+fn remote_custody_probe(
+    target: &str,
+    remote_zynk: &RemoteZynk,
+    custody: &InstallCustody,
+) -> io::Result<Output> {
+    let command = remote_executable_script(remote_zynk, &custody.sha256,
+        "printf '%s\\n' \"$actual\" && /proc/self/fd/3 --version && /proc/self/fd/3 status client --json");
     ssh_sh_output(target, &command)
 }
 
@@ -478,8 +514,14 @@ fn remote_binary_is_the_reviewed_one(
     remote_zynk: &RemoteZynk,
     custody: &InstallCustody,
 ) -> io::Result<bool> {
-    let output = remote_custody_probe(target, remote_zynk)?;
+    let output = remote_custody_probe(target, remote_zynk, custody)?;
     if !output.status.success() {
+        if output.status.code() == Some(78) {
+            return Err(command_failed(
+                "remote executable custody prerequisite failed",
+                &output,
+            ));
+        }
         return Ok(false);
     }
 
@@ -811,7 +853,13 @@ fn confirm_remote_install_with_running_server(
 }
 
 fn remote_server_status(target: &str, remote_zynk: &RemoteZynk) -> io::Result<RemoteServerStatus> {
-    let command = format!("{} status server --json", remote_zynk.shell_path);
+    let command = if remote_zynk.expected_sha256.is_some() {
+        prepared_remote_script(remote_zynk, "/proc/self/fd/3 status server --json")?
+    } else {
+        // Legacy pre-install server discovery is only a compatibility query. It
+        // cannot authorize reuse; every prepared executable takes the bound path.
+        format!("{} status server --json", remote_zynk.shell_path)
+    };
     let output = ssh_sh_output(target, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server status failed", &output));
@@ -932,13 +980,13 @@ fn confirm_remote_server_stop(
 }
 
 fn live_handoff_remote_server(target: &str, remote_zynk: &RemoteZynk) -> io::Result<()> {
-    let command = format!(
-        "{} server live-handoff --import-exe {} --expected-protocol {} --expected-version {}",
-        remote_zynk.shell_path,
-        remote_zynk.shell_path,
+    // Keep the SSH shell alive until the old server has opened the import image.
+    // /proc/self here would name the OLD server's fd table, not our held file.
+    let command = prepared_remote_script(remote_zynk, &format!(
+        "/proc/self/fd/3 server live-handoff --import-exe \"/proc/$$/fd/3\" --expected-protocol {} --expected-version {}",
         CURRENT_PROTOCOL,
-        current_version()
-    );
+        shell_quote(&current_version())
+    ))?;
     let output = ssh_sh_output(target, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server live handoff failed", &output));
@@ -951,7 +999,7 @@ fn live_handoff_remote_server(target: &str, remote_zynk: &RemoteZynk) -> io::Res
 }
 
 fn stop_remote_server(target: &str, remote_zynk: &RemoteZynk) -> io::Result<()> {
-    let command = format!("{} server stop", remote_zynk.shell_path);
+    let command = prepared_remote_script(remote_zynk, "/proc/self/fd/3 server stop")?;
     let output = ssh_sh_output(target, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server stop failed", &output));
@@ -1050,9 +1098,21 @@ fn confirm_remote_install(
 /// `ZYNK_REMOTE_BINARY` files included. This is the authority for BOTH remote decisions: what to
 /// copy, and whether a binary already on the remote host may be reused instead.
 fn local_install_custody(path: &Path) -> io::Result<InstallCustody> {
-    let sha256 = crate::checksum::file_sha256(path)?;
+    let source = File::open(path)?;
+    local_install_custody_from_open_file(path, &source)
+}
 
-    let output = Command::new(path)
+fn local_install_custody_from_open_file(path: &Path, source: &File) -> io::Result<InstallCustody> {
+    use std::os::fd::AsRawFd;
+    // The parent keeps this file open while both hashing and the child query run.
+    let executable = PathBuf::from(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        source.as_raw_fd()
+    ));
+    let sha256 = crate::checksum::file_sha256(&executable)?;
+
+    let output = Command::new(&executable)
         .arg("--version")
         .output()
         .map_err(|err| {
@@ -1108,10 +1168,10 @@ fn verify_remote_custody(
     remote_zynk: &RemoteZynk,
     custody: &InstallCustody,
 ) -> io::Result<()> {
-    let output = remote_custody_probe(target, remote_zynk)?;
+    let output = remote_custody_probe(target, remote_zynk, custody)?;
     if !output.status.success() {
         return Err(command_failed(
-            "remote custody verification failed (the remote host needs sha256sum)",
+            "remote custody verification failed (requires sha256sum and executable access through /proc/self/fd)",
             &output,
         ));
     }
@@ -1261,6 +1321,9 @@ mv "$tmp" "$dest"
 thread_local! {
     static STUBBED_SSH_OUTPUT: std::cell::RefCell<std::collections::VecDeque<Output>> =
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    // Run the actual generated remote script in a disposable local Linux shell.
+    // A one-shot environment lets tests replace the pathname during hashing.
+    static SSH_SCRIPT_ENV: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1283,6 +1346,13 @@ fn ssh_sh_output(target: &str, script: &str) -> io::Result<Output> {
     #[cfg(test)]
     if let Some(output) = take_stubbed_ssh_output() {
         return Ok(output);
+    }
+    #[cfg(test)]
+    if let Some(env) = SSH_SCRIPT_ENV.with(|slot| slot.borrow_mut().take()) {
+        return Command::new("/bin/sh")
+            .args(["-c", script])
+            .envs(env)
+            .output();
     }
     // Feed POSIX bootstrap scripts to /bin/sh so the user's login shell only
     // has to parse a simple executable invocation.
@@ -1316,14 +1386,15 @@ fn ssh_user_shell_output(target: &str, command: &str) -> io::Result<Output> {
         .output()
 }
 
-fn remote_bridge_command(remote_zynk: &RemoteZynk, session_name: &str) -> String {
-    let mut command = format!("exec {}", remote_zynk.shell_path);
+fn remote_bridge_command(remote_zynk: &RemoteZynk, session_name: &str) -> io::Result<String> {
+    let mut command = "exec /proc/self/fd/3".to_string();
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         command.push_str(" --session ");
         command.push_str(&shell_quote(session_name));
     }
     command.push_str(" remote-client-bridge");
-    command
+    let script = prepared_remote_script(remote_zynk, &command)?;
+    Ok(format!("exec /bin/sh -c {}", shell_quote(&script)))
 }
 
 fn reattach_command(
@@ -1549,7 +1620,7 @@ fn bridge_connection(
     command
         .arg("-T")
         .arg(target)
-        .arg(remote_bridge_command(remote_zynk, session_name));
+        .arg(remote_bridge_command(remote_zynk, session_name)?);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2037,10 +2108,15 @@ mod tests {
             os: "linux",
             arch: "x86_64",
         });
-        assert_eq!(
-            remote_bridge_command(&remote_zynk, crate::session::DEFAULT_SESSION_NAME),
-            "exec \"$HOME/.local/bin/zynk\" remote-client-bridge"
-        );
+        assert!(remote_bridge_command(&remote_zynk, crate::session::DEFAULT_SESSION_NAME).is_err());
+        let command = remote_bridge_command(
+            &remote_zynk.with_custody(&custody_fixture()),
+            crate::session::DEFAULT_SESSION_NAME,
+        )
+        .unwrap();
+        assert!(command.starts_with("exec /bin/sh -c "));
+        assert!(command.contains("exec 3<\"$HOME/.local/bin/zynk\""));
+        assert!(command.contains("exec /proc/self/fd/3 remote-client-bridge"));
     }
 
     #[test]
@@ -2052,10 +2128,7 @@ mod tests {
         let remote_zynk =
             remote_zynk_from_path_discovery(&remote_zynk, "/usr/bin/zynk\n").expect("path binary");
 
-        assert_eq!(
-            remote_bridge_command(&remote_zynk, crate::session::DEFAULT_SESSION_NAME),
-            "exec /usr/bin/zynk remote-client-bridge"
-        );
+        assert_eq!(remote_zynk.shell_path, "/usr/bin/zynk");
     }
 
     #[test]
@@ -2067,10 +2140,7 @@ mod tests {
         let remote_zynk = remote_zynk_from_path_discovery(&remote_zynk, "/opt/zynk bin/zynk\n")
             .expect("path binary");
 
-        assert_eq!(
-            remote_bridge_command(&remote_zynk, crate::session::DEFAULT_SESSION_NAME),
-            "exec '/opt/zynk bin/zynk' remote-client-bridge"
-        );
+        assert_eq!(remote_zynk.shell_path, "'/opt/zynk bin/zynk'");
     }
 
     #[test]
@@ -2079,10 +2149,7 @@ mod tests {
         let remote_zynk = remote_zynk_from_path_discovery(&remote_zynk, "/usr/local/bin/zynk\n")
             .expect("path binary");
 
-        assert_eq!(
-            remote_bridge_command(&remote_zynk, crate::session::DEFAULT_SESSION_NAME),
-            "exec /usr/local/bin/zynk remote-client-bridge"
-        );
+        assert_eq!(remote_zynk.shell_path, "/usr/local/bin/zynk");
         assert_eq!(remote_zynk.platform.platform_key(), "linux-x86_64");
     }
 
@@ -2095,10 +2162,7 @@ mod tests {
         let remote_zynk = remote_zynk_from_path_discovery(&remote_zynk, "/opt/zynk's/bin/zynk\n")
             .expect("path binary");
 
-        assert_eq!(
-            remote_bridge_command(&remote_zynk, crate::session::DEFAULT_SESSION_NAME),
-            "exec '/opt/zynk'\\''s/bin/zynk' remote-client-bridge"
-        );
+        assert_eq!(remote_zynk.shell_path, "'/opt/zynk'\\''s/bin/zynk'");
     }
 
     #[test]
@@ -2397,6 +2461,220 @@ mod tests {
             version: current_version(),
             protocol: CURRENT_PROTOCOL,
         }
+    }
+
+    struct CustodyRaceFixture {
+        path: PathBuf,
+        replacement: PathBuf,
+        marker: PathBuf,
+        remote: RemoteZynk,
+        custody: InstallCustody,
+        env: Vec<(String, String)>,
+    }
+
+    impl CustodyRaceFixture {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let mut custody = custody_fixture();
+            let path = write_fake_zynk("path-race", "unused");
+            let root = path.parent().unwrap();
+            let marker = root.join("unreviewed-executed");
+            let replacement = root.join("replacement");
+            let body = format!(
+                "touch {}\ncase \"$1\" in\n--version) printf '%s\\n' {} ;;\nstatus) printf '%s\\n' {} ;;\nserver) \"$4\" --version 3<&- ;;\n*) printf 'reviewed-bridge\\n'; printf '%s\\n' \"$@\" ;;\nesac\n",
+                shell_quote(root.join("any-execution").to_str().unwrap()),
+                shell_quote(&format!("zynk {} ({})", custody.version, custody.build_sha)),
+                shell_quote(&format!(r#"{{"protocol":{}}}"#, custody.protocol)),
+            );
+            fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+            fs::write(
+                &replacement,
+                format!(
+                    "#!/bin/sh\ntouch {}\n{body}",
+                    shell_quote(marker.to_str().unwrap())
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+            custody.sha256 = crate::checksum::file_sha256(&path).unwrap();
+            let tools = root.join("tools");
+            fs::create_dir(&tools).unwrap();
+            let hasher = tools.join("sha256sum");
+            fs::write(&hasher, "#!/bin/sh\nif test \"$HASH_FAIL\" = 1; then exit 42; fi\n/usr/bin/sha256sum \"$@\" || exit $?\nif test \"$SWAP_AFTER_HASH\" = 1 && test -e \"$REPLACEMENT\"; then mv -- \"$REPLACEMENT\" \"$TARGET\"; fi\n").unwrap();
+            fs::set_permissions(&hasher, fs::Permissions::from_mode(0o755)).unwrap();
+            let env = vec![
+                ("PATH".into(), format!("{}:/usr/bin:/bin", tools.display())),
+                ("REPLACEMENT".into(), replacement.display().to_string()),
+                ("TARGET".into(), path.display().to_string()),
+                ("SWAP_AFTER_HASH".into(), "1".into()),
+            ];
+            let remote = RemoteZynk::for_platform(RemotePlatform::local())
+                .with_shell_path(shell_quote(path.to_str().unwrap()))
+                .with_custody(&custody);
+            Self {
+                path,
+                replacement,
+                marker,
+                remote,
+                custody,
+                env,
+            }
+        }
+
+        fn run_probe(&self, post_copy: bool, hash_fails: bool) -> bool {
+            let mut env = self.env.clone();
+            env.push((
+                "HASH_FAIL".into(),
+                if hash_fails { "1" } else { "0" }.into(),
+            ));
+            SSH_SCRIPT_ENV.with(|slot| *slot.borrow_mut() = Some(env));
+            if post_copy {
+                verify_remote_custody("isolated-shell", &self.remote, &self.custody).is_ok()
+            } else {
+                remote_binary_is_the_reviewed_one("isolated-shell", &self.remote, &self.custody)
+                    .unwrap()
+            }
+        }
+    }
+
+    impl Drop for CustodyRaceFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(self.path.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn local_custody_uses_the_open_file_not_a_replaced_pathname() {
+        let fixture = CustodyRaceFixture::new();
+        let source = File::open(&fixture.path).unwrap();
+        fs::rename(&fixture.replacement, &fixture.path).unwrap();
+        let custody = local_install_custody_from_open_file(&fixture.path, &source).unwrap();
+        assert_eq!(
+            custody.sha256, fixture.custody.sha256,
+            "custody reopened the local pathname"
+        );
+        assert!(!fixture.marker.exists());
+    }
+
+    #[test]
+    fn remote_reuse_keeps_the_executable_open_across_hash_and_metadata() {
+        let fixture = CustodyRaceFixture::new();
+        assert!(fixture.run_probe(false, false));
+        assert!(
+            !fixture.marker.exists(),
+            "reuse executed the pathname substituted after hashing"
+        );
+    }
+
+    #[test]
+    fn remote_post_copy_keeps_the_executable_open_across_hash_and_metadata() {
+        let fixture = CustodyRaceFixture::new();
+        assert!(fixture.run_probe(true, false));
+        assert!(
+            !fixture.marker.exists(),
+            "post-copy validation executed substituted bytes"
+        );
+    }
+
+    #[test]
+    fn remote_probe_checks_the_hash_before_executing_any_metadata() {
+        for post_copy in [false, true] {
+            let fixture = CustodyRaceFixture::new();
+            fs::rename(&fixture.replacement, &fixture.path).unwrap();
+            assert!(!fixture.run_probe(post_copy, false));
+            assert!(
+                !fixture.marker.exists(),
+                "an unreviewed binary ran before hash comparison"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_bridge_revalidates_a_path_changed_after_preparation() {
+        let fixture = CustodyRaceFixture::new();
+        fs::rename(&fixture.replacement, &fixture.path).unwrap();
+        let command =
+            remote_bridge_command(&fixture.remote, crate::session::DEFAULT_SESSION_NAME).unwrap();
+        let output = Command::new("/bin/sh")
+            .args(["-c", &command])
+            .envs(fixture.env.clone())
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "bridge ran changed bytes after preparation: {output:?}"
+        );
+        assert!(!fixture.marker.exists());
+    }
+
+    #[test]
+    fn remote_bridge_executes_the_hashed_inode_even_if_its_path_is_replaced() {
+        let mut fixture = CustodyRaceFixture::new();
+        let quoted_path = fixture.path.with_file_name("zynk's reviewed binary");
+        fs::rename(&fixture.path, &quoted_path).unwrap();
+        fixture.path = quoted_path;
+        fixture.remote.shell_path = shell_quote(fixture.path.to_str().unwrap());
+        fixture
+            .env
+            .push(("TARGET".into(), fixture.path.display().to_string()));
+        let command = remote_bridge_command(&fixture.remote, "work 'one'").unwrap();
+        let output = Command::new("/bin/sh")
+            .args(["-c", &command])
+            .envs(fixture.env.clone())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "reviewed-bridge\n--session\nwork 'one'\nremote-client-bridge\n"
+        );
+        assert!(!fixture.marker.exists());
+        assert_ne!(
+            crate::checksum::file_sha256(&fixture.path).unwrap(),
+            fixture.custody.sha256
+        );
+    }
+
+    #[test]
+    fn a_failed_remote_hash_query_runs_no_binary_and_names_the_requirement() {
+        for post_copy in [false, true] {
+            let fixture = CustodyRaceFixture::new();
+            let mut env = fixture.env.clone();
+            env.push(("HASH_FAIL".into(), "1".into()));
+            SSH_SCRIPT_ENV.with(|slot| *slot.borrow_mut() = Some(env));
+            let error = if post_copy {
+                verify_remote_custody("isolated-shell", &fixture.remote, &fixture.custody)
+                    .unwrap_err()
+            } else {
+                remote_binary_is_the_reviewed_one(
+                    "isolated-shell",
+                    &fixture.remote,
+                    &fixture.custody,
+                )
+                .unwrap_err()
+            };
+            assert!(error.to_string().contains("sha256sum failed"), "{error}");
+            assert!(!fixture
+                .path
+                .parent()
+                .unwrap()
+                .join("any-execution")
+                .exists());
+        }
+    }
+
+    #[test]
+    fn remote_handoff_import_path_names_the_descriptor_holder() {
+        let fixture = CustodyRaceFixture::new();
+        SSH_SCRIPT_ENV.with(|slot| *slot.borrow_mut() = Some(fixture.env.clone()));
+        // The fake CLI executes the received --import-exe in a child process. The
+        // path must still refer to the SSH shell's held inode after replacement.
+        live_handoff_remote_server("isolated-shell", &fixture.remote).unwrap();
+        assert!(!fixture.marker.exists());
+        assert_ne!(
+            crate::checksum::file_sha256(&fixture.path).unwrap(),
+            fixture.custody.sha256
+        );
     }
 
     /// What one custody probe prints: the file's hash, its version line, its client status.

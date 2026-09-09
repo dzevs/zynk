@@ -2462,6 +2462,103 @@ fn status_commands_report_client_and_server_versions() {
 }
 
 #[test]
+fn a_remote_bridge_bootstraps_its_running_image_after_path_replacement() {
+    use interprocess::local_socket::traits::StreamCommon as _;
+    use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket = runtime_dir.join("zynk.sock");
+    fs::create_dir_all(config_home.join("zynk-dev")).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(
+        config_home.join("zynk-dev/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+    let path = base.join("zynk");
+    fs::copy(env!("CARGO_BIN_EXE_zynk"), &path).unwrap();
+    let image = fs::File::open(&path).unwrap();
+    let marker = base.join("wrong-image");
+    let replacement = base.join("replacement");
+    fs::write(
+        &replacement,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    let log_path = base.join("bridge.log");
+    let child = Command::new(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        image.as_raw_fd()
+    ))
+    .arg("remote-client-bridge")
+    .env("XDG_CONFIG_HOME", &config_home)
+    .env("XDG_RUNTIME_DIR", &runtime_dir)
+    .env("ZYNK_SQLITE_HOME", config_home.join("sqlite"))
+    .env("ZYNK_SOCKET_PATH", &socket)
+    .env(
+        "ZYNK_CLIENT_SOCKET_PATH",
+        runtime_dir.join("zynk-client.sock"),
+    )
+    .env_remove("ZYNK_HOME")
+    .env_remove("ZYNK_SESSION")
+    .env_remove("ZYNK_ENV")
+    .env_remove("ZYNK_PANE_ID")
+    .env_remove("ZYNK_TEST_TRUST_PEER_PID")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(fs::File::create(&log_path).unwrap())
+    .spawn()
+    .unwrap();
+    register_spawned_zynk_pid(Some(child.id()));
+    register_runtime_dir(&runtime_dir);
+    let mut bridge = SpawnedServerProcess {
+        child,
+        log_path: log_path.clone(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() && Instant::now() < deadline {
+        if bridge.child.try_wait().unwrap().is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let started = socket.exists();
+    // A copied/deleted executable is invisible to the usual pathname-based PID
+    // scanner. Ask the isolated socket for its real kernel-reported daemon PID.
+    let pid = socket
+        .as_path()
+        .to_fs_name::<GenericFilePath>()
+        .and_then(Stream::connect)
+        .ok()
+        .and_then(|stream| stream.peer_creds().ok().and_then(|creds| creds.pid()))
+        .and_then(|pid| u32::try_from(pid).ok());
+    register_spawned_zynk_pid(pid);
+    let image_meta = image.metadata().unwrap();
+    let same_image = pid.is_some_and(|pid| {
+        fs::metadata(format!("/proc/{pid}/exe"))
+            .is_ok_and(|meta| (meta.dev(), meta.ino()) == (image_meta.dev(), image_meta.ino()))
+    });
+    let diagnostic = fs::read_to_string(&log_path).unwrap_or_default();
+    let wrong_image = marker.exists();
+    if started {
+        let _ = run_cli(&socket, &["server", "stop"]);
+    }
+    drop(bridge);
+    cleanup_test_base(&base);
+    assert!(
+        started && same_image,
+        "bridge did not bootstrap its pinned image: {diagnostic}; pid={pid:?}"
+    );
+    assert!(!wrong_image, "the bridge bootstrapped substituted bytes");
+}
+
+#[test]
 fn status_reports_not_running_when_server_socket_is_missing() {
     let base = unique_test_dir();
     let runtime_dir = base.join("runtime");
