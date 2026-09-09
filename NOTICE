@@ -67,6 +67,7 @@ docs/zynk/fork-patch-ledger.md and enumerated here.
 - src/integration/assets/pi/zynk-agent-state.test.ts
 - src/integration/assets/pi/zynk-agent-state.ts
 - src/integration/assets/zynk-agent-state.test.ts
+- src/integration/claude_settings.rs
 - src/integration/env.rs
 - src/integration/mod.rs
 - src/integration/registry.rs

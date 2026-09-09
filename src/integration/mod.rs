@@ -1,4 +1,5 @@
 mod actions;
+mod claude_settings;
 mod command;
 mod config_edit;
 mod env;

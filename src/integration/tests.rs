@@ -874,6 +874,104 @@ fn install_claude_removes_deprecated_completion_hooks_and_preserves_user_hooks()
     let _ = fs::remove_dir_all(base);
 }
 
+// Round-trip fixture for the jsonc-parser rewrite (upstream d742e515): a real
+// `install_claude()` + `uninstall_claude()` pass over a hand-formatted
+// settings.json must leave every untouched byte alone -- 4-space indent, the
+// user's own (non-alphabetical) key order, ` : ` separators, the `\u0061`
+// escape, the `1e+02` literal, and the trailing blank line. The old
+// serde_json::to_string_pretty round-trip destroyed all six.
+#[test]
+fn install_then_uninstall_claude_restores_original_settings_bytes() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let claude_dir = home.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    let settings_path = claude_dir.join("settings.json");
+    let original = concat!(
+        "{\n",
+        "    \"zeta\" : {\"escaped\":\"\\u0061\", \"number\":1e+02},\n",
+        "    \"hooks\" : {\n",
+        "        \"Notification\" : [{\"matcher\":\"keep\",\"hooks\":[{  \"type\" : \"command\", \"command\" : \"echo keep\"  }]}]\n",
+        "    },\n",
+        "    \"alpha\" : 1\n",
+        "}\n\n",
+    );
+    fs::write(&settings_path, original).unwrap();
+    std::env::set_var("HOME", &home);
+
+    install_claude().unwrap();
+    let installed = fs::read_to_string(&settings_path).unwrap();
+
+    // Everything before and after the edited `hooks` object is byte-identical,
+    // and the only textual change inside it is the appended SessionStart entry.
+    assert!(
+        installed.starts_with(concat!(
+            "{\n",
+            "    \"zeta\" : {\"escaped\":\"\\u0061\", \"number\":1e+02},\n",
+            "    \"hooks\" : {\n",
+            "        \"Notification\" : [{\"matcher\":\"keep\",\"hooks\":[{  \"type\" : \"command\", \"command\" : \"echo keep\"  }]}],\n",
+        )),
+        "{installed}"
+    );
+    assert!(
+        installed.ends_with(concat!("\n    },\n", "    \"alpha\" : 1\n", "}\n\n")),
+        "{installed}"
+    );
+    assert!(installed.contains("\"SessionStart\""), "{installed}");
+    // The user's key order survives; a serde_json round-trip would sort it.
+    let zeta = installed.find("\"zeta\"").unwrap();
+    let hooks = installed.find("\"hooks\"").unwrap();
+    let alpha = installed.find("\"alpha\"").unwrap();
+    assert!(zeta < hooks && hooks < alpha, "{installed}");
+    let parsed: Value = serde_json::from_str(&installed).unwrap();
+    assert_eq!(parsed["zeta"]["number"], 100.0);
+    assert_eq!(parsed["hooks"]["SessionStart"][0]["matcher"], "*");
+
+    let removal = uninstall_claude().unwrap();
+
+    assert!(removal.updated_settings);
+    assert_eq!(fs::read_to_string(&settings_path).unwrap(), original);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+// Comments are NOT preserved by the jsonc-parser rewrite -- despite the crate
+// name, `parse_value` is plain `serde_json::from_str` and `strict_parse_options`
+// sets `allow_comments: false`, so a JSONC settings.json is rejected exactly as
+// it was before this port. Pin that: install fails with a parse error and leaves
+// the user's file byte-for-byte untouched rather than rewriting it.
+#[test]
+fn install_claude_rejects_settings_with_comments_and_leaves_the_file_untouched() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let claude_dir = home.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    let settings_path = claude_dir.join("settings.json");
+    let original = concat!(
+        "{\n",
+        "    // keep my notes\n",
+        "    \"alpha\" : 1\n",
+        "}\n",
+    );
+    fs::write(&settings_path, original).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let error = install_claude().unwrap_err().to_string();
+
+    assert!(error.contains("failed to parse"), "{error}");
+    assert!(
+        error.contains(&settings_path.display().to_string()),
+        "{error}"
+    );
+    assert_eq!(fs::read_to_string(&settings_path).unwrap(), original);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
 #[test]
 fn claude_v1_integration_status_is_outdated() {
     let _lock = integration_env_lock();
