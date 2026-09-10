@@ -1652,7 +1652,7 @@ impl AppState {
         self.selection = None;
         self.selection_autoscroll = None;
         self.clear_chrome_press(source_id);
-        self.drag = None;
+        self.clear_chrome_drag(source_id);
         self.context_menu = None;
         self.right_click_passthrough = Some(RightClickPassthroughGesture {
             pane_info: info,
