@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Headless server mode — runs the zynk event loop without a real terminal.
 //!
 //! The server:
@@ -2294,8 +2296,9 @@ impl HeadlessServer {
             self.resize_shared_runtime_to_effective_size_before_input();
         }
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
-        self.app
-            .route_client_events(events, self.foreground_client_id == Some(client_id));
+        // Client-local theme reports were applied above; route the captured batch
+        // without updating every pane again for each palette entry.
+        self.app.route_client_events(events, false);
         if self.app.take_config_reloaded_from_disk() {
             self.reload_server_config(false);
         } else {
@@ -5205,6 +5208,7 @@ next_tab = ""
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         server
             .app
@@ -5258,6 +5262,7 @@ next_tab = ""
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         server
             .app
@@ -5322,6 +5327,7 @@ next_tab = ""
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         server
             .app
@@ -5757,6 +5763,7 @@ next_tab = ""
                         g: 0x22,
                         b: 0x33,
                     }),
+                    ..Default::default()
                 },
                 None,
                 1,
@@ -5780,6 +5787,7 @@ next_tab = ""
                         g: 0xee,
                         b: 0xff,
                     }),
+                    ..Default::default()
                 },
                 None,
                 2,
@@ -5827,6 +5835,7 @@ next_tab = ""
                 g: 0x50,
                 b: 0x60,
             }),
+            ..Default::default()
         };
         server.clients.insert(
             1,
@@ -5877,6 +5886,7 @@ next_tab = ""
                 crate::terminal_theme::TerminalTheme {
                     foreground: None,
                     background: Some(crate::terminal_theme::RgbColor { r: 0, g: 0, b: 0 }),
+                    ..Default::default()
                 },
                 None,
                 1,
@@ -5896,6 +5906,7 @@ next_tab = ""
                         g: 255,
                         b: 255,
                     }),
+                    ..Default::default()
                 },
                 None,
                 2,
@@ -5925,6 +5936,7 @@ next_tab = ""
                 g: 0x50,
                 b: 0x60,
             }),
+            ..Default::default()
         };
         server.app.state.host_terminal_theme = initial_theme;
         server.clients.insert(

@@ -891,6 +891,9 @@ async fn run_client_loop(
                     ) {
                         state.request_full_redraw();
                     }
+                    if crate::raw_input::events_require_host_terminal_appearance_query(&events) {
+                        query_host_terminal_appearance();
+                    }
                     if crate::raw_input::events_require_host_terminal_theme_query(&events) {
                         query_host_terminal_theme();
                     }
@@ -1405,6 +1408,15 @@ fn resize_poll_loop(
 // Logging
 // ---------------------------------------------------------------------------
 
+fn query_host_terminal_appearance() {
+    let _ = write_host_terminal_appearance_query(io::stdout());
+}
+
+fn write_host_terminal_appearance_query(mut writer: impl io::Write) -> io::Result<()> {
+    writer.write_all(crate::terminal_theme::HOST_COLOR_SCHEME_QUERY_SEQUENCE.as_bytes())?;
+    writer.flush()
+}
+
 /// Initialize logging for the client process.
 fn query_host_terminal_theme() {
     let _ = write_host_terminal_theme_query(io::stdout());
@@ -1415,7 +1427,8 @@ fn should_query_host_terminal_theme() -> bool {
 }
 
 fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
-    writer.write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes())?;
+    let query = crate::terminal_theme::host_terminal_theme_query_sequence();
+    writer.write_all(query.as_bytes())?;
     writer.flush()
 }
 
@@ -1559,13 +1572,35 @@ mod tests {
     }
 
     #[test]
+    fn write_host_terminal_appearance_query_emits_mode_2031_query() {
+        let mut output = Vec::new();
+        write_host_terminal_appearance_query(&mut output).unwrap();
+        assert_eq!(output, b"\x1b[?996n");
+    }
+
+    #[test]
+    fn write_host_terminal_theme_query_includes_all_palette_entries() {
+        let mut output = Vec::new();
+        write_host_terminal_theme_query(&mut output).unwrap();
+        let query = String::from_utf8(output).unwrap();
+        assert!(query.starts_with(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE));
+        assert!(query.contains("\x1b]4;0;?\x1b\\"));
+        assert!(query.ends_with("\x1b]4;255;?\x1b\\"));
+        assert_eq!(query.matches("\x1b]4;").count(), 256);
+    }
+
+    #[test]
     fn write_host_terminal_theme_query_emits_osc_queries() {
         let mut output = Vec::new();
         write_host_terminal_theme_query(&mut output).unwrap();
         assert_eq!(
             output,
-            crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes()
+            crate::terminal_theme::host_terminal_theme_query_sequence().as_bytes()
         );
+        assert!(!output
+            .windows(crate::terminal_theme::HOST_COLOR_SCHEME_QUERY_SEQUENCE.len())
+            .any(|window| window
+                == crate::terminal_theme::HOST_COLOR_SCHEME_QUERY_SEQUENCE.as_bytes()));
     }
 
     #[test]

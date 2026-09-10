@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -116,6 +118,8 @@ pub struct InputState {
     pub mouse_alternate_scroll: bool,
     #[serde(default)]
     pub modify_other_keys: bool,
+    #[serde(default)]
+    pub color_scheme_reporting: bool,
 }
 
 impl InputState {
@@ -428,6 +432,13 @@ impl PaneTerminal {
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.ghostty.apply_host_terminal_theme(theme);
+    }
+
+    pub fn apply_host_terminal_appearance(
+        &self,
+        appearance: Option<crate::terminal_theme::HostAppearance>,
+    ) -> Option<Bytes> {
+        self.ghostty.apply_host_terminal_appearance(appearance)
     }
 
     pub fn has_transient_default_color_override(&self) -> bool {
@@ -921,6 +932,21 @@ impl GhosttyPaneTerminal {
             if foreground_unowned && background_unowned {
                 core.transient_default_color_owner_pgid = None;
             }
+
+            let mut palette = crate::ghostty::default_palette();
+            for (index, color) in theme.palette.iter().enumerate() {
+                if let Some(color) = color {
+                    palette[index] = crate::ghostty::RgbColor {
+                        r: color.r,
+                        g: color.g,
+                        b: color.b,
+                    };
+                }
+            }
+            if let Err(err) = core.terminal.set_default_palette(&palette) {
+                debug!(err = %err, "failed to apply host terminal palette");
+            }
+
             write_host_terminal_theme_selective(
                 &mut core.terminal,
                 theme,
@@ -928,6 +954,32 @@ impl GhosttyPaneTerminal {
                 background_unowned,
             );
         }
+    }
+
+    pub fn apply_host_terminal_appearance(
+        &self,
+        appearance: Option<crate::terminal_theme::HostAppearance>,
+    ) -> Option<Bytes> {
+        let mut core = self.core.lock().ok()?;
+        let color_scheme = appearance.map(|appearance| match appearance {
+            crate::terminal_theme::HostAppearance::Dark => crate::ghostty::ColorScheme::Dark,
+            crate::terminal_theme::HostAppearance::Light => crate::ghostty::ColorScheme::Light,
+        });
+        let previous = core.terminal.set_color_scheme(color_scheme);
+
+        let transitioned = matches!(
+            (previous, color_scheme),
+            (Some(previous), Some(current)) if previous != current
+        );
+        if !transitioned
+            || !core
+                .terminal
+                .mode_get(crate::ghostty::MODE_COLOR_SCHEME_REPORT)
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        appearance.map(|appearance| Bytes::from_static(appearance.color_scheme_report()))
     }
 
     pub fn has_transient_default_color_override(&self) -> bool {
@@ -1234,6 +1286,10 @@ impl GhosttyPaneTerminal {
             crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL,
             input_state.mouse_alternate_scroll,
         );
+        let _ = core.terminal.mode_set(
+            crate::ghostty::MODE_COLOR_SCHEME_REPORT,
+            input_state.color_scheme_reporting,
+        );
 
         for mode in [
             MODE_MOUSE_X10,
@@ -1482,6 +1538,10 @@ impl GhosttyPaneTerminal {
                 .keyboard_state_ansi()
                 .ok()
                 .is_some_and(|ansi| !ansi.is_empty()),
+            color_scheme_reporting: core
+                .terminal
+                .mode_get(crate::ghostty::MODE_COLOR_SCHEME_REPORT)
+                .ok()?,
         })
     }
 
@@ -3199,6 +3259,7 @@ mod tests {
                     g: 0x22,
                     b: 0x33,
                 }),
+                ..Default::default()
             };
         }
         let core = pane.core.lock().unwrap();
@@ -3225,6 +3286,7 @@ mod tests {
                     g: 0x22,
                     b: 0x33,
                 }),
+                ..Default::default()
             };
         }
         let core = pane.core.lock().unwrap();
@@ -3392,6 +3454,7 @@ mod tests {
             mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
             mouse_alternate_scroll: true,
             modify_other_keys: true,
+            color_scheme_reporting: true,
         });
 
         assert_eq!(
@@ -3405,6 +3468,7 @@ mod tests {
                 mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
                 mouse_alternate_scroll: true,
                 modify_other_keys: true,
+                color_scheme_reporting: true,
             })
         );
 
@@ -4569,6 +4633,45 @@ mod tests {
     }
 
     #[test]
+    fn color_scheme_queries_and_live_updates_follow_terminal_mode() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        assert!(pane
+            .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark))
+            .is_none());
+        let query = pane.process_pty_bytes(pane_id, 0, b"\x1b[?996n", &tx);
+        assert_eq!(
+            query.terminal_responses,
+            vec![Bytes::from_static(b"\x1b[?997;1n")]
+        );
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[?2031h", &tx);
+        assert!(pane
+            .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark))
+            .is_none());
+        assert_eq!(
+            pane.apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Light)),
+            Some(Bytes::from_static(b"\x1b[?997;2n"))
+        );
+
+        assert!(pane.apply_host_terminal_appearance(None).is_none());
+        let unknown_query = pane.process_pty_bytes(pane_id, 0, b"\x1b[?996n", &tx);
+        assert!(unknown_query.terminal_responses.is_empty());
+        assert!(pane
+            .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark))
+            .is_none());
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1bc", &tx);
+        assert!(pane
+            .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Light))
+            .is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn process_pty_bytes_returns_xtgettcap_truecolor_query_responses_without_queuing_input() {
         let (tx, mut rx) = mpsc::channel(8);
         let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
@@ -4668,6 +4771,7 @@ mod tests {
                 g: 0x2b,
                 b: 0x36,
             }),
+            ..Default::default()
         });
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1bP+q5463\x1b\\\x1b]11;?\x07", &tx);
@@ -4699,6 +4803,7 @@ mod tests {
                 g: 0xbb,
                 b: 0xcc,
             }),
+            ..Default::default()
         });
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
@@ -4724,6 +4829,7 @@ mod tests {
                 g: 0xbb,
                 b: 0xcc,
             }),
+            ..Default::default()
         });
         pane.process_pty_bytes(pane_id, 0, b"\x1b]111\x07", &tx);
         assert!(!pane.has_transient_default_color_override());
@@ -4822,6 +4928,7 @@ mod tests {
                 g: 0x2b,
                 b: 0x36,
             }),
+            ..Default::default()
         });
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07\x1b[c", &tx);
@@ -4836,20 +4943,107 @@ mod tests {
     }
 
     #[test]
-    fn process_pty_bytes_returns_palette_color_query_response_without_queuing_input() {
+    fn process_pty_bytes_returns_host_palette_color_without_queuing_input() {
         let (tx, mut rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
-        let color = current_palette_color(&pane, 0);
+        pane.apply_host_terminal_theme(
+            crate::terminal_theme::TerminalTheme::default().with_palette_color(
+                0,
+                crate::terminal_theme::RgbColor {
+                    r: 0x11,
+                    g: 0x22,
+                    b: 0x33,
+                },
+            ),
+        );
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]4;0;?\x07", &tx);
 
         assert_eq!(
             result.terminal_responses,
-            vec![expected_osc_rgb_response("4;0", color)]
+            vec![Bytes::from_static(b"\x1b]4;0;rgb:1111/2222/3333\x1b\\")]
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn opentui_256_palette_query_burst_uses_host_snapshot() {
+        use std::fmt::Write as _;
+
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        let mut theme = crate::terminal_theme::TerminalTheme::default();
+        let mut queries = String::new();
+        for index in 0..=u8::MAX {
+            theme = theme.with_palette_color(
+                index,
+                crate::terminal_theme::RgbColor {
+                    r: index,
+                    g: 0x22,
+                    b: 0x33,
+                },
+            );
+            let _ = write!(queries, "\x1b]4;{index};?\x07");
+        }
+        pane.apply_host_terminal_theme(theme);
+
+        let result = pane.process_pty_bytes(pane_id, 0, queries.as_bytes(), &tx);
+
+        assert_eq!(result.terminal_responses.len(), 256);
+        assert_eq!(
+            result.terminal_responses[0],
+            Bytes::from_static(b"\x1b]4;0;rgb:0000/2222/3333\x1b\\")
+        );
+        assert_eq!(
+            result.terminal_responses[255],
+            Bytes::from_static(b"\x1b]4;255;rgb:ffff/2222/3333\x1b\\")
+        );
+    }
+
+    #[test]
+    fn child_palette_override_survives_host_refresh_until_reset() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        pane.apply_host_terminal_theme(
+            crate::terminal_theme::TerminalTheme::default().with_palette_color(
+                7,
+                crate::terminal_theme::RgbColor {
+                    r: 0x11,
+                    g: 0x22,
+                    b: 0x33,
+                },
+            ),
+        );
+        pane.process_pty_bytes(pane_id, 0, b"\x1b]4;7;rgb:aa/bb/cc\x1b\\", &tx);
+
+        pane.apply_host_terminal_theme(
+            crate::terminal_theme::TerminalTheme::default().with_palette_color(
+                7,
+                crate::terminal_theme::RgbColor {
+                    r: 0x44,
+                    g: 0x55,
+                    b: 0x66,
+                },
+            ),
+        );
+        let overridden = pane.process_pty_bytes(pane_id, 0, b"\x1b]4;7;?\x1b\\", &tx);
+        assert_eq!(
+            overridden.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]4;7;rgb:aaaa/bbbb/cccc\x1b\\")]
+        );
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b]104;7\x1b\\", &tx);
+        let reset = pane.process_pty_bytes(pane_id, 0, b"\x1b]4;7;?\x1b\\", &tx);
+        assert_eq!(
+            reset.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]4;7;rgb:4444/5555/6666\x1b\\")]
+        );
     }
 
     #[test]
@@ -4915,6 +5109,7 @@ mod tests {
                 g: 0x2b,
                 b: 0x36,
             }),
+            ..Default::default()
         });
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]4;0;?\x07\x1b]11;?\x07\x1b[c", &tx);
@@ -4945,6 +5140,7 @@ mod tests {
                 g: 0x2b,
                 b: 0x36,
             }),
+            ..Default::default()
         });
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
@@ -4973,6 +5169,7 @@ mod tests {
                 g: 0xf6,
                 b: 0xe3,
             }),
+            ..Default::default()
         });
 
         let palette = pane.process_pty_bytes(pane_id, 0, b"\x1b]4;0;?;1;?\x1b\\", &tx);
@@ -5075,6 +5272,7 @@ mod tests {
                 g: 0xf6,
                 b: 0xe3,
             }),
+            ..Default::default()
         });
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]10;?\x07\x1b]11;?\x07", &tx);
@@ -5102,6 +5300,7 @@ mod tests {
                 g: 0xf6,
                 b: 0xe3,
             }),
+            ..Default::default()
         });
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11", &tx);
@@ -5132,6 +5331,7 @@ mod tests {
                 g: 0xf6,
                 b: 0xe3,
             }),
+            ..Default::default()
         });
 
         let result =
@@ -5166,6 +5366,7 @@ mod tests {
                 g: 0x22,
                 b: 0x33,
             }),
+            ..Default::default()
         };
         pane.apply_host_terminal_theme(host_theme);
         {
@@ -5204,6 +5405,7 @@ mod tests {
                 g: 0x22,
                 b: 0x33,
             }),
+            ..Default::default()
         };
         pane.apply_host_terminal_theme(host_theme);
         {
@@ -5241,6 +5443,7 @@ mod tests {
                 g: 0x22,
                 b: 0x33,
             }),
+            ..Default::default()
         };
         pane.apply_host_terminal_theme(host_theme);
         {
@@ -5278,6 +5481,7 @@ mod tests {
                 g: 0x22,
                 b: 0x33,
             }),
+            ..Default::default()
         };
         pane.apply_host_terminal_theme(host_theme);
         {

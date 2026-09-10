@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::time::{Duration, Instant};
 
 use crossterm::terminal;
@@ -178,6 +180,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {
+                self.query_host_terminal_appearance();
                 self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
                 if self.state.redraw_on_focus_gained {
                     self.request_full_redraw();
@@ -193,6 +196,9 @@ impl App {
             }
             crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                 self.update_host_terminal_theme(kind, color)
+            }
+            crate::raw_input::RawInputEvent::HostPaletteColors { colors } => {
+                self.update_host_terminal_palette_colors(&colors)
             }
             crate::raw_input::RawInputEvent::HostColorSchemeChanged(appearance) => {
                 self.query_host_terminal_theme();
@@ -1086,6 +1092,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         let terminal_id = app.state.workspaces[0]
             .terminal_id(pane_id)

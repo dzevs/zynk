@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::io::Read;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -95,7 +97,8 @@ use tokio::sync::mpsc;
 
 use crate::input::{parse_terminal_key_sequence, TerminalKey};
 use crate::terminal_theme::{
-    parse_default_color_response, DefaultColorKind, HostAppearance, RgbColor,
+    parse_default_color_response, parse_palette_color_response, DefaultColorKind, HostAppearance,
+    RgbColor,
 };
 
 const ESC: u8 = 0x1b;
@@ -115,6 +118,9 @@ pub enum RawInputEvent {
         kind: DefaultColorKind,
         color: RgbColor,
     },
+    HostPaletteColors {
+        colors: Vec<(u8, RgbColor)>,
+    },
     HostColorSchemeChanged(HostAppearance),
     Unsupported,
 }
@@ -133,8 +139,20 @@ impl RawInputFramer {
         self.byte_framer.host_color_query_sent();
     }
 
+    pub(crate) fn enable_host_color_scheme_change_tracking(&mut self) {
+        self.byte_framer.enable_host_color_scheme_change_tracking();
+    }
+
+    pub(crate) fn enable_host_appearance_query_on_focus(&mut self) {
+        self.byte_framer.enable_host_appearance_query_on_focus();
+    }
+
     pub(crate) fn flush_timeout(&mut self) -> Vec<RawInputEvent> {
         Self::events_from_chunks(self.byte_framer.flush_timeout())
+    }
+
+    pub(crate) fn has_pending_input(&self) -> bool {
+        self.byte_framer.has_pending_input()
     }
 
     fn events_from_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
@@ -161,11 +179,14 @@ pub(crate) struct RawInputByteFramer {
     buffer: Vec<u8>,
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
-    host_color_replies_awaited: u8,
+    host_color_replies_awaited: u16,
+    host_appearance_reply_awaited: bool,
     held_pending_color_esc: bool,
+    host_color_scheme_change_tracking: bool,
+    host_appearance_query_on_focus: bool,
 }
 
-const HOST_COLOR_QUERY_REPLIES: u8 = 2;
+const HOST_COLOR_QUERY_REPLIES: u16 = 258;
 
 impl RawInputByteFramer {
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
@@ -173,12 +194,35 @@ impl RawInputByteFramer {
         self.drain_available_chunks()
     }
 
-    /// Hold a lone trailing ESC for one idle flush so an OSC 10/11 reply split
+    /// Hold a lone trailing ESC for one idle flush so an OSC 4/10/11 reply split
     /// at its ESC introducer stitches back together instead of leaking
     /// (upstream 6f9ca0e).
     pub(crate) fn host_color_query_sent(&mut self) {
         self.host_color_replies_awaited = HOST_COLOR_QUERY_REPLIES;
         self.held_pending_color_esc = false;
+    }
+
+    fn host_appearance_query_sent(&mut self) {
+        self.host_appearance_reply_awaited = true;
+        self.held_pending_color_esc = false;
+    }
+
+    fn awaiting_host_reply(&self) -> bool {
+        self.host_color_replies_awaited > 0 || self.host_appearance_reply_awaited
+    }
+
+    pub(crate) fn enable_host_color_scheme_change_tracking(&mut self) {
+        self.host_color_scheme_change_tracking = true;
+    }
+
+    /// Arm the bounded host-reply window when focus gain will emit an appearance query.
+    /// If the write or reply fails, a lone Escape is delayed for only one extra flush.
+    pub(crate) fn enable_host_appearance_query_on_focus(&mut self) {
+        self.host_appearance_query_on_focus = true;
+    }
+
+    pub(crate) fn has_pending_input(&self) -> bool {
+        !self.buffer.is_empty()
     }
 
     pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
@@ -214,6 +258,16 @@ impl RawInputByteFramer {
             return chunks;
         }
 
+        if self.host_appearance_reply_awaited && self.buffer.as_slice() == b"\x1b[" {
+            if !self.held_pending_color_esc {
+                self.held_pending_color_esc = true;
+                tracing::trace!("holding incomplete host CSI reply one flush");
+                return chunks;
+            }
+            self.host_appearance_reply_awaited = false;
+            self.held_pending_color_esc = false;
+        }
+
         if starts_with_incomplete_default_color_response(&self.buffer) {
             tracing::trace!(
                 len = self.buffer.len(),
@@ -223,10 +277,20 @@ impl RawInputByteFramer {
         }
 
         if starts_with_incomplete_host_color_scheme_report(&self.buffer) {
+            if self.host_appearance_reply_awaited && !self.held_pending_color_esc {
+                self.held_pending_color_esc = true;
+                tracing::trace!(
+                    len = self.buffer.len(),
+                    "holding incomplete host color scheme report one flush"
+                );
+                return chunks;
+            }
             tracing::debug!(
                 len = self.buffer.len(),
                 "discarding incomplete host color scheme report after input timeout"
             );
+            self.host_appearance_reply_awaited = false;
+            self.held_pending_color_esc = false;
             self.discard_until = Some(ControlStringFamily::HostColorSchemeCsi);
             self.discarded_tail_bytes = 0;
             self.buffer.clear();
@@ -247,13 +311,14 @@ impl RawInputByteFramer {
         }
 
         if self.buffer.as_slice() == [ESC] {
-            if self.host_color_replies_awaited > 0 && !self.held_pending_color_esc {
+            if self.awaiting_host_reply() && !self.held_pending_color_esc {
                 self.held_pending_color_esc = true;
                 tracing::trace!("holding lone escape one flush while awaiting host color reply");
                 return chunks;
             }
             // No continuation arrived; give up the window so Escape is not delayed again.
             self.host_color_replies_awaited = 0;
+            self.host_appearance_reply_awaited = false;
             self.held_pending_color_esc = false;
             tracing::warn!(
                 bytes = ?self.buffer,
@@ -305,8 +370,20 @@ impl RawInputByteFramer {
             let Some((event, consumed)) = extract_one_event(&self.buffer) else {
                 break;
             };
-            if matches!(event, RawInputEvent::HostDefaultColor { .. }) {
+            if matches!(
+                event,
+                RawInputEvent::HostDefaultColor { .. } | RawInputEvent::HostPaletteColors { .. }
+            ) {
                 self.host_color_replies_awaited = self.host_color_replies_awaited.saturating_sub(1);
+            } else if self.host_appearance_query_on_focus
+                && matches!(event, RawInputEvent::OuterFocusGained)
+            {
+                self.host_appearance_query_sent();
+            } else if matches!(event, RawInputEvent::HostColorSchemeChanged(_)) {
+                self.host_appearance_reply_awaited = false;
+                if self.host_color_scheme_change_tracking {
+                    self.host_color_query_sent();
+                }
             }
             self.held_pending_color_esc = false;
             chunks.push(self.buffer[..consumed].to_vec());
@@ -359,6 +436,12 @@ pub(crate) fn events_require_host_surface_redraw(
             .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
 }
 
+pub(crate) fn events_require_host_terminal_appearance_query(events: &[RawInputEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
+}
+
 pub(crate) fn events_require_host_terminal_theme_query(events: &[RawInputEvent]) -> bool {
     events
         .iter()
@@ -370,33 +453,76 @@ pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
 
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
-        let mut reader = stdin.lock();
-        let mut scratch = [0u8; 1024];
-        let mut framer = RawInputFramer::default();
-        framer.host_color_query_sent();
-
-        loop {
-            match reader.read(&mut scratch) {
-                Ok(0) => break,
-                Ok(n) => {
-                    send_raw_input_events(framer.push(&scratch[..n]), &tx);
-
-                    if stdin_read_ready(&reader, 10) == Some(false) {
-                        send_raw_input_events(framer.flush_timeout(), &tx);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+        raw_input_reader_loop(stdin.lock(), &tx);
     });
 
     rx
 }
 
-fn send_raw_input_events(events: Vec<RawInputEvent>, tx: &mpsc::Sender<RawInputEvent>) {
-    for event in events {
-        let _ = tx.blocking_send(event);
+fn raw_input_reader_loop<R: Read + AsRawFd>(mut reader: R, tx: &mpsc::Sender<RawInputEvent>) {
+    let mut scratch = [0u8; 1024];
+    let mut framer = RawInputFramer::default();
+    framer.host_color_query_sent();
+    framer.enable_host_color_scheme_change_tracking();
+    framer.enable_host_appearance_query_on_focus();
+    let mut pending_palette = Vec::new();
+
+    loop {
+        match reader.read(&mut scratch) {
+            Ok(0) => break,
+            Ok(n) => {
+                send_raw_input_events(framer.push(&scratch[..n]), tx, &mut pending_palette);
+
+                if stdin_read_ready(&reader, 10) == Some(false) {
+                    let had_pending = framer.has_pending_input();
+                    let events = framer.flush_timeout();
+                    let held_escape = had_pending && events.is_empty();
+                    send_raw_input_events(events, tx, &mut pending_palette);
+                    flush_host_palette_events(tx, &mut pending_palette);
+                    if held_escape && stdin_read_ready(&reader, 10) == Some(false) {
+                        send_raw_input_events(framer.flush_timeout(), tx, &mut pending_palette);
+                        flush_host_palette_events(tx, &mut pending_palette);
+                    }
+                }
+            }
+            Err(_) => break,
+        }
     }
+}
+
+fn send_raw_input_events(
+    events: Vec<RawInputEvent>,
+    tx: &mpsc::Sender<RawInputEvent>,
+    pending_palette: &mut Vec<(u8, RgbColor)>,
+) {
+    for event in events {
+        match event {
+            RawInputEvent::HostPaletteColors { colors } => {
+                pending_palette.extend(colors);
+                if pending_palette.len() == 256 {
+                    flush_host_palette_events(tx, pending_palette);
+                }
+            }
+            event @ RawInputEvent::HostDefaultColor { .. } => {
+                let _ = tx.blocking_send(event);
+            }
+            event => {
+                flush_host_palette_events(tx, pending_palette);
+                let _ = tx.blocking_send(event);
+            }
+        }
+    }
+}
+
+fn flush_host_palette_events(
+    tx: &mpsc::Sender<RawInputEvent>,
+    pending_palette: &mut Vec<(u8, RgbColor)>,
+) {
+    if pending_palette.is_empty() {
+        return;
+    }
+    let colors = std::mem::take(pending_palette);
+    let _ = tx.blocking_send(RawInputEvent::HostPaletteColors { colors });
 }
 
 #[cfg(test)]
@@ -503,6 +629,14 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
 
         if let Some((kind, color)) = parse_default_color_response(seq) {
             return Some((RawInputEvent::HostDefaultColor { kind, color }, seq_len));
+        }
+        if let Some((index, color)) = parse_palette_color_response(seq) {
+            return Some((
+                RawInputEvent::HostPaletteColors {
+                    colors: vec![(index, color)],
+                },
+                seq_len,
+            ));
         }
 
         match seq {
@@ -945,6 +1079,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_host_palette_color_response() {
+        let (RawInputEvent::HostPaletteColors { colors }, consumed) =
+            extract_one_event(b"\x1b]4;7;rgb:1111/2222/3333\x1b\\").unwrap()
+        else {
+            panic!("expected host palette response");
+        };
+        assert_eq!(consumed, 26);
+        assert_eq!(
+            colors,
+            vec![(
+                7,
+                RgbColor {
+                    r: 0x11,
+                    g: 0x22,
+                    b: 0x33,
+                }
+            )]
+        );
+    }
+
+    #[test]
     fn parses_legacy_up_arrow() {
         let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b[A").unwrap() else {
             panic!("expected key");
@@ -972,6 +1127,41 @@ mod tests {
 
         let events = parse_raw_input_bytes_sync(b"\x1b[O");
         assert!(!events_require_host_surface_redraw(&events, true));
+    }
+
+    #[tokio::test]
+    async fn input_reader_releases_escape_without_another_read_after_focus() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut host) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        let thread = std::thread::spawn(move || raw_input_reader_loop(reader, &tx));
+        host.write_all(b"\x1b[I\x1b").unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            (rx.recv().await, rx.recv().await)
+        })
+        .await;
+        drop(host);
+        thread.join().unwrap();
+
+        let (focus, escape) = received.expect("Escape must not wait for another host byte");
+        assert!(matches!(focus, Some(RawInputEvent::OuterFocusGained)));
+        assert_raw_key(escape.unwrap(), KeyCode::Esc, KeyModifiers::empty());
+    }
+
+    #[test]
+    fn outer_focus_gained_requests_host_appearance_query() {
+        let gained = parse_raw_input_bytes_sync(b"\x1b[I");
+        let lost = parse_raw_input_bytes_sync(b"\x1b[O");
+        let scheme_report = parse_raw_input_bytes_sync(b"\x1b[?997;1n");
+
+        assert!(events_require_host_terminal_appearance_query(&gained));
+        assert!(!events_require_host_terminal_appearance_query(&lost));
+        assert!(!events_require_host_terminal_appearance_query(
+            &scheme_report
+        ));
+        assert!(events_require_host_terminal_theme_query(&scheme_report));
     }
 
     #[test]
@@ -1888,6 +2078,159 @@ mod tests {
     }
 
     #[test]
+    fn opt_in_does_not_delay_plain_escape_without_color_scheme_report() {
+        let mut framer = RawInputByteFramer::default();
+        framer.enable_host_color_scheme_change_tracking();
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
+    fn opted_in_byte_framer_rearms_after_color_scheme_report() {
+        let mut framer = RawInputByteFramer::default();
+        framer.enable_host_color_scheme_change_tracking();
+
+        assert_eq!(
+            framer.push(GHOSTTY_COLOR_SCHEME_DARK_REPORT),
+            vec![GHOSTTY_COLOR_SCHEME_DARK_REPORT.to_vec()]
+        );
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        let chunks = framer.push(b"]10;#abcdef\x07");
+        assert_eq!(chunks.len(), 1);
+        let (event, _) = extract_one_event(&chunks[0]).unwrap();
+        assert!(matches!(
+            event,
+            RawInputEvent::HostDefaultColor {
+                kind: DefaultColorKind::Foreground,
+                color: RgbColor {
+                    r: 0xab,
+                    g: 0xcd,
+                    b: 0xef
+                }
+            }
+        ));
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        let chunks = framer.push(b"]11;#123456\x07");
+        assert_eq!(chunks.len(), 1);
+        let (event, _) = extract_one_event(&chunks[0]).unwrap();
+        assert!(matches!(
+            event,
+            RawInputEvent::HostDefaultColor {
+                kind: DefaultColorKind::Background,
+                color: RgbColor {
+                    r: 0x12,
+                    g: 0x34,
+                    b: 0x56
+                }
+            }
+        ));
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
+    fn opted_in_byte_framer_rearms_after_outer_focus_gained() {
+        let mut framer = RawInputByteFramer::default();
+        framer.enable_host_color_scheme_change_tracking();
+        framer.enable_host_appearance_query_on_focus();
+
+        assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(
+            framer.push(b"[?997;2n"),
+            vec![GHOSTTY_COLOR_SCHEME_LIGHT_REPORT.to_vec()]
+        );
+    }
+
+    #[test]
+    fn opted_in_byte_framer_reassembles_appearance_reply_split_after_csi() {
+        let mut framer = RawInputByteFramer::default();
+        framer.enable_host_color_scheme_change_tracking();
+        framer.enable_host_appearance_query_on_focus();
+
+        assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(
+            framer.push(b"?997;2n"),
+            vec![GHOSTTY_COLOR_SCHEME_LIGHT_REPORT.to_vec()]
+        );
+    }
+
+    #[test]
+    fn opted_in_byte_framer_reassembles_delayed_appearance_reply() {
+        let mut framer = RawInputByteFramer::default();
+        framer.enable_host_color_scheme_change_tracking();
+        framer.enable_host_appearance_query_on_focus();
+
+        assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+        assert!(framer.push(b"\x1b[?997;").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(
+            framer.push(b"2n"),
+            vec![GHOSTTY_COLOR_SCHEME_LIGHT_REPORT.to_vec()]
+        );
+    }
+
+    #[test]
+    fn timed_out_appearance_reply_preserves_pending_color_reply_window() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
+        framer.enable_host_appearance_query_on_focus();
+
+        assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+        assert!(framer.push(b"\x1b[?997;").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b"2n").is_empty());
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(
+            framer.push(b"]10;rgb:aaaa/bbbb/cccc\x1b\\"),
+            vec![b"\x1b]10;rgb:aaaa/bbbb/cccc\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn disabled_focus_query_does_not_rearm_byte_framer() {
+        let mut framer = RawInputByteFramer::default();
+        framer.enable_host_color_scheme_change_tracking();
+
+        assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
+    fn focus_query_policy_does_not_delay_plain_escape_without_focus() {
+        let mut framer = RawInputByteFramer::default();
+        framer.enable_host_appearance_query_on_focus();
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
+    fn focus_query_without_reply_holds_escape_for_only_one_flush() {
+        let mut framer = RawInputByteFramer::default();
+        framer.enable_host_appearance_query_on_focus();
+
+        assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
     fn holds_lone_escape_and_stitches_split_host_color_reply() {
         let mut framer = RawInputByteFramer::default();
         framer.host_color_query_sent();
@@ -1934,12 +2277,18 @@ mod tests {
 
     #[test]
     fn stops_holding_lone_escape_after_host_color_reply_completes() {
+        use std::fmt::Write as _;
+
         let mut framer = RawInputByteFramer::default();
         framer.host_color_query_sent();
+        let mut replies =
+            String::from("\x1b]10;rgb:6565/7b7b/8383\x1b\\\x1b]11;rgb:2424/2727/3a3a\x1b\\");
+        for index in 0..=u8::MAX {
+            let _ = write!(replies, "\x1b]4;{index};rgb:1111/2222/3333\x1b\\");
+        }
 
-        let chunks =
-            framer.push(b"\x1b]10;rgb:6565/7b7b/8383\x1b\\\x1b]11;rgb:2424/2727/3a3a\x1b\\");
-        assert_eq!(chunks.len(), 2);
+        let chunks = framer.push(replies.as_bytes());
+        assert_eq!(chunks.len(), 258);
 
         // Window closed: a later lone Escape flushes immediately.
         assert!(framer.push(b"\x1b").is_empty());

@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -1338,6 +1340,7 @@ mod tests {
                 g: 14,
                 b: 16,
             }),
+            ..Default::default()
         };
         let expected_style = automatic_selection_style(&palette, host_theme);
         let selection = Some(Selection::range(PaneId::from_raw(1), 0, 0, 2, None));
@@ -1403,6 +1406,7 @@ mod tests {
                     g: 14,
                     b: 16,
                 }),
+                ..Default::default()
             },
         );
 

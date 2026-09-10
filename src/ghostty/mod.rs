@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 #![allow(dead_code)]
 
 #[allow(
@@ -119,6 +121,21 @@ impl FocusEvent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScheme {
+    Light,
+    Dark,
+}
+
+impl ColorScheme {
+    fn as_raw(self) -> ffi::GhosttyColorScheme {
+        match self {
+            Self::Light => ffi::GhosttyColorScheme_GHOSTTY_COLOR_SCHEME_LIGHT,
+            Self::Dark => ffi::GhosttyColorScheme_GHOSTTY_COLOR_SCHEME_DARK,
+        }
+    }
+}
+
 pub const MOD_SHIFT: u16 = ffi::GHOSTTY_MODS_SHIFT as u16;
 pub const MOD_CTRL: u16 = ffi::GHOSTTY_MODS_CTRL as u16;
 pub const MOD_ALT: u16 = ffi::GHOSTTY_MODS_ALT as u16;
@@ -163,6 +180,7 @@ pub const MODE_MOUSE_SGR_PIXELS: u16 = 1016;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 pub const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
 pub const MODE_GRAPHEME_CLUSTER: u16 = 2027;
+pub const MODE_COLOR_SCHEME_REPORT: u16 = 2031;
 
 const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -333,6 +351,12 @@ impl From<ffi::GhosttyColorRgb> for RgbColor {
     }
 }
 
+pub fn default_palette() -> [RgbColor; 256] {
+    let mut palette = [ffi::GhosttyColorRgb::default(); 256];
+    unsafe { ffi::ghostty_color_palette_default(palette.as_mut_ptr()) };
+    palette.map(Into::into)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellColor {
     Palette(u8),
@@ -437,6 +461,25 @@ struct TerminalCallbackState {
     write_pty: Option<Box<WritePtyCallback>>,
     pwd_changes: Vec<Vec<u8>>,
     clipboard_writes: Vec<Vec<u8>>,
+    color_scheme: Option<ColorScheme>,
+}
+
+unsafe extern "C" fn color_scheme_trampoline(
+    _terminal: ffi::GhosttyTerminal,
+    userdata: *mut c_void,
+    out_scheme: *mut ffi::GhosttyColorScheme,
+) -> bool {
+    if userdata.is_null() || out_scheme.is_null() {
+        return false;
+    }
+    let state = unsafe { &*userdata.cast::<TerminalCallbackState>() };
+    let Some(color_scheme) = state.color_scheme else {
+        return false;
+    };
+    unsafe {
+        out_scheme.write(color_scheme.as_raw());
+    }
+    true
 }
 
 unsafe extern "C" fn write_pty_trampoline(
@@ -744,6 +787,12 @@ impl Terminal {
             .into_result()?;
             ffi::ghostty_terminal_set(
                 terminal.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_SCHEME,
+                (color_scheme_trampoline as *const ()).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                terminal.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_GLYPH_PROTOCOL,
                 (&glyph_protocol as *const bool).cast(),
             )
@@ -756,6 +805,22 @@ impl Terminal {
         // SAFETY: self.raw is a live terminal handle for self's lifetime.
         unsafe {
             ffi::ghostty_terminal_vt_write(self.raw, bytes.as_ptr(), bytes.len());
+        }
+    }
+
+    pub fn set_default_palette(&mut self, palette: &[RgbColor; 256]) -> Result<(), Error> {
+        let palette = palette.map(|color| ffi::GhosttyColorRgb {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+        });
+        unsafe {
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+                palette.as_ptr().cast(),
+            )
+            .into_result()
         }
     }
 
@@ -834,6 +899,10 @@ impl Terminal {
         }
         self.callback_state.write_pty = Some(Box::new(callback));
         Ok(())
+    }
+
+    pub fn set_color_scheme(&mut self, color_scheme: Option<ColorScheme>) -> Option<ColorScheme> {
+        mem::replace(&mut self.callback_state.color_scheme, color_scheme)
     }
 
     pub fn take_pwd_changes(&mut self) -> Vec<Vec<u8>> {

@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::path::PathBuf;
 
 use super::{terminal_targets::TerminalTargetError, App, Mode};
@@ -323,6 +325,7 @@ impl App {
             argv,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
+            self.state.host_terminal_appearance,
             self.event_tx.clone(),
             self.render_notify.clone(),
             self.render_dirty.clone(),
@@ -373,6 +376,7 @@ impl App {
                     Vec::new(),
                     self.state.pane_scrollback_limit_bytes,
                     self.state.host_terminal_theme,
+                    self.state.host_terminal_appearance,
                     focus,
                 )
             })

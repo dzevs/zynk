@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -148,6 +150,11 @@ impl ClientConnection {
                     {
                         changed |=
                             self.set_host_appearance(Some(color.inferred_appearance()), false);
+                    }
+                }
+                crate::raw_input::RawInputEvent::HostPaletteColors { colors } => {
+                    for &(index, color) in colors {
+                        next_theme = next_theme.with_palette_color(index, color);
                     }
                 }
                 crate::raw_input::RawInputEvent::HostColorSchemeChanged(appearance) => {

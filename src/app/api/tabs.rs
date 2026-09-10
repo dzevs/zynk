@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::path::PathBuf;
 
 use crate::api::schema::{
@@ -72,6 +74,7 @@ impl App {
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
+        let host_terminal_appearance = self.state.host_terminal_appearance;
         let result = self
             .state
             .workspaces
@@ -84,6 +87,7 @@ impl App {
                     cwd,
                     scrollback_limit_bytes,
                     host_terminal_theme,
+                    host_terminal_appearance,
                     crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
                 )
             });

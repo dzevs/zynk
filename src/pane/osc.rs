@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::borrow::Cow;
 use std::path::PathBuf;
 
@@ -840,6 +842,7 @@ mod tests {
                 g: colors.background.g,
                 b: colors.background.b,
             }),
+            ..Default::default()
         }
     }
 
@@ -1584,6 +1587,7 @@ mod tests {
                 g: 0x22,
                 b: 0x33,
             }),
+            ..Default::default()
         };
 
         pane.apply_host_terminal_theme(host_theme);

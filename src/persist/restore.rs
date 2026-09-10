@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -622,6 +624,7 @@ fn restore_tab(
                 },
                 runtime_context.scrollback_limit_bytes,
                 crate::terminal_theme::TerminalTheme::default(),
+                None,
                 runtime_context.events.clone(),
                 runtime_context.render_notify.clone(),
                 runtime_context.render_dirty.clone(),
@@ -634,6 +637,7 @@ fn restore_tab(
                 cwd.clone(),
                 runtime_context.scrollback_limit_bytes,
                 crate::terminal_theme::TerminalTheme::default(),
+                None,
                 runtime_context.shell_config,
                 &launch_env,
                 startup.initial_history_ansi,

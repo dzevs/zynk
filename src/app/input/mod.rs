@@ -609,6 +609,7 @@ impl AppState {
                 cwd,
                 self.pane_scrollback_limit_bytes,
                 self.host_terminal_theme,
+                self.host_terminal_appearance,
                 crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
             ) {
                 let new_id = new_pane.pane_id;
