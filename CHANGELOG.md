@@ -80,6 +80,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
   compositions, and bypasses key encoding and bindings.
 - Tab and workspace clicks retain ownership per input source when terminal drag reports stray
   coordinates; chrome reordering requires a real drop target and disconnect clears only its source.
+- Ctrl-click URL opener processes are retained and reaped alongside detached custom commands,
+  including failed opener processes.
 - Live handoff keeps imported hook identity provisional until the new detector
   observes that owner's process running. An exit after snapshot capture cannot
   leave a dead session receipt-capable; a still-running session needs no new hook report.

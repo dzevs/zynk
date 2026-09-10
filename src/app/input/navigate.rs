@@ -869,7 +869,7 @@ impl App {
             command.current_dir(cwd);
         }
         let child = command.spawn()?;
-        self.detached_custom_command_children.push(child);
+        self.detached_process_children.push(child);
         Ok(())
     }
 
@@ -3250,14 +3250,14 @@ navigate_pane_down = "ctrl+j"
         std::fs::write(&release_path, b"release").expect("release command");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while crate::platform::process_exists(pid) && tokio::time::Instant::now() < deadline {
-            app.reap_finished_custom_commands();
+            app.reap_finished_detached_processes();
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        app.reap_finished_custom_commands();
+        app.reap_finished_detached_processes();
         let reaped_by_runtime = !crate::platform::process_exists(pid);
         if !reaped_by_runtime {
             if let Some(child) = app
-                .detached_custom_command_children
+                .detached_process_children
                 .iter_mut()
                 .find(|child| child.id() == pid)
             {
