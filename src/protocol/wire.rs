@@ -887,6 +887,11 @@ mod tests {
     }
 
     #[test]
+    fn protocol_version_is_pinned_at_m5_19() {
+        assert_eq!(PROTOCOL_VERSION, 19);
+    }
+
+    #[test]
     fn client_message_wire_tags_preserve_protocol_19_order() {
         fn tag(msg: &ClientMessage) -> u8 {
             *bincode::serde::encode_to_vec(msg, bincode::config::standard())

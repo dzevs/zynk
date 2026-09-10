@@ -321,7 +321,6 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
 
-    #[cfg(target_os = "linux")]
     use super::super::wait_for_detached_process_reap;
     use super::super::{app_for_mouse_test, mouse, numbered_lines_bytes};
     use super::super::{unique_temp_path, wait_for_file};
@@ -961,7 +960,6 @@ mod tests {
         assert!(app.selection_highlight_clear_deadline.is_none());
     }
 
-    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn ctrl_click_url_reaps_failed_opener() {
         let opener_dir = unique_temp_path("url-opener");

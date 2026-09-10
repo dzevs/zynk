@@ -820,7 +820,6 @@ fn wait_for_file(path: &std::path::Path) -> String {
 }
 
 #[cfg(test)]
-#[cfg(target_os = "linux")]
 async fn wait_for_detached_process_reap(app: &mut App, pid: u32) -> bool {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     while crate::platform::process_exists(pid) && tokio::time::Instant::now() < deadline {
