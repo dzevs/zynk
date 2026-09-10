@@ -2634,6 +2634,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn passthrough_right_click_preserves_foreign_chrome_drag() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, _rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                4,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
+        app.state.drag = Some(crate::app::state::DragState {
+            target: crate::app::state::DragTarget::TabReorder {
+                source_id: 7,
+                ws_idx: 0,
+                source_tab_idx: 0,
+                insert_idx: None,
+            },
+        });
+
+        app.handle_mouse_from_input_source(
+            9,
+            MouseEvent {
+                modifiers: KeyModifiers::CONTROL,
+                ..mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    info.inner_rect.x + 2,
+                    info.inner_rect.y + 3,
+                )
+            },
+        );
+
+        assert!(app.state.drag.is_some());
+    }
+
+    #[tokio::test]
     async fn right_click_passthrough_does_not_forward_pane_frame_clicks() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
