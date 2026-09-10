@@ -1,3 +1,5 @@
+<!-- Modified by the zynk project: this file differs from the upstream version it was derived from. -->
+<!-- See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms. -->
 # Agent instructions
 
 How implementation and reviewer agents (Codex, Claude, Pi, swarm) work in this repo. Read `CLAUDE.md` for project
@@ -82,6 +84,30 @@ focused review perspectives. Personas don't invoke other personas; orchestration
   in one bounded batch. Review probes stay in isolated copies.
 - Label an unreviewed fix as **IMPLEMENTED / PENDING VERIFICATION**, not closed.
   A passing author check or fix commit is not a reviewer approval.
+
+### Multiplicative performance paths
+
+Treat work reachable from view computation, rendering, background-pane resizing,
+PTY parsing, detection, and client frame fanout as multiplicative. Identify its
+frequency and cardinality: per byte, event, or render x panes, tabs, or workspaces
+x attached clients.
+
+Inside pane-scaled render and layout loops:
+
+- Use narrow terminal-state accessors. Do not collect aggregate input state,
+  format terminal snapshots, inspect process trees, perform filesystem I/O, or
+  allocate when one scalar fact is enough.
+- Keep terminal-core lock duration minimal.
+- Preserve hidden-source and retained-render early exits. Hidden panes still
+  parse output, but that must not itself trigger presentation work.
+- When widening work in these loops, profile fixed geometry with 1 and at least
+  15 populated panes and report the scaling delta. `just bench-render-scale`
+  covers background-workspace and active-pane cardinality; run it through the
+  same isolated build/test environment as other local verification.
+
+Prefer deterministic operation or architecture tests to wall-clock CI limits.
+`just ui-hot-path-architecture-test` is included in `just test` and `just check`;
+benchmark timings support, but do not replace, behavioral coverage.
 
 ## Current role assignment
 

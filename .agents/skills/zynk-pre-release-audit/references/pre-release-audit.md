@@ -1,4 +1,6 @@
 ---
+# Modified by the zynk project: this file differs from the upstream version it was derived from.
+# See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 description: Audit release readiness against the root CHANGELOG and README before a zynk release
 ---
 Audit release readiness for the zynk public repo (single repo, canonical branch `main`).
@@ -63,6 +65,11 @@ Process:
      `LICENSE-APACHE-2.0.upstream` (AGPL-3.0-or-later, the upstream attribution, and the Apache-2.0 text that
      post-`cd5ea1be` upstream code travels under) are intact. `check-required` on the candidate SHA is the only
      build evidence there is — zynk publishes no binaries (ADR 0013).
+   - Run `just bench-render-scale` in the isolated build/test environment, or report NOT CHECKED if execution
+     is not authorized. Retain the 1, 15, and 50-count median/p95 results and ratios for background-workspace
+     resize/layout and active panes. This is a required release review checkpoint, not a wall-clock CI
+     threshold: investigate material scaling regressions before release, using comparable geometry and
+     workloads rather than absolute timings across machines. A passing benchmark does not waive any gate.
 
 9. Apply changes only when explicitly asked.
    - Do not edit files during the audit unless the user asks you to apply fixes.
@@ -88,6 +95,9 @@ README: OK | MISSING | INACCURATE
 - <user-facing gaps or stale sections>
 
 Gates: just check <green|red> · just gate <clean|fail> · LICENSE/NOTICE <intact|issue>
+
+Render scaling: OK | NEEDS ATTENTION | NOT CHECKED
+<1, 15, and 50-count median/p95 results and ratios for background-workspace resize/layout and active panes>
 
 Issue references the release will close:
 - #<n>

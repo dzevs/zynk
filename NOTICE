@@ -46,6 +46,9 @@ here. The maintenance test scripts/test_license_docs.py enforces both
 directions — every listed file carries the notice, and no unlisted file does.
 
 <!-- apache-modified-files: begin -->
+- .agents/skills/zynk-pre-release-audit/SKILL.md
+- .agents/skills/zynk-pre-release-audit/references/pre-release-audit.md
+- AGENTS.md
 - Cargo.toml
 - justfile
 - scripts/test_hermes_integration_asset.py
@@ -138,6 +141,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/server/clients.rs
 - src/server/headless.rs
 - src/server/notifications.rs
+- src/server/render_stream.rs
 - src/terminal/id.rs
 - src/terminal/runtime.rs
 - src/terminal/state.rs

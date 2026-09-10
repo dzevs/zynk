@@ -1,4 +1,6 @@
 ---
+# Modified by the zynk project: this file differs from the upstream version it was derived from.
+# See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 name: zynk-pre-release-audit
 description: Audit zynk release readiness by comparing commits since the last release tag against the root CHANGELOG.md and README.md, plus version/tag consistency. Use when asked to run the repo's pre-release audit or to check that the changelog and docs cover what shipped before a zynk release.
 ---
@@ -15,6 +17,7 @@ Read `references/pre-release-audit.md` and follow its workflow. It is the source
 - auditing the root `README.md` for user-facing changes (commands, config, integrations, install/version pins)
 - checking version consistency (`Cargo.toml` ↔ tag ↔ `CHANGELOG.md` ↔ `README.md`)
 - listing the issue references the release will close
+- running and assessing `just bench-render-scale` in an isolated build/test environment
 - producing the final release-readiness report
 
 This is a READ-ONLY audit by default. Do not edit files unless the user explicitly asks to apply fixes, and

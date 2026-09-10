@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Virtual rendering helpers for headless client frame streaming.
 
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
@@ -425,4 +427,231 @@ fn focused_terminal_suppresses_host_cursor(
     app_state
         .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         .is_some_and(crate::terminal::TerminalRuntime::synchronized_output_active)
+}
+
+#[cfg(test)]
+mod render_scale_benchmark {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use ratatui::layout::Direction;
+
+    use super::*;
+    use crate::app::Mode;
+    use crate::terminal::TerminalRuntime;
+    use crate::workspace::Workspace;
+
+    const AREA: Rect = Rect::new(0, 0, 120, 40);
+    const SAMPLE_COUNT: usize = 40;
+    const WARMUP_COUNT: usize = 5;
+
+    struct RenderFixture {
+        app: AppState,
+        terminal_runtimes: TerminalRuntimeRegistry,
+    }
+
+    impl RenderFixture {
+        fn render(&mut self) -> (ratatui::buffer::Buffer, Option<CursorState>) {
+            render_virtual_with_runtime_registry(
+                &mut self.app,
+                &self.terminal_runtimes,
+                AREA,
+                true,
+                crate::kitty_graphics::HostCellSize::default(),
+            )
+        }
+
+        fn assert_all_panes_resized(&self) {
+            let pane_count = self
+                .app
+                .workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .map(|tab| tab.layout.pane_count())
+                .sum::<usize>();
+            assert!(pane_count > 0);
+            assert_eq!(self.terminal_runtimes.len(), pane_count);
+            assert!(
+                self.terminal_runtimes
+                    .values()
+                    .all(|runtime| runtime.current_size() != (AREA.height, AREA.width)),
+                "every populated terminal, including background workspaces, must be resized"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct RenderStats {
+        median_us: u128,
+        p95_us: u128,
+        max_us: u128,
+    }
+
+    fn history() -> String {
+        (0..2_000).map(|line| format!("line-{line}\r\n")).collect()
+    }
+
+    fn runtime(history: &str) -> TerminalRuntime {
+        TerminalRuntime::test_with_scrollback_bytes(
+            AREA.width,
+            AREA.height,
+            1024 * 1024,
+            history.as_bytes(),
+        )
+    }
+
+    fn app_with_workspaces(workspace_count: usize) -> RenderFixture {
+        let history = history();
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        let workspaces = (0..workspace_count)
+            .map(|index| {
+                let workspace = Workspace::test_new(&format!("bench-{}", index + 1));
+                let root_pane = workspace.tabs[0].root_pane;
+                let terminal_id = workspace.terminal_id(root_pane).unwrap().clone();
+                terminal_runtimes.insert(terminal_id, runtime(&history));
+                workspace
+            })
+            .collect();
+        app_with(workspaces, terminal_runtimes)
+    }
+
+    fn app_with_active_panes(pane_count: usize) -> RenderFixture {
+        let history = history();
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        let mut workspace = Workspace::test_new("bench");
+        let root_pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(root_pane).unwrap().clone();
+        terminal_runtimes.insert(terminal_id, runtime(&history));
+        let mut pane_ids = vec![root_pane];
+
+        for index in 1..pane_count {
+            let target = pane_ids[(index - 1) / 2];
+            workspace.tabs[0].layout.focus_pane(target);
+            let direction = if index % 2 == 0 {
+                Direction::Vertical
+            } else {
+                Direction::Horizontal
+            };
+            let pane_id = workspace.test_split(direction);
+            let terminal_id = workspace.terminal_id(pane_id).unwrap().clone();
+            terminal_runtimes.insert(terminal_id, runtime(&history));
+            pane_ids.push(pane_id);
+        }
+
+        app_with(vec![workspace], terminal_runtimes)
+    }
+
+    fn app_with(
+        workspaces: Vec<Workspace>,
+        terminal_runtimes: TerminalRuntimeRegistry,
+    ) -> RenderFixture {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.pane_scrollbars = true;
+        app.workspaces = workspaces;
+        app.active = Some(0);
+        app.selected = 0;
+        app.ensure_test_terminals();
+        RenderFixture {
+            app,
+            terminal_runtimes,
+        }
+    }
+
+    fn profile(mut fixture: RenderFixture) -> RenderStats {
+        for _ in 0..WARMUP_COUNT {
+            black_box(fixture.render());
+        }
+        fixture.assert_all_panes_resized();
+
+        let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+        for _ in 0..SAMPLE_COUNT {
+            let started = Instant::now();
+            black_box(fixture.render());
+            samples.push(started.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+
+        RenderStats {
+            median_us: samples[SAMPLE_COUNT / 2],
+            p95_us: samples[(SAMPLE_COUNT - 1) * 95 / 100],
+            max_us: samples[SAMPLE_COUNT - 1],
+        }
+    }
+
+    fn profile_cardinalities(build: fn(usize) -> RenderFixture) -> [(usize, RenderStats); 3] {
+        [1, 15, 50].map(|count| (count, profile(build(count))))
+    }
+
+    fn print_profiles(label: &str, profiles: [(usize, RenderStats); 3]) {
+        let baseline_median_us = profiles[0].1.median_us as f64;
+        let baseline_p95_us = profiles[0].1.p95_us as f64;
+        println!("{label}");
+        println!("     count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x");
+        for (count, stats) in profiles {
+            println!(
+                "{count:>10}  {:>9}  {:>6}  {:>6}  {:>12.2}  {:>9.2}",
+                stats.median_us,
+                stats.p95_us,
+                stats.max_us,
+                stats.median_us as f64 / baseline_median_us,
+                stats.p95_us as f64 / baseline_p95_us,
+            );
+        }
+    }
+
+    fn full_render_aggregate_input_state_reads(
+        mut fixture: RenderFixture,
+        expected_visible_panes: usize,
+    ) -> usize {
+        crate::pane::reset_aggregate_input_state_reads();
+        let (buffer, _) = black_box(fixture.render());
+        let reads = crate::pane::aggregate_input_state_reads();
+        assert_eq!(fixture.app.view.pane_infos.len(), expected_visible_panes);
+        fixture.assert_all_panes_resized();
+        assert!(
+            buffer.content.chunks(AREA.width as usize).any(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("line-")
+            }),
+            "render fixture must show populated terminal content"
+        );
+        reads
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn aggregate_input_state_counter_records_reads() {
+        let runtime = TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        crate::pane::reset_aggregate_input_state_reads();
+        black_box(runtime.input_state());
+        assert_eq!(crate::pane::aggregate_input_state_reads(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_render_avoids_aggregate_input_state_reads() {
+        let reads = [
+            full_render_aggregate_input_state_reads(app_with_workspaces(15), 1),
+            full_render_aggregate_input_state_reads(app_with_active_panes(15), 15),
+        ];
+        assert_eq!(
+            reads,
+            [0, 0],
+            "aggregate reads for [workspaces, active panes]"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "manual full-render scaling profile"]
+    async fn render_scale_profile() {
+        print_profiles(
+            "background-workspace resize/layout (one pane each)",
+            profile_cardinalities(app_with_workspaces),
+        );
+        print_profiles(
+            "active panes (one workspace)",
+            profile_cardinalities(app_with_active_panes),
+        );
+    }
 }

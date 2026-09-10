@@ -646,27 +646,20 @@ mod tests {
                 "queue acceptance is not application of the exit"
             );
         }
-        let response = app.handle_api_request_from_socket(
-            crate::api::schema::Request {
-                id: "pending-exit-receipt".into(),
-                method: crate::api::schema::Method::ZynkMessageReceived(
-                    crate::api::schema::ZynkMessageReceivedParams {
-                        pane_id: public_id.clone(),
-                        message_id: "msg".into(),
-                        conversation_id: "conv".into(),
-                        conversation_seq: 1,
-                        runtime_session_id: "rt".into(),
-                        socket_namespace: "sock".into(),
-                        receiver_seq: None,
-                        timestamp: None,
-                        status: None,
-                        receiver_agent_session: None,
-                    },
-                ),
-            },
-            crate::api::ApiCaller {
-                peer: None,
-                trusted_as_pane_child: true,
+        // Exercise the receipt fence itself, independent of the debug-only caller seam.
+        let response = app.handle_zynk_message_received(
+            "pending-exit-receipt".into(),
+            crate::api::schema::ZynkMessageReceivedParams {
+                pane_id: public_id.clone(),
+                message_id: "msg".into(),
+                conversation_id: "conv".into(),
+                conversation_seq: 1,
+                runtime_session_id: "rt".into(),
+                socket_namespace: "sock".into(),
+                receiver_seq: None,
+                timestamp: None,
+                status: None,
+                receiver_agent_session: None,
             },
         );
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();

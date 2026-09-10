@@ -374,6 +374,10 @@ impl PaneTerminal {
         self.ghostty.input_state()
     }
 
+    pub fn alternate_screen_active(&self) -> bool {
+        self.ghostty.alternate_screen_active()
+    }
+
     pub fn wheel_routing(&self) -> Option<crate::pane::WheelRouting> {
         self.ghostty.wheel_routing()
     }
@@ -1564,6 +1568,14 @@ impl GhosttyPaneTerminal {
         core.kitty_keyboard.replay_ansi()
     }
 
+    pub fn alternate_screen_active(&self) -> bool {
+        self.core.lock().is_ok_and(|core| {
+            core.terminal.active_screen().ok() == Some(crate::ghostty::ActiveScreen::Alternate)
+        })
+    }
+
+    // This aggregate snapshot performs multiple terminal queries and may format
+    // keyboard state. Pane-scaled callers should add a narrow accessor instead.
     pub fn input_state(&self) -> Option<InputState> {
         let Ok(core) = self.core.lock() else {
             return None;
