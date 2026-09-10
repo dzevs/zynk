@@ -2,9 +2,13 @@
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::{app::App, input::TerminalKey};
+use super::{ConsumedInputLease, InputLeaseKey};
+use crate::{
+    app::{App, InputSourceId},
+    input::TerminalKey,
+};
 
-fn is_retained_selection_copy_key(key: TerminalKey) -> bool {
+fn is_retained_selection_copy_key(key: &TerminalKey) -> bool {
     matches!(key.code, KeyCode::Char('c' | 'C'))
         && matches!(key.modifiers, KeyModifiers::CONTROL | KeyModifiers::SUPER)
 }
@@ -24,9 +28,13 @@ impl App {
         true
     }
 
-    pub(super) fn try_copy_retained_selection(&mut self, key: TerminalKey) -> bool {
+    pub(super) fn try_copy_retained_selection(
+        &mut self,
+        source_id: InputSourceId,
+        key: TerminalKey,
+    ) -> bool {
         if self.state.copy_on_select
-            || !is_retained_selection_copy_key(key)
+            || !is_retained_selection_copy_key(&key)
             || !self
                 .state
                 .selection
@@ -41,8 +49,10 @@ impl App {
             return false;
         }
 
-        self.suppressed_repeat_keys
-            .insert(crate::app::repeat_key_identity(&key));
+        self.input_leases.insert_consumed(
+            InputLeaseKey::new(source_id, &key),
+            ConsumedInputLease::SuppressRepeats,
+        );
         true
     }
 }
@@ -128,8 +138,21 @@ mod tests {
         assert_visible_selection(&app);
         assert!(app.event_rx.try_recv().is_err());
 
-        let ctrl_c = TerminalKey::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        app.route_client_events(vec![crate::raw_input::RawInputEvent::Key(ctrl_c)], false);
+        let ctrl_c = TerminalKey::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            .with_windows_record(crate::input::WindowsKeyRecord {
+                key_down: true,
+                repeat_count: 1,
+                virtual_key_code: 0x43,
+                virtual_scan_code: 0x2e,
+                unicode: 'c' as u16,
+                control_key_state: 0x0008,
+            });
+        let source_id = 41;
+        app.route_client_events_from(
+            source_id,
+            vec![crate::raw_input::RawInputEvent::Key(ctrl_c.clone())],
+            false,
+        );
 
         let content = clipboard_write_content(&mut app);
         assert_eq!(content, b"alpha");
@@ -145,25 +168,37 @@ mod tests {
             Some("copied to clipboard")
         );
 
-        app.route_client_events(
-            vec![crate::raw_input::RawInputEvent::Key(
-                ctrl_c.with_kind(KeyEventKind::Repeat),
-            )],
+        app.route_client_events_from(
+            source_id,
+            vec![
+                crate::raw_input::RawInputEvent::Key(ctrl_c.clone()),
+                crate::raw_input::RawInputEvent::Key(
+                    ctrl_c.clone().with_kind(KeyEventKind::Repeat),
+                ),
+            ],
             false,
         );
+        assert_eq!(app.input_leases.len(), 1);
         assert!(app.event_rx.try_recv().is_err());
         assert!(input_rx.try_recv().is_err());
 
-        app.route_client_events(
+        app.route_client_events_from(
+            source_id,
             vec![crate::raw_input::RawInputEvent::Key(
-                ctrl_c.with_kind(KeyEventKind::Release),
+                ctrl_c.clone().with_kind(KeyEventKind::Release),
             )],
             false,
         );
-        app.route_client_events(vec![crate::raw_input::RawInputEvent::Key(ctrl_c)], false);
+        assert!(app.input_leases.is_empty());
+        app.route_client_events_from(
+            source_id,
+            vec![crate::raw_input::RawInputEvent::Key(ctrl_c.clone())],
+            false,
+        );
+        let expected = b"\x03".as_slice();
         assert_eq!(
             input_rx.try_recv().expect("forwarded Ctrl-C").as_ref(),
-            b"\x03"
+            expected
         );
         assert!(app.event_rx.try_recv().is_err());
     }

@@ -1298,6 +1298,7 @@ impl HeadlessServer {
 
     fn remove_client(&mut self, client_id: u64) -> bool {
         let was_foreground = self.foreground_client_id == Some(client_id);
+        self.app.release_input_source_headless(client_id);
         self.send_client_graphics_cleanup(client_id);
         let removed = self.clients.remove(&client_id);
         if let Some(removed) = removed {
@@ -2347,6 +2348,12 @@ impl HeadlessServer {
         }
         if source_is_full_app {
             self.update_client_outer_focus_from_events(client_id, &events);
+            if events
+                .iter()
+                .any(|event| matches!(event, crate::raw_input::RawInputEvent::OuterFocusLost))
+            {
+                self.app.release_input_source_headless(client_id);
+            }
         }
         let events = events_for_app_routing(events, source_was_foreground, source_is_full_app);
         let interaction = events_include_interaction(&events);
@@ -2361,7 +2368,7 @@ impl HeadlessServer {
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
         // Client-local theme reports were applied above; route the captured batch
         // without updating every pane again for each palette entry.
-        self.app.route_client_events(events, false);
+        self.app.route_client_events_from(client_id, events, false);
         if self.app.take_config_reloaded_from_disk() {
             self.reload_server_config(false);
         } else {
@@ -3829,6 +3836,7 @@ fn events_for_app_routing(
             }
             crate::raw_input::RawInputEvent::OuterFocusLost if !source_is_foreground => None,
             crate::raw_input::RawInputEvent::Key(_)
+            | crate::raw_input::RawInputEvent::Text(_)
             | crate::raw_input::RawInputEvent::Mouse(_)
             | crate::raw_input::RawInputEvent::Paste(_) => {
                 source_is_foreground = true;
@@ -6397,6 +6405,85 @@ next_tab = ""
     }
 
     #[tokio::test]
+    async fn background_client_focus_loss_releases_its_owned_keys() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[>3u");
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.clients.insert(2, test_app_client(Some(true), 2));
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char('j'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }],
+        }));
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+
+        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::FocusLost],
+        }));
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded press"),
+            Bytes::from_static(b"\x1b[106;5:1u")
+        );
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("synthetic release from background client"),
+            Bytes::from_static(b"\x1b[106;5:3u")
+        );
+        assert!(server.app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn background_client_disconnect_releases_its_owned_keys() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[>3u");
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.clients.insert(2, test_app_client(Some(true), 2));
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char('j'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }],
+        }));
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+
+        assert!(!server.remove_client(1));
+        assert!(!server.clients.contains_key(&1));
+        assert_eq!(server.foreground_client_id, Some(2));
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded press"),
+            Bytes::from_static(b"\x1b[106;5:1u")
+        );
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("synthetic release from background client"),
+            Bytes::from_static(b"\x1b[106;5:3u")
+        );
+        assert!(server.app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
     async fn structured_outer_focus_events_reach_reporting_pane() {
         let mut server = test_headless_server();
         let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1004h");
@@ -6437,6 +6524,9 @@ next_tab = ""
                     code: crate::protocol::ClientKeyCode::Char('x'),
                     modifiers: 0,
                     kind: crate::protocol::ClientKeyKind::Release,
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::FocusLost,
             ],
@@ -6484,6 +6574,9 @@ next_tab = ""
                 code: crate::protocol::ClientKeyCode::Char('x'),
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Release,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }],
         }));
         assert_eq!(server.foreground_client_id, Some(3));
@@ -6723,6 +6816,9 @@ next_tab = ""
                 code: crate::protocol::ClientKeyCode::Enter,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }],
         }));
 
@@ -6759,6 +6855,9 @@ next_tab = ""
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }],
         }));
 
@@ -6792,6 +6891,9 @@ next_tab = ""
                 code: crate::protocol::ClientKeyCode::Down,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }],
         }));
 

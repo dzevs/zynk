@@ -3,9 +3,10 @@
 ## [3.1.0] — unreleased (pre-tag; the date is set when the immutable tag is cut)
 
 The **herdr v0.7.1 port** (36 upstream changes re-applied on top of the Zynk identity — see
-`docs/zynk/fork-patch-ledger.md`, *v0.7.1 PORT LEDGER*) plus a hardened single public repo. No wire/protocol
-change: socket method IDs, protocol-ID fields, and the delivery/receipt matrix are unchanged. Two documented
-config keys are removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 only.
+`docs/zynk/fork-patch-ledger.md`, *v0.7.1 PORT LEDGER*), subsequent Linux-only port work, and a hardened
+single public repo. The binary client input protocol advances to 19; JSON socket method IDs,
+protocol-ID fields, and the delivery/receipt matrix are unchanged. Two documented config keys are
+removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 only.
 
 **Added**
 
@@ -29,6 +30,8 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 
 **Changed**
 
+- Binary client protocol 19 carries key source metadata, grouped repeats, and explicit text commits.
+  Clients and servers must use the same protocol version.
 - The Experiments tab is removed from Settings. Pane history remains available
   through `experimental.pane_history` in the config file; Header settings remain.
 - `ui.agent_panel_scope` is **no longer supported**; the agent panel shows all workspaces.
@@ -52,6 +55,10 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 
 **Fixed**
 
+- Held-key repeats and releases stay with the pane that received the press, even after focus changes
+  or a move between workspaces. Client focus loss, disconnect, and terminal shutdown release that
+  source's held keys. Clipboard shortcuts suppress only their own client's key lifecycle; explicit
+  text commits bypass keybindings and structured input limits include expanded repeats and payloads.
 - Alternate-screen applications reclaim the scrollbar column, restoring it on exit.
 - A bottom mode bar does not activate the tabs underneath it. Background pane
   restoration honors the scrollbar setting when choosing its initial size.

@@ -2,6 +2,7 @@
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Input handling — translates crossterm key/mouse events into state mutations.
 
+use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::app::PaneClickState;
@@ -38,6 +39,7 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
 
 mod clipboard;
 mod copy_mode;
+mod lease;
 mod modal;
 mod mouse;
 mod navigate;
@@ -48,6 +50,7 @@ mod sidebar;
 mod terminal;
 
 pub(crate) use self::{
+    lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
     modal::{
         handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
         insert_keybind_help_query_text, insert_navigator_search_text, insert_rename_input_text,
@@ -73,17 +76,20 @@ use super::App;
 // ---------------------------------------------------------------------------
 
 impl App {
-    pub(super) async fn handle_key(&mut self, key: TerminalKey) {
+    pub(super) async fn handle_key(
+        &mut self,
+        key: TerminalKey,
+    ) -> Option<super::TerminalInputTarget> {
         let key_event = key.as_key_event();
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.paste_into_active_text_input(&text);
             }
-            return;
+            return None;
         }
 
         match self.state.mode {
-            Mode::Terminal => self.handle_terminal_key(key).await,
+            Mode::Terminal => return self.handle_terminal_key(key).await,
             Mode::Prefix => self.handle_prefix_key(key),
             Mode::Navigate => self.handle_navigate_key(key),
             Mode::Copy => self.handle_copy_mode_key(key),
@@ -111,6 +117,51 @@ impl App {
                 }
                 Mode::Terminal => unreachable!(),
             },
+        }
+        None
+    }
+
+    pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.state.mode != Mode::Terminal {
+            self.paste_into_active_text_input(text);
+            return;
+        }
+
+        self.state.clear_selection();
+        self.selection_autoscroll_deadline = None;
+        self.state.update_dismissed = true;
+        if let Some(ws_idx) = self.state.active {
+            if let Some(runtime) = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            {
+                let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
+            }
+        }
+    }
+
+    pub(super) async fn handle_text_commit(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if self.state.mode != Mode::Terminal {
+            self.paste_into_active_text_input(&text);
+            return;
+        }
+
+        self.state.clear_selection();
+        self.selection_autoscroll_deadline = None;
+        self.state.update_dismissed = true;
+        if let Some(ws_idx) = self.state.active {
+            if let Some(runtime) = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            {
+                let _ = runtime.send_bytes(Bytes::from(text)).await;
+            }
         }
     }
 

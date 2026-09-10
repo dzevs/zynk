@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{KeyboardProtocol, MouseProtocolEncoding, TerminalKey};
@@ -12,6 +14,12 @@ pub fn encode_key(key: KeyEvent, protocol: KeyboardProtocol) -> Vec<u8> {
 }
 
 pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<u8> {
+    if key.kind != crossterm::event::KeyEventKind::Release {
+        if let Some(text) = &key.generated_text {
+            return text.as_bytes().to_vec();
+        }
+    }
+
     // A release event only produces bytes when the pane protocol reports event
     // types (Kitty REPORT_EVENT_TYPES). Otherwise the child expects a single
     // legacy byte per keystroke, so re-emitting it on release would double keys
@@ -767,6 +775,12 @@ mod tests {
         );
         assert_eq!(
             encode_key(modified_release, KeyboardProtocol::Kitty { flags: 3 }),
+            b"\x1b[13;5:3u"
+        );
+        let mut malformed_release = TerminalKey::from(modified_release);
+        malformed_release.generated_text = Some("ignored".to_owned());
+        assert_eq!(
+            encode_terminal_key(malformed_release, KeyboardProtocol::Kitty { flags: 3 }),
             b"\x1b[13;5:3u"
         );
     }

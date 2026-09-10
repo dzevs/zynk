@@ -24,7 +24,7 @@ mod terminal_targets;
 mod theme_sync;
 mod worktrees;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::pending;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -141,8 +141,7 @@ pub struct App {
     pub(crate) last_render_at: Option<Instant>,
     /// Last attempt that could update a connected presentation surface.
     pub(crate) last_presentation_at: Option<Instant>,
-    pub(crate) suppressed_repeat_keys:
-        HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+    pub(crate) input_leases: input::InputLeaseTable,
     pub render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<crate::render_signal::RenderSignal>,
     pub(crate) full_redraw_pending: bool,
@@ -202,11 +201,18 @@ async fn sleep_until_or_pending(deadline: Option<Instant>) {
     }
 }
 
-fn repeat_key_identity(
-    key: &crate::input::TerminalKey,
-) -> (crossterm::event::KeyCode, crossterm::event::KeyModifiers) {
-    (key.code, key.modifiers)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalInputTarget {
+    terminal_id: crate::terminal::TerminalId,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalInputContext {
+    Pane,
+}
+
+pub(crate) type InputSourceId = u64;
+const LOCAL_INPUT_SOURCE: InputSourceId = 0;
 
 fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
@@ -747,7 +753,7 @@ impl App {
             persist_pane_history: config.experimental.pane_history,
             last_render_at: None,
             last_presentation_at: None,
-            suppressed_repeat_keys: HashSet::new(),
+            input_leases: input::InputLeaseTable::default(),
             api_rx,
             event_hub,
             last_focus,
@@ -1517,38 +1523,128 @@ impl App {
         self.route_client_events(events, true);
     }
 
+    pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
+        if self.state.mode == Mode::Terminal {
+            Some(TerminalInputContext::Pane)
+        } else {
+            None
+        }
+    }
+
+    fn execute_repeat_plan_headless(
+        &mut self,
+        source_id: InputSourceId,
+        lease_key: input::InputLeaseKey,
+        key: crate::input::TerminalKey,
+        plan: input::RepeatPlan,
+    ) {
+        match plan {
+            input::RepeatPlan::Forwarded(target) => {
+                if !self.forward_terminal_key_to_target_headless(&target, key) {
+                    self.input_leases.remove(&lease_key);
+                }
+            }
+            input::RepeatPlan::Reprocess {
+                context,
+                repetitions,
+                tracked,
+            } => {
+                let key = key
+                    .with_kind(crossterm::event::KeyEventKind::Repeat)
+                    .with_repeat_count(1);
+                let mut forwarded_target = None;
+                for _ in 0..repetitions {
+                    if let Some(target) = &forwarded_target {
+                        if !self.forward_terminal_key_to_target_headless(target, key.clone()) {
+                            self.input_leases.remove(&lease_key);
+                            break;
+                        }
+                        continue;
+                    }
+                    let current_context = self.terminal_input_context();
+                    if !self.input_leases.reprocess_allowed(
+                        lease_key,
+                        &context,
+                        current_context.as_ref(),
+                        tracked,
+                    ) {
+                        break;
+                    }
+                    if let Some(target) =
+                        self.handle_terminal_key_headless_from(source_id, key.clone())
+                    {
+                        if tracked {
+                            self.input_leases.insert_forwarded(
+                                lease_key,
+                                target.clone(),
+                                key.clone(),
+                            );
+                            forwarded_target = Some(target);
+                        }
+                    }
+                }
+            }
+            input::RepeatPlan::Ignore => {}
+        }
+    }
+
     pub(crate) fn route_client_events(
         &mut self,
+        events: Vec<crate::raw_input::RawInputEvent>,
+        apply_host_terminal_theme: bool,
+    ) {
+        self.route_client_events_from(LOCAL_INPUT_SOURCE, events, apply_host_terminal_theme);
+    }
+
+    pub(crate) fn route_client_events_from(
+        &mut self,
+        source_id: InputSourceId,
         events: Vec<crate::raw_input::RawInputEvent>,
         apply_host_terminal_theme: bool,
     ) {
         for event in events {
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
-                    let key_id = repeat_key_identity(&key);
+                    let lease_key = input::InputLeaseKey::new(source_id, &key);
+                    let key = self.input_leases.normalize_press(&lease_key, key);
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {
-                            if self.state.mode == Mode::Terminal {
-                                self.suppressed_repeat_keys.remove(&key_id);
-                                self.handle_terminal_key_headless(key);
+                            let initial_context = self.terminal_input_context();
+                            let target = if initial_context.is_some() {
+                                self.handle_terminal_key_headless_from(source_id, key.clone())
                             } else {
-                                self.suppressed_repeat_keys.insert(key_id);
-                                self.handle_non_terminal_key_headless(key);
-                            }
+                                self.handle_non_terminal_key_headless(key.clone());
+                                None
+                            };
+                            let resulting_context = self.terminal_input_context();
+                            let plan = self.input_leases.complete_press(
+                                lease_key,
+                                &key,
+                                initial_context.as_ref(),
+                                resulting_context.as_ref(),
+                                target,
+                            );
+                            self.execute_repeat_plan_headless(source_id, lease_key, key, plan);
                         }
                         crossterm::event::KeyEventKind::Repeat => {
-                            if self.state.mode == Mode::Terminal
-                                && !self.suppressed_repeat_keys.contains(&key_id)
-                            {
-                                self.handle_terminal_key_headless(key);
-                            }
-                            // Repeats in non-terminal modes are ignored
-                            // (same as monolithic behavior).
+                            let current_context = self.terminal_input_context();
+                            let plan = self.input_leases.plan_repeat(
+                                lease_key,
+                                &key,
+                                current_context.as_ref(),
+                            );
+                            self.execute_repeat_plan_headless(source_id, lease_key, key, plan);
                         }
                         crossterm::event::KeyEventKind::Release => {
-                            self.suppressed_repeat_keys.remove(&key_id);
+                            if let Some(lease) = self.input_leases.remove_forwarded(&lease_key) {
+                                let _ = self
+                                    .forward_terminal_key_to_target_headless(&lease.target, key);
+                            }
                         }
                     }
+                }
+                crate::raw_input::RawInputEvent::Text(text) => {
+                    self.handle_text_commit_headless(text.as_str());
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
                     if self.state.mouse_capture {
@@ -1591,6 +1687,7 @@ impl App {
                     self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
                 }
                 crate::raw_input::RawInputEvent::OuterFocusLost => {
+                    self.release_input_source_headless(source_id);
                     self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
                 }
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
@@ -1714,6 +1811,343 @@ mod tests {
         crate::raw_input::RawInputEvent::Key(
             crate::input::TerminalKey::new(code, modifiers).with_kind(kind),
         )
+    }
+
+    #[test]
+    fn explicit_text_commit_does_not_trigger_navigate_binding() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.detach_exits = false;
+        app.state.mode = Mode::Navigate;
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Text(
+                crate::input::TextCommit::new("q"),
+            )],
+            false,
+        );
+
+        assert!(!app.state.detach_requested);
+        assert_eq!(app.state.mode, Mode::Navigate);
+        assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_text_commit_bypasses_bindings_leases_and_key_encoding() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>15u", 2);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Text(
+                crate::input::TextCommit::new("你🙂"),
+            )],
+            false,
+        );
+
+        assert_eq!(
+            rx.try_recv().expect("forwarded input").as_ref(),
+            "你🙂".as_bytes()
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn physical_count_one_repeats_and_release_keep_the_pressed_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let pressed_pane = workspace.focused_pane_id().unwrap();
+        let other_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(pressed_pane);
+        let (pressed_runtime, mut pressed_rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 5);
+        let (other_runtime, mut other_rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 2);
+        workspace.tabs[0]
+            .runtimes
+            .insert(pressed_pane, pressed_runtime);
+        workspace.tabs[0].runtimes.insert(other_pane, other_runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let record = crate::input::WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: 65,
+            virtual_scan_code: 30,
+            unicode: 97,
+            control_key_state: 0x0008,
+        };
+        let roundtrip = |events: Vec<crate::protocol::ClientInputEvent>| {
+            let message = crate::protocol::ClientMessage::InputEvents { events };
+            let encoded =
+                bincode::serde::encode_to_vec(&message, bincode::config::standard()).unwrap();
+            let (decoded, _): (crate::protocol::ClientMessage, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            let crate::protocol::ClientMessage::InputEvents { events } = decoded else {
+                panic!("expected structured input events");
+            };
+            events
+                .into_iter()
+                .map(|event| event.to_raw_input_event())
+                .collect()
+        };
+        let event = |kind, record| crate::protocol::ClientInputEvent::Key {
+            code: crate::protocol::ClientKeyCode::Char('a'),
+            modifiers: KeyModifiers::CONTROL.bits(),
+            kind,
+            repeat_count: 1,
+            generated_text: None,
+            source: crate::protocol::ClientKeySource::WindowsConsole { record },
+        };
+
+        app.route_client_events(
+            roundtrip(vec![event(crate::protocol::ClientKeyKind::Press, record)]),
+            false,
+        );
+        assert!(app.state.focus_pane_in_workspace(0, other_pane));
+        app.route_client_events(
+            roundtrip(vec![
+                event(crate::protocol::ClientKeyKind::Press, record),
+                event(crate::protocol::ClientKeyKind::Repeat, record),
+                event(
+                    crate::protocol::ClientKeyKind::Release,
+                    crate::input::WindowsKeyRecord {
+                        key_down: false,
+                        unicode: 0,
+                        ..record
+                    },
+                ),
+            ]),
+            false,
+        );
+
+        for expected in [
+            b"\x1b[97;5:1u".as_slice(),
+            b"\x1b[97;5:2u".as_slice(),
+            b"\x1b[97;5:2u".as_slice(),
+            b"\x1b[97;5:3u".as_slice(),
+        ] {
+            assert_eq!(pressed_rx.try_recv().unwrap().as_ref(), expected);
+        }
+        assert!(pressed_rx.try_recv().is_err());
+        assert!(other_rx.try_recv().is_err());
+        assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn grouped_physical_press_and_runtime_loss_preserve_count_then_close_the_lease() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("test");
+        let pane_id = workspace.focused_pane_id().unwrap();
+        let terminal_id = workspace.tabs[0].terminal_id(pane_id).unwrap().clone();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let (runtime, mut rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 2);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        let record = crate::input::WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 3,
+            virtual_key_code: 65,
+            virtual_scan_code: 30,
+            unicode: 97,
+            control_key_state: 0x0008,
+        };
+        let message = crate::protocol::ClientMessage::InputEvents {
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char('a'),
+                modifiers: KeyModifiers::CONTROL.bits(),
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 3,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::WindowsConsole { record },
+            }],
+        };
+        let encoded = bincode::serde::encode_to_vec(&message, bincode::config::standard()).unwrap();
+        let (decoded, _): (crate::protocol::ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        let crate::protocol::ClientMessage::InputEvents { events } = decoded else {
+            panic!("expected structured input events");
+        };
+
+        app.route_client_events(
+            events
+                .into_iter()
+                .map(|event| event.to_raw_input_event())
+                .collect(),
+            false,
+        );
+        app.shutdown_terminal_runtime(terminal_id.clone());
+
+        assert_eq!(
+            rx.try_recv().expect("grouped press"),
+            bytes::Bytes::from_static(b"\x1b[97;5:1u\x1b[97;5:2u\x1b[97;5:2u")
+        );
+        assert_eq!(
+            rx.try_recv()
+                .expect("synthetic release before runtime shutdown"),
+            bytes::Bytes::from_static(b"\x1b[97;5:3u")
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(app.input_leases.is_empty());
+        assert!(app.terminal_runtimes.get(&terminal_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn key_lifecycle_ownership_is_isolated_by_client() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let first_pane = workspace.focused_pane_id().unwrap();
+        let second_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(first_pane);
+        let (first_runtime, mut first_rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 3);
+        let (second_runtime, mut second_rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 3);
+        workspace.tabs[0].runtimes.insert(first_pane, first_runtime);
+        workspace.tabs[0]
+            .runtimes
+            .insert(second_pane, second_runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_events_from(
+            1,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+        assert!(app.state.focus_pane_in_workspace(0, second_pane));
+        app.route_client_events_from(
+            2,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+        app.route_client_events_from(
+            1,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Release,
+            )],
+            false,
+        );
+        app.route_client_events_from(
+            2,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Release,
+            )],
+            false,
+        );
+
+        for rx in [&mut first_rx, &mut second_rx] {
+            assert_eq!(
+                rx.try_recv().expect("forwarded input"),
+                bytes::Bytes::from_static(b"\x1b[106;5:1u")
+            );
+            assert_eq!(
+                rx.try_recv().expect("forwarded input"),
+                bytes::Bytes::from_static(b"\x1b[106;5:3u")
+            );
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnected_input_source_releases_owned_keys() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 3);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_events_from(
+            42,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+        app.release_input_source_headless(42);
+
+        assert_eq!(
+            rx.try_recv().expect("forwarded press"),
+            bytes::Bytes::from_static(b"\x1b[106;5:1u")
+        );
+        assert_eq!(
+            rx.try_recv().expect("synthetic release on disconnect"),
+            bytes::Bytes::from_static(b"\x1b[106;5:3u")
+        );
+        assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn committed_text_does_not_erase_owned_semantic_key() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 4);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_input(b"\x1b[106;5u".to_vec());
+        assert_eq!(app.input_leases.len(), 1);
+        app.route_client_input(b"j".to_vec());
+        assert_eq!(app.input_leases.len(), 1, "text must preserve the held key");
+        app.route_client_input(b"\x1b[106;5:3u".to_vec());
+
+        assert_eq!(
+            rx.try_recv().expect("semantic press"),
+            bytes::Bytes::from_static(b"\x1b[106;5:1u")
+        );
+        assert_eq!(
+            rx.try_recv().expect("committed text"),
+            bytes::Bytes::from_static(b"j")
+        );
+        assert_eq!(
+            rx.try_recv().expect("semantic release"),
+            bytes::Bytes::from_static(b"\x1b[106;5:3u")
+        );
+        assert!(app.input_leases.is_empty());
     }
 
     fn release_notes_state() -> state::ReleaseNotesState {
@@ -3179,6 +3613,136 @@ mod tests {
         let result =
             tokio::time::timeout(Duration::from_millis(20), recv_raw_input_or_pending(None)).await;
         assert!(result.is_err());
+    }
+
+    async fn assert_key_lifecycle_stays_with_pressed_pane(headless: bool, focus_lost: bool) {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("key-lifecycle");
+        let pressed_pane = workspace.tabs[0].root_pane;
+        let other_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(pressed_pane);
+        let (runtime, mut pressed_rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 8);
+        let key = crate::input::TerminalKey::new(KeyCode::Up, KeyModifiers::empty());
+        let press = runtime.encode_terminal_key(key.clone());
+        let repeat = runtime.encode_terminal_key(key.clone().with_kind(KeyEventKind::Repeat));
+        let release = runtime.encode_terminal_key(key.with_kind(KeyEventKind::Release));
+        assert!(!press.is_empty() && !repeat.is_empty() && !release.is_empty());
+        assert_ne!(repeat, release);
+        workspace.insert_test_runtime(pressed_pane, runtime);
+        let (runtime, mut other_rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.insert_test_runtime(other_pane, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let event = raw_key(KeyCode::Up, KeyModifiers::empty(), KeyEventKind::Press);
+        if headless {
+            app.route_client_events(vec![event], false);
+        } else {
+            app.handle_raw_input_event(event).await;
+        }
+        assert_eq!(pressed_rx.try_recv().unwrap().as_ref(), press);
+        assert!(app.state.focus_pane_in_workspace(0, other_pane));
+
+        let events = if focus_lost {
+            vec![crate::raw_input::RawInputEvent::OuterFocusLost]
+        } else {
+            vec![
+                raw_key(KeyCode::Up, KeyModifiers::empty(), KeyEventKind::Repeat),
+                raw_key(KeyCode::Up, KeyModifiers::empty(), KeyEventKind::Release),
+            ]
+        };
+        for event in events {
+            if headless {
+                app.route_client_events(vec![event], false);
+            } else {
+                app.handle_raw_input_event(event).await;
+            }
+        }
+        assert!(
+            other_rx.try_recv().is_err(),
+            "held key reached a different pane"
+        );
+        if !focus_lost {
+            assert_eq!(
+                pressed_rx
+                    .try_recv()
+                    .expect("repeat at original pane")
+                    .as_ref(),
+                repeat
+            );
+        }
+        assert_eq!(
+            pressed_rx
+                .try_recv()
+                .expect("release at original pane")
+                .as_ref(),
+            release
+        );
+        assert!(pressed_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn key_lifecycle_release_matches_owner_after_modifiers_change() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("key-release-order");
+        let pane = workspace.tabs[0].root_pane;
+        let (runtime, mut rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 4);
+        let press = crate::input::TerminalKey::new(KeyCode::Up, KeyModifiers::ALT);
+        let release = crate::input::TerminalKey::new(KeyCode::Up, KeyModifiers::empty())
+            .with_kind(KeyEventKind::Release);
+        let expected_press = runtime.encode_terminal_key(press.clone());
+        let expected_release = runtime.encode_terminal_key(release.clone());
+        assert!(!expected_release.is_empty());
+        workspace.insert_test_runtime(pane, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.route_client_events_from(1, vec![crate::raw_input::RawInputEvent::Key(press)], false);
+        app.route_client_events_from(
+            2,
+            vec![crate::raw_input::RawInputEvent::Key(release.clone())],
+            false,
+        );
+        assert_eq!(
+            app.input_leases.len(),
+            1,
+            "another source cannot release this key"
+        );
+        assert_eq!(rx.try_recv().unwrap().as_ref(), expected_press);
+        assert!(rx.try_recv().is_err());
+        app.route_client_events_from(
+            1,
+            vec![crate::raw_input::RawInputEvent::Key(release)],
+            false,
+        );
+        assert_eq!(rx.try_recv().unwrap().as_ref(), expected_release);
+        assert!(rx.try_recv().is_err());
+        assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn headless_key_lifecycle_retains_pressed_pane_after_focus_change() {
+        assert_key_lifecycle_stays_with_pressed_pane(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn local_key_lifecycle_retains_pressed_pane_after_focus_change() {
+        assert_key_lifecycle_stays_with_pressed_pane(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn headless_key_lifecycle_releases_pressed_pane_on_focus_loss() {
+        assert_key_lifecycle_stays_with_pressed_pane(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn local_key_lifecycle_releases_pressed_pane_on_focus_loss() {
+        assert_key_lifecycle_stays_with_pressed_pane(false, true).await;
     }
 
     #[tokio::test]

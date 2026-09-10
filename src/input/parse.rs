@@ -44,12 +44,11 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
         modifiers |= KeyModifiers::SHIFT;
     }
 
-    Some(TerminalKey {
-        code,
-        modifiers,
-        kind,
-        shifted_codepoint,
-    })
+    let mut key = TerminalKey::new(code, modifiers).with_kind(kind);
+    if let Some(shifted_codepoint) = shifted_codepoint {
+        key = key.with_shifted_codepoint(shifted_codepoint);
+    }
+    Some(key)
 }
 
 #[allow(dead_code)] // Reserved for the upcoming raw stdin parser.

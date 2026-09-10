@@ -55,10 +55,10 @@ pub fn parse_raw_input_bytes_with_ranges(data: &[u8]) -> Vec<RawInputEventWithRa
     if !buffer.is_empty() {
         if buffer.as_slice() == [ESC] {
             events.push(RawInputEventWithRange {
-                event: RawInputEvent::Key(TerminalKey::new(
-                    crossterm::event::KeyCode::Esc,
-                    KeyModifiers::empty(),
-                )),
+                event: RawInputEvent::Key(
+                    TerminalKey::new(crossterm::event::KeyCode::Esc, KeyModifiers::empty())
+                        .with_vt_bytes(vec![ESC]),
+                ),
                 start: offset,
                 len: 1,
             });
@@ -70,7 +70,7 @@ pub fn parse_raw_input_bytes_with_ranges(data: &[u8]) -> Vec<RawInputEventWithRa
         } else if let Ok(text) = std::str::from_utf8(&buffer) {
             if let Some(key) = parse_terminal_key_sequence(text) {
                 events.push(RawInputEventWithRange {
-                    event: RawInputEvent::Key(key),
+                    event: RawInputEvent::Key(key.with_text_commit().with_vt_bytes(buffer.clone())),
                     start: offset,
                     len: buffer.len(),
                 });
@@ -95,7 +95,7 @@ pub fn parse_raw_input_bytes_sync(data: &[u8]) -> Vec<RawInputEvent> {
 use std::os::fd::AsRawFd;
 use tokio::sync::mpsc;
 
-use crate::input::{parse_terminal_key_sequence, TerminalKey};
+use crate::input::{parse_terminal_key_sequence, TerminalKey, TextCommit};
 use crate::terminal_theme::{
     parse_default_color_response, parse_palette_color_response, DefaultColorKind, HostAppearance,
     RgbColor,
@@ -110,6 +110,7 @@ const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 #[derive(Debug)]
 pub enum RawInputEvent {
     Key(TerminalKey),
+    Text(TextCommit),
     Paste(String),
     Mouse(MouseEvent),
     OuterFocusGained,
@@ -160,10 +161,10 @@ impl RawInputFramer {
             .into_iter()
             .filter_map(|chunk| {
                 if chunk.as_slice() == [ESC] {
-                    return Some(RawInputEvent::Key(TerminalKey::new(
-                        crossterm::event::KeyCode::Esc,
-                        KeyModifiers::empty(),
-                    )));
+                    return Some(RawInputEvent::Key(
+                        TerminalKey::new(crossterm::event::KeyCode::Esc, KeyModifiers::empty())
+                            .with_vt_bytes(chunk),
+                    ));
                 }
                 extract_one_event(&chunk).map(|(event, _consumed)| {
                     tracing::debug!(raw_bytes = ?chunk, event = ?event, "raw input event parsed");
@@ -552,10 +553,10 @@ pub(crate) fn drain_complete_input_bytes(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
 fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
     if let Some(bytes) = flush_incomplete_input_bytes(buffer) {
         if bytes.as_slice() == [ESC] {
-            let _ = tx.blocking_send(RawInputEvent::Key(TerminalKey::new(
-                crossterm::event::KeyCode::Esc,
-                KeyModifiers::empty(),
-            )));
+            let _ = tx.blocking_send(RawInputEvent::Key(
+                TerminalKey::new(crossterm::event::KeyCode::Esc, KeyModifiers::empty())
+                    .with_vt_bytes(bytes),
+            ));
             return;
         }
 
@@ -654,7 +655,10 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
         }
 
         if let Some(key) = parse_terminal_key_sequence(seq) {
-            return Some((RawInputEvent::Key(key), seq_len));
+            return Some((
+                RawInputEvent::Key(key.with_vt_bytes(buffer[..seq_len].to_vec())),
+                seq_len,
+            ));
         }
 
         tracing::debug!(sequence = ?seq, "dropping unsupported escape sequence");
@@ -663,7 +667,9 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
 
     let consumed = first_complete_utf8_char_len(buffer)?;
     let text = std::str::from_utf8(&buffer[..consumed]).ok()?;
-    let key = parse_terminal_key_sequence(text)?;
+    let key = parse_terminal_key_sequence(text)?
+        .with_text_commit()
+        .with_vt_bytes(buffer[..consumed].to_vec());
     Some((RawInputEvent::Key(key), consumed))
 }
 
@@ -916,6 +922,23 @@ mod tests {
         };
         assert_eq!(key.code, code);
         assert_eq!(key.modifiers, modifiers);
+    }
+
+    #[test]
+    fn raw_key_source_retains_exact_vt_bytes_and_separate_text_metadata() {
+        for (bytes, text) in [
+            (b"\x1b".as_slice(), None),
+            (b"\x1b[106;5u".as_slice(), None),
+            (b"j".as_slice(), Some("j")),
+            ("\u{00c9}".as_bytes(), Some("\u{00c9}")),
+        ] {
+            let events = parse_raw_input_bytes_sync(bytes);
+            let [RawInputEvent::Key(key)] = events.as_slice() else {
+                panic!("expected one key: {events:?}");
+            };
+            assert_eq!(key.vt_bytes(), Some(bytes));
+            assert_eq!(key.generated_text.as_deref(), text);
+        }
     }
 
     fn decode_hex(hex: &str) -> Vec<u8> {

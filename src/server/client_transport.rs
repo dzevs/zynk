@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Blocking client socket transport for the headless server.
 //!
 //! This module owns the thin-client handshake, read loop, and writer loop.
@@ -364,22 +366,68 @@ fn parse_client_keybindings(
     }
 }
 
-fn input_events_within_limits(events: &[ClientInputEvent]) -> bool {
-    if events.len() > MAX_INPUT_EVENT_BATCH {
-        return false;
-    }
+#[derive(Debug, PartialEq, Eq)]
+enum InputEventLimit {
+    WithinLimits,
+    TooManyEvents,
+    PasteTooLarge { size: usize },
+    InputPayloadTooLarge { size: usize },
+}
 
+fn input_event_limit(events: &[ClientInputEvent]) -> InputEventLimit {
+    let mut expanded_events = 0usize;
     let mut paste_bytes = 0usize;
+    let mut input_bytes = 0usize;
     for event in events {
-        if let ClientInputEvent::Paste { text } = event {
-            paste_bytes = paste_bytes.saturating_add(text.len());
-            if paste_bytes > MAX_INPUT_PAYLOAD {
-                return false;
+        expanded_events = expanded_events.saturating_add(match event {
+            ClientInputEvent::Key { repeat_count, .. } => usize::from((*repeat_count).max(1)),
+            _ => 1,
+        });
+        match event {
+            ClientInputEvent::Key {
+                repeat_count,
+                generated_text,
+                source,
+                ..
+            } => {
+                if let Some(text) = generated_text {
+                    input_bytes = input_bytes.saturating_add(
+                        text.len()
+                            .saturating_mul(usize::from((*repeat_count).max(1))),
+                    );
+                }
+                if let crate::protocol::ClientKeySource::Vt { bytes } = source {
+                    input_bytes = input_bytes.saturating_add(bytes.len());
+                }
             }
+            ClientInputEvent::TextCommit(text) => {
+                input_bytes = input_bytes.saturating_add(text.len());
+            }
+            ClientInputEvent::Paste { text } => {
+                paste_bytes = paste_bytes.saturating_add(text.len());
+            }
+            ClientInputEvent::Mouse { .. }
+            | ClientInputEvent::FocusGained
+            | ClientInputEvent::FocusLost => {}
         }
     }
 
-    true
+    if expanded_events > MAX_INPUT_EVENT_BATCH {
+        return InputEventLimit::TooManyEvents;
+    }
+
+    let payload_bytes = paste_bytes.saturating_add(input_bytes);
+    if payload_bytes <= MAX_INPUT_PAYLOAD {
+        InputEventLimit::WithinLimits
+    } else if input_bytes == 0 {
+        InputEventLimit::PasteTooLarge {
+            size: payload_bytes,
+        }
+    } else {
+        InputEventLimit::InputPayloadTooLarge {
+            size: payload_bytes,
+        }
+    }
 }
 
 fn set_client_recv_timeout(
@@ -637,10 +685,12 @@ fn client_read_loop(
                 }
             }
             ClientMessage::InputEvents { events } => {
-                if !input_events_within_limits(&events) {
+                let limit = input_event_limit(&events);
+                if limit != InputEventLimit::WithinLimits {
                     warn!(
                         client_id,
                         count = events.len(),
+                        reason = ?limit,
                         "oversized input events from client, closing"
                     );
                     let _ = server_event_tx
@@ -1178,6 +1228,9 @@ new_tab = "ctrl+notakey"
                 code: crate::protocol::ClientKeyCode::Enter,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             },
             ClientInputEvent::FocusGained,
         ];
@@ -1282,6 +1335,94 @@ new_tab = "ctrl+notakey"
             .join()
             .expect("read thread join")
             .expect("read thread result");
+    }
+
+    #[test]
+    fn structured_input_limits_charge_grouped_repeats_and_text_payloads() {
+        let grouped = ClientInputEvent::Key {
+            code: crate::protocol::ClientKeyCode::Char('x'),
+            modifiers: 0,
+            kind: crate::protocol::ClientKeyKind::Press,
+            repeat_count: (MAX_INPUT_EVENT_BATCH + 1) as u16,
+            generated_text: None,
+            source: crate::protocol::ClientKeySource::Synthesized,
+        };
+        assert_eq!(
+            input_event_limit(&[grouped]),
+            InputEventLimit::TooManyEvents
+        );
+
+        let repeated_text = ClientInputEvent::Key {
+            code: crate::protocol::ClientKeyCode::Char('x'),
+            modifiers: 0,
+            kind: crate::protocol::ClientKeyKind::Press,
+            repeat_count: MAX_INPUT_EVENT_BATCH as u16,
+            generated_text: Some("x".repeat((MAX_INPUT_PAYLOAD / MAX_INPUT_EVENT_BATCH) + 1)),
+            source: crate::protocol::ClientKeySource::Synthesized,
+        };
+        assert!(matches!(
+            input_event_limit(&[repeated_text]),
+            InputEventLimit::InputPayloadTooLarge { size } if size > MAX_INPUT_PAYLOAD
+        ));
+
+        let text = ClientInputEvent::TextCommit("x".repeat(MAX_INPUT_PAYLOAD + 1));
+        assert_eq!(
+            input_event_limit(&[text]),
+            InputEventLimit::InputPayloadTooLarge {
+                size: MAX_INPUT_PAYLOAD + 1
+            }
+        );
+    }
+
+    #[test]
+    fn structured_input_limits_bound_combined_payload_and_zero_repeats() {
+        let key = ClientInputEvent::Key {
+            code: crate::protocol::ClientKeyCode::Char('x'),
+            modifiers: 0,
+            kind: crate::protocol::ClientKeyKind::Press,
+            repeat_count: 0,
+            generated_text: Some("x".to_owned()),
+            source: crate::protocol::ClientKeySource::Vt {
+                bytes: b"x".to_vec(),
+            },
+        };
+        let mut events = vec![
+            key.clone(),
+            ClientInputEvent::TextCommit("t".to_owned()),
+            ClientInputEvent::Paste {
+                text: "p".repeat(MAX_INPUT_PAYLOAD - 3),
+            },
+        ];
+        assert_eq!(input_event_limit(&events), InputEventLimit::WithinLimits);
+        events.push(ClientInputEvent::TextCommit("!".to_owned()));
+        assert_eq!(
+            input_event_limit(&events),
+            InputEventLimit::InputPayloadTooLarge {
+                size: MAX_INPUT_PAYLOAD + 1
+            }
+        );
+
+        let mut events = vec![key; MAX_INPUT_EVENT_BATCH];
+        assert_eq!(input_event_limit(&events), InputEventLimit::WithinLimits);
+        events.push(ClientInputEvent::FocusLost);
+        assert_eq!(input_event_limit(&events), InputEventLimit::TooManyEvents);
+
+        let vt = ClientInputEvent::Key {
+            code: crate::protocol::ClientKeyCode::Esc,
+            modifiers: 0,
+            kind: crate::protocol::ClientKeyKind::Release,
+            repeat_count: 1,
+            generated_text: None,
+            source: crate::protocol::ClientKeySource::Vt {
+                bytes: vec![0; MAX_INPUT_PAYLOAD + 1],
+            },
+        };
+        assert_eq!(
+            input_event_limit(&[vt]),
+            InputEventLimit::InputPayloadTooLarge {
+                size: MAX_INPUT_PAYLOAD + 1
+            }
+        );
     }
 
     #[test]

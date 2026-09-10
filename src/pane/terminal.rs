@@ -1673,11 +1673,29 @@ impl GhosttyPaneTerminal {
         key: crate::input::TerminalKey,
         protocol: crate::input::KeyboardProtocol,
     ) -> Vec<u8> {
-        if ghostty_prefers_zynk_text_encoding(key) {
+        let repeat_count = key.repeat_count;
+        let first = key.with_repeat_count(1);
+        let mut bytes = self.encode_terminal_key_once(first.clone(), protocol);
+        if repeat_count > 1 && first.kind != crossterm::event::KeyEventKind::Release {
+            let repeated = first.with_kind(crossterm::event::KeyEventKind::Repeat);
+            let repeated_bytes = self.encode_terminal_key_once(repeated, protocol);
+            for _ in 1..repeat_count {
+                bytes.extend_from_slice(&repeated_bytes);
+            }
+        }
+        bytes
+    }
+
+    fn encode_terminal_key_once(
+        &self,
+        key: crate::input::TerminalKey,
+        protocol: crate::input::KeyboardProtocol,
+    ) -> Vec<u8> {
+        if ghostty_prefers_zynk_text_encoding(&key) {
             return crate::input::encode_terminal_key(key, protocol);
         }
 
-        let Some(event) = ghostty_key_event_from_terminal_key(key) else {
+        let Some(event) = ghostty_key_event_from_terminal_key(&key) else {
             return crate::input::encode_terminal_key(key, protocol);
         };
 
@@ -1686,7 +1704,8 @@ impl GhosttyPaneTerminal {
         };
         match encoder.encode(&event) {
             Ok(bytes)
-                if !bytes.is_empty() && encoded_key_preserves_event_kind(&bytes, key, protocol) =>
+                if !bytes.is_empty()
+                    && encoded_key_preserves_event_kind(&bytes, &key, protocol) =>
             {
                 bytes
             }
@@ -1969,7 +1988,7 @@ impl GhosttyPaneTerminal {
 
 fn encoded_key_preserves_event_kind(
     bytes: &[u8],
-    key: crate::input::TerminalKey,
+    key: &crate::input::TerminalKey,
     protocol: crate::input::KeyboardProtocol,
 ) -> bool {
     if !protocol.reports_event_types() || key.kind == crossterm::event::KeyEventKind::Press {
@@ -3695,8 +3714,48 @@ mod tests {
         assert_eq!(encoded, b"\x1bOA");
 
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
         assert_eq!(encoded, b"\x1b[27;2;13~");
+    }
+
+    #[test]
+    fn grouped_semantic_key_repeats_expand_at_the_destination() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let key = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        )
+        .with_repeat_count(3);
+
+        assert_eq!(
+            pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
+            b"xxx"
+        );
+    }
+
+    #[test]
+    fn grouped_release_is_encoded_once() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>11u");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let protocol = pane.keyboard_protocol().unwrap();
+        let release = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::empty(),
+        )
+        .with_kind(crossterm::event::KeyEventKind::Release);
+        let expected = pane.encode_terminal_key(release.clone(), protocol);
+
+        assert!(!expected.is_empty());
+        let mut malformed_release = release;
+        malformed_release.repeat_count = 3;
+        assert_eq!(
+            pane.encode_terminal_key(malformed_release, protocol),
+            expected
+        );
     }
 
     #[test]
@@ -3738,9 +3797,9 @@ mod tests {
             crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
         );
 
-        let before = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let before = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
         pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
-        let after = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let after = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_ne!(before, after);
         assert_eq!(after, b"\x1b[13;6u");
@@ -3755,7 +3814,7 @@ mod tests {
         pane.process_pty_bytes(pane_id, 0, b"\x1b[>5u", &tx);
 
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(
             pane.keyboard_protocol(),
@@ -3772,7 +3831,7 @@ mod tests {
         pane.seed_keyboard_protocol_flags(5);
 
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(
             pane.keyboard_protocol(),
@@ -3831,7 +3890,7 @@ mod tests {
         pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
 
         let key = crate::input::parse_terminal_key_sequence("\x1b\x7f").unwrap();
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(encoded, b"\x1b[127;3u");
     }

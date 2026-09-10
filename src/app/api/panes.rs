@@ -2265,6 +2265,82 @@ mod tests {
         assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), source);
     }
 
+    #[tokio::test]
+    async fn key_release_follows_pane_moved_across_workspaces() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let source_terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(source)
+            .unwrap()
+            .clone();
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[>3u",
+                2,
+            );
+        app.terminal_runtimes.insert(source_terminal_id, runtime);
+        app.state.workspaces.push(Workspace::test_new("other"));
+        seed_terminal_states(&mut app);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let source_public = app.public_pane_id(0, source).unwrap();
+        let target = app.state.workspaces[1].tabs[0].root_pane;
+        let target_tab_id = app.public_tab_id(1, 0).unwrap();
+        let target_pane_id = app.public_pane_id(1, target).unwrap();
+
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('j'),
+                    crossterm::event::KeyModifiers::CONTROL,
+                ),
+            )],
+            false,
+        );
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::Tab {
+                    tab_id: target_tab_id,
+                    target_pane_id: Some(target_pane_id),
+                    split: SplitDirection::Down,
+                    ratio: None,
+                },
+                focus: false,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response)
+            .unwrap_or_else(|error| panic!("pane move failed: {error}; response: {response}"));
+        assert!(matches!(success.result, ResponseResult::PaneMove { .. }));
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('j'),
+                    crossterm::event::KeyModifiers::CONTROL,
+                )
+                .with_kind(crossterm::event::KeyEventKind::Release),
+            )],
+            false,
+        );
+
+        assert_eq!(
+            rx.try_recv().expect("forwarded press"),
+            bytes::Bytes::from_static(b"\x1b[106;5:1u")
+        );
+        assert_eq!(
+            rx.try_recv().expect("forwarded release after pane move"),
+            bytes::Bytes::from_static(b"\x1b[106;5:3u")
+        );
+        assert!(app.input_leases.is_empty());
+    }
+
     #[test]
     fn api_pane_move_to_existing_tab_across_workspace_reassigns_public_pane_id() {
         let mut app = app_with_linked_worktree();

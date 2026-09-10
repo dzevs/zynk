@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Wire protocol for zynk server/client communication.
 //!
 //! Defines the message types, framing, version negotiation, and safety
@@ -13,7 +15,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -115,7 +117,11 @@ pub enum ClientInputEvent {
         code: ClientKeyCode,
         modifiers: u8,
         kind: ClientKeyKind,
+        repeat_count: u16,
+        generated_text: Option<String>,
+        source: ClientKeySource,
     },
+    TextCommit(String),
     Mouse {
         kind: ClientMouseKind,
         column: u16,
@@ -127,6 +133,17 @@ pub enum ClientInputEvent {
     },
     FocusGained,
     FocusLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientKeySource {
+    Synthesized,
+    Vt {
+        bytes: Vec<u8>,
+    },
+    WindowsConsole {
+        record: crate::input::WindowsKeyRecord,
+    },
 }
 
 impl ClientKeyKind {
@@ -198,13 +215,28 @@ impl ClientInputEvent {
                 code,
                 modifiers,
                 kind,
-            } => crate::raw_input::RawInputEvent::Key(
-                crate::input::TerminalKey::new(
+                repeat_count,
+                generated_text,
+                source,
+            } => {
+                let mut key = crate::input::TerminalKey::new(
                     code.to_crossterm(),
                     crossterm::event::KeyModifiers::from_bits_truncate(*modifiers),
                 )
-                .with_kind(kind.to_crossterm()),
-            ),
+                .with_generated_text(generated_text.clone());
+                key = match source {
+                    ClientKeySource::Synthesized => key,
+                    ClientKeySource::Vt { bytes } => key.with_vt_bytes(bytes.clone()),
+                    ClientKeySource::WindowsConsole { record } => key.with_windows_record(*record),
+                };
+                key = key
+                    .with_repeat_count(*repeat_count)
+                    .with_kind(kind.to_crossterm());
+                crate::raw_input::RawInputEvent::Key(key)
+            }
+            Self::TextCommit(text) => {
+                crate::raw_input::RawInputEvent::Text(crate::input::TextCommit::new(text.clone()))
+            }
             Self::Mouse {
                 kind,
                 column,
@@ -855,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn client_message_wire_tags_preserve_protocol_15_order() {
+    fn client_message_wire_tags_preserve_protocol_19_order() {
         fn tag(msg: &ClientMessage) -> u8 {
             *bincode::serde::encode_to_vec(msg, bincode::config::standard())
                 .unwrap()
@@ -923,12 +955,39 @@ mod tests {
                     code: ClientKeyCode::Char('N'),
                     modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                     kind: ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 ClientInputEvent::Key {
                     code: ClientKeyCode::Backspace,
                     modifiers: 0,
                     kind: ClientKeyKind::Press,
+                    repeat_count: 3,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Vt {
+                        bytes: b"\x1b[127;1u".to_vec(),
+                    },
                 },
+                ClientInputEvent::Key {
+                    code: ClientKeyCode::Esc,
+                    modifiers: 0,
+                    kind: ClientKeyKind::Release,
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::WindowsConsole {
+                        record: crate::input::WindowsKeyRecord {
+                            key_down: false,
+                            repeat_count: 1,
+                            virtual_key_code: 27,
+                            virtual_scan_code: 1,
+                            unicode: 27,
+                            control_key_state: 0,
+                        },
+                    },
+                },
+                ClientInputEvent::TextCommit("你🙂".to_owned()),
                 ClientInputEvent::Mouse {
                     kind: ClientMouseKind::Down(ClientMouseButton::Left),
                     column: 3,
@@ -938,17 +997,75 @@ mod tests {
             ],
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        // Freeze the protocol 19 input envelope before it is published.
+        assert_eq!(
+            encoded,
+            vec![
+                7, 5, 0, 15, 78, 1, 0, 1, 0, 0, 0, 0, 0, 0, 3, 0, 1, 8, 27, 91, 49, 50, 55, 59, 49,
+                117, 0, 14, 0, 2, 1, 0, 2, 0, 1, 27, 1, 27, 0, 1, 7, 228, 189, 160, 240, 159, 153,
+                130, 2, 0, 0, 3, 4, 0,
+            ]
+        );
         let (decoded, _): (ClientMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
     }
 
     #[test]
+    fn wire_release_cannot_restore_a_grouped_repeat_count() {
+        for source in [
+            ClientKeySource::Synthesized,
+            ClientKeySource::Vt {
+                bytes: b"\x1b".to_vec(),
+            },
+            ClientKeySource::WindowsConsole {
+                record: crate::input::WindowsKeyRecord {
+                    key_down: true,
+                    repeat_count: 7,
+                    virtual_key_code: 27,
+                    virtual_scan_code: 1,
+                    unicode: 27,
+                    control_key_state: 0,
+                },
+            },
+        ] {
+            let event = ClientInputEvent::Key {
+                code: ClientKeyCode::Esc,
+                modifiers: 0,
+                kind: ClientKeyKind::Release,
+                repeat_count: 3,
+                generated_text: Some("ignored".to_owned()),
+                source,
+            };
+
+            match event.to_raw_input_event() {
+                crate::raw_input::RawInputEvent::Key(key) => {
+                    assert_eq!(key.kind, crossterm::event::KeyEventKind::Release);
+                    assert_eq!(key.repeat_count, 1);
+                    assert_eq!(key.generated_text, None);
+                }
+                other => panic!("expected key event, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn client_input_events_convert_to_raw_keys() {
+        let record = crate::input::WindowsKeyRecord {
+            key_down: false,
+            repeat_count: 1,
+            virtual_key_code: 78,
+            virtual_scan_code: 49,
+            unicode: 78,
+            control_key_state: 16,
+        };
         let shifted = ClientInputEvent::Key {
             code: ClientKeyCode::Char('N'),
             modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
             kind: ClientKeyKind::Press,
+            repeat_count: 1,
+            generated_text: None,
+            source: ClientKeySource::WindowsConsole { record },
         }
         .to_raw_input_event();
         match shifted {
@@ -956,6 +1073,10 @@ mod tests {
                 assert_eq!(key.code, crossterm::event::KeyCode::Char('N'));
                 assert_eq!(key.modifiers, crossterm::event::KeyModifiers::SHIFT);
                 assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+                assert_eq!(
+                    key.windows_record().map(|record| record.key_down),
+                    Some(false)
+                );
             }
             other => panic!("expected shifted key event, got {other:?}"),
         }
@@ -964,6 +1085,10 @@ mod tests {
             code: ClientKeyCode::Backspace,
             modifiers: 0,
             kind: ClientKeyKind::Press,
+
+            repeat_count: 1,
+            generated_text: None,
+            source: crate::protocol::ClientKeySource::Synthesized,
         }
         .to_raw_input_event();
         match backspace {

@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 mod encode;
 mod model;
 mod parse;
@@ -8,7 +10,7 @@ pub use encode::{
 };
 pub use model::ime_compatible_keyboard_enhancement_flags;
 pub use model::{
-    host_modify_other_keys_mode, KeyboardProtocol, MouseProtocolEncoding, MouseProtocolMode,
-    TerminalKey,
+    host_modify_other_keys_mode, KeyIdentity, KeyboardProtocol, MouseProtocolEncoding,
+    MouseProtocolMode, TerminalKey, TextCommit, WindowsKeyRecord,
 };
 pub use parse::parse_terminal_key_sequence;

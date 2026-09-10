@@ -92,6 +92,9 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/detect/manifests/qwen.toml
 - src/detect/mod.rs
 - src/ghostty/mod.rs
+- src/input/encode.rs
+- src/input/mod.rs
+- src/input/model.rs
 - src/input/parse.rs
 - src/integration/actions.rs
 - src/integration/assets/antigravity_cli/zynk-agent-state.sh
@@ -122,13 +125,16 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/integration/types.rs
 - src/main.rs
 - src/pane.rs
+- src/pane/input.rs
 - src/pane/osc.rs
 - src/pane/terminal.rs
 - src/persist/restore.rs
+- src/protocol/wire.rs
 - src/pty/actor/unix.rs
 - src/raw_input.rs
 - src/render_signal.rs
 - src/selection.rs
+- src/server/client_transport.rs
 - src/server/clients.rs
 - src/server/headless.rs
 - src/server/notifications.rs

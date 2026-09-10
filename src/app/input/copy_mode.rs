@@ -18,7 +18,7 @@ impl App {
             return;
         }
         self.state.update_dismissed = true;
-        if self.state.is_prefix_key(key) {
+        if self.state.is_prefix_key(&key) {
             self.state.mode = Mode::Prefix;
             return;
         }
@@ -82,7 +82,7 @@ impl AppState {
         terminal_runtimes: &TerminalRuntimeRegistry,
         key: TerminalKey,
     ) {
-        if self.handle_copy_mode_search_prompt_key(terminal_runtimes, key) {
+        if self.handle_copy_mode_search_prompt_key(terminal_runtimes, key.clone()) {
             return;
         }
         match key.code {
