@@ -9,7 +9,8 @@ use crate::{
 };
 
 fn is_retained_selection_copy_key(key: &TerminalKey) -> bool {
-    matches!(key.code, KeyCode::Char('c' | 'C'))
+    key.generated_text.is_none()
+        && matches!(key.code, KeyCode::Char('c' | 'C'))
         && matches!(key.modifiers, KeyModifiers::CONTROL | KeyModifiers::SUPER)
 }
 
@@ -128,6 +129,47 @@ mod tests {
             .selection
             .as_ref()
             .is_some_and(crate::selection::Selection::is_visible));
+    }
+
+    #[tokio::test]
+    async fn retained_selection_copy_binding_does_not_consume_associated_ime_text() {
+        for (name, composed, shortcut) in [
+            ("Ctrl-C", "\x1b[99;5;20320:22909u", "\x1b[99;5u"),
+            ("Super-C", "\x1b[99;9;20320:22909u", "\x1b[99;9u"),
+        ] {
+            let (mut app, info, mut input_rx) = app_with_screen_bytes_and_input(b"alpha beta");
+            app.state.copy_on_select = false;
+            drag_select_range(&mut app, &info, 0, 4);
+            assert!(app.state.selection.as_ref().unwrap().is_finalized());
+            assert!(app.event_rx.try_recv().is_err());
+
+            app.route_client_input(composed.as_bytes().to_vec());
+
+            let forwarded = input_rx
+                .try_recv()
+                .unwrap_or_else(|error| panic!("{name} composed text did not reach pane: {error}"));
+            assert_eq!(forwarded.as_ref(), "\u{4f60}\u{597d}".as_bytes(), "{name}");
+            assert!(
+                input_rx.try_recv().is_err(),
+                "{name}: unexpected pane input"
+            );
+            assert!(app.event_rx.try_recv().is_err(), "{name}: copied selection");
+            assert!(app.state.request_clipboard_write.is_none());
+            assert!(
+                app.state.selection.is_none(),
+                "{name}: typing kept selection"
+            );
+            assert!(app.input_leases.is_empty(), "{name}: consumed input lease");
+            assert_eq!(app.state.mode, Mode::Terminal);
+
+            // The same raw key without associated text must still copy.
+            drag_select_range(&mut app, &info, 0, 4);
+            app.route_client_input(shortcut.as_bytes().to_vec());
+            assert_eq!(clipboard_write_content(&mut app), b"alpha", "{name}");
+            assert!(app.state.selection.is_none());
+            assert!(input_rx.try_recv().is_err(), "{name}: copy reached pane");
+            assert_eq!(app.input_leases.len(), 1, "{name}: missing copy lease");
+        }
     }
 
     #[tokio::test]
