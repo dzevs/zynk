@@ -69,6 +69,48 @@ enum MobileMouseResult {
 }
 
 impl AppState {
+    fn chrome_press_pending(&self, source_id: crate::app::InputSourceId) -> bool {
+        self.tab_presses.contains_key(&source_id) || self.workspace_presses.contains_key(&source_id)
+    }
+
+    fn chrome_drag_owned_by_other(&self, source_id: crate::app::InputSourceId) -> bool {
+        self.drag.as_ref().is_some_and(|drag| {
+            matches!(
+                drag.target,
+                DragTarget::WorkspaceReorder { source_id: owner, .. }
+                    | DragTarget::TabReorder { source_id: owner, .. }
+                    if owner != source_id
+            )
+        })
+    }
+
+    pub(crate) fn clear_chrome_press(&mut self, source_id: crate::app::InputSourceId) {
+        self.tab_presses.remove(&source_id);
+        self.workspace_presses.remove(&source_id);
+    }
+
+    fn chrome_press_action(
+        &mut self,
+        workspace_press: Option<WorkspacePressState>,
+        tab_press: Option<TabPressState>,
+    ) -> Option<MouseAction> {
+        if let Some(press) = workspace_press {
+            self.mode = Mode::Terminal;
+            return Some(MouseAction::FocusWorkspace {
+                ws_idx: press.ws_idx,
+            });
+        }
+        if let Some(press) = tab_press {
+            if self.active == Some(press.ws_idx) {
+                self.mode = Mode::Terminal;
+                return Some(MouseAction::FocusTab {
+                    tab_idx: press.tab_idx,
+                });
+            }
+        }
+        None
+    }
+
     pub(crate) fn handle_pane_mouse_only(
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
@@ -100,6 +142,7 @@ impl AppState {
     pub(super) fn handle_mouse(
         &mut self,
         terminal_runtimes: &mut TerminalRuntimeRegistry,
+        source_id: crate::app::InputSourceId,
         mouse: MouseEvent,
     ) -> Option<MouseAction> {
         if self.mode == Mode::Onboarding {
@@ -189,7 +232,7 @@ impl AppState {
             && mouse.row >= sidebar.y
             && mouse.row < sidebar.y + sidebar.height;
 
-        if self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar) {
+        if self.handle_right_click_passthrough(terminal_runtimes, source_id, mouse, in_sidebar) {
             return None;
         }
 
@@ -223,7 +266,7 @@ impl AppState {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
                 self.selection_autoscroll = None;
-                self.workspace_press = None;
+                self.clear_chrome_press(source_id);
 
                 if self.mode == Mode::ConfirmClose {
                     let popup = self.confirm_close_rect();
@@ -497,12 +540,15 @@ impl AppState {
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
-                    self.tab_press = Some(TabPressState {
-                        ws_idx,
-                        tab_idx,
-                        start_col: mouse.column,
-                        start_row: mouse.row,
-                    });
+                    self.tab_presses.insert(
+                        source_id,
+                        TabPressState {
+                            ws_idx,
+                            tab_idx,
+                            start_col: mouse.column,
+                            start_row: mouse.row,
+                        },
+                    );
                     return None;
                 }
                 if self.on_new_tab_button(mouse.column, mouse.row) {
@@ -585,11 +631,14 @@ impl AppState {
                     }
 
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
-                        self.workspace_press = Some(WorkspacePressState {
-                            ws_idx: idx,
-                            start_col: mouse.column,
-                            start_row: mouse.row,
-                        });
+                        self.workspace_presses.insert(
+                            source_id,
+                            WorkspacePressState {
+                                ws_idx: idx,
+                                start_col: mouse.column,
+                                start_row: mouse.row,
+                            },
+                        );
                         return None;
                     }
 
@@ -667,7 +716,9 @@ impl AppState {
                     return None;
                 }
 
-                if self.drag.is_none() {
+                if (self.drag.is_none() || self.chrome_drag_owned_by_other(source_id))
+                    && !self.chrome_press_pending(source_id)
+                {
                     if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
                         if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                             self.selection = None;
@@ -680,27 +731,34 @@ impl AppState {
                 let workspace_drop_index = self.workspace_drop_index_at_row(mouse.row);
                 let tab_drop_index = self.tab_drop_index_at(mouse.column, mouse.row);
                 if self.drag.is_none() {
-                    if let Some(press) = &self.workspace_press {
+                    if let Some(press) = self.workspace_presses.get(&source_id) {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
                         let can_reorder = self
                             .workspaces
                             .get(press.ws_idx)
                             .is_some_and(|ws| ws.worktree_space().is_none());
-                        if can_reorder && delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD {
+                        if workspace_drop_index.is_some()
+                            && can_reorder
+                            && delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD
+                        {
                             self.drag = Some(DragState {
                                 target: DragTarget::WorkspaceReorder {
+                                    source_id,
                                     source_ws_idx: press.ws_idx,
                                     insert_idx: workspace_drop_index,
                                 },
                             });
                         }
-                    } else if let Some(press) = &self.tab_press {
+                    } else if let Some(press) = self.tab_presses.get(&source_id) {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
-                        if delta_col.max(delta_row) >= TAB_DRAG_THRESHOLD {
+                        if tab_drop_index.is_some()
+                            && delta_col.max(delta_row) >= TAB_DRAG_THRESHOLD
+                        {
                             self.drag = Some(DragState {
                                 target: DragTarget::TabReorder {
+                                    source_id,
                                     ws_idx: press.ws_idx,
                                     source_tab_idx: press.tab_idx,
                                     insert_idx: tab_drop_index,
@@ -711,18 +769,28 @@ impl AppState {
                 }
 
                 if let Some(DragState {
-                    target: DragTarget::WorkspaceReorder { insert_idx, .. },
-                }) = &mut self.drag
-                {
-                    *insert_idx = workspace_drop_index;
-                } else if let Some(DragState {
                     target:
-                        DragTarget::TabReorder {
-                            ws_idx, insert_idx, ..
+                        DragTarget::WorkspaceReorder {
+                            source_id: drag_source_id,
+                            insert_idx,
+                            ..
                         },
                 }) = &mut self.drag
                 {
-                    if self.active == Some(*ws_idx) {
+                    if *drag_source_id == source_id {
+                        *insert_idx = workspace_drop_index;
+                    }
+                } else if let Some(DragState {
+                    target:
+                        DragTarget::TabReorder {
+                            source_id: drag_source_id,
+                            ws_idx,
+                            insert_idx,
+                            ..
+                        },
+                }) = &mut self.drag
+                {
+                    if *drag_source_id == source_id && self.active == Some(*ws_idx) {
                         *insert_idx = tab_drop_index;
                     }
                 } else if let Some(drag) = &self.drag {
@@ -807,8 +875,7 @@ impl AppState {
                     let was_click = selection.was_just_click();
                     let was_finalized = selection.is_finalized();
 
-                    self.workspace_press = None;
-                    self.tab_press = None;
+                    self.clear_chrome_press(source_id);
                     self.drag = None;
                     self.selection_autoscroll = None;
                     if was_click {
@@ -823,27 +890,33 @@ impl AppState {
                     return None;
                 }
 
-                if self.drag.is_none() {
+                let foreign_chrome_drag = self.chrome_drag_owned_by_other(source_id);
+                if (self.drag.is_none() || foreign_chrome_drag)
+                    && !self.chrome_press_pending(source_id)
+                {
                     if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
                         if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                             self.selection = None;
                             self.selection_autoscroll = None;
-                            self.workspace_press = None;
-                            self.tab_press = None;
+                            self.clear_chrome_press(source_id);
                             self.drag = None;
                             return None;
                         }
                     }
                 }
 
-                let workspace_press = self.workspace_press.take();
-                let tab_press = self.tab_press.take();
+                let workspace_press = self.workspace_presses.remove(&source_id);
+                let tab_press = self.tab_presses.remove(&source_id);
+                if foreign_chrome_drag {
+                    return self.chrome_press_action(workspace_press, tab_press);
+                }
                 match self.drag.take() {
                     Some(DragState {
                         target:
                             DragTarget::WorkspaceReorder {
                                 source_ws_idx,
                                 insert_idx: Some(insert_idx),
+                                ..
                             },
                     }) => {
                         return Some(MouseAction::MoveWorkspace {
@@ -857,6 +930,7 @@ impl AppState {
                                 ws_idx,
                                 source_tab_idx,
                                 insert_idx: Some(insert_idx),
+                                ..
                             },
                     }) => {
                         if self.active == Some(ws_idx) {
@@ -997,8 +1071,7 @@ impl AppState {
             }
 
             MouseEventKind::Down(MouseButton::Right) if in_sidebar && !self.sidebar_collapsed => {
-                self.workspace_press = None;
-                self.tab_press = None;
+                self.clear_chrome_press(source_id);
                 if self
                     .workspace_list_scrollbar_target_at(mouse.column, mouse.row)
                     .is_some()
@@ -1513,6 +1586,7 @@ impl AppState {
     fn handle_right_click_passthrough(
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
+        source_id: crate::app::InputSourceId,
         mouse: MouseEvent,
         in_sidebar: bool,
     ) -> bool {
@@ -1564,8 +1638,7 @@ impl AppState {
 
         self.selection = None;
         self.selection_autoscroll = None;
-        self.workspace_press = None;
-        self.tab_press = None;
+        self.clear_chrome_press(source_id);
         self.drag = None;
         self.context_menu = None;
         self.right_click_passthrough = Some(RightClickPassthroughGesture {
@@ -1884,6 +1957,85 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: ws_idx != 0,
         });
+    }
+
+    #[test]
+    fn tab_click_survives_stray_drag_outside_tab_bar() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("test");
+        workspace.test_add_tab(None);
+        workspace.active_tab = 1;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let area = Rect::new(0, 0, 106, 20);
+        crate::ui::compute_view(&mut app.state, area);
+
+        let tab = app.state.view.tab_hit_areas[0];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            tab.x + 1,
+            tab.y,
+        ));
+        assert!(app.state.tab_presses.contains_key(&0));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            tab.x + 1,
+            area.height - 1,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            tab.x + 1,
+            area.height - 1,
+        ));
+
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+    }
+
+    #[test]
+    fn tab_presses_are_owned_by_their_input_source() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("test");
+        workspace.test_add_tab(None);
+        workspace.test_add_tab(None);
+        workspace.active_tab = 2;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let first = app.state.view.tab_hit_areas[0];
+        let second = app.state.view.tab_hit_areas[1];
+        app.handle_mouse_from_input_source(
+            41,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                first.x + 1,
+                first.y,
+            ),
+        );
+        app.handle_mouse_from_input_source(
+            42,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                second.x + 1,
+                second.y,
+            ),
+        );
+        app.handle_mouse_from_input_source(
+            41,
+            mouse(MouseEventKind::Up(MouseButton::Left), first.x + 1, first.y),
+        );
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        app.handle_mouse_from_input_source(
+            42,
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                second.x + 1,
+                second.y,
+            ),
+        );
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
     }
 
     #[tokio::test]
@@ -3441,7 +3593,7 @@ mod tests {
             assert_eq!(app.state.workspaces[0].active_tab, 0);
             assert_eq!(app.state.workspaces[0].tabs.len(), 2);
             assert!(app.state.context_menu.is_none());
-            assert!(app.state.tab_press.is_none());
+            assert!(app.state.tab_presses.is_empty());
             assert!(app.state.drag.is_none());
             assert!(!app.state.request_new_tab);
         }

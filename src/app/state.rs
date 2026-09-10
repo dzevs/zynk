@@ -1149,10 +1149,12 @@ pub struct SettingsState {
 
 pub(crate) enum DragTarget {
     WorkspaceReorder {
+        source_id: crate::app::InputSourceId,
         source_ws_idx: usize,
         insert_idx: Option<usize>,
     },
     TabReorder {
+        source_id: crate::app::InputSourceId,
         ws_idx: usize,
         source_tab_idx: usize,
         insert_idx: Option<usize>,
@@ -1473,8 +1475,9 @@ pub struct AppState {
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
-    pub(crate) workspace_press: Option<WorkspacePressState>,
-    pub(crate) tab_press: Option<TabPressState>,
+    pub(crate) workspace_presses:
+        std::collections::HashMap<crate::app::InputSourceId, WorkspacePressState>,
+    pub(crate) tab_presses: std::collections::HashMap<crate::app::InputSourceId, TabPressState>,
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
@@ -1850,8 +1853,8 @@ impl AppState {
                 split_borders: Vec::new(),
             },
             drag: None,
-            workspace_press: None,
-            tab_press: None,
+            workspace_presses: std::collections::HashMap::new(),
+            tab_presses: std::collections::HashMap::new(),
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -2040,11 +2043,11 @@ impl AppState {
                 "empty app state must not keep drag state"
             );
             assert!(
-                self.workspace_press.is_none(),
+                self.workspace_presses.is_empty(),
                 "empty app state must not keep workspace press state"
             );
             assert!(
-                self.tab_press.is_none(),
+                self.tab_presses.is_empty(),
                 "empty app state must not keep tab press state"
             );
             assert!(
@@ -2194,6 +2197,7 @@ impl AppState {
                 DragTarget::WorkspaceReorder {
                     source_ws_idx,
                     insert_idx,
+                    ..
                 } => {
                     assert_workspace_index(*source_ws_idx, "workspace drag source");
                     if let Some(insert_idx) = insert_idx {
@@ -2209,6 +2213,7 @@ impl AppState {
                     ws_idx,
                     source_tab_idx,
                     insert_idx,
+                    ..
                 } => {
                     assert_tab_index(*ws_idx, *source_tab_idx, "tab drag source");
                     if let Some(insert_idx) = insert_idx {
@@ -2227,10 +2232,10 @@ impl AppState {
                 _ => {}
             }
         }
-        if let Some(press) = &self.workspace_press {
+        for press in self.workspace_presses.values() {
             assert_workspace_index(press.ws_idx, "workspace press");
         }
-        if let Some(press) = &self.tab_press {
+        for press in self.tab_presses.values() {
             assert_tab_index(press.ws_idx, press.tab_idx, "tab press");
         }
         if let Some(menu) = &self.context_menu {

@@ -2661,6 +2661,7 @@ mod tests {
         app.mouse_capture = true;
         app.drag = Some(crate::app::state::DragState {
             target: crate::app::state::DragTarget::WorkspaceReorder {
+                source_id: 0,
                 source_ws_idx: 0,
                 insert_idx: Some(1),
             },

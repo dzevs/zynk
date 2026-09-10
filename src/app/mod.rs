@@ -592,8 +592,8 @@ impl App {
                 split_borders: Vec::new(),
             },
             drag: None,
-            workspace_press: None,
-            tab_press: None,
+            workspace_presses: std::collections::HashMap::new(),
+            tab_presses: std::collections::HashMap::new(),
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -1788,6 +1788,17 @@ impl App {
         // Only teardown clears a pending URL click. Opening a browser can cost
         // the host focus before its mouse release arrives.
         self.pending_url_click_sources.remove(&source_id);
+        self.state.clear_chrome_press(source_id);
+        if self.state.drag.as_ref().is_some_and(|drag| {
+            matches!(
+                drag.target,
+                crate::app::state::DragTarget::WorkspaceReorder { source_id: owner, .. }
+                    | crate::app::state::DragTarget::TabReorder { source_id: owner, .. }
+                    if owner == source_id
+            )
+        }) {
+            self.state.drag = None;
+        }
         self.release_input_source_headless(source_id);
     }
 
