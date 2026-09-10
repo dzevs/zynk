@@ -1,6 +1,5 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
-use std::sync::atomic::Ordering;
 
 use super::App;
 
@@ -104,7 +103,7 @@ impl App {
         }
         self.state.theme_name = theme_name;
         self.state.palette = palette;
-        self.render_dirty.store(true, Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
         true
     }
@@ -120,7 +119,7 @@ impl App {
             runtime.apply_host_terminal_theme(self.state.host_terminal_theme);
         }
 
-        self.render_dirty.store(true, Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 }

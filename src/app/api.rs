@@ -1,6 +1,5 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 mod agents;
@@ -90,7 +89,7 @@ impl App {
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results);
         if changed {
-            self.render_dirty.store(true, Ordering::Release);
+            self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
         changed
@@ -168,7 +167,7 @@ impl App {
                 && self.respawn_shell_for_launch_pane(*pane_id)
             {
                 self.overlay_panes.remove(pane_id);
-                self.render_dirty.store(true, Ordering::Release);
+                self.render_dirty.request_generic();
                 self.render_notify.notify_one();
                 return;
             }
@@ -1616,7 +1615,7 @@ mod tests {
             &crate::pane::PaneLaunchEnv::default(),
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
         )
         .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1708,7 +1707,7 @@ mod tests {
             &crate::pane::PaneLaunchEnv::default(),
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
         )
         .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);

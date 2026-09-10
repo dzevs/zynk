@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -203,15 +205,10 @@ pub(super) fn state_dot(state: AgentState, seen: bool, p: &Palette) -> (&'static
     }
 }
 
-pub(super) fn agent_icon(
-    state: AgentState,
-    seen: bool,
-    tick: u32,
-    p: &Palette,
-) -> (&'static str, Style) {
+pub(super) fn agent_icon(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {
     match (state, seen) {
         (AgentState::Blocked, _) => ("◉", Style::default().fg(p.red)),
-        (AgentState::Working, _) => (super::spinner_frame(tick), Style::default().fg(p.yellow)),
+        (AgentState::Working, _) => ("●", Style::default().fg(p.yellow)),
         (AgentState::Idle, false) => ("●", Style::default().fg(p.teal)),
         (AgentState::Idle, true) => ("✓", Style::default().fg(p.green)),
         (AgentState::Unknown, _) => ("○", Style::default().fg(p.overlay0)),
@@ -260,24 +257,37 @@ mod tests {
     }
 
     #[test]
-    fn agent_icon_unchanged_for_navigator_and_mobile() {
-        // The shared `agent_icon` (navigator + mobile) must keep its current glyphs — the new sidebar
-        // grammar lives in a separate `sidebar_agent_icon`, scoped to the sidebar only.
+    fn static_agent_icon_preserves_navigator_and_mobile_grammar() {
         let p = crate::app::state::Palette::tokyo_night();
-        // working keeps the GLOBAL braille spinner, not the sidebar pulse.
-        let (gw, sw) = agent_icon(AgentState::Working, false, 0, &p);
-        assert_eq!(gw, crate::ui::spinner_frame(0));
-        assert_eq!(gw, "⠋");
+        // Working no longer animates; the other surface-specific marks stay intact.
+        let (gw, sw) = agent_icon(AgentState::Working, false, &p);
+        assert_eq!(gw, "●");
         assert_eq!(sw.fg, Some(p.yellow));
         // idle keeps ● (done/unseen) / ✓ (idle/seen), NOT ○.
-        assert_eq!(agent_icon(AgentState::Idle, false, 0, &p).0, "●");
-        assert_eq!(agent_icon(AgentState::Idle, true, 0, &p).0, "✓");
+        assert_eq!(agent_icon(AgentState::Idle, false, &p).0, "●");
+        assert_eq!(agent_icon(AgentState::Idle, true, &p).0, "✓");
         // unknown keeps ○, NOT ◌.
-        assert_eq!(agent_icon(AgentState::Unknown, false, 0, &p).0, "○");
+        assert_eq!(agent_icon(AgentState::Unknown, false, &p).0, "○");
         // blocked already ◉ red.
-        let (gb, sb) = agent_icon(AgentState::Blocked, false, 0, &p);
+        let (gb, sb) = agent_icon(AgentState::Blocked, false, &p);
         assert_eq!(gb, "◉");
         assert_eq!(sb.fg, Some(p.red));
+    }
+
+    #[test]
+    fn state_dots_use_aligned_static_workspace_marks() {
+        let palette = Palette::catppuccin();
+        for (state, seen, symbol, color) in [
+            (AgentState::Blocked, true, "●", palette.red),
+            (AgentState::Working, true, "●", palette.yellow),
+            (AgentState::Idle, false, "●", palette.teal),
+            (AgentState::Idle, true, "○", palette.green),
+            (AgentState::Unknown, true, "·", palette.overlay0),
+        ] {
+            let (actual_symbol, style) = state_dot(state, seen, &palette);
+            assert_eq!(actual_symbol, symbol);
+            assert_eq!(style.fg, Some(color));
+        }
     }
 
     #[test]

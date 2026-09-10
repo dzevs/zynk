@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Cross-area integration tests for end-to-end persistence flows.
 
 mod support;
@@ -561,6 +563,15 @@ fn decode_frame_payload(payload: &[u8]) -> io::Result<FrameWire> {
         })
 }
 
+fn frame_contains_colored_symbol(frame: &FrameWire, symbol: &str, rgb: (u8, u8, u8)) -> bool {
+    let (r, g, b) = rgb;
+    let fg = 0x02_00_00_00 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+    frame
+        .cells
+        .iter()
+        .any(|cell| cell.symbol == symbol && cell.fg == fg)
+}
+
 fn frame_contains_text(frame: &FrameWire, needle: &str) -> bool {
     if frame.cells.is_empty() {
         return false;
@@ -849,6 +860,7 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
     let saw_working_on_client =
         wait_for_frame_matching(&mut client_b, Duration::from_secs(5), |frame| {
             frame_contains_text(frame, "working")
+                && frame_contains_colored_symbol(frame, "●", (249, 226, 175))
         })
         .expect("frame decoding should succeed");
     assert!(

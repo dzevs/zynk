@@ -27,14 +27,10 @@ mod worktrees;
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
-pub(crate) const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
-pub(crate) const HEADLESS_ANIMATION_INTERVAL: Duration = Duration::from_millis(128);
-pub(crate) const HEADLESS_ANIMATION_TICK_STEP: u32 = 8;
 pub(crate) const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(30);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
@@ -129,7 +125,6 @@ pub struct App {
     /// the matching drag/release never reaches a mouse-reporting pane.
     pub(crate) pending_url_click: bool,
     pub(crate) next_resize_poll: Instant,
-    pub(crate) next_animation_tick: Option<Instant>,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
@@ -142,11 +137,14 @@ pub struct App {
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) persist_pane_history: bool,
+    /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
+    /// Last attempt that could update a connected presentation surface.
+    pub(crate) last_presentation_at: Option<Instant>,
     pub(crate) suppressed_repeat_keys:
         HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     pub render_notify: Arc<Notify>,
-    pub render_dirty: Arc<AtomicBool>,
+    pub(crate) render_dirty: Arc<crate::render_signal::RenderSignal>,
     pub(crate) full_redraw_pending: bool,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
     pub(crate) local_terminal_notifications: bool,
@@ -371,7 +369,7 @@ impl App {
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         let render_notify = Arc::new(Notify::new());
-        let render_dirty = Arc::new(AtomicBool::new(false));
+        let render_dirty = Arc::new(crate::render_signal::RenderSignal::new());
 
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
@@ -646,7 +644,6 @@ impl App {
             header_verbose: config.header.verbose,
             header_max_width: config.header.max_width,
             keybinds: config.keybinds(),
-            spinner_tick: 0,
             palette: theme_palette,
             theme_name,
             theme_runtime,
@@ -730,7 +727,6 @@ impl App {
             last_pane_click: None,
             pending_url_click: false,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
-            next_animation_tick: None,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             next_agent_manifest_update_check: manifest_check_enabled
@@ -746,6 +742,7 @@ impl App {
             selection_highlight_clear_deadline: None,
             persist_pane_history: config.experimental.pane_history,
             last_render_at: None,
+            last_presentation_at: None,
             suppressed_repeat_keys: HashSet::new(),
             api_rx,
             event_hub,
@@ -857,7 +854,7 @@ impl App {
 
         while !self.state.should_quit {
             self.reap_finished_custom_commands();
-            if self.render_dirty.load(Ordering::Acquire) {
+            if self.render_dirty.is_pending() {
                 needs_render = true;
             }
 
@@ -968,11 +965,10 @@ impl App {
             }
 
             let now = Instant::now();
-            self.sync_animation_timer(now);
             self.sync_host_mouse_capture(&mut host_mouse_capture_active)?;
 
             if needs_render && self.can_render_now(now) {
-                self.render_dirty.swap(false, Ordering::AcqRel);
+                let _ = self.render_dirty.take();
                 let _sync_output = SyncOutputGuard::begin()?;
                 let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
                 if self.full_redraw_pending {
@@ -1015,10 +1011,10 @@ impl App {
                 }
                 self.sync_pending_agent_resume_deadline(now);
                 if self.start_pending_agent_resumes(self.pending_agent_resume_due(now)) {
-                    self.render_dirty.store(true, Ordering::Release);
+                    self.render_dirty.request_generic();
                     self.render_notify.notify_one();
                 }
-                self.last_render_at = Some(now);
+                self.record_render_attempt(now, true);
                 needs_render = false;
                 continue;
             }
@@ -1065,7 +1061,7 @@ impl App {
                     self.input_rx = None;
                 }
                 LoopEvent::RenderRequested => {
-                    if self.render_dirty.load(Ordering::Acquire) {
+                    if self.render_dirty.is_pending() {
                         needs_render = true;
                     }
                 }
@@ -1817,7 +1813,7 @@ mod tests {
     fn git_status_event_marks_render_dirty_when_status_changes() {
         let mut app = test_app();
         app.state.workspaces.push(Workspace::test_new("one"));
-        app.render_dirty.store(false, Ordering::Release);
+        let _ = app.render_dirty.take();
         let workspace_id = app.state.workspaces[0].id.clone();
         let resolved_identity_cwd = app.state.workspaces[0].resolved_identity_cwd().unwrap();
 
@@ -1835,7 +1831,7 @@ mod tests {
             cache_updates: Vec::new(),
         });
 
-        assert!(app.render_dirty.load(Ordering::Acquire));
+        assert!(app.render_dirty.is_pending());
     }
 
     #[test]
@@ -4190,7 +4186,6 @@ mod tests {
         app.next_resize_poll = now - Duration::from_millis(1);
         app.config_diagnostic_deadline = None;
         app.toast_deadline = None;
-        app.next_animation_tick = None;
         app.next_auto_update_check = None;
         app.session_save_deadline = None;
         app.state.workspaces.clear();
@@ -4304,7 +4299,6 @@ mod tests {
         let now = Instant::now();
         app.next_resize_poll = now + Duration::from_millis(300);
         app.selection_autoscroll_deadline = Some(now + Duration::from_millis(5));
-        app.next_animation_tick = Some(now + Duration::from_millis(100));
         app.session_save_deadline = Some(now + Duration::from_millis(200));
         assert_eq!(
             app.next_loop_deadline(now, false),
@@ -4313,10 +4307,7 @@ mod tests {
     }
 
     #[test]
-    fn spaces_working_animation_schedules_when_nonactive_workspace_working() {
-        // §4 follow-up: with the ACTIVE workspace idle, a different working workspace must still
-        // keep the animation timer alive so its `spaces` working dot pulses. The agent panel
-        // animation now always scans every space, so a non-active working pane keeps the timer up.
+    fn working_nonactive_workspace_does_not_schedule_animation_redraw() {
         let mut app = test_app();
         let now = Instant::now();
         app.state.workspaces = vec![
@@ -4333,12 +4324,17 @@ mod tests {
             .clone();
         app.state.terminals.get_mut(&tid).unwrap().state = AgentState::Working;
 
-        app.next_animation_tick = None;
-        app.sync_animation_timer(now);
-        assert!(
-            app.next_animation_tick.is_some(),
-            "a working non-active workspace must keep the spaces animation timer scheduled"
-        );
+        app.next_resize_poll = now + Duration::from_secs(10);
+        app.git_refresh_in_flight = true;
+        app.next_auto_update_check = None;
+        app.next_agent_manifest_update_check = None;
+        assert!(!app.handle_scheduled_tasks(now, false));
+        assert!(!app.handle_scheduled_tasks(now + Duration::from_millis(200), false));
+        let later = now + Duration::from_millis(300);
+        app.state.config_diagnostic = Some("expired".into());
+        app.config_diagnostic_deadline = Some(later);
+        assert!(app.handle_scheduled_tasks(later, false));
+        assert!(app.state.config_diagnostic.is_none());
     }
 
     #[test]

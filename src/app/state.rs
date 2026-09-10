@@ -770,6 +770,12 @@ pub enum Mode {
     Navigator,
 }
 
+impl Mode {
+    pub(crate) fn mouse_motion_changes_view(self) -> bool {
+        matches!(self, Self::GlobalMenu | Self::ContextMenu | Self::Navigator)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NavigatorTarget {
     Workspace {
@@ -1494,8 +1500,6 @@ pub struct AppState {
     /// for display to `[MIN_HEADER_MAX_WIDTH, MAX_HEADER_MAX_WIDTH]`).
     pub header_max_width: usize,
     pub keybinds: Keybinds,
-    /// Frame counter for spinner animations (wraps around).
-    pub spinner_tick: u32,
     /// UI color palette — all sidebar/UI colors centralized for theming.
     pub palette: Palette,
     /// Currently applied theme name (for settings UI).
@@ -1859,7 +1863,6 @@ impl AppState {
             header_verbose: false,
             header_max_width: crate::config::Config::default().header.max_width,
             keybinds: Keybinds::default(),
-            spinner_tick: 0,
             palette: Palette::catppuccin(),
             theme_name: "catppuccin".to_string(),
             theme_runtime: ThemeRuntimeConfig {

@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::collections::HashMap;
 
 use crate::detect::{Agent, AgentState};
@@ -23,14 +25,6 @@ pub struct PaneDetail {
 }
 
 impl Tab {
-    pub fn has_working_pane(&self, terminals: &HashMap<TerminalId, TerminalState>) -> bool {
-        self.panes.values().any(|pane| {
-            terminals
-                .get(&pane.attached_terminal_id)
-                .is_some_and(|terminal| terminal.state == AgentState::Working)
-        })
-    }
-
     fn pane_details(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
@@ -95,10 +89,6 @@ impl Workspace {
             })
             .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
             .unwrap_or((AgentState::Unknown, true))
-    }
-
-    pub fn has_working_pane(&self, terminals: &HashMap<TerminalId, TerminalState>) -> bool {
-        self.tabs.iter().any(|tab| tab.has_working_pane(terminals))
     }
 
     pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {

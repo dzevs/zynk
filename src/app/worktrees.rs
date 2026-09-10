@@ -1,4 +1,5 @@
-use std::sync::atomic::Ordering;
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -789,14 +790,14 @@ impl App {
                         self.state.mode = Mode::Navigate;
                     }
                 }
-                self.render_dirty.store(true, Ordering::Release);
+                self.render_dirty.request_generic();
                 self.render_notify.notify_one();
             }
             Err(message) => {
                 tracing::warn!(checkout_path = %create.checkout_path.display(), error = %message, "git worktree add failed");
                 create.creating = false;
                 create.error = Some(message);
-                self.render_dirty.store(true, Ordering::Release);
+                self.render_dirty.request_generic();
                 self.render_notify.notify_one();
             }
         }
@@ -838,7 +839,7 @@ impl App {
                 } else {
                     Mode::Navigate
                 };
-                self.render_dirty.store(true, Ordering::Release);
+                self.render_dirty.request_generic();
                 self.render_notify.notify_one();
             }
             Err(message) => {
@@ -852,7 +853,7 @@ impl App {
                 } else {
                     remove.error = Some(message);
                 }
-                self.render_dirty.store(true, Ordering::Release);
+                self.render_dirty.request_generic();
                 self.render_notify.notify_one();
             }
         }

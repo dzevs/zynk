@@ -1,13 +1,15 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+#[cfg(test)]
+use std::time::Duration;
 
 use crossterm::terminal;
 
 use super::{
-    background_update_check_enabled, repeat_key_identity, App, Mode, ANIMATION_INTERVAL,
-    AUTO_UPDATE_CHECK_INTERVAL, MIN_RENDER_INTERVAL, RESIZE_POLL_INTERVAL,
-    SELECTION_AUTOSCROLL_INTERVAL,
+    background_update_check_enabled, repeat_key_identity, App, Mode, AUTO_UPDATE_CHECK_INTERVAL,
+    MIN_RENDER_INTERVAL, RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
 };
 fn retain_custom_command_after_wait(
     pid: u32,
@@ -140,13 +142,15 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
+                let changes_view = !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
+                    || self.state.mode.mouse_motion_changes_view();
                 if self.state.mouse_capture {
                     self.handle_mouse(mouse);
                 } else {
                     self.state
                         .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
                 }
-                true
+                changes_view
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {
                 self.query_host_terminal_appearance();
@@ -194,8 +198,6 @@ impl App {
         let mut changed = false;
         let mut resized = false;
 
-        self.sync_animation_timer(now);
-
         if now >= self.next_resize_poll {
             resized = self.handle_resize_poll();
             changed |= resized;
@@ -238,15 +240,6 @@ impl App {
         {
             self.copy_feedback_deadline = None;
             self.state.copy_feedback = None;
-            changed = true;
-        }
-
-        if self
-            .next_animation_tick
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.state.spinner_tick = self.state.spinner_tick.wrapping_add(1);
-            self.next_animation_tick = Some(now + ANIMATION_INTERVAL);
             changed = true;
         }
 
@@ -302,7 +295,6 @@ impl App {
             self.sync_pending_agent_resume_deadline(now);
             changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
         }
-        self.sync_animation_timer(now);
         changed
     }
 
@@ -330,35 +322,6 @@ impl App {
 
     pub(crate) fn sync_agent_metadata_deadline(&mut self) {
         self.agent_metadata_deadline = self.state.next_agent_metadata_expiry();
-    }
-
-    pub(crate) fn sync_animation_timer(&mut self, now: Instant) {
-        self.sync_animation_timer_with_interval(now, ANIMATION_INTERVAL);
-    }
-
-    pub(crate) fn sync_headless_animation_timer(&mut self, now: Instant) {
-        self.sync_animation_timer_with_interval(now, crate::app::HEADLESS_ANIMATION_INTERVAL);
-    }
-
-    fn sync_animation_timer_with_interval(&mut self, now: Instant, interval: Duration) {
-        if self.sidebar_has_working_animation() {
-            self.next_animation_tick.get_or_insert(now + interval);
-        } else {
-            self.next_animation_tick = None;
-        }
-    }
-
-    /// True when the spinner must keep ticking for any animated sidebar surface. This drives BOTH
-    /// the agent-panel working spinners AND the `spaces` working dots. The spaces list always shows
-    /// every workspace, so the spinner advances whenever ANY workspace has a working pane —
-    /// independent of `agent_panel_sort` (which only governs the order the detail panel lists
-    /// agents, not whether a working space dot animates). Widened from the old
-    /// `agent_panel_has_animation`.
-    fn sidebar_has_working_animation(&self) -> bool {
-        self.state
-            .workspaces
-            .iter()
-            .any(|ws| ws.has_working_pane(&self.state.terminals))
     }
 
     pub(crate) fn tick_selection_autoscroll(&mut self, now: Instant) {
@@ -446,6 +409,22 @@ impl App {
         }
     }
 
+    pub(crate) fn can_present_now(&self, now: Instant) -> bool {
+        match self.last_presentation_at {
+            Some(last_presentation_at) => {
+                now.duration_since(last_presentation_at) >= MIN_RENDER_INTERVAL
+            }
+            None => true,
+        }
+    }
+
+    pub(crate) fn record_render_attempt(&mut self, now: Instant, presentation: bool) {
+        self.last_render_at = Some(now);
+        if presentation {
+            self.last_presentation_at = Some(now);
+        }
+    }
+
     pub(crate) fn run_auto_update_check(&mut self) {
         if !background_update_check_enabled(self.no_session, self.update_version_check_enabled) {
             self.next_auto_update_check = None;
@@ -512,7 +491,6 @@ impl App {
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
             self.copy_feedback_deadline,
-            self.next_animation_tick,
             include_git_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
@@ -567,6 +545,20 @@ mod tests {
     use super::*;
     use crate::app::state;
     use crate::workspace::Workspace;
+
+    #[test]
+    fn hidden_render_attempt_keeps_presentation_cadence_available() {
+        let (mut app, _) = test_app_with_pane();
+        let initial_presentation = Instant::now();
+        app.record_render_attempt(initial_presentation, true);
+
+        let hidden_attempt = initial_presentation + MIN_RENDER_INTERVAL;
+        app.record_render_attempt(hidden_attempt, false);
+        let foreground_echo = hidden_attempt + Duration::from_millis(1);
+
+        assert!(!app.can_render_now(foreground_echo));
+        assert!(app.can_present_now(foreground_echo));
+    }
 
     #[test]
     fn interrupted_custom_command_wait_keeps_child_for_retry() {
@@ -752,6 +744,24 @@ mod tests {
         // At scrollback bottom, can't scroll further down — should stop
         assert!(app.state.selection_autoscroll.is_none());
         assert!(app.selection_autoscroll_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn passive_mouse_motion_does_not_request_monolithic_render() {
+        let (mut app, _) = test_app_with_pane();
+        app.state.mode = crate::app::Mode::Terminal;
+        let motion = || {
+            crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Moved,
+                column: 10,
+                row: 5,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+        };
+
+        assert!(!app.handle_raw_input_event(motion()).await);
+        app.state.mode = crate::app::Mode::GlobalMenu;
+        assert!(app.handle_raw_input_event(motion()).await);
     }
 
     #[tokio::test]

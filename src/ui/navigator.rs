@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -66,7 +68,6 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
             &mut spans,
             crate::detect::AgentState::Blocked,
             true,
-            app.spinner_tick,
             "blocked",
             app,
         ),
@@ -74,7 +75,6 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
             &mut spans,
             crate::detect::AgentState::Working,
             true,
-            app.spinner_tick,
             "working",
             app,
         ),
@@ -82,7 +82,6 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
             &mut spans,
             crate::detect::AgentState::Idle,
             true,
-            app.spinner_tick,
             "idle",
             app,
         ),
@@ -90,7 +89,6 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
             &mut spans,
             crate::detect::AgentState::Idle,
             false,
-            app.spinner_tick,
             "done",
             app,
         ),
@@ -114,11 +112,10 @@ fn push_state_chip(
     spans: &mut Vec<Span<'static>>,
     state: crate::detect::AgentState,
     seen: bool,
-    tick: u32,
     label: &'static str,
     app: &AppState,
 ) {
-    let (icon, icon_style) = agent_icon(state, seen, tick, &app.palette);
+    let (icon, icon_style) = agent_icon(state, seen, &app.palette);
     spans.push(Span::styled(icon, icon_style.add_modifier(Modifier::BOLD)));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
@@ -206,7 +203,7 @@ fn render_row(
     } else {
         Style::default().fg(p.subtext0).bg(p.panel_bg)
     };
-    let (status_icon, status_style) = agent_icon(row.status, row.seen, app.spinner_tick, p);
+    let (status_icon, status_style) = agent_icon(row.status, row.seen, p);
     let status_style = if selected {
         base_style.add_modifier(Modifier::BOLD)
     } else if context_only {
