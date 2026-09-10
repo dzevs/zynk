@@ -32,11 +32,18 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
     let modifier = modifier_text.parse::<u8>().ok()?.checked_sub(1)?;
 
     let mut key_fields = key_part.split(':');
-    let codepoint = key_fields.next()?.parse::<u32>().ok()?;
-    let shifted_codepoint = key_fields
-        .next()
-        .filter(|field| !field.is_empty())
-        .and_then(|field| field.parse::<u32>().ok());
+    let codepoint = parse_kitty_codepoint(key_fields.next()?)?;
+    let shifted_codepoint = match key_fields.next().filter(|field| !field.is_empty()) {
+        Some(field) => Some(parse_kitty_codepoint(field)?),
+        None => None,
+    };
+    // Validate the optional base-layout key even though dispatch does not use it yet.
+    if let Some(field) = key_fields.next().filter(|field| !field.is_empty()) {
+        parse_kitty_codepoint(field)?;
+    }
+    if key_fields.next().is_some() {
+        return None;
+    }
     let code = kitty_codepoint_to_keycode(codepoint)?;
     let kind = parse_kitty_event_type(event_type)?;
     let mut modifiers = key_modifiers_from_u8(modifier);
@@ -54,6 +61,15 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
         key = key.with_shifted_codepoint(shifted_codepoint);
     }
     Some(key.with_generated_text(associated_text))
+}
+
+fn parse_kitty_codepoint(value: &str) -> Option<u32> {
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let codepoint = value.parse::<u32>().ok()?;
+    char::from_u32(codepoint)?;
+    Some(codepoint)
 }
 
 fn parse_kitty_associated_text(value: &str) -> Option<String> {
@@ -706,6 +722,57 @@ mod tests {
         assert_eq!(key.code, KeyCode::Char(' '));
         assert_eq!(key.modifiers, KeyModifiers::CONTROL);
         assert_eq!(key.generated_text.as_deref(), Some("你好"));
+    }
+
+    #[test]
+    fn parse_kitty_optional_alternate_keys_with_associated_text() {
+        for (key_part, shifted) in [
+            ("97", None),
+            ("97:65", Some(65)),
+            ("97::99", None),
+            ("97:65:99", Some(65)),
+        ] {
+            for (event, kind) in [
+                (1, crossterm::event::KeyEventKind::Press),
+                (2, crossterm::event::KeyEventKind::Repeat),
+                (3, crossterm::event::KeyEventKind::Release),
+            ] {
+                let input = format!("\x1b[{key_part};6:{event};20320:22909u");
+                let key = parse_terminal_key_sequence(&input).expect(&input);
+                assert_eq!(key.code, KeyCode::Char('a'));
+                assert_eq!(key.shifted_codepoint, shifted);
+                assert_eq!(key.modifiers, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+                assert_eq!(key.kind, kind);
+                assert_eq!(
+                    key.generated_text.as_deref(),
+                    (kind != crossterm::event::KeyEventKind::Release).then_some("\u{4f60}\u{597d}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reject_malformed_kitty_alternate_key_components() {
+        for key_part in [
+            "32:bad",
+            "32:1114112",
+            "32:55296",
+            "32::bad",
+            "32::1114112",
+            "32::55296",
+            "32:65:bad",
+            "32:65:1114112",
+            "32:65:55296",
+            "32:65:99:123",
+            "32:::99",
+            "32:+65",
+            "32::+99",
+        ] {
+            for suffix in ["u", ";5;20320:22909u"] {
+                let input = format!("\x1b[{key_part}{suffix}");
+                assert_eq!(parse_terminal_key_sequence(&input), None, "{input:?}");
+            }
+        }
     }
 
     #[test]

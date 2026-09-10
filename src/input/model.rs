@@ -129,6 +129,13 @@ impl TerminalKey {
         self
     }
 
+    /// Plain VT characters mirror their input bytes in generated_text; associated text does not.
+    pub(crate) fn has_associated_text(&self) -> bool {
+        self.generated_text.as_ref().is_some_and(|text| {
+            !matches!(&self.source, KeySource::Vt { bytes } if bytes.as_slice() == text.as_bytes())
+        })
+    }
+
     pub fn with_windows_record(mut self, record: WindowsKeyRecord) -> Self {
         self.repeat_count = if self.kind == crossterm::event::KeyEventKind::Release {
             1
@@ -369,6 +376,47 @@ mod tests {
         let key = TerminalKey::new(KeyCode::Char('É'), KeyModifiers::SHIFT).with_text_commit();
 
         assert_eq!(key.generated_text.as_deref(), Some("É"));
+    }
+
+    #[test]
+    fn associated_text_is_distinct_from_plain_vt_characters() {
+        for (bytes, text, associated) in [
+            ("q", "q", false),
+            ("\u{e9}", "\u{e9}", false),
+            ("\x1b[113;1;113u", "q", true),
+            ("\x1b[113;1;20320:22909u", "\u{4f60}\u{597d}", true),
+        ] {
+            let events = crate::raw_input::parse_raw_input_bytes_sync(bytes.as_bytes());
+            let [crate::raw_input::RawInputEvent::Key(key)] = events.as_slice() else {
+                panic!("expected one key from {bytes:?}");
+            };
+            assert_eq!(key.generated_text.as_deref(), Some(text));
+            assert_eq!(key.has_associated_text(), associated, "{bytes:?}");
+            let KeyCode::Char(ch) = key.code else {
+                panic!("expected a character key");
+            };
+
+            let wire = crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char(ch),
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: Some(text.to_owned()),
+                source: crate::protocol::ClientKeySource::Vt {
+                    bytes: bytes.as_bytes().to_vec(),
+                },
+            };
+            let crate::raw_input::RawInputEvent::Key(decoded) = wire.to_raw_input_event() else {
+                panic!("expected decoded key");
+            };
+            assert_eq!(decoded.has_associated_text(), associated, "wire {bytes:?}");
+        }
+        let synthesized = TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty())
+            .with_generated_text(Some("q".to_owned()));
+        assert!(synthesized.has_associated_text());
+        assert!(!synthesized
+            .with_kind(crossterm::event::KeyEventKind::Release)
+            .has_associated_text());
     }
 
     #[test]

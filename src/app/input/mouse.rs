@@ -89,15 +89,19 @@ impl AppState {
         self.workspace_presses.remove(&source_id);
     }
 
-    fn clear_chrome_drag(&mut self, source_id: crate::app::InputSourceId) {
-        if self.drag.as_ref().is_some_and(|drag| {
+    fn chrome_drag_owned_by(&self, source_id: crate::app::InputSourceId) -> bool {
+        self.drag.as_ref().is_some_and(|drag| {
             matches!(
                 drag.target,
                 DragTarget::WorkspaceReorder { source_id: owner, .. }
                     | DragTarget::TabReorder { source_id: owner, .. }
                     if owner == source_id
             )
-        }) {
+        })
+    }
+
+    fn clear_chrome_drag(&mut self, source_id: crate::app::InputSourceId) {
+        if self.chrome_drag_owned_by(source_id) {
             self.drag = None;
         }
     }
@@ -275,6 +279,9 @@ impl AppState {
             return None;
         }
 
+        // A source's chrome gesture takes precedence over the global pane selection.
+        let chrome_gesture =
+            self.chrome_press_pending(source_id) || self.chrome_drag_owned_by(source_id);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
@@ -724,7 +731,7 @@ impl AppState {
             }
 
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.selection.is_some() {
+                if self.selection.is_some() && !chrome_gesture {
                     self.update_selection_drag(terminal_runtimes, mouse.column, mouse.row);
                     return None;
                 }
@@ -884,7 +891,7 @@ impl AppState {
             MouseEventKind::Up(MouseButton::Left) => {
                 // Mouse-up either finishes a drag selection or releases after a
                 // double-click word selection; the latter is already finalized.
-                if let Some(selection) = self.selection.as_ref() {
+                if let Some(selection) = self.selection.as_ref().filter(|_| !chrome_gesture) {
                     let was_click = selection.was_just_click();
                     let was_finalized = selection.is_finalized();
 
@@ -2813,6 +2820,211 @@ mod tests {
                 );
             }
         }
+    }
+
+    async fn assert_chrome_owner_completes_after_foreign_selection(
+        workspace_drag: bool,
+        teardown: bool,
+    ) {
+        // Cover an already chosen drop, an updated drop, and a pending chrome press.
+        for (update_drop, start_from_press) in [(false, false), (true, false), (true, true)] {
+            let mut app = app_for_mouse_test();
+            let mut first = Workspace::test_new("first");
+            let first_pane = first.tabs[0].root_pane;
+            first.test_add_tab(Some("second tab"));
+            let second_tab_pane = first.tabs[1].root_pane;
+            first.active_tab = 0;
+            let second = Workspace::test_new("second");
+            let first_workspace = first.id.clone();
+            let second_workspace = second.id.clone();
+            app.state.workspaces = vec![first, second];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            if !teardown {
+                app.state.copy_on_select = false;
+            } else {
+                assert!(
+                    app.state.copy_on_select,
+                    "exercise the default clipboard policy"
+                );
+            }
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 24));
+            let info = app.state.view.pane_infos[0].clone();
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    info.inner_rect.width,
+                    info.inner_rect.height,
+                    0,
+                    b"alpha beta",
+                    4,
+                );
+            app.state.workspaces[0].insert_test_runtime(first_pane, runtime);
+            let (drop_col, drop_row, start_col, start_row) = if workspace_drag {
+                let first_card = app
+                    .state
+                    .view
+                    .workspace_card_areas
+                    .iter()
+                    .find(|card| card.ws_idx == 0)
+                    .expect("first workspace")
+                    .rect;
+                let second_card = app
+                    .state
+                    .view
+                    .workspace_card_areas
+                    .iter()
+                    .find(|card| card.ws_idx == 1)
+                    .expect("second workspace")
+                    .rect;
+                let drop_row = crate::ui::workspace_drop_indicator_row(
+                    &app.state.view.workspace_card_areas,
+                    app.state.workspace_list_rect(),
+                    0,
+                )
+                .expect("drop slot before first workspace");
+                assert_eq!(app.state.workspace_drop_index_at_row(drop_row), Some(0));
+                (first_card.x + 2, drop_row, second_card.x + 2, second_card.y)
+            } else {
+                let first_tab = app.state.view.tab_hit_areas[0];
+                let second_tab = app.state.view.tab_hit_areas[1];
+                assert_eq!(
+                    app.state.tab_drop_index_at(first_tab.x, first_tab.y),
+                    Some(0)
+                );
+                (first_tab.x, first_tab.y, second_tab.x + 1, second_tab.y)
+            };
+            if start_from_press {
+                app.handle_mouse_from_input_source(
+                    7,
+                    mouse(
+                        MouseEventKind::Down(MouseButton::Left),
+                        start_col,
+                        start_row,
+                    ),
+                );
+                assert!(app.state.chrome_press_pending(7));
+                assert!(app.state.drag.is_none());
+            } else {
+                app.state.drag = Some(DragState {
+                    target: if workspace_drag {
+                        DragTarget::WorkspaceReorder {
+                            source_id: 7,
+                            source_ws_idx: 1,
+                            insert_idx: Some(usize::from(update_drop)),
+                        }
+                    } else {
+                        DragTarget::TabReorder {
+                            source_id: 7,
+                            ws_idx: 0,
+                            source_tab_idx: 1,
+                            insert_idx: Some(usize::from(update_drop)),
+                        }
+                    },
+                });
+            }
+
+            let col = info.inner_rect.x + 2;
+            let row = info.inner_rect.y + 3;
+            app.handle_mouse_from_input_source(
+                9,
+                mouse(MouseEventKind::Down(MouseButton::Left), col, row),
+            );
+            app.handle_mouse_from_input_source(
+                9,
+                mouse(MouseEventKind::Drag(MouseButton::Left), col + 1, row + 1),
+            );
+            if teardown {
+                app.clear_input_source(9);
+            } else {
+                app.handle_mouse_from_input_source(
+                    9,
+                    mouse(MouseEventKind::Up(MouseButton::Left), col + 1, row + 1),
+                );
+            }
+            let selection = app
+                .state
+                .selection
+                .as_ref()
+                .expect("foreign selection remains");
+            assert_eq!(selection.is_finalized(), !teardown);
+            let selected_cells = selection.ordered_cells();
+            if update_drop {
+                app.handle_mouse_from_input_source(
+                    7,
+                    mouse(MouseEventKind::Drag(MouseButton::Left), drop_col, drop_row),
+                );
+                assert_eq!(
+                    app.state
+                        .selection
+                        .as_ref()
+                        .expect("owner drag keeps foreign selection")
+                        .ordered_cells(),
+                    selected_cells,
+                );
+            }
+            let target = &app
+                .state
+                .drag
+                .as_ref()
+                .expect("owner reorder remains")
+                .target;
+            assert!(
+                matches!(
+                    target,
+                    DragTarget::TabReorder {
+                        source_id: 7,
+                        insert_idx: Some(0),
+                        ..
+                    } | DragTarget::WorkspaceReorder {
+                        source_id: 7,
+                        insert_idx: Some(0),
+                        ..
+                    }
+                ),
+                "owner must update its drop target"
+            );
+
+            app.handle_mouse_from_input_source(
+                7,
+                mouse(MouseEventKind::Up(MouseButton::Left), drop_col, drop_row),
+            );
+
+            assert!(app.state.drag.is_none());
+            if workspace_drag {
+                assert_eq!(
+                    app.state.workspaces[0].id, second_workspace,
+                    "owner must move the workspace"
+                );
+                assert_eq!(app.state.workspaces[1].id, first_workspace);
+            } else {
+                assert_eq!(
+                    app.state.workspaces[0].tabs[0].root_pane, second_tab_pane,
+                    "owner must move the tab"
+                );
+                assert_eq!(app.state.workspaces[0].tabs[1].root_pane, first_pane);
+            }
+            assert!(input_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn tab_reorder_owner_completes_after_foreign_selection() {
+        assert_chrome_owner_completes_after_foreign_selection(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn workspace_reorder_owner_completes_after_foreign_selection() {
+        assert_chrome_owner_completes_after_foreign_selection(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn tab_reorder_owner_completes_after_foreign_source_teardown() {
+        assert_chrome_owner_completes_after_foreign_selection(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn workspace_reorder_owner_completes_after_foreign_source_teardown() {
+        assert_chrome_owner_completes_after_foreign_selection(true, true).await;
     }
 
     #[tokio::test]

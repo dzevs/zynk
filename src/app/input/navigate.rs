@@ -63,6 +63,17 @@ impl App {
         let key = raw_key.as_key_event();
         self.state.update_dismissed = true;
 
+        // Associated text commits to the pane, not to the pending prefix command.
+        if raw_key.has_associated_text() {
+            self.cancel_copy_mode_if_active();
+            self.state.clear_selection();
+            self.selection_autoscroll_deadline = None;
+            if !self.pass_through_key_to_focused_pane(raw_key) {
+                leave_command_mode(&mut self.state);
+            }
+            return;
+        }
+
         if matches!(key.code, KeyCode::Modifier(_)) {
             return;
         }
@@ -1913,6 +1924,169 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    #[derive(Clone, Copy)]
+    enum PrefixBindingControl {
+        RenameTab,
+        CustomCommand,
+        SwitchWorkspace,
+    }
+
+    async fn dispatch_prefix_test_input(app: &mut App, input: &[u8], headless: bool) {
+        if headless {
+            app.route_client_input(input.to_vec());
+        } else {
+            for event in parse_raw_input_bytes_sync(input) {
+                let RawInputEvent::Key(key) = event else {
+                    panic!("expected a parsed key: {event:?}");
+                };
+                app.handle_key(key).await;
+            }
+        }
+    }
+
+    async fn assert_prefix_binding_does_not_consume_associated_text(binding: PrefixBindingControl) {
+        for (headless, plain_binding) in
+            [(true, false), (false, false), (true, true), (false, true)]
+        {
+            let mut app = app_with_test_workspaces(&["first", "second"]);
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80,
+                    24,
+                    0,
+                    b"\x1b[>15u",
+                    4,
+                );
+            app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+            let binding_key = if plain_binding { "c" } else { "ctrl+c" };
+            let (config_text, codepoint) = match binding {
+                PrefixBindingControl::RenameTab => (
+                    format!("[keys]\nrename_tab = \"prefix+{binding_key}\"\n"),
+                    99,
+                ),
+                PrefixBindingControl::CustomCommand => (
+                    format!(
+                        "[[keys.command]]\nkey = \"prefix+{binding_key}\"\ncommand = \"true\"\n"
+                    ),
+                    99,
+                ),
+                PrefixBindingControl::SwitchWorkspace => {
+                    let keys = if plain_binding {
+                        "prefix+1..9"
+                    } else {
+                        "prefix+ctrl+1..9"
+                    };
+                    (format!("[keys]\nswitch_workspace = \"{keys}\"\n"), 50)
+                }
+            };
+            // Use the whole resolved config so custom bindings displace conflicting defaults.
+            let config: Config = toml::from_str(&config_text).unwrap();
+            app.state.keybinds = config.keybinds();
+            app.state.mode = Mode::Prefix;
+            let mut selection = crate::selection::Selection::range(pane_id, 0, 0, 4, None);
+            selection.finish();
+            app.state.selection = Some(selection);
+            app.selection_autoscroll_deadline = Some(std::time::Instant::now());
+            app.state.update_dismissed = false;
+
+            let modifier = if plain_binding { 1 } else { 5 };
+            let input = format!("\x1b[{codepoint};{modifier};20320:22909u");
+            dispatch_prefix_test_input(&mut app, input.as_bytes(), headless).await;
+
+            assert_eq!(
+                input_rx
+                    .try_recv()
+                    .expect("prefix-mode IME text reaches the pane")
+                    .as_ref(),
+                "\u{4f60}\u{597d}".as_bytes(),
+            );
+            assert!(input_rx.try_recv().is_err());
+            assert_eq!(app.state.mode, Mode::Terminal);
+            assert_eq!(app.state.active, Some(0));
+            assert!(app.detached_process_children.is_empty());
+            assert!(app.input_leases.is_empty());
+            assert!(app.state.selection.is_none());
+            assert!(app.selection_autoscroll_deadline.is_none());
+            assert!(app.state.update_dismissed);
+
+            // The same key with no associated text must still execute its prefix binding.
+            app.state.mode = Mode::Prefix;
+            let ordinary = if plain_binding {
+                char::from_u32(codepoint).unwrap().to_string()
+            } else {
+                format!("\x1b[{codepoint};{modifier}u")
+            };
+            dispatch_prefix_test_input(&mut app, ordinary.as_bytes(), headless).await;
+            assert!(input_rx.try_recv().is_err());
+            match binding {
+                PrefixBindingControl::RenameTab => assert_eq!(app.state.mode, Mode::RenameTab),
+                PrefixBindingControl::CustomCommand => {
+                    assert_eq!(app.detached_process_children.len(), 1);
+                    let pid = app.detached_process_children[0].id();
+                    assert!(super::super::wait_for_detached_process_reap(&mut app, pid).await);
+                    assert_eq!(app.state.mode, Mode::Terminal);
+                }
+                PrefixBindingControl::SwitchWorkspace => {
+                    assert_eq!(app.state.active, Some(1));
+                    assert_eq!(app.state.mode, Mode::Terminal);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prefix_ime_text_bypasses_non_indexed_binding() {
+        assert_prefix_binding_does_not_consume_associated_text(PrefixBindingControl::RenameTab)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn prefix_ime_text_bypasses_custom_binding() {
+        assert_prefix_binding_does_not_consume_associated_text(PrefixBindingControl::CustomCommand)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn prefix_ime_text_bypasses_indexed_binding() {
+        assert_prefix_binding_does_not_consume_associated_text(
+            PrefixBindingControl::SwitchWorkspace,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn prefix_associated_text_equal_to_shortcut_still_reaches_pane() {
+        for headless in [true, false] {
+            let mut app = app_with_test_workspaces(&["first"]);
+            app.state.detach_exits = false;
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80, 24, 0, b"", 4,
+                );
+            app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+            app.state.mode = Mode::Prefix;
+            dispatch_prefix_test_input(&mut app, b"\x1b[113;1;113u", headless).await;
+            assert_eq!(
+                input_rx
+                    .try_recv()
+                    .expect("associated q reaches pane")
+                    .as_ref(),
+                b"q"
+            );
+            assert!(!app.state.detach_requested);
+            assert_eq!(app.state.mode, Mode::Terminal);
+            app.state.mode = Mode::Prefix;
+            dispatch_prefix_test_input(&mut app, b"q", headless).await;
+            assert!(
+                app.state.detach_requested,
+                "ordinary q remains a prefix shortcut"
+            );
+            assert!(input_rx.try_recv().is_err());
+        }
     }
 
     #[test]
