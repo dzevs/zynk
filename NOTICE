@@ -80,6 +80,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/config/keybinds.rs
 - src/config/model.rs
 - src/config/sound.rs
+- src/config/theme.rs
 - src/detect/manifest.rs
 - src/detect/manifests/claude.toml
 - src/detect/manifests/cursor.toml
@@ -140,6 +141,8 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/ui/panes.rs
 - src/ui/sidebar.rs
 - src/ui/status.rs
+- src/ui/tab_surface.rs
+- src/ui/tabs.rs
 - src/workspace.rs
 - src/workspace/aggregate.rs
 - src/workspace/git/discovery.rs

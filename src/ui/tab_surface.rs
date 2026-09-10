@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use ratatui::{layout::Rect, Frame};
 
 use super::panes::{compute_pane_infos, render_panes, resize_tab_panes};
@@ -372,7 +374,7 @@ mod tests {
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
         assert_eq!(
             frame_digest(&frame),
-            "ce027f36e0364232ad5c656eab075b4ab61dc178295bdbc68ddf7c30b37ffbb5"
+            "f318104f8ecf67ff19947cf62be5bc44444cd0d4dcce17a9238a98a0562f84af"
         );
     }
 

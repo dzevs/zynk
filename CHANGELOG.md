@@ -13,6 +13,9 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   blocked > working > done ranking.
 - Optional host light/dark theme switching: `theme.auto_switch = true` (default **off**) with
   `theme.dark_name` / `theme.light_name`.
+- Independent sidebar color overrides: `theme.custom.sidebar_bg`, `active_row_bg`, and
+  `selection_bg`. The sidebar background stays unset by default; active and Navigate rows have
+  separate colors.
 - `ui.pane_borders` / `ui.pane_gaps` for pane chrome.
 - `update.version_check` / `update.manifest_check` toggles. They only *disable* checks; self-update stays
   unavailable (no update-manifest hosting yet).
@@ -41,6 +44,12 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 
 **Fixed**
 
+- Sidebar worktree groups stay packed, two-digit workspace positions retain their status mark,
+  and the collapsed agent list highlights only the focused pane. Active rows remain visible under
+  the Navigate cursor when its selection background follows the terminal.
+- Tab labels are centered by display width. Rename and new-worktree inputs position the host
+  cursor at a blank caret cell, including wide text and overflowing names, so IME composition stays
+  inside the input field.
 - Live handoff keeps imported hook identity provisional until the new detector
   observes that owner's process running. An exit after snapshot capture cannot
   leave a dead session receipt-capable; a still-running session needs no new hook report.

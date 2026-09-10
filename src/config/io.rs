@@ -1550,6 +1550,78 @@ hide_tab_bar_when_single_tabb = true
     }
 
     #[test]
+    fn load_live_config_registers_sidebar_bg_and_reports_misspelled_sibling() {
+        let loaded = load_live_config_from_str(
+            "[theme.custom]\nsidebar_bg = \"#123456\"\nsidebar_bgg = \"#abcdef\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            loaded
+                .config
+                .theme
+                .custom
+                .as_ref()
+                .unwrap()
+                .sidebar_bg
+                .as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key theme.custom.sidebar_bgg; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_registers_active_row_bg_and_reports_misspelled_sibling() {
+        let loaded = load_live_config_from_str(
+            "[theme.custom]\nactive_row_bg = \"#123456\"\nactive_row_bgg = \"#abcdef\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            loaded
+                .config
+                .theme
+                .custom
+                .as_ref()
+                .unwrap()
+                .active_row_bg
+                .as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key theme.custom.active_row_bgg; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_registers_selection_bg_and_reports_misspelled_sibling() {
+        let loaded = load_live_config_from_str(
+            "[theme.custom]\nselection_bg = \"#123456\"\nselection_bgg = \"#abcdef\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            loaded
+                .config
+                .theme
+                .custom
+                .as_ref()
+                .unwrap()
+                .selection_bg
+                .as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key theme.custom.selection_bgg; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
     fn startup_config_load_accepts_the_shipped_default_config() {
         // `zynk --default-config` is what users copy to config.toml; every key it ships
         // must be a real typed key, and its commented lines must not read as keys.

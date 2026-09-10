@@ -125,6 +125,11 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Override individual color tokens on top of the base theme.
 # Accepts: hex (#rrggbb), named colors, rgb(r,g,b), or panel_bg = "reset"
 # [theme.custom]
+# Optional sidebar fill; omitted preserves the terminal background.
+# sidebar_bg = "#181825"
+# Active workspace/focused agent and Navigate cursor row backgrounds.
+# active_row_bg = "#1e1e2e"
+# selection_bg = "#313244"
 # panel_bg = "reset"
 # accent = "#f5c2e7"
 # red = "#ff6188"
