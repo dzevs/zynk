@@ -60,16 +60,21 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/api/plugins/panes.rs
 - src/app/api/tabs.rs
 - src/app/creation.rs
+- src/app/input/copy_mode.rs
 - src/app/input/mod.rs
+- src/app/input/modal.rs
 - src/app/input/mouse.rs
 - src/app/input/navigate.rs
+- src/app/input/overlays.rs
 - src/app/input/terminal.rs
 - src/app/mod.rs
 - src/app/runtime.rs
+- src/app/state.rs
 - src/app/theme_sync.rs
 - src/cli/integration.rs
 - src/client/input.rs
 - src/client/mod.rs
+- src/config/keybinds.rs
 - src/config/model.rs
 - src/config/sound.rs
 - src/detect/manifest.rs
@@ -80,6 +85,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/detect/manifests/qwen.toml
 - src/detect/mod.rs
 - src/ghostty/mod.rs
+- src/input/parse.rs
 - src/integration/actions.rs
 - src/integration/assets/antigravity_cli/zynk-agent-state.sh
 - src/integration/assets/claude/zynk-agent-state.sh
@@ -121,6 +127,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/terminal/state.rs
 - src/terminal_theme.rs
 - src/ui/dialogs.rs
+- src/ui/keybind_help.rs
 - src/ui/mobile.rs
 - src/ui/panes.rs
 - src/ui/sidebar.rs
@@ -128,6 +135,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/workspace/tab.rs
 - tests/cli_wrapper.rs
 - tests/client_mode.rs
+- tests/fixtures/keyboard_protocol_corpus.tsv
 - tests/zynk_receipt.rs
 <!-- apache-modified-files: end -->
 

@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::borrow::Cow;
 
 use ratatui::{
@@ -181,6 +183,26 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     groups
 }
 
+fn filter_keybind_help_groups(groups: Vec<HelpGroup>, query: &str) -> Vec<HelpGroup> {
+    if query.is_empty() {
+        return groups;
+    }
+
+    let query = query.to_lowercase();
+    groups
+        .into_iter()
+        .filter_map(|(group, entries)| {
+            let entries = entries
+                .into_iter()
+                .filter(|(key, label)| {
+                    key.to_lowercase().contains(&query) || label.to_lowercase().contains(&query)
+                })
+                .collect::<Vec<_>>();
+            (!entries.is_empty()).then_some((group, entries))
+        })
+        .collect()
+}
+
 pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> {
     let heading_style = Style::default()
         .fg(app.palette.accent)
@@ -190,7 +212,7 @@ pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> 
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(app.palette.text);
 
-    let groups = keybind_help_groups(app);
+    let groups = filter_keybind_help_groups(keybind_help_groups(app), &app.keybind_help.query);
     let key_width = groups
         .iter()
         .flat_map(|(_, entries)| entries.iter().map(|(key, _)| key.chars().count()))
@@ -198,6 +220,17 @@ pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> 
         .unwrap_or(8);
 
     let mut lines = Vec::new();
+
+    if groups.is_empty() {
+        let message = " no matching keybinds";
+        return vec![(
+            message.chars().count(),
+            Line::from(Span::styled(
+                message,
+                Style::default().fg(app.palette.overlay1),
+            )),
+        )];
+    }
 
     for (group, entries) in groups {
         lines.push((
@@ -240,17 +273,38 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         frame,
         release_notes_close_button_rect(header_rows[0]),
         Some("esc"),
-        "close",
+        if app.keybind_help.search_focused {
+            "back"
+        } else {
+            "close"
+        },
         Style::default()
             .fg(panel_contrast_fg(&app.palette))
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(
-        Paragraph::new(" available commands and configured shortcuts")
-            .style(Style::default().fg(app.palette.overlay1)),
-        header_rows[1],
-    );
+    let search_line = if app.keybind_help.search_focused {
+        Line::from(vec![
+            Span::styled(
+                " / ",
+                Style::default()
+                    .fg(app.palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                app.keybind_help.query.as_str(),
+                Style::default()
+                    .fg(app.palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            " / filter",
+            Style::default().fg(app.palette.overlay0),
+        ))
+    };
+    frame.render_widget(Paragraph::new(search_line), header_rows[1]);
 
     let body_area = stack.content;
     let metrics = crate::pane::ScrollMetrics {
@@ -300,9 +354,62 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
             Span::styled("jump", Style::default().fg(app.palette.overlay0)),
             Span::styled(" pgup / pgdn ", Style::default().fg(app.palette.text)),
             Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("close", Style::default().fg(app.palette.overlay0)),
+            Span::styled(
+                if app.keybind_help.search_focused {
+                    "back / close"
+                } else {
+                    "close"
+                },
+                Style::default().fg(app.palette.overlay0),
+            ),
             Span::styled(" esc / enter ", Style::default().fg(app.palette.text)),
         ])),
         stack.footer.unwrap_or_default(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn groups() -> Vec<HelpGroup> {
+        vec![
+            (
+                "workspaces / tabs",
+                vec![
+                    help_entry("w", "workspace navigation"),
+                    help_entry("c", "new tab"),
+                ],
+            ),
+            (
+                "panes",
+                vec![
+                    help_entry("v", "split vertical"),
+                    help_entry("x", "close pane"),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn keybind_help_filter_matches_labels_case_insensitively() {
+        let filtered = filter_keybind_help_groups(groups(), "WoRk");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "workspaces / tabs");
+        assert_eq!(filtered[0].1.len(), 1);
+        assert_eq!(filtered[0].1[0].1, "workspace navigation");
+    }
+
+    #[test]
+    fn keybind_help_filter_matches_shortcuts_without_matching_group_headings() {
+        let filtered = filter_keybind_help_groups(groups(), "x");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "panes");
+        assert_eq!(filtered[0].1.len(), 1);
+        assert_eq!(filtered[0].1[0].1, "close pane");
+
+        assert!(filter_keybind_help_groups(groups(), "panes").is_empty());
+    }
 }
