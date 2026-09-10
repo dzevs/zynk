@@ -15,22 +15,21 @@ pub fn parse_terminal_key_sequence(data: &str) -> Option<TerminalKey> {
 fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
     let body = data.strip_prefix("\x1b[")?.strip_suffix('u')?;
 
-    let (main, event_type) = match body.rsplit_once(':') {
-        Some((head, _)) if head.contains(";;") => (body, None),
-        Some((head, tail)) if tail.chars().all(|ch| ch.is_ascii_digit()) && head.contains(';') => {
-            (head, Some(tail))
-        }
-        _ => (body, None),
+    let mut fields = body.split(';');
+    let key_part = fields.next()?;
+    let modifier_and_event = fields
+        .next()
+        .filter(|field| !field.is_empty())
+        .unwrap_or("1");
+    let associated_text = match fields.next() {
+        Some(value) => Some(parse_kitty_associated_text(value)?),
+        None => None,
     };
-
-    let (key_part, modifier_part, associated_text) =
-        if let Some((key, text)) = main.split_once(";;") {
-            (key, "1", Some(parse_kitty_associated_text(text)?))
-        } else {
-            let (key, modifier) = main.rsplit_once(';').unwrap_or((main, "1"));
-            (key, modifier, None)
-        };
-    let modifier = modifier_part.parse::<u8>().ok()?.checked_sub(1)?;
+    if fields.next().is_some() {
+        return None;
+    }
+    let (modifier_text, event_type) = split_modifier_and_event(modifier_and_event);
+    let modifier = modifier_text.parse::<u8>().ok()?.checked_sub(1)?;
 
     let mut key_fields = key_part.split(':');
     let codepoint = key_fields.next()?.parse::<u32>().ok()?;
@@ -697,6 +696,15 @@ mod tests {
         assert_eq!(key.code, KeyCode::Char(' '));
         assert_eq!(key.modifiers, KeyModifiers::empty());
         assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+        assert_eq!(key.generated_text.as_deref(), Some("你好"));
+    }
+
+    #[test]
+    fn parse_kitty_sequence_with_explicit_modifier_and_ime_text() {
+        let key = parse_terminal_key_sequence("\x1b[32;5;20320:22909u").unwrap();
+
+        assert_eq!(key.code, KeyCode::Char(' '));
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
         assert_eq!(key.generated_text.as_deref(), Some("你好"));
     }
 

@@ -89,6 +89,19 @@ impl AppState {
         self.workspace_presses.remove(&source_id);
     }
 
+    fn clear_chrome_drag(&mut self, source_id: crate::app::InputSourceId) {
+        if self.drag.as_ref().is_some_and(|drag| {
+            matches!(
+                drag.target,
+                DragTarget::WorkspaceReorder { source_id: owner, .. }
+                    | DragTarget::TabReorder { source_id: owner, .. }
+                    if owner == source_id
+            )
+        }) {
+            self.drag = None;
+        }
+    }
+
     fn chrome_press_action(
         &mut self,
         workspace_press: Option<WorkspacePressState>,
@@ -876,7 +889,7 @@ impl AppState {
                     let was_finalized = selection.is_finalized();
 
                     self.clear_chrome_press(source_id);
-                    self.drag = None;
+                    self.clear_chrome_drag(source_id);
                     self.selection_autoscroll = None;
                     if was_click {
                         self.selection = None;
@@ -899,7 +912,7 @@ impl AppState {
                             self.selection = None;
                             self.selection_autoscroll = None;
                             self.clear_chrome_press(source_id);
-                            self.drag = None;
+                            self.clear_chrome_drag(source_id);
                             return None;
                         }
                     }

@@ -55,55 +55,63 @@ impl App {
         self.selection_autoscroll_deadline = None;
         self.state.update_dismissed = true;
 
-        if let Some(action) =
-            super::terminal_direct_non_indexed_navigation_action(&self.state, &key)
-        {
-            debug!(
-                code = ?key_event.code,
-                modifiers = ?key_event.modifiers,
-                kind = ?key_event.kind,
-                action = ?action,
-                "intercepted terminal direct keybinding before forwarding to pane"
-            );
-            if action == super::navigate::NavigateAction::EditScrollback {
-                self.launch_focused_scrollback_editor();
-            } else {
-                self.execute_tui_navigate_action(action, super::navigate::ActionContext::Direct);
+        // Committed IME payload bypasses local bindings, including prefix keys.
+        if key.generated_text.is_none() {
+            if let Some(action) =
+                super::terminal_direct_non_indexed_navigation_action(&self.state, &key)
+            {
+                debug!(
+                    code = ?key_event.code,
+                    modifiers = ?key_event.modifiers,
+                    kind = ?key_event.kind,
+                    action = ?action,
+                    "intercepted terminal direct keybinding before forwarding to pane"
+                );
+                if action == super::navigate::NavigateAction::EditScrollback {
+                    self.launch_focused_scrollback_editor();
+                } else {
+                    self.execute_tui_navigate_action(
+                        action,
+                        super::navigate::ActionContext::Direct,
+                    );
+                }
+                return None;
             }
-            return None;
-        }
 
-        if let Some(binding) = super::navigate::command_for_key(
-            &self.state,
-            &key,
-            super::navigate::BindingDispatch::Direct,
-        ) {
-            debug!(
-                code = ?key_event.code,
-                modifiers = ?key_event.modifiers,
-                kind = ?key_event.kind,
-                command = %binding.label,
-                "intercepted terminal direct custom command before forwarding to pane"
-            );
-            self.launch_custom_command(binding, super::navigate::ActionContext::Direct);
-            return None;
-        }
+            if let Some(binding) = super::navigate::command_for_key(
+                &self.state,
+                &key,
+                super::navigate::BindingDispatch::Direct,
+            ) {
+                debug!(
+                    code = ?key_event.code,
+                    modifiers = ?key_event.modifiers,
+                    kind = ?key_event.kind,
+                    command = %binding.label,
+                    "intercepted terminal direct custom command before forwarding to pane"
+                );
+                self.launch_custom_command(binding, super::navigate::ActionContext::Direct);
+                return None;
+            }
 
-        if let Some(action) = super::terminal_direct_indexed_navigation_action(&self.state, &key) {
-            debug!(
-                code = ?key_event.code,
-                modifiers = ?key_event.modifiers,
-                kind = ?key_event.kind,
-                action = ?action,
-                "intercepted terminal direct indexed keybinding before forwarding to pane"
-            );
-            self.execute_tui_navigate_action(action, super::navigate::ActionContext::Direct);
-            return None;
-        }
+            if let Some(action) =
+                super::terminal_direct_indexed_navigation_action(&self.state, &key)
+            {
+                debug!(
+                    code = ?key_event.code,
+                    modifiers = ?key_event.modifiers,
+                    kind = ?key_event.kind,
+                    action = ?action,
+                    "intercepted terminal direct indexed keybinding before forwarding to pane"
+                );
+                self.execute_tui_navigate_action(action, super::navigate::ActionContext::Direct);
+                return None;
+            }
 
-        if self.state.is_prefix_key(&key) {
-            self.state.mode = Mode::Prefix;
-            return None;
+            if self.state.is_prefix_key(&key) {
+                self.state.mode = Mode::Prefix;
+                return None;
+            }
         }
 
         if is_modifier_only_key(&key_event.code) {

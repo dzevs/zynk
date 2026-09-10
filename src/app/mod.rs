@@ -1897,8 +1897,10 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        app.state.prefix_code = crossterm::event::KeyCode::Char(' ');
+        app.state.prefix_mods = crossterm::event::KeyModifiers::empty();
 
-        app.route_client_input(b"\x1b[32;;20320:22909u".to_vec());
+        app.route_client_input(b"\x1b[32;5;20320:22909u".to_vec());
 
         assert_eq!(rx.recv().await.unwrap().as_ref(), "你好".as_bytes());
         assert!(rx.try_recv().is_err());
