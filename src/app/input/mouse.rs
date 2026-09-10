@@ -2640,7 +2640,7 @@ mod tests {
         let pane_id = ws.tabs[0].root_pane;
         let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
         let info = pane_infos[0].clone();
-        let (runtime, _rx) =
+        let (runtime, mut input_rx) =
             crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
                 info.inner_rect.width,
                 info.inner_rect.height,
@@ -2676,7 +2676,143 @@ mod tests {
             },
         );
 
-        assert!(app.state.drag.is_some());
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::TabReorder {
+                source_id: 7,
+                ws_idx: 0,
+                source_tab_idx: 0,
+                insert_idx: None,
+            })
+        ));
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded right mouse down"),
+            Bytes::from_static(b"\x1b[<2;3;4M"),
+        );
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn pane_mouse_release_preserves_foreign_chrome_drag() {
+        for mouse_reporting in [false, true] {
+            for workspace_drag in [false, true] {
+                let mut app = app_for_mouse_test();
+                let mut ws = Workspace::test_new("test");
+                let pane_id = ws.tabs[0].root_pane;
+                let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+                let info = pane_infos[0].clone();
+                let screen = if mouse_reporting {
+                    b"\x1b[?1002h\x1b[?1006h".as_slice()
+                } else {
+                    b""
+                };
+                let (runtime, mut input_rx) =
+                    crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                        info.inner_rect.width,
+                        info.inner_rect.height,
+                        0,
+                        screen,
+                        4,
+                    );
+                ws.insert_test_runtime(pane_id, runtime);
+                app.state.workspaces = vec![ws];
+                app.state.active = Some(0);
+                app.state.selected = 0;
+                app.state.copy_on_select = false;
+                app.state.view.pane_infos = pane_infos;
+                let col = info.inner_rect.x + 2;
+                let row = info.inner_rect.y + 3;
+
+                app.handle_mouse_from_input_source(
+                    9,
+                    mouse(MouseEventKind::Down(MouseButton::Left), col, row),
+                );
+                assert_eq!(app.state.selection.is_some(), !mouse_reporting);
+
+                app.state.drag = Some(DragState {
+                    target: if workspace_drag {
+                        DragTarget::WorkspaceReorder {
+                            source_id: 7,
+                            source_ws_idx: 0,
+                            insert_idx: None,
+                        }
+                    } else {
+                        DragTarget::TabReorder {
+                            source_id: 7,
+                            ws_idx: 0,
+                            source_tab_idx: 0,
+                            insert_idx: None,
+                        }
+                    },
+                });
+                for kind in [
+                    MouseEventKind::Drag(MouseButton::Left),
+                    MouseEventKind::Up(MouseButton::Left),
+                ] {
+                    app.handle_mouse_from_input_source(9, mouse(kind, col + 1, row + 1));
+                    let target = app.state.drag.as_ref().map(|drag| &drag.target);
+                    if workspace_drag {
+                        assert!(
+                            matches!(
+                                target,
+                                Some(DragTarget::WorkspaceReorder {
+                                    source_id: 7,
+                                    source_ws_idx: 0,
+                                    insert_idx: None,
+                                })
+                            ),
+                            "{kind:?} changed the foreign workspace drag; mouse_reporting={mouse_reporting}",
+                        );
+                    } else {
+                        assert!(
+                            matches!(
+                                target,
+                                Some(DragTarget::TabReorder {
+                                    source_id: 7,
+                                    ws_idx: 0,
+                                    source_tab_idx: 0,
+                                    insert_idx: None,
+                                })
+                            ),
+                            "{kind:?} changed the foreign tab drag; mouse_reporting={mouse_reporting}",
+                        );
+                    }
+                }
+
+                if mouse_reporting {
+                    for expected in [
+                        b"\x1b[<0;3;4M".as_slice(),
+                        b"\x1b[<32;4;5M".as_slice(),
+                        b"\x1b[<0;4;5m".as_slice(),
+                    ] {
+                        assert_eq!(
+                            input_rx
+                                .try_recv()
+                                .expect("forwarded pane mouse event")
+                                .as_ref(),
+                            expected
+                        );
+                    }
+                } else {
+                    assert!(app
+                        .state
+                        .selection
+                        .as_ref()
+                        .expect("retained selection")
+                        .is_finalized());
+                }
+                assert!(input_rx.try_recv().is_err());
+
+                app.handle_mouse_from_input_source(
+                    7,
+                    mouse(MouseEventKind::Up(MouseButton::Left), col + 1, row + 1),
+                );
+                assert!(
+                    app.state.drag.is_none(),
+                    "the owning source must still end its drag"
+                );
+            }
+        }
     }
 
     #[tokio::test]

@@ -368,6 +368,58 @@ mod tests {
             .offset_from_bottom
     }
 
+    #[tokio::test]
+    async fn kitty_associated_ime_text_bypasses_matching_prefix_binding() {
+        for (text_input, prefix_input, modifiers) in [
+            (
+                b"\x1b[32;;20320:22909u".as_slice(),
+                b"\x1b[32u".as_slice(),
+                KeyModifiers::empty(),
+            ),
+            (
+                b"\x1b[32;5;20320:22909u".as_slice(),
+                b"\x1b[32;5u".as_slice(),
+                KeyModifiers::CONTROL,
+            ),
+        ] {
+            let mut app = app_for_mouse_test();
+            let mut ws = Workspace::test_new("test");
+            let pane_id = ws.tabs[0].root_pane;
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80,
+                    24,
+                    0,
+                    b"\x1b[>15u",
+                    2,
+                );
+            ws.insert_test_runtime(pane_id, runtime);
+            app.state.workspaces = vec![ws];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.prefix_code = KeyCode::Char(' ');
+            app.state.prefix_mods = modifiers;
+
+            app.route_client_input(text_input.to_vec());
+
+            assert_eq!(
+                input_rx
+                    .try_recv()
+                    .expect("committed IME text reaches the pane")
+                    .as_ref(),
+                "\u{4f60}\u{597d}".as_bytes(),
+            );
+            assert_eq!(app.state.mode, Mode::Terminal);
+            assert!(input_rx.try_recv().is_err());
+            assert!(app.input_leases.is_empty());
+
+            // The same physical key without composed text must still activate the prefix.
+            app.route_client_input(prefix_input.to_vec());
+            assert_eq!(app.state.mode, Mode::Prefix);
+            assert!(input_rx.try_recv().is_err());
+        }
+    }
+
     fn physical_page_up(repeat_count: u16) -> TerminalKey {
         TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()).with_windows_record(
             crate::input::WindowsKeyRecord {
