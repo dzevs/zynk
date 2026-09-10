@@ -30,6 +30,10 @@ impl App {
     }
 
     fn prepare_terminal_key_forward(&mut self, key: TerminalKey) -> Option<PreparedPaneInput> {
+        if self.try_copy_retained_selection(key) {
+            return None;
+        }
+
         self.state.clear_selection();
         self.selection_autoscroll_deadline = None;
         self.state.update_dismissed = true;
@@ -501,7 +505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn copy_on_select_disabled_keeps_explicit_double_click_copy() {
+    async fn copy_on_select_disabled_retains_double_clicked_word_until_shortcut() {
         let (mut app, info) = app_with_screen_bytes(b"alpha beta");
         app.state.copy_on_select = false;
         let col = info.inner_rect.x + 2;
@@ -509,16 +513,22 @@ mod tests {
 
         double_click(&mut app, col, row);
 
-        assert_eq!(clipboard_write_content(&mut app), b"alpha");
         assert_visible_selection(&app);
-        assert!(app.selection_highlight_clear_deadline.is_some());
+        assert!(app.selection_highlight_clear_deadline.is_none());
         assert!(app.event_rx.try_recv().is_err());
+
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ));
+
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+        assert!(app.state.selection.is_none());
     }
 
     #[tokio::test]
     async fn new_drag_cancels_stale_double_click_highlight_deadline() {
         let (mut app, info) = app_with_screen_bytes(b"alpha beta");
-        app.state.copy_on_select = false;
         let row = info.inner_rect.y;
         let word_col = info.inner_rect.x + 2;
 
@@ -527,6 +537,7 @@ mod tests {
         let stale_deadline = app
             .selection_highlight_clear_deadline
             .expect("double-click highlight deadline");
+        app.state.copy_on_select = false;
 
         let start_col = info.inner_rect.x + 6;
         let end_col = info.inner_rect.x + 9;

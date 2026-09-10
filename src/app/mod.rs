@@ -13,6 +13,7 @@ mod api;
 mod api_helpers;
 mod config_io;
 mod creation;
+mod git_refresh;
 mod ids;
 mod input;
 mod runtime;
@@ -37,6 +38,7 @@ pub(crate) const HEADLESS_ANIMATION_TICK_STEP: u32 = 8;
 pub(crate) const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(30);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
+const GIT_REPO_DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const PENDING_AGENT_RESUME_THEME_WAIT: Duration = Duration::from_millis(750);
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
@@ -109,8 +111,10 @@ pub struct App {
     pub(crate) copy_feedback_deadline: Option<Instant>,
     pub(crate) last_api_notification_at: Option<Instant>,
     pub(crate) last_git_remote_status_refresh: Instant,
+    pub(crate) last_git_repo_discovery_refresh: Instant,
     pub(crate) git_refresh_in_flight: bool,
     pub(crate) git_refresh_due_after_in_flight: bool,
+    pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
     /// Deferred-API worktree operations in flight, keyed by canonical checkout
     /// path (creates) / workspace id (removes) so stale completion events can be
@@ -713,8 +717,10 @@ impl App {
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
+            last_git_repo_discovery_refresh: Instant::now(),
             git_refresh_in_flight: false,
             git_refresh_due_after_in_flight: false,
+            git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
             pending_api_worktree_creates: HashMap::new(),
             pending_api_worktree_removes: HashMap::new(),
@@ -1041,8 +1047,9 @@ impl App {
             match event {
                 LoopEvent::Timer => {}
                 LoopEvent::Internal(ev) => {
-                    self.handle_internal_event(ev);
-                    needs_render = true;
+                    if self.handle_internal_event_with_render_impact(ev) {
+                        needs_render = true;
+                    }
                 }
                 LoopEvent::Api(msg) => {
                     if self.handle_api_request_message(*msg) {
@@ -1777,6 +1784,20 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_git_status_event_has_no_render_impact() {
+        let mut app = test_app();
+        app.git_refresh_in_flight = true;
+
+        let changed = app.handle_internal_event_with_render_impact(AppEvent::GitStatusRefreshed {
+            results: Vec::new(),
+            cache_updates: Vec::new(),
+        });
+
+        assert!(!changed);
+        assert!(!app.git_refresh_in_flight);
+    }
+
+    #[test]
     fn git_status_event_clears_in_flight_refresh() {
         let mut app = test_app();
         app.git_refresh_in_flight = true;
@@ -1803,7 +1824,10 @@ mod tests {
         app.handle_internal_event(AppEvent::GitStatusRefreshed {
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
-                resolved_identity_cwd,
+                resolved_identity_cwd: resolved_identity_cwd.clone(),
+                status_cache_key: resolved_identity_cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                auto_label: "one".into(),
                 branch: Some("render-dirty-test".into()),
                 ahead_behind: Some((1, 0)),
                 space: None,
@@ -2034,6 +2058,21 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_git_status_drain_has_no_render_impact() {
+        let mut app = test_app();
+        app.git_refresh_in_flight = true;
+        app.event_tx
+            .try_send(AppEvent::GitStatusRefreshed {
+                results: Vec::new(),
+                cache_updates: Vec::new(),
+            })
+            .unwrap();
+
+        assert!(!app.drain_internal_events());
+        assert!(!app.git_refresh_in_flight);
+    }
+
+    #[test]
     fn internal_event_drain_limits_work_per_tick() {
         let mut app = test_app();
         for i in 0..=APP_EVENT_DRAIN_LIMIT {
@@ -2053,6 +2092,32 @@ mod tests {
             Some(expected_version.as_str())
         );
         assert!(app.event_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn full_event_drain_continues_after_a_batch_without_render_impact() {
+        let mut app = test_app();
+        for _ in 0..APP_EVENT_DRAIN_LIMIT {
+            app.event_tx
+                .try_send(AppEvent::GitStatusRefreshed {
+                    results: Vec::new(),
+                    cache_updates: Vec::new(),
+                })
+                .unwrap();
+        }
+        app.event_tx
+            .try_send(AppEvent::UpdateReady {
+                version: "after-git-events".into(),
+                install_command: "zynk install".into(),
+            })
+            .unwrap();
+
+        assert!(app.drain_all_internal_events());
+        assert_eq!(
+            app.state.update_available.as_deref(),
+            Some("after-git-events")
+        );
+        assert!(app.event_rx.try_recv().is_err());
     }
 
     #[test]

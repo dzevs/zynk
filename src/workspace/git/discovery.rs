@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,12 +21,12 @@ pub struct GitWorktreeInfo {
 }
 
 pub fn derive_label_from_cwd(cwd: &Path) -> String {
-    if let Some(repo_root) = git_repo_root(cwd) {
-        if let Some(name) = repo_root.file_name().and_then(|n| n.to_str()) {
-            return name.to_string();
-        }
-    }
+    git_repo_root(cwd)
+        .map(|repo_root| automatic_workspace_label(cwd, &repo_root))
+        .unwrap_or_else(|| fallback_label_from_cwd(cwd))
+}
 
+pub fn fallback_label_from_cwd(cwd: &Path) -> String {
     if let Ok(home) = std::env::var("HOME") {
         let home = Path::new(&home);
         if cwd == home {
@@ -56,9 +58,19 @@ pub fn git_worktree_info(cwd: &Path) -> Option<GitWorktreeInfo> {
 }
 
 pub fn git_space_metadata(cwd: &Path) -> Option<GitSpaceMetadata> {
-    git_repo_root(cwd)?;
-
     let info = git_worktree_info(cwd)?;
+    Some(git_space_metadata_from_info(&info))
+}
+
+pub(crate) fn automatic_workspace_label(cwd: &Path, repo_root: &Path) -> String {
+    repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback_label_from_cwd(cwd))
+}
+
+pub(super) fn git_space_metadata_from_info(info: &GitWorktreeInfo) -> GitSpaceMetadata {
     let key = canonicalize_best_effort_path(&info.git_common_dir)
         .display()
         .to_string();
@@ -80,13 +92,13 @@ pub fn git_space_metadata(cwd: &Path) -> Option<GitSpaceMetadata> {
         .and_then(|name| name.to_str())
         .unwrap_or("repo")
         .to_string();
-    Some(GitSpaceMetadata {
+    GitSpaceMetadata {
         key,
         checkout_key,
         label,
-        repo_root: info.repo_root,
+        repo_root: info.repo_root.clone(),
         is_linked_worktree: info.is_linked_worktree,
-    })
+    }
 }
 
 pub(super) fn canonicalize_best_effort_path(path: &Path) -> PathBuf {

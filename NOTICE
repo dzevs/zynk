@@ -60,6 +60,8 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/api/plugins/panes.rs
 - src/app/api/tabs.rs
 - src/app/creation.rs
+- src/app/git_refresh.rs
+- src/app/input/clipboard.rs
 - src/app/input/copy_mode.rs
 - src/app/input/mod.rs
 - src/app/input/modal.rs
@@ -120,6 +122,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/persist/restore.rs
 - src/pty/actor/unix.rs
 - src/raw_input.rs
+- src/selection.rs
 - src/server/clients.rs
 - src/server/headless.rs
 - src/server/notifications.rs
@@ -132,6 +135,9 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/ui/panes.rs
 - src/ui/sidebar.rs
 - src/workspace.rs
+- src/workspace/git/discovery.rs
+- src/workspace/git/mod.rs
+- src/workspace/git/status.rs
 - src/workspace/tab.rs
 - tests/cli_wrapper.rs
 - tests/client_mode.rs

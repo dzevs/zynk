@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Text selection and clipboard support.
 //!
 //! Selection lifecycle:
@@ -7,7 +9,7 @@
 //!   MouseUp           → Selection finalized; optionally copied by the caller
 //!   Next click / key  → A retained selection is cleared
 //!
-//! Double-click copy also briefly highlights the selected word.
+//! Double-click selects a word; the caller decides whether to copy it immediately.
 //!
 //! Rows are stored in screen-buffer coordinates instead of viewport-relative
 //! coordinates. That keeps selection stable while the pane scrolls.
