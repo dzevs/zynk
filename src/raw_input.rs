@@ -123,6 +123,11 @@ pub enum RawInputEvent {
         colors: Vec<(u8, RgbColor)>,
     },
     HostColorSchemeChanged(HostAppearance),
+    // The dimensions are only read by the Unix client.
+    HostCellSizeReport {
+        width_px: u32,
+        height_px: u32,
+    },
     Unsupported,
 }
 
@@ -181,13 +186,15 @@ pub(crate) struct RawInputByteFramer {
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
     host_color_replies_awaited: u16,
+    host_cell_size_replies_awaited: u16,
     host_appearance_reply_awaited: bool,
-    held_pending_color_esc: bool,
+    held_pending_host_reply_esc: bool,
     host_color_scheme_change_tracking: bool,
     host_appearance_query_on_focus: bool,
 }
 
 const HOST_COLOR_QUERY_REPLIES: u16 = 258;
+const HOST_CELL_SIZE_QUERY_REPLIES: u16 = 1;
 
 impl RawInputByteFramer {
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
@@ -200,16 +207,24 @@ impl RawInputByteFramer {
     /// (upstream 6f9ca0e).
     pub(crate) fn host_color_query_sent(&mut self) {
         self.host_color_replies_awaited = HOST_COLOR_QUERY_REPLIES;
-        self.held_pending_color_esc = false;
+        self.held_pending_host_reply_esc = false;
     }
 
     fn host_appearance_query_sent(&mut self) {
         self.host_appearance_reply_awaited = true;
-        self.held_pending_color_esc = false;
+        self.held_pending_host_reply_esc = false;
     }
 
     fn awaiting_host_reply(&self) -> bool {
-        self.host_color_replies_awaited > 0 || self.host_appearance_reply_awaited
+        self.host_color_replies_awaited > 0
+            || self.host_cell_size_replies_awaited > 0
+            || self.host_appearance_reply_awaited
+    }
+
+    /// Hold split XTWINOPS replies for the same bounded window as color replies.
+    pub(crate) fn host_cell_size_query_sent(&mut self) {
+        self.host_cell_size_replies_awaited = HOST_CELL_SIZE_QUERY_REPLIES;
+        self.held_pending_host_reply_esc = false;
     }
 
     pub(crate) fn enable_host_color_scheme_change_tracking(&mut self) {
@@ -230,6 +245,9 @@ impl RawInputByteFramer {
         let mut chunks = self.drain_available_chunks();
 
         if let Some(family) = self.discard_until {
+            if family == ControlStringFamily::HostReplyCsi {
+                return chunks;
+            }
             let keep_split_st = self.buffer.last() == Some(&ESC);
             let keep_discarding = plausible_control_string_tail(family, &self.buffer);
             self.discarded_tail_bytes = self.discarded_tail_bytes.saturating_add(self.buffer.len());
@@ -259,14 +277,32 @@ impl RawInputByteFramer {
             return chunks;
         }
 
-        if self.host_appearance_reply_awaited && self.buffer.as_slice() == b"\x1b[" {
-            if !self.held_pending_color_esc {
-                self.held_pending_color_esc = true;
+        if (self.host_appearance_reply_awaited || self.host_cell_size_replies_awaited > 0)
+            && self.buffer.as_slice() == b"\x1b["
+        {
+            if !self.held_pending_host_reply_esc {
+                self.held_pending_host_reply_esc = true;
                 tracing::trace!("holding incomplete host CSI reply one flush");
                 return chunks;
             }
             self.host_appearance_reply_awaited = false;
-            self.held_pending_color_esc = false;
+            self.host_cell_size_replies_awaited = 0;
+            self.held_pending_host_reply_esc = false;
+        }
+
+        if self.host_cell_size_replies_awaited > 0
+            && starts_with_incomplete_host_cell_size_report(&self.buffer)
+        {
+            tracing::debug!(
+                len = self.buffer.len(),
+                "discarding incomplete host cell size report after input timeout"
+            );
+            self.host_cell_size_replies_awaited = 0;
+            self.held_pending_host_reply_esc = false;
+            self.discard_until = Some(ControlStringFamily::HostReplyCsi);
+            self.discarded_tail_bytes = 0;
+            self.buffer.clear();
+            return chunks;
         }
 
         if starts_with_incomplete_default_color_response(&self.buffer) {
@@ -278,8 +314,8 @@ impl RawInputByteFramer {
         }
 
         if starts_with_incomplete_host_color_scheme_report(&self.buffer) {
-            if self.host_appearance_reply_awaited && !self.held_pending_color_esc {
-                self.held_pending_color_esc = true;
+            if self.host_appearance_reply_awaited && !self.held_pending_host_reply_esc {
+                self.held_pending_host_reply_esc = true;
                 tracing::trace!(
                     len = self.buffer.len(),
                     "holding incomplete host color scheme report one flush"
@@ -291,8 +327,8 @@ impl RawInputByteFramer {
                 "discarding incomplete host color scheme report after input timeout"
             );
             self.host_appearance_reply_awaited = false;
-            self.held_pending_color_esc = false;
-            self.discard_until = Some(ControlStringFamily::HostColorSchemeCsi);
+            self.held_pending_host_reply_esc = false;
+            self.discard_until = Some(ControlStringFamily::HostReplyCsi);
             self.discarded_tail_bytes = 0;
             self.buffer.clear();
             return chunks;
@@ -312,15 +348,16 @@ impl RawInputByteFramer {
         }
 
         if self.buffer.as_slice() == [ESC] {
-            if self.awaiting_host_reply() && !self.held_pending_color_esc {
-                self.held_pending_color_esc = true;
-                tracing::trace!("holding lone escape one flush while awaiting host color reply");
+            if self.awaiting_host_reply() && !self.held_pending_host_reply_esc {
+                self.held_pending_host_reply_esc = true;
+                tracing::trace!("holding lone escape one flush while awaiting host reply");
                 return chunks;
             }
             // No continuation arrived; give up the window so Escape is not delayed again.
             self.host_color_replies_awaited = 0;
+            self.host_cell_size_replies_awaited = 0;
             self.host_appearance_reply_awaited = false;
-            self.held_pending_color_esc = false;
+            self.held_pending_host_reply_esc = false;
             tracing::warn!(
                 bytes = ?self.buffer,
                 "flushing lone escape after input timeout; if this follows an alt chord or focus switch it may reach the pane as plain esc"
@@ -357,6 +394,15 @@ impl RawInputByteFramer {
 
         loop {
             if let Some(family) = self.discard_until {
+                if family == ControlStringFamily::HostReplyCsi {
+                    if discard_host_reply_csi_tail(&mut self.buffer, &mut self.discarded_tail_bytes)
+                    {
+                        self.discard_until = None;
+                        self.discarded_tail_bytes = 0;
+                        continue;
+                    }
+                    break;
+                }
                 let Some(terminator_len) =
                     control_string_terminator_for_family(&self.buffer, family)
                 else {
@@ -376,6 +422,9 @@ impl RawInputByteFramer {
                 RawInputEvent::HostDefaultColor { .. } | RawInputEvent::HostPaletteColors { .. }
             ) {
                 self.host_color_replies_awaited = self.host_color_replies_awaited.saturating_sub(1);
+            } else if matches!(event, RawInputEvent::HostCellSizeReport { .. }) {
+                self.host_cell_size_replies_awaited =
+                    self.host_cell_size_replies_awaited.saturating_sub(1);
             } else if self.host_appearance_query_on_focus
                 && matches!(event, RawInputEvent::OuterFocusGained)
             {
@@ -386,7 +435,7 @@ impl RawInputByteFramer {
                     self.host_color_query_sent();
                 }
             }
-            self.held_pending_color_esc = false;
+            self.held_pending_host_reply_esc = false;
             chunks.push(self.buffer[..consumed].to_vec());
             self.buffer.drain(..consumed);
         }
@@ -421,9 +470,7 @@ fn plausible_control_string_tail(family: ControlStringFamily, buffer: &[u8]) -> 
                 )
         }),
         ControlStringFamily::StTerminated => buffer.last() == Some(&ESC),
-        ControlStringFamily::HostColorSchemeCsi => buffer
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b';' | b'?' | b'n')),
+        ControlStringFamily::HostReplyCsi => false,
     }
 }
 
@@ -650,6 +697,16 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
             return Some((RawInputEvent::HostColorSchemeChanged(appearance), seq_len));
         }
 
+        if let Some((width_px, height_px)) = parse_host_cell_size_report(&buffer[..seq_len]) {
+            return Some((
+                RawInputEvent::HostCellSizeReport {
+                    width_px,
+                    height_px,
+                },
+                seq_len,
+            ));
+        }
+
         if let Some(mouse) = parse_sgr_mouse(seq) {
             return Some((RawInputEvent::Mouse(mouse), seq_len));
         }
@@ -677,7 +734,7 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
 enum ControlStringFamily {
     Osc,
     StTerminated,
-    HostColorSchemeCsi,
+    HostReplyCsi,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -699,6 +756,23 @@ fn parse_host_color_scheme_report(buffer: &[u8]) -> Option<HostAppearance> {
     }
 }
 
+/// Parses an XTWINOPS cell size report (`CSI 6 ; height ; width t`) into
+/// `(width_px, height_px)`; note the reply orders height first.
+fn parse_host_cell_size_report(buffer: &[u8]) -> Option<(u32, u32)> {
+    let body = buffer.strip_prefix(b"\x1b[")?.strip_suffix(b"t")?;
+    let text = std::str::from_utf8(body).ok()?;
+    let mut params = text.split(';');
+    if params.next()? != "6" {
+        return None;
+    }
+    let height_px = params.next()?.parse::<u32>().ok()?;
+    let width_px = params.next()?.parse::<u32>().ok()?;
+    if params.next().is_some() || width_px == 0 || height_px == 0 {
+        return None;
+    }
+    Some((width_px, height_px))
+}
+
 fn starts_with_incomplete_default_color_response(buffer: &[u8]) -> bool {
     matches!(
         control_string(buffer),
@@ -713,6 +787,26 @@ fn starts_with_incomplete_host_color_scheme_report(buffer: &[u8]) -> bool {
         && (GHOSTTY_COLOR_SCHEME_DARK_REPORT.starts_with(buffer)
             || GHOSTTY_COLOR_SCHEME_LIGHT_REPORT.starts_with(buffer))
         && buffer.len() < GHOSTTY_COLOR_SCHEME_DARK_REPORT.len()
+}
+
+fn starts_with_incomplete_host_cell_size_report(buffer: &[u8]) -> bool {
+    let Some(body) = buffer.strip_prefix(b"\x1b[") else {
+        return false;
+    };
+    if body.is_empty() || body.last() == Some(&b't') {
+        return false;
+    }
+
+    let mut params = body.split(|byte| *byte == b';');
+    if params.next() != Some(b"6".as_slice()) {
+        return false;
+    }
+    let height = params.next();
+    let width = params.next();
+    params.next().is_none()
+        && height.is_none_or(|value| value.iter().all(u8::is_ascii_digit))
+        && width.is_none_or(|value| value.iter().all(u8::is_ascii_digit))
+        && !(height.is_some_and(<[u8]>::is_empty) && width.is_some())
 }
 
 fn control_string(buffer: &[u8]) -> Option<ControlString> {
@@ -817,6 +911,29 @@ fn st_string_terminator(buffer: &[u8]) -> Option<usize> {
     find_subsequence(buffer, b"\x1b\\").map(|idx| idx + 2)
 }
 
+fn discard_host_reply_csi_tail(buffer: &mut Vec<u8>, discarded_tail_bytes: &mut usize) -> bool {
+    let remaining = MAX_DISCARDED_CONTROL_TAIL_BYTES.saturating_sub(*discarded_tail_bytes);
+    let inspected = buffer.len().min(remaining);
+
+    for index in 0..inspected {
+        match buffer[index] {
+            0x20..=0x3f => {}
+            0x40..=0x7e => {
+                buffer.drain(..=index);
+                return true;
+            }
+            _ => {
+                buffer.drain(..index);
+                return true;
+            }
+        }
+    }
+
+    buffer.drain(..inspected);
+    *discarded_tail_bytes = discarded_tail_bytes.saturating_add(inspected);
+    *discarded_tail_bytes >= MAX_DISCARDED_CONTROL_TAIL_BYTES
+}
+
 fn control_string_terminator_for_family(
     buffer: &[u8],
     family: ControlStringFamily,
@@ -824,10 +941,7 @@ fn control_string_terminator_for_family(
     match family {
         ControlStringFamily::Osc => osc_string_terminator(buffer),
         ControlStringFamily::StTerminated => st_string_terminator(buffer),
-        ControlStringFamily::HostColorSchemeCsi => buffer
-            .iter()
-            .position(|byte| *byte == b'n')
-            .map(|idx| idx + 1),
+        ControlStringFamily::HostReplyCsi => None,
     }
 }
 
@@ -1232,6 +1346,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_host_cell_size_report() {
+        let events = parse_raw_input_bytes_sync(b"\x1b[6;21;10t");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            RawInputEvent::HostCellSizeReport {
+                width_px: 10,
+                height_px: 21,
+            }
+        ));
+    }
+
+    #[test]
+    fn host_cell_size_report_parser_is_exact() {
+        for bytes in [
+            // Zero dimensions carry no usable cell size.
+            b"\x1b[6;0;10t".as_slice(),
+            b"\x1b[6;21;0t".as_slice(),
+            // Missing or extra parameters.
+            b"\x1b[6;21t".as_slice(),
+            b"\x1b[6;21;10;3t".as_slice(),
+            // Other XTWINOPS reports must not be mistaken for a cell size.
+            b"\x1b[4;1610;777t".as_slice(),
+            b"\x1b[8;37;161t".as_slice(),
+            // Non-numeric parameters.
+            b"\x1b[6;21;1-t".as_slice(),
+        ] {
+            assert!(
+                parse_host_cell_size_report(bytes).is_none(),
+                "bytes: {bytes:?}"
+            );
+        }
+    }
+
+    #[test]
     fn split_color_scheme_timeout_does_not_swallow_legacy_alt_bracket() {
         let mut framer = RawInputByteFramer::default();
 
@@ -1251,6 +1401,102 @@ mod tests {
     }
 
     #[test]
+    fn holds_lone_escape_and_stitches_split_host_cell_size_reply() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_cell_size_query_sent();
+
+        // The XTWINOPS reply is split right at its ESC introducer.
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+
+        let chunks = framer.push(b"[6;21;10t");
+        assert_eq!(chunks, vec![b"\x1b[6;21;10t".to_vec()]);
+        let (event, _) = extract_one_event(&chunks[0]).unwrap();
+        assert!(matches!(
+            event,
+            RawInputEvent::HostCellSizeReport {
+                width_px: 10,
+                height_px: 21,
+            }
+        ));
+    }
+
+    #[test]
+    fn timed_out_host_cell_size_reply_fragments_do_not_leak() {
+        for (prefix, tail) in [
+            (b"\x1b[6".as_slice(), b";21;10t".as_slice()),
+            (b"\x1b[6;".as_slice(), b"21;10t".as_slice()),
+            (b"\x1b[6;21;".as_slice(), b"10t".as_slice()),
+        ] {
+            let mut framer = RawInputByteFramer::default();
+            framer.host_cell_size_query_sent();
+
+            assert!(framer.push(prefix).is_empty(), "prefix: {prefix:?}");
+            assert!(framer.flush_timeout().is_empty(), "prefix: {prefix:?}");
+            assert!(framer.push(tail).is_empty(), "tail: {tail:?}");
+            assert_eq!(framer.push(b"a"), vec![b"a".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn split_host_cell_size_reply_after_csi_intro_gets_one_more_flush() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_cell_size_query_sent();
+
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.push(b"6;21;10t"), vec![b"\x1b[6;21;10t".to_vec()]);
+
+        let mut alt_bracket = RawInputByteFramer::default();
+        alt_bracket.host_cell_size_query_sent();
+        assert!(alt_bracket.push(b"\x1b[").is_empty());
+        assert!(alt_bracket.flush_timeout().is_empty());
+        assert_eq!(alt_bracket.flush_timeout(), vec![b"\x1b[".to_vec()]);
+    }
+
+    #[test]
+    fn malformed_host_reply_tail_preserves_following_input() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_cell_size_query_sent();
+
+        assert!(framer.push(b"\x1b[6;21").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(
+            framer.push(b";10xabc"),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+    }
+
+    #[test]
+    fn host_reply_tail_discard_is_bounded_across_pushes() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_cell_size_query_sent();
+
+        assert!(framer.push(b"\x1b[6;21").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(&[b'1'; 64]).is_empty());
+        assert_eq!(
+            framer.push(&[b'2'; 67]),
+            vec![b"2".to_vec(), b"2".to_vec(), b"2".to_vec()]
+        );
+    }
+
+    #[test]
+    fn stops_holding_lone_escape_after_host_cell_size_reply_completes() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_cell_size_query_sent();
+
+        assert_eq!(
+            framer.push(b"\x1b[6;21;10t"),
+            vec![b"\x1b[6;21;10t".to_vec()]
+        );
+
+        // Window closed: a later lone Escape flushes immediately.
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
     fn default_byte_framer_does_not_rearm_after_color_scheme_report() {
         let mut framer = RawInputByteFramer::default();
 
@@ -1260,6 +1506,60 @@ mod tests {
         );
         assert!(framer.push(b"\x1b").is_empty());
         assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
+    fn cell_size_and_appearance_replies_keep_independent_pending_windows() {
+        let cell = b"\x1b[6;21;10t".as_slice();
+        let appearance = GHOSTTY_COLOR_SCHEME_DARK_REPORT;
+        for (first, second) in [(cell, appearance), (appearance, cell)] {
+            let mut framer = RawInputByteFramer::default();
+            framer.host_cell_size_query_sent();
+            framer.enable_host_appearance_query_on_focus();
+            assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+            assert_eq!(framer.push(first), vec![first.to_vec()]);
+
+            assert!(framer.push(b"\x1b").is_empty());
+            assert!(framer.flush_timeout().is_empty());
+            assert_eq!(framer.push(&second[1..]), vec![second.to_vec()]);
+
+            assert!(framer.push(b"\x1b").is_empty());
+            assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn timed_out_cell_size_reply_preserves_pending_appearance_reply() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_cell_size_query_sent();
+        framer.enable_host_appearance_query_on_focus();
+        assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+        assert!(framer.push(b"\x1b[6;21").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b";10t").is_empty());
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(
+            framer.push(b"[?997;1n"),
+            vec![GHOSTTY_COLOR_SCHEME_DARK_REPORT.to_vec()]
+        );
+    }
+
+    #[test]
+    fn timed_out_appearance_reply_preserves_pending_cell_size_reply() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_cell_size_query_sent();
+        framer.enable_host_appearance_query_on_focus();
+        assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+        assert!(framer.push(b"\x1b[?997;1").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b"n").is_empty());
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.push(b"[6;21;10t"), vec![b"\x1b[6;21;10t".to_vec()]);
     }
 
     #[test]

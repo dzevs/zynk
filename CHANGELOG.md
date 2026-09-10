@@ -55,6 +55,12 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Remote VS Code terminals prefer OSC 52 clipboard writes. When graphics are enabled and the
+  host does not report pixel dimensions through the terminal ioctl, the client queries cell size
+  and updates its resize geometry; split replies cannot leak into pane input.
+- Page Up/Page Down scroll pane history at zsh/REPL prompts using application-cursor mode with
+  bracketed paste. Primary-screen pagers, alternate-screen apps and mouse-reporting apps retain
+  their own page keys.
 - Held-key repeats and releases stay with the pane that received the press, even after focus changes
   or a move between workspaces. Client focus loss, disconnect, and terminal shutdown release that
   source's held keys. Clipboard shortcuts suppress only their own client's key lifecycle; explicit

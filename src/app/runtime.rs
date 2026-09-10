@@ -258,7 +258,8 @@ impl App {
                 self.query_host_terminal_theme();
                 self.set_host_terminal_appearance(appearance, true)
             }
-            crate::raw_input::RawInputEvent::Unsupported => false,
+            crate::raw_input::RawInputEvent::HostCellSizeReport { .. }
+            | crate::raw_input::RawInputEvent::Unsupported => false,
         };
         self.shutdown_detached_terminal_runtimes();
         changed

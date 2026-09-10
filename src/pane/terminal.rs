@@ -131,7 +131,11 @@ impl InputState {
     }
 
     pub fn plain_page_keys_use_host_scrollback(self) -> bool {
-        !self.alternate_screen && !self.mouse_reporting_enabled() && !self.application_cursor
+        !self.alternate_screen
+            && !self.mouse_reporting_enabled()
+            // Bracketed paste distinguishes zsh's line editor (where it's on)
+            // from e.g. less -X (where it's off).
+            && (!self.application_cursor || self.bracketed_paste)
     }
 }
 
@@ -2843,6 +2847,48 @@ mod tests {
     use super::*;
     use ratatui::{layout::Rect, style::Color};
     use tokio::sync::mpsc;
+
+    #[test]
+    fn plain_page_keys_host_scroll_for_shell_like_decckm_with_bracketed_paste() {
+        assert!(InputState {
+            alternate_screen: false,
+            application_cursor: true,
+            bracketed_paste: true,
+            focus_reporting: false,
+            mouse_protocol_mode: crate::input::MouseProtocolMode::None,
+            mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Default,
+            mouse_alternate_scroll: false,
+            modify_other_keys: false,
+            color_scheme_reporting: false,
+        }
+        .plain_page_keys_use_host_scrollback());
+    }
+
+    #[test]
+    fn bracketed_paste_does_not_override_page_key_application_ownership() {
+        use crate::input::{MouseProtocolEncoding, MouseProtocolMode};
+
+        for (alternate_screen, mouse_protocol_mode) in [
+            (true, MouseProtocolMode::None),
+            (false, MouseProtocolMode::Press),
+            (false, MouseProtocolMode::PressRelease),
+            (false, MouseProtocolMode::ButtonMotion),
+            (false, MouseProtocolMode::AnyMotion),
+        ] {
+            let state = InputState {
+                alternate_screen,
+                application_cursor: true,
+                bracketed_paste: true,
+                focus_reporting: false,
+                mouse_protocol_mode,
+                mouse_protocol_encoding: MouseProtocolEncoding::Default,
+                mouse_alternate_scroll: false,
+                modify_other_keys: false,
+                color_scheme_reporting: false,
+            };
+            assert!(!state.plain_page_keys_use_host_scrollback(), "{state:?}");
+        }
+    }
 
     fn text_cell(text: &str) -> crate::ghostty::ScreenTextCell {
         crate::ghostty::ScreenTextCell {

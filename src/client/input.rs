@@ -32,17 +32,30 @@ pub fn stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
+    host_cell_size_query_sent: bool,
 ) {
-    unix_stdin_reader_loop(event_tx, should_quit, host_color_query_sent);
+    unix_stdin_reader_loop(
+        event_tx,
+        should_quit,
+        host_color_query_sent,
+        host_cell_size_query_sent,
+    );
 }
 
 fn unix_stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
+    host_cell_size_query_sent: bool,
 ) {
     let stdin = io::stdin();
-    unix_input_reader_loop(stdin.lock(), event_tx, should_quit, host_color_query_sent);
+    unix_input_reader_loop(
+        stdin.lock(),
+        event_tx,
+        should_quit,
+        host_color_query_sent,
+        host_cell_size_query_sent,
+    );
 }
 
 fn unix_input_reader_loop<R: Read + AsRawFd>(
@@ -50,6 +63,7 @@ fn unix_input_reader_loop<R: Read + AsRawFd>(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
+    host_cell_size_query_sent: bool,
 ) {
     let mut scratch = [0u8; 4096];
     let mut framer = crate::raw_input::RawInputByteFramer::default();
@@ -57,6 +71,9 @@ fn unix_input_reader_loop<R: Read + AsRawFd>(
         framer.host_color_query_sent();
         framer.enable_host_color_scheme_change_tracking();
         framer.enable_host_appearance_query_on_focus();
+    }
+    if host_cell_size_query_sent {
+        framer.host_cell_size_query_sent();
     }
     let mut pending_palette = Vec::new();
 
@@ -189,11 +206,66 @@ fn poll_read_ready(fd: i32, timeout_ms: i32) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    // The stdin reader thread is hard to unit test since it reads from actual stdin.
-    // Integration tests will verify the full client→server input flow.
-    // Here we test the event type construction.
-
     use super::*;
+
+    #[tokio::test]
+    async fn input_reader_forwards_cell_report_without_swallowing_following_keys() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut host) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let reader_quit = Arc::clone(&should_quit);
+        let thread = std::thread::spawn(move || {
+            unix_input_reader_loop(reader, tx, &reader_quit, false, true);
+        });
+        host.write_all(b"\x1b[6;21;10tx\x1b").unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            (rx.recv().await, rx.recv().await, rx.recv().await)
+        })
+        .await;
+        should_quit.store(true, Ordering::Release);
+        drop(host);
+        thread.join().unwrap();
+
+        let (report, key, escape) = received.expect("cell report must not consume later input");
+        let Some(ClientLoopEvent::StdinInput(data)) = report else {
+            panic!("expected cell size report");
+        };
+        assert_eq!(data, b"\x1b[6;21;10t");
+        let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+        assert_eq!(
+            super::super::reported_cell_size_from_events(&events),
+            Some((10, 21))
+        );
+        assert!(matches!(key, Some(ClientLoopEvent::StdinInput(data)) if data == b"x"));
+        assert!(matches!(escape, Some(ClientLoopEvent::StdinInput(data)) if data == b"\x1b"));
+    }
+
+    #[tokio::test]
+    async fn input_reader_releases_escape_when_cell_size_query_is_unanswered() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut host) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let reader_quit = Arc::clone(&should_quit);
+        let thread = std::thread::spawn(move || {
+            unix_input_reader_loop(reader, tx, &reader_quit, false, true);
+        });
+        host.write_all(b"\x1b").unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+        should_quit.store(true, Ordering::Release);
+        drop(host);
+        thread.join().unwrap();
+
+        assert!(matches!(
+            received.expect("unanswered cell query must not hold Escape indefinitely"),
+            Some(ClientLoopEvent::StdinInput(data)) if data == b"\x1b"
+        ));
+    }
 
     #[tokio::test]
     async fn input_reader_releases_escape_without_another_read_after_focus() {
@@ -205,7 +277,7 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let reader_quit = Arc::clone(&should_quit);
         let thread = std::thread::spawn(move || {
-            unix_input_reader_loop(reader, tx, &reader_quit, true);
+            unix_input_reader_loop(reader, tx, &reader_quit, true, false);
         });
         host.write_all(b"\x1b[I\x1b").unwrap();
         let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {

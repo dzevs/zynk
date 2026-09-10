@@ -1705,7 +1705,8 @@ impl App {
                         self.set_host_terminal_appearance(appearance, true);
                     }
                 }
-                crate::raw_input::RawInputEvent::Unsupported => {}
+                crate::raw_input::RawInputEvent::HostCellSizeReport { .. }
+                | crate::raw_input::RawInputEvent::Unsupported => {}
             }
         }
     }
