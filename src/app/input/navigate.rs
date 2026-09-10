@@ -184,15 +184,7 @@ impl App {
         let previous_mode = self.state.mode;
         match action {
             NavigateAction::NewWorkspace => {
-                self.runtime_workspace_create(
-                    "tui.key.workspace.create",
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: None,
-                        focus: true,
-                        label: None,
-                    },
-                );
-                leave_navigate_mode(&mut self.state);
+                self.begin_tui_workspace_create("tui.key.workspace.create");
             }
             NavigateAction::NewWorktree => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context).filter(|idx| {
@@ -1980,6 +1972,71 @@ mod tests {
 
         assert!(state.request_new_workspace);
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn cancelling_new_workspace_prompt_creates_nothing() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.prompt_new_workspace_name = true;
+        app.state.mode = Mode::Navigate;
+        app.execute_tui_navigate_action(NavigateAction::NewWorkspace, ActionContext::Navigate);
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app.state.pending_workspace_create_cwd.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn new_workspace_key_opens_prefilled_prompt_and_preserves_captured_cwd() {
+        let cwd = unique_temp_path("workspace-name-suggestion");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.new_terminal_cwd =
+            crate::config::NewTerminalCwdConfig::Path(cwd.display().to_string());
+        app.state.prompt_new_workspace_name = true;
+        app.state.mode = Mode::Navigate;
+        app.state.keybinds.new_workspace = crate::config::ActionKeybinds::prefix("g");
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()));
+        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.name_input, suggested_name);
+        assert!(app.state.name_input_replace_on_type);
+        assert_eq!(app.state.pending_workspace_create_cwd.as_ref(), Some(&cwd));
+        assert_eq!(app.state.workspaces.len(), 1);
+
+        app.state.new_terminal_cwd =
+            crate::config::NewTerminalCwdConfig::Path("/tmp/changed-after-prompt".into());
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.workspaces[1].identity_cwd, cwd);
+        assert!(app.state.workspaces[1].custom_name.is_none());
+        assert!(app.state.pending_workspace_create_cwd.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[tokio::test]
+    async fn new_workspace_prompt_saves_custom_name_atomically() {
+        let cwd = unique_temp_path("workspace-custom-name");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.new_terminal_cwd =
+            crate::config::NewTerminalCwdConfig::Path(cwd.display().to_string());
+        app.state.prompt_new_workspace_name = true;
+        app.state.mode = Mode::Navigate;
+        app.execute_tui_navigate_action(NavigateAction::NewWorkspace, ActionContext::Navigate);
+        app.state.name_input = "  logs  ".into();
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.workspaces[1].custom_name.as_deref(), Some("logs"));
+        assert_eq!(app.state.workspaces[1].identity_cwd, cwd);
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]

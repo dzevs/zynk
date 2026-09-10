@@ -172,9 +172,8 @@ impl App {
                 }
                 MouseEventKind::ScrollUp => {
                     self.state.navigator.scroll = self.state.navigator.scroll.saturating_sub(3);
-                    self.state.navigator.selected = self.state.navigator.scroll;
                     self.state
-                        .clamp_navigator_selection_from(&self.terminal_runtimes);
+                        .align_navigator_selection_to_scroll_from(&self.terminal_runtimes);
                 }
                 MouseEventKind::ScrollDown => {
                     let viewport = self.state.navigator_body_rect().height as usize;
@@ -183,9 +182,8 @@ impl App {
                         .navigator_max_scroll_from(&self.terminal_runtimes, viewport);
                     self.state.navigator.scroll =
                         self.state.navigator.scroll.saturating_add(3).min(max);
-                    self.state.navigator.selected = self.state.navigator.scroll;
                     self.state
-                        .clamp_navigator_selection_from(&self.terminal_runtimes);
+                        .align_navigator_selection_to_scroll_from(&self.terminal_runtimes);
                 }
                 _ => {}
             }
@@ -337,11 +335,17 @@ impl AppState {
         if !rect_contains(body, col, row) {
             return None;
         }
-        let idx = self
+        let line_idx = self
             .navigator
             .scroll
             .saturating_add(row.saturating_sub(body.y) as usize);
-        (idx < self.navigator_rows_from(terminal_runtimes).len()).then_some(idx)
+        let lines = crate::app::state::navigator_display_lines(
+            &self.navigator_rows_from(terminal_runtimes),
+        );
+        match lines.get(line_idx) {
+            Some(crate::app::state::NavigatorDisplayLine::Row(idx)) => Some(*idx),
+            _ => None,
+        }
     }
 
     pub(crate) fn navigator_row_caret_at(&self, col: u16) -> bool {
@@ -710,6 +714,37 @@ mod tests {
 
     use super::super::{app_for_mouse_test, mouse};
     use super::*;
+
+    #[test]
+    fn navigator_mouse_mapping_skips_workspace_spacers() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("one"),
+            crate::workspace::Workspace::test_new("two"),
+        ];
+        app.state.ensure_test_terminals();
+        app.state.open_navigator_from(&app.terminal_runtimes);
+        let body = app.state.navigator_body_rect();
+        assert!(body.height >= 4);
+        assert_eq!(
+            app.state
+                .navigator_row_index_at_from(&app.terminal_runtimes, body.x, body.y + 2),
+            None
+        );
+        assert_eq!(
+            app.state
+                .navigator_row_index_at_from(&app.terminal_runtimes, body.x, body.y + 3),
+            Some(2)
+        );
+        let selected = app.state.navigator.selected;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x,
+            body.y + 2,
+        ));
+        assert_eq!(app.state.navigator.selected, selected);
+        assert_eq!(app.state.mode, Mode::Navigator);
+    }
 
     #[test]
     fn clicking_keybind_help_close_button_closes_overlay() {

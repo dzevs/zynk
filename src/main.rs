@@ -245,6 +245,9 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Maximum sidebar width when expanded (columns)
 # sidebar_max_width = 36
 
+# Start with the sidebar collapsed. Changes take effect on the next launch.
+# sidebar_start_collapsed = false
+
 # Collapsed sidebar presentation: "compact" keeps the narrow status rail, "hidden" uses zero width.
 # sidebar_collapsed_mode = "compact"
 
@@ -279,6 +282,9 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Ask for a tab name before creating a new tab.
 # Set false to create tabs immediately with generated names.
 # prompt_new_tab_name = true
+
+# Ask for a workspace name before interactive creation.
+# prompt_new_workspace_name = false
 
 # Draw borders around split panes.
 # pane_borders = true

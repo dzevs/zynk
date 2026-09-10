@@ -49,7 +49,7 @@ mod terminal;
 pub(crate) use self::{
     modal::{
         handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
-        insert_navigator_search_text, insert_rename_input_text,
+        insert_navigator_search_text, insert_rename_input_text, open_new_workspace_dialog,
     },
     navigate::{
         terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
@@ -284,33 +284,18 @@ impl App {
         }
 
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
+        if !handled_pane_double_click {
+            self.focus_pane_before_mouse_press(mouse);
+        }
 
         let previous_agent_panel_sort = self.state.agent_panel_sort;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
-            let right_button = matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Right)
-                    | MouseEventKind::Up(MouseButton::Right)
-                    | MouseEventKind::Drag(MouseButton::Right)
-            );
-            let intentional_pane_press = matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
-            );
-            if !right_button
-                && intentional_pane_press
-                && matches!(self.state.mode, Mode::Terminal | Mode::Resize)
-            {
-                if let (Some(ws_idx), Some(info)) = (
-                    self.state.active,
-                    self.state.pane_at(mouse.column, mouse.row).cloned(),
-                ) {
-                    self.focus_pane_internal_via_api(ws_idx, info.id);
-                }
-            }
             if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
                 match action {
+                    MouseAction::NewWorkspace => {
+                        self.begin_tui_workspace_create("tui.mouse.workspace.create")
+                    }
                     MouseAction::Settings(action) => match action {
                         SettingsAction::SaveTheme(name) => self.save_theme(&name),
                         SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
@@ -399,6 +384,31 @@ impl App {
             self.selection_autoscroll_deadline =
                 Some(std::time::Instant::now() + super::SELECTION_AUTOSCROLL_INTERVAL);
         }
+    }
+
+    fn focus_pane_before_mouse_press(&mut self, mouse: MouseEvent) {
+        if !matches!(self.state.mode, Mode::Terminal | Mode::Resize)
+            || !matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
+            )
+        {
+            return;
+        }
+
+        let Some(pane_id) = self
+            .state
+            .pane_at(mouse.column, mouse.row)
+            .map(|info| info.id)
+        else {
+            return;
+        };
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+
+        // Focus through the runtime API before an application can consume its press.
+        self.focus_pane_internal_via_api(ws_idx, pane_id);
     }
 
     fn handle_modified_url_click(&mut self, mouse: MouseEvent) -> bool {

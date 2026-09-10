@@ -193,6 +193,7 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
     cmd.env("ZYNK_SQLITE_HOME", config_home.join("sqlite"));
     cmd.env_remove("ZYNK_HOME");
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env_remove("ZYNK_SESSION");
     cmd.env_remove("ZYNK_SOCKET_PATH");
     cmd.env_remove("ZYNK_CLIENT_SOCKET_PATH");
@@ -286,6 +287,58 @@ fn wait_for_api(socket_path: &Path, timeout: Duration) {
         "api did not become ready at {}; last error: {last_error}",
         socket_path.display()
     );
+}
+
+fn write_plugin_manifest(root: &Path, plugin_id: &str) {
+    fs::create_dir_all(root).unwrap();
+    fs::write(
+        root.join("zynk-plugin.toml"),
+        format!(
+            r#"id = "{plugin_id}"
+name = "Live handoff test"
+version = "0.1.0"
+min_zynk_version = "3.1.0"
+platforms = ["linux"]
+"#
+        ),
+    )
+    .unwrap();
+}
+
+fn link_plugin(socket_path: &Path, root: &Path) {
+    assert_ok(request(
+        socket_path,
+        serde_json::json!({
+            "id": "test:plugin:link",
+            "method": "plugin.link",
+            "params": {"path": root, "enabled": true}
+        }),
+    ));
+}
+
+fn listed_plugin_ids(socket_path: &Path) -> Vec<String> {
+    let response = request(
+        socket_path,
+        serde_json::json!({"id":"test:plugin:list","method":"plugin.list","params":{}}),
+    );
+    assert_ok(response.clone());
+    response["result"]["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|plugin| plugin["plugin_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn saved_plugin_ids(registry_path: &Path) -> Vec<String> {
+    let mut ids =
+        serde_json::from_str::<Vec<serde_json::Value>>(&fs::read_to_string(registry_path).unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|plugin| plugin["plugin_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 fn wait_for_output(socket_path: &Path, pane_id: &str, needle: &str) {
@@ -515,6 +568,53 @@ fn live_handoff_preserves_named_session_socket_paths() {
     assert!(
         !config_home.join("zynk-dev/zynk.sock").exists(),
         "named handoff unexpectedly bound the default session API socket"
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_preserves_installed_plugins() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = config_home.join("zynk-dev/zynk.sock");
+    let registry_path = config_home.join("zynk-dev/plugins.json");
+    let existing_plugin = base.join("plugins/existing");
+    let added_plugin = base.join("plugins/added");
+    write_plugin_manifest(&existing_plugin, "test.live-handoff-existing");
+    write_plugin_manifest(&added_plugin, "test.live-handoff-added");
+
+    let spawned = spawn_default_session_server(&config_home, &runtime_dir);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    link_plugin(&api_socket, &existing_plugin);
+    assert_eq!(
+        listed_plugin_ids(&api_socket),
+        ["test.live-handoff-existing"]
+    );
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    assert_eq!(
+        listed_plugin_ids(&api_socket),
+        ["test.live-handoff-existing"]
+    );
+    link_plugin(&api_socket, &added_plugin);
+    assert_eq!(
+        saved_plugin_ids(&registry_path),
+        ["test.live-handoff-added", "test.live-handoff-existing"]
     );
 
     let _ = request(

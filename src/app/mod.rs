@@ -502,7 +502,12 @@ impl App {
             state::Mode::Navigate
         };
 
+        #[cfg(not(test))]
         let agent_manifest_summaries = crate::detect::manifest::reload_manifests();
+        // Manifest-sensitive tests reload explicitly; ordinary App fixtures should
+        // not recompile every bundled regex in each nextest process.
+        #[cfg(test)]
+        let agent_manifest_summaries = Vec::new();
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
@@ -533,6 +538,7 @@ impl App {
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
+            pending_workspace_create_cwd: None,
             rename_pane_target: None,
             worktree_create: None,
             worktree_open: None,
@@ -601,7 +607,7 @@ impl App {
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
             sidebar_width_auto: false,
-            sidebar_collapsed: false,
+            sidebar_collapsed: config.ui.sidebar_start_collapsed,
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
             agent_panel_sort,
@@ -614,6 +620,7 @@ impl App {
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             confirm_close: config.ui.confirm_close,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
+            prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
@@ -776,6 +783,7 @@ impl App {
         let pane_id_aliases = crate::persist::handoff_pane_aliases(snapshot, &workspaces);
 
         app.no_session = false;
+        app.state.installed_plugins = load_plugin_registry(app.no_session);
         let now = Instant::now();
         if background_update_check_enabled(app.no_session, app.update_version_check_enabled) {
             app.next_auto_update_check = app
@@ -1082,7 +1090,10 @@ impl App {
     }
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
-        if !self.state.workspaces.is_empty() || self.state.mode == Mode::Onboarding {
+        if !self.state.workspaces.is_empty()
+            || self.state.mode == Mode::Onboarding
+            || self.state.pending_workspace_create_cwd.is_some()
+        {
             return false;
         }
 
@@ -1340,6 +1351,7 @@ impl App {
                     config.ui.right_click_passthrough_modifiers();
                 self.state.confirm_close = config.ui.confirm_close;
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
+                self.state.prompt_new_workspace_name = config.ui.prompt_new_workspace_name;
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
@@ -1708,6 +1720,12 @@ mod tests {
         )
     }
 
+    #[test]
+    fn unit_app_construction_does_not_reload_bundled_manifests() {
+        let app = test_app();
+        assert!(app.state.agent_manifest_summaries.is_empty());
+    }
+
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2073,6 +2091,38 @@ mod tests {
     }
 
     #[test]
+    fn startup_uses_configured_sidebar_state() {
+        let config = toml::from_str("[ui]\nsidebar_start_collapsed = true\n").unwrap();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        assert!(app.state.sidebar_collapsed);
+    }
+
+    #[test]
+    fn workspace_name_prompt_suppresses_default_creation_while_pending() {
+        let mut app = test_app();
+        app.state.prompt_new_workspace_name = true;
+        app.begin_tui_workspace_create("test.workspace.create");
+        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert!(app.state.pending_workspace_create_cwd.is_some());
+        assert!(!app.ensure_default_workspace());
+        assert!(app.state.workspaces.is_empty());
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(app.state.workspaces.is_empty());
+        assert!(app.state.pending_workspace_create_cwd.is_none());
+    }
+
+    #[test]
+    fn startup_uses_workspace_name_prompt_config() {
+        let mut config = Config::default();
+        config.ui.prompt_new_workspace_name = true;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        assert!(app.state.prompt_new_workspace_name);
+    }
+
+    #[test]
     fn startup_uses_redraw_on_focus_gained_config() {
         let mut config = Config::default();
         config.ui.redraw_on_focus_gained = false;
@@ -2269,7 +2319,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"zynk\"\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\nprompt_new_workspace_name = true\n[ui.toast]\ndelivery = \"zynk\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -2317,6 +2367,7 @@ mod tests {
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
         assert!(!app.state.redraw_on_focus_gained);
         assert!(!app.state.copy_on_select);
+        assert!(app.state.prompt_new_workspace_name);
         assert!(app.state.selection.is_some());
         assert!(app.state.selection_autoscroll.is_some());
         assert_eq!(app.selection_autoscroll_deadline, Some(selection_deadline));
@@ -2394,6 +2445,24 @@ mod tests {
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_does_not_reset_sidebar_to_startup_state() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-sidebar-start-collapsed");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert!(!app.state.sidebar_collapsed);
+        std::fs::write(&path, "[ui]\nsidebar_start_collapsed = true\n").unwrap();
+        let report = app.reload_config();
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(!app.state.sidebar_collapsed);
     }
 
     #[test]

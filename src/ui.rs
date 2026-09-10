@@ -432,7 +432,9 @@ pub fn render_with_runtime_registry(
         Mode::Prefix => render_prefix_overlay(app, frame, terminal_area),
         Mode::Copy => render_copy_mode_overlay(app, frame, terminal_area),
         Mode::Resize => render_resize_overlay(app, frame, terminal_area),
-        Mode::ConfirmClose => render_confirm_close_overlay(app, frame, terminal_area),
+        Mode::ConfirmClose => {
+            render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
+        }
         Mode::ContextMenu => {
             render_context_menu(app, frame);
         }
@@ -571,6 +573,24 @@ mod tests {
     use crate::{app::state::ViewLayout, layout::PaneInfo, workspace::Workspace};
     use ratatui::style::Color;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn workspace_creation_dialog_renders_new_workspace_title() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.mode = Mode::RenameWorkspace;
+        app.pending_workspace_create_cwd = Some("/tmp/project".into());
+        app.name_input = "project".into();
+        let area = Rect::new(0, 0, 80, 20);
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let screen = (0..area.height)
+            .map(|row| buffer_row_text(terminal.backend().buffer(), area, row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("new workspace"), "{screen}");
+        assert!(screen.contains("project"), "{screen}");
+    }
 
     #[test]
     fn copy_feedback_offset_only_increases_when_toast_rect_overlaps() {
