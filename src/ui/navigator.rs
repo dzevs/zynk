@@ -115,7 +115,7 @@ fn push_state_chip(
     label: &'static str,
     app: &AppState,
 ) {
-    let (icon, icon_style) = agent_icon(state, seen, &app.palette);
+    let (icon, icon_style) = agent_icon(state, seen, app.status_indicators, &app.palette);
     spans.push(Span::styled(icon, icon_style.add_modifier(Modifier::BOLD)));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
@@ -203,7 +203,7 @@ fn render_row(
     } else {
         Style::default().fg(p.subtext0).bg(p.panel_bg)
     };
-    let (status_icon, status_style) = agent_icon(row.status, row.seen, p);
+    let (status_icon, status_style) = agent_icon(row.status, row.seen, app.status_indicators, p);
     let status_style = if selected {
         base_style.add_modifier(Modifier::BOLD)
     } else if context_only {
@@ -605,6 +605,36 @@ mod tests {
             row(0, true),
             row(1, false),
         ]
+    }
+
+    #[test]
+    fn navigator_rows_and_chips_follow_the_configured_indicator_style() {
+        let mut app = AppState::test_new();
+        let mut entry = row(0, true);
+        entry.status = AgentState::Blocked;
+        let rows = vec![entry];
+        for (style, expected) in [
+            (crate::config::StatusIndicatorStyle::Dots, "◉"),
+            (crate::config::StatusIndicatorStyle::Symbols, "×"),
+        ] {
+            app.status_indicators = style;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 1)).unwrap();
+            terminal
+                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, 40, 1), &rows, 0, false))
+                .unwrap();
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(rendered.contains(expected), "{rendered}");
+            let mut spans = Vec::new();
+            push_state_chip(&mut spans, AgentState::Blocked, true, "blocked", &app);
+            assert!(spans.iter().any(|span| span.content == expected));
+        }
     }
 
     #[test]

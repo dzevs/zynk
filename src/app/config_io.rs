@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use super::App;
 
 impl App {
@@ -50,6 +52,19 @@ impl App {
                 &format!("\"{name}\""),
             );
             crate::config::upsert_section_bool(&content, "theme", "auto_switch", false)
+        }) {
+            self.apply_config_from_disk(false);
+        }
+    }
+
+    pub(super) fn save_status_indicators(&mut self, style: crate::config::StatusIndicatorStyle) {
+        if self.update_config_file("status indicators", |content| {
+            crate::config::upsert_section_value(
+                content,
+                "ui",
+                "status_indicators",
+                &format!("\"{}\"", style.as_str()),
+            )
         }) {
             self.apply_config_from_disk(false);
         }
@@ -117,14 +132,6 @@ impl App {
                 "show_agent_labels_on_pane_borders",
                 enabled,
             )
-        }) {
-            self.apply_config_from_disk(false);
-        }
-    }
-
-    pub(super) fn save_pane_history_persistence(&mut self, enabled: bool) {
-        if self.update_config_file("pane screen history", |content| {
-            crate::config::upsert_section_bool(content, "experimental", "pane_history", enabled)
         }) {
             self.apply_config_from_disk(false);
         }

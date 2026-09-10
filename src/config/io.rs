@@ -1503,6 +1503,80 @@ sidebar_collapsed_mod = "hidden"
     }
 
     #[test]
+    fn load_live_config_registers_tab_bar_position_and_reports_exact_typo_path() {
+        let loaded = load_live_config_from_str(
+            r#"[ui]
+tab_bar_position = "bottom"
+tab_bar_position_typo = "bottom"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.config.ui.tab_bar_position,
+            super::super::TabBarPositionConfig::Bottom
+        );
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key ui.tab_bar_position_typo; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_registers_pane_scrollbars_and_reports_exact_typo_path() {
+        let loaded = load_live_config_from_str(
+            r#"[ui]
+pane_scrollbars = false
+pane_scrollbars_typo = false
+"#,
+        )
+        .unwrap();
+        assert!(!loaded.config.ui.pane_scrollbars);
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key ui.pane_scrollbars_typo; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_registers_pane_outer_borders_and_reports_exact_typo_path() {
+        let loaded = load_live_config_from_str(
+            r#"[ui]
+pane_outer_borders = false
+pane_outer_borders_typo = false
+"#,
+        )
+        .unwrap();
+        assert!(!loaded.config.ui.pane_outer_borders);
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key ui.pane_outer_borders_typo; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_registers_status_indicators_and_reports_exact_typo_path() {
+        let loaded = load_live_config_from_str(
+            r#"[ui]
+status_indicators = "symbols"
+status_indicators_typo = "symbols"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.config.ui.status_indicators,
+            super::super::StatusIndicatorStyle::Symbols
+        );
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["unknown config key ui.status_indicators_typo; ignoring key"]
+        );
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
     fn load_live_config_registers_hide_tab_bar_when_single_tab_and_reports_misspelled_sibling() {
         let loaded = load_live_config_from_str(
             r#"

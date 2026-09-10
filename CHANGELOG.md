@@ -17,12 +17,20 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
   `selection_bg`. The sidebar background stays unset by default; active and Navigate rows have
   separate colors.
 - `ui.pane_borders` / `ui.pane_gaps` for pane chrome.
+- `ui.tab_bar_position = "bottom"` places desktop tabs below the panes.
+- `ui.pane_scrollbars = false` hides pane scrollbars and reclaims their column;
+  `ui.pane_outer_borders = false` keeps internal splitters without an outside frame.
+- `ui.status_indicators = "symbols"` uses distinct static status glyphs. The default
+  `"dots"` retains the fork's existing surface-specific marks. The Indicators
+  settings tab applies and persists this choice.
 - `update.version_check` / `update.manifest_check` toggles. They only *disable* checks; self-update stays
   unavailable (no update-manifest hosting yet).
 - Linux: `ZYNK_AGENT` environment hints identify agents running inside wrapped foreground processes.
 
 **Changed**
 
+- The Experiments tab is removed from Settings. Pane history remains available
+  through `experimental.pane_history` in the config file; Header settings remain.
 - `ui.agent_panel_scope` is **no longer supported**; the agent panel shows all workspaces.
   `ui.agent_panel_sort` controls ordering only and does not restore current-workspace filtering. An old
   `agent_panel_scope` key is ignored and reported as a startup diagnostic. *Policy note:* Zynk may remove a
@@ -44,6 +52,9 @@ config keys are removed (see **Changed** and **Removed**), and zynk now builds f
 
 **Fixed**
 
+- Alternate-screen applications reclaim the scrollbar column, restoring it on exit.
+- A bottom mode bar does not activate the tabs underneath it. Background pane
+  restoration honors the scrollbar setting when choosing its initial size.
 - Sidebar worktree groups stay packed, two-digit workspace positions retain their status mark,
   and the collapsed agent list highlights only the focused pane. Active rows remain visible under
   the Navigate cursor when its selection background follows the terminal.

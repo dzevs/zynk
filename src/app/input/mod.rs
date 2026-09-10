@@ -307,6 +307,9 @@ impl App {
                     }
                     MouseAction::Settings(action) => match action {
                         SettingsAction::SaveTheme(name) => self.save_theme(&name),
+                        SettingsAction::SaveStatusIndicators(style) => {
+                            self.save_status_indicators(style)
+                        }
                         SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
                         SettingsAction::SaveToastDelivery(delivery) => {
                             self.save_toast_delivery(delivery)
@@ -319,9 +322,6 @@ impl App {
                         }
                         SettingsAction::SaveHeaderMaxWidth(width) => {
                             self.save_header_max_width(width)
-                        }
-                        SettingsAction::SavePaneHistory(enabled) => {
-                            self.save_pane_history_persistence(enabled)
                         }
                         SettingsAction::InstallRecommendedIntegrations => {
                             self.install_recommended_integrations()

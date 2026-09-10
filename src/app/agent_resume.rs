@@ -132,6 +132,8 @@ impl App {
             terminal_area,
             self.state.pane_borders,
             self.state.pane_gaps,
+            self.state.pane_outer_borders,
+            self.state.pane_scrollbars,
         );
 
         if self.state.active == Some(ws_idx)
@@ -295,19 +297,26 @@ fn derived_pending_agent_resume_pane_infos(
     terminal_area: Rect,
     pane_borders: bool,
     pane_gaps: bool,
+    pane_outer_borders: bool,
+    pane_scrollbars: bool,
 ) -> Vec<crate::layout::PaneInfo> {
-    crate::ui::apply_pane_chrome(tab.layout.panes(terminal_area), pane_borders, pane_gaps)
-        .into_iter()
-        .map(|mut info| {
-            let pane_inner = crate::ui::pane_inner_rect(info.rect, info.borders);
-            info.inner_rect = stable_terminal_inner_rect(pane_inner);
-            info
-        })
-        .collect()
+    crate::ui::apply_pane_chrome(
+        tab.layout.panes(terminal_area),
+        pane_borders,
+        pane_gaps,
+        pane_outer_borders,
+    )
+    .into_iter()
+    .map(|mut info| {
+        let pane_inner = crate::ui::pane_inner_rect(info.rect, info.borders);
+        info.inner_rect = stable_terminal_inner_rect(pane_inner, pane_scrollbars);
+        info
+    })
+    .collect()
 }
 
-fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
-    if pane_inner.width <= 4 {
+fn stable_terminal_inner_rect(pane_inner: Rect, pane_scrollbars: bool) -> Rect {
+    if !pane_scrollbars || pane_inner.width <= 4 {
         return pane_inner;
     }
 
@@ -363,6 +372,19 @@ mod tests {
 
     fn long_running_test_argv() -> Vec<String> {
         vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()]
+    }
+
+    #[test]
+    fn pending_resume_geometry_respects_disabled_scrollbars() {
+        let mut app = test_app();
+        let workspace = crate::workspace::Workspace::test_new("background");
+        let area = Rect::new(7, 3, 40, 8);
+        app.state.pane_scrollbars = false;
+        let infos = app.pending_agent_resume_pane_infos(1, 0, &workspace.tabs[0], area);
+        assert_eq!(infos[0].inner_rect, area);
+        app.state.pane_scrollbars = true;
+        let infos = app.pending_agent_resume_pane_infos(1, 0, &workspace.tabs[0], area);
+        assert_eq!(infos[0].inner_rect, Rect::new(7, 3, 39, 8));
     }
 
     fn marker_resume_test_argv() -> Vec<String> {

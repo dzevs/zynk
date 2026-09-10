@@ -13,6 +13,7 @@ use super::status::{state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, Mode};
+use crate::config::StatusIndicatorStyle;
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -666,7 +667,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         }
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
         // Same workspace-scoped glyph as the expanded spaces list (Unknown -> ◌, not the global ·).
-        let (icon, icon_style) = workspace_state_icon(agg_state, agg_seen, p);
+        let (icon, icon_style) =
+            workspace_state_icon(agg_state, agg_seen, app.status_indicators, p);
         let is_selected = visible_idx == app.selected && is_navigating;
         let is_active = Some(visible_idx) == app.active;
         let selection_bg = workspace_selection_background(p, is_active);
@@ -729,7 +731,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 Style::default().fg(p.overlay0)
             };
             // Collapsed rail uses the expanded panel's sidebar-agent icon grammar.
-            let (icon, icon_style) = sidebar_agent_icon(detail.state, detail.seen, p);
+            let (icon, icon_style) =
+                sidebar_agent_icon(detail.state, detail.seen, app.status_indicators, p);
             if is_active {
                 let buf = frame.buffer_mut();
                 for x in detail_content_area.x..detail_content_area.x + detail_content_area.width {
@@ -812,7 +815,15 @@ pub(super) fn render_sidebar(
 }
 
 // Sidebar marks retain their surface-specific non-working glyphs.
-fn sidebar_agent_icon(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {
+fn sidebar_agent_icon(
+    state: AgentState,
+    seen: bool,
+    indicator_style: StatusIndicatorStyle,
+    p: &Palette,
+) -> (&'static str, Style) {
+    if indicator_style == StatusIndicatorStyle::Symbols {
+        return super::status::state_icon(state, seen, indicator_style, p);
+    }
     match (state, seen) {
         (AgentState::Blocked, _) => ("◉", Style::default().fg(p.red)),
         (AgentState::Working, _) => ("●", Style::default().fg(p.yellow)),
@@ -823,31 +834,40 @@ fn sidebar_agent_icon(state: AgentState, seen: bool, p: &Palette) -> (&'static s
 }
 
 /// Group priority: blocked, working, done/unseen, idle, then unknown.
-fn agents_group_aggregate(states: &[(AgentState, bool)], p: &Palette) -> (&'static str, Style) {
+fn agents_group_aggregate(
+    states: &[(AgentState, bool)],
+    indicator_style: StatusIndicatorStyle,
+    p: &Palette,
+) -> (&'static str, Style) {
     if states.iter().any(|&(s, _)| s == AgentState::Blocked) {
-        return sidebar_agent_icon(AgentState::Blocked, false, p);
+        return sidebar_agent_icon(AgentState::Blocked, false, indicator_style, p);
     }
     if states.iter().any(|&(s, _)| s == AgentState::Working) {
-        return sidebar_agent_icon(AgentState::Working, false, p);
+        return sidebar_agent_icon(AgentState::Working, false, indicator_style, p);
     }
     if states
         .iter()
         .any(|&(s, seen)| s == AgentState::Idle && !seen)
     {
-        return sidebar_agent_icon(AgentState::Idle, false, p);
+        return sidebar_agent_icon(AgentState::Idle, false, indicator_style, p);
     }
     if states
         .iter()
         .any(|&(s, seen)| s == AgentState::Idle && seen)
     {
-        return sidebar_agent_icon(AgentState::Idle, true, p);
+        return sidebar_agent_icon(AgentState::Idle, true, indicator_style, p);
     }
-    sidebar_agent_icon(AgentState::Unknown, false, p)
+    sidebar_agent_icon(AgentState::Unknown, false, indicator_style, p)
 }
 
 /// Spaces and agents use the same static state marks.
-fn workspace_state_icon(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {
-    sidebar_agent_icon(state, seen, p)
+fn workspace_state_icon(
+    state: AgentState,
+    seen: bool,
+    indicator_style: StatusIndicatorStyle,
+    p: &Palette,
+) -> (&'static str, Style) {
+    sidebar_agent_icon(state, seen, indicator_style, p)
 }
 
 /// One placed row in the grouped agents panel — the single layout primitive that render, hit-test,
@@ -1001,7 +1021,8 @@ fn render_workspace_list(
             Style::default().fg(p.subtext0)
         };
 
-        let (icon, icon_style) = workspace_state_icon(agg_state, agg_seen, p);
+        let (icon, icon_style) =
+            workspace_state_icon(agg_state, agg_seen, app.status_indicators, p);
         let label = ws.display_name_from(&app.terminals, terminal_runtimes);
         let mut line1 = Vec::new();
         let mut show_workspace_icon = true;
@@ -1011,7 +1032,7 @@ fn render_workspace_list(
             let icon = if collapsed { "▸" } else { "▾" };
             let (state_icon, state_style) = if collapsed {
                 let (state, seen) = space_aggregate_state(app, &key);
-                workspace_state_icon(state, seen, p)
+                workspace_state_icon(state, seen, app.status_indicators, p)
             } else {
                 (icon, Style::default().fg(p.accent))
             };
@@ -1236,7 +1257,7 @@ fn render_agent_detail(
                     .filter(|d| (d.ws_idx, d.tab_idx) == key)
                     .map(|d| (d.state, d.seen))
                     .collect();
-                let (icon, icon_style) = agents_group_aggregate(&states, p);
+                let (icon, icon_style) = agents_group_aggregate(&states, app.status_indicators, p);
                 let tab = truncate_end(&detail.tab_label, body_width.saturating_sub(2));
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
@@ -1255,7 +1276,8 @@ fn render_agent_detail(
                     continue;
                 };
                 let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-                let (icon, icon_style) = sidebar_agent_icon(detail.state, detail.seen, p);
+                let (icon, icon_style) =
+                    sidebar_agent_icon(detail.state, detail.seen, app.status_indicators, p);
                 let label_color = state_label_color(detail.state, detail.seen, p);
                 let label = detail
                     .state_labels
@@ -1645,6 +1667,84 @@ mod tests {
         }
 
         (app, first_pane, second_pane)
+    }
+
+    #[test]
+    fn distinct_indicators_reach_group_headers_children_and_collapsed_spaces() {
+        let (mut app, first, second) = collapsed_agent_app();
+        app.status_indicators = StatusIndicatorStyle::Symbols;
+        let third = app.workspaces[1].tabs[0].root_pane;
+        for (ws_idx, pane_id, state) in [
+            (0, first, AgentState::Blocked),
+            (0, second, AgentState::Idle),
+            (1, third, AgentState::Working),
+        ] {
+            let pane = app.workspaces[ws_idx].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .unwrap();
+            pane.seen = false;
+            app.terminals
+                .get_mut(&pane.attached_terminal_id)
+                .unwrap()
+                .state = state;
+        }
+        let expected = |pane| {
+            if pane == first {
+                "×"
+            } else if pane == second {
+                "✓"
+            } else {
+                "◐"
+            }
+        };
+        let runtimes = TerminalRuntimeRegistry::new();
+        let area = Rect::new(0, 0, 38, 22);
+        let entries = agent_panel_entries(&app);
+        let body = agent_panel_body_rect(area, false);
+        let mut terminal = Terminal::new(TestBackend::new(38, 22)).unwrap();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &runtimes, frame, area))
+            .unwrap();
+        let mut counts = (0, 0);
+        for row in agent_visible_rows(&app, area) {
+            let (x, y, symbol) = match row {
+                AgentVisibleRow::GroupHeader { entry_idx, y } => {
+                    counts.0 += 1;
+                    (
+                        body.x,
+                        y,
+                        if entries[entry_idx].ws_idx == 0 {
+                            "×"
+                        } else {
+                            "◐"
+                        },
+                    )
+                }
+                AgentVisibleRow::Child { entry_idx, y, .. } => {
+                    counts.1 += 1;
+                    (body.x + 3, y, expected(entries[entry_idx].pane_id))
+                }
+            };
+            assert_eq!(terminal.backend().buffer()[(x, y)].symbol(), symbol);
+        }
+        assert_eq!(counts, (2, 3));
+
+        let area = Rect::new(0, 0, 4, 18);
+        let (spaces, _, agents) = collapsed_sidebar_sections(area);
+        let mut terminal = Terminal::new(TestBackend::new(4, 18)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(spaces.x + 2, spaces.y)].symbol(), "×");
+        assert_eq!(buffer[(spaces.x + 2, spaces.y + 1)].symbol(), "◐");
+        for (index, entry) in entries.iter().enumerate() {
+            assert_eq!(
+                buffer[(agents.x + 2, agents.y + index as u16)].symbol(),
+                expected(entry.pane_id)
+            );
+        }
     }
 
     fn collapsed_agent_row_styles(
@@ -2644,13 +2744,26 @@ mod tests {
     fn working_marks_match_across_sidebar_and_mobile() {
         let p = crate::app::state::Palette::tokyo_night();
         let expected = ("●", Style::default().fg(p.yellow));
-        assert_eq!(sidebar_agent_icon(AgentState::Working, false, &p), expected);
         assert_eq!(
-            crate::ui::status::agent_icon(AgentState::Working, false, &p),
+            sidebar_agent_icon(AgentState::Working, false, StatusIndicatorStyle::Dots, &p),
             expected
         );
         assert_eq!(
-            crate::ui::status::state_dot(AgentState::Working, false, &p),
+            crate::ui::status::agent_icon(
+                AgentState::Working,
+                false,
+                StatusIndicatorStyle::Dots,
+                &p
+            ),
+            expected
+        );
+        assert_eq!(
+            crate::ui::status::state_icon(
+                AgentState::Working,
+                false,
+                StatusIndicatorStyle::Dots,
+                &p
+            ),
             expected
         );
     }
@@ -2659,23 +2772,27 @@ mod tests {
     fn sidebar_agent_icon_grammar() {
         let p = crate::app::state::Palette::tokyo_night();
         for seen in [false, true] {
-            let (g, s) = sidebar_agent_icon(AgentState::Working, seen, &p);
+            let (g, s) =
+                sidebar_agent_icon(AgentState::Working, seen, StatusIndicatorStyle::Dots, &p);
             assert_eq!(g, "●");
             assert_eq!(s.fg, Some(p.yellow));
         }
         assert_eq!(
-            sidebar_agent_icon(AgentState::Idle, true, &p),
+            sidebar_agent_icon(AgentState::Idle, true, StatusIndicatorStyle::Dots, &p),
             ("○", Style::default().fg(p.green))
         );
         assert_eq!(
-            sidebar_agent_icon(AgentState::Idle, false, &p),
+            sidebar_agent_icon(AgentState::Idle, false, StatusIndicatorStyle::Dots, &p),
             ("○", Style::default().fg(p.teal))
         );
         assert_eq!(
-            sidebar_agent_icon(AgentState::Blocked, false, &p),
+            sidebar_agent_icon(AgentState::Blocked, false, StatusIndicatorStyle::Dots, &p),
             ("◉", Style::default().fg(p.red))
         );
-        assert_eq!(sidebar_agent_icon(AgentState::Unknown, false, &p).0, "◌");
+        assert_eq!(
+            sidebar_agent_icon(AgentState::Unknown, false, StatusIndicatorStyle::Dots, &p).0,
+            "◌"
+        );
     }
 
     #[test]
@@ -2684,27 +2801,47 @@ mod tests {
         use AgentState::*;
         // blocked wins outright
         assert_eq!(
-            agents_group_aggregate(&[(Idle, true), (Blocked, false)], &p).0,
+            agents_group_aggregate(
+                &[(Idle, true), (Blocked, false)],
+                StatusIndicatorStyle::Dots,
+                &p
+            )
+            .0,
             "◉"
         );
         // else working wins with a static mark
         assert_eq!(
-            agents_group_aggregate(&[(Idle, true), (Working, false)], &p).0,
+            agents_group_aggregate(
+                &[(Idle, true), (Working, false)],
+                StatusIndicatorStyle::Dots,
+                &p
+            )
+            .0,
             "●"
         );
         // else done/unseen (teal)
         assert_eq!(
-            agents_group_aggregate(&[(Idle, true), (Idle, false)], &p),
+            agents_group_aggregate(
+                &[(Idle, true), (Idle, false)],
+                StatusIndicatorStyle::Dots,
+                &p
+            ),
             ("○", Style::default().fg(p.teal))
         );
         // else idle (green)
         assert_eq!(
-            agents_group_aggregate(&[(Idle, true)], &p),
+            agents_group_aggregate(&[(Idle, true)], StatusIndicatorStyle::Dots, &p),
             ("○", Style::default().fg(p.green))
         );
         // else unknown / empty
-        assert_eq!(agents_group_aggregate(&[(Unknown, false)], &p).0, "◌");
-        assert_eq!(agents_group_aggregate(&[], &p).0, "◌");
+        assert_eq!(
+            agents_group_aggregate(&[(Unknown, false)], StatusIndicatorStyle::Dots, &p).0,
+            "◌"
+        );
+        assert_eq!(
+            agents_group_aggregate(&[], StatusIndicatorStyle::Dots, &p).0,
+            "◌"
+        );
     }
 
     #[test]
@@ -2774,40 +2911,54 @@ mod tests {
         // Spaces retain the sidebar-specific non-working marks.
         let p = crate::app::state::Palette::tokyo_night();
         for seen in [false, true] {
-            let (g, s) = workspace_state_icon(AgentState::Working, seen, &p);
+            let (g, s) =
+                workspace_state_icon(AgentState::Working, seen, StatusIndicatorStyle::Dots, &p);
             assert_eq!(g, "●");
             assert_eq!(s.fg, Some(p.yellow));
         }
         assert_eq!(
-            workspace_state_icon(AgentState::Blocked, false, &p),
+            workspace_state_icon(AgentState::Blocked, false, StatusIndicatorStyle::Dots, &p),
             ("◉", Style::default().fg(p.red))
         );
         assert_eq!(
-            workspace_state_icon(AgentState::Idle, false, &p),
+            workspace_state_icon(AgentState::Idle, false, StatusIndicatorStyle::Dots, &p),
             ("○", Style::default().fg(p.teal))
         );
         assert_eq!(
-            workspace_state_icon(AgentState::Idle, true, &p),
+            workspace_state_icon(AgentState::Idle, true, StatusIndicatorStyle::Dots, &p),
             ("○", Style::default().fg(p.green))
         );
-        assert_eq!(workspace_state_icon(AgentState::Unknown, false, &p).0, "◌");
+        assert_eq!(
+            workspace_state_icon(AgentState::Unknown, false, StatusIndicatorStyle::Dots, &p).0,
+            "◌"
+        );
     }
 
     #[test]
-    fn global_state_dot_unchanged() {
-        // Non-goal guard: the spaces grammar change must NOT alter the global `state_dot`
+    fn global_default_state_icon_unchanged() {
+        // Non-goal guard: the spaces grammar change must NOT alter the default `state_icon`
         // (other surfaces depend on it) — filled dots, its own mapping, no animation.
         let p = crate::app::state::Palette::tokyo_night();
         assert_eq!(
-            crate::ui::status::state_dot(AgentState::Working, true, &p),
+            crate::ui::status::state_icon(
+                AgentState::Working,
+                true,
+                StatusIndicatorStyle::Dots,
+                &p
+            ),
             ("●", Style::default().fg(p.yellow))
         );
         assert_eq!(
-            crate::ui::status::state_dot(AgentState::Idle, false, &p),
+            crate::ui::status::state_icon(AgentState::Idle, false, StatusIndicatorStyle::Dots, &p),
             ("●", Style::default().fg(p.teal))
         );
         assert_eq!(
-            crate::ui::status::state_dot(AgentState::Unknown, false, &p),
+            crate::ui::status::state_icon(
+                AgentState::Unknown,
+                false,
+                StatusIndicatorStyle::Dots,
+                &p
+            ),
             ("·", Style::default().fg(p.overlay0))
         );
     }

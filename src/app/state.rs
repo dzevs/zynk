@@ -989,35 +989,35 @@ pub enum AgentPanelSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Theme,
+    Indicators,
     Sound,
     Toast,
     PaneLabels,
     Header,
-    Experiments,
     Integrations,
 }
 
 impl SettingsSection {
     pub const ALL: &[Self] = &[
         Self::Theme,
+        Self::Indicators,
         Self::Sound,
         Self::Toast,
         Self::PaneLabels,
         Self::Header,
         Self::Integrations,
-        Self::Experiments,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Theme => "theme",
+            Self::Indicators => "indicators",
             Self::Sound => "sound",
             Self::Toast => "toasts",
-            // Tab label kept short so the 7-tab row fits the settings modal inner
+            // Tab label kept short so the tab row fits the settings modal inner
             // width (#116 fix); the section content title is "agent border labels".
             Self::PaneLabels => "labels",
             Self::Header => "header",
-            Self::Experiments => "experiments",
             Self::Integrations => "integrations",
         }
     }
@@ -1048,27 +1048,6 @@ impl HeaderSettingRow {
         match idx {
             0 => Self::Verbose,
             _ => Self::MaxWidth,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExperimentSetting {
-    PaneHistory,
-}
-
-impl ExperimentSetting {
-    pub(crate) const ALL: [Self; 1] = [Self::PaneHistory];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::PaneHistory => "pane screen history",
-        }
-    }
-
-    pub(crate) fn enabled(self, state: &AppState) -> bool {
-        match self {
-            Self::PaneHistory => state.pane_history_persistence_enabled(),
         }
     }
 }
@@ -1526,6 +1505,7 @@ pub struct AppState {
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
+    pub status_indicators: crate::config::StatusIndicatorStyle,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Zynk's own mouse UI. When false, Zynk only
     /// captures mouse while the focused pane app requests mouse reporting.
@@ -1539,9 +1519,12 @@ pub struct AppState {
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
+    pub pane_outer_borders: bool,
+    pub pane_scrollbars: bool,
     pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub hide_tab_bar_when_single_tab: bool,
+    pub tab_bar_position: crate::config::TabBarPositionConfig,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1641,10 +1624,6 @@ impl AppState {
 
     pub fn agent_border_labels_enabled(&self) -> bool {
         self.show_agent_labels_on_pane_borders
-    }
-
-    pub fn pane_history_persistence_enabled(&self) -> bool {
-        self.pane_history_persistence
     }
 
     pub(crate) fn pane_exposes_host_cursor(
@@ -1898,6 +1877,7 @@ impl AppState {
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
             agent_panel_sort: AgentPanelSort::Spaces,
+            status_indicators: crate::config::StatusIndicatorStyle::Dots,
             next_agent_state_change_seq: 0,
             mouse_capture: true,
             copy_on_select: true,
@@ -1909,9 +1889,12 @@ impl AppState {
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
+            pane_outer_borders: true,
+            pane_scrollbars: true,
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
+            tab_bar_position: crate::config::TabBarPositionConfig::Top,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,

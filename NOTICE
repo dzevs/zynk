@@ -59,6 +59,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/api/panes.rs
 - src/app/api/plugins/panes.rs
 - src/app/api/tabs.rs
+- src/app/config_io.rs
 - src/app/creation.rs
 - src/app/git_refresh.rs
 - src/app/input/clipboard.rs
@@ -68,6 +69,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/input/mouse.rs
 - src/app/input/navigate.rs
 - src/app/input/overlays.rs
+- src/app/input/settings.rs
 - src/app/input/terminal.rs
 - src/app/mod.rs
 - src/app/runtime.rs
@@ -77,6 +79,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/cli/integration.rs
 - src/client/input.rs
 - src/client/mod.rs
+- src/config.rs
 - src/config/keybinds.rs
 - src/config/model.rs
 - src/config/sound.rs
@@ -139,6 +142,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/ui/mobile.rs
 - src/ui/navigator.rs
 - src/ui/panes.rs
+- src/ui/settings.rs
 - src/ui/sidebar.rs
 - src/ui/status.rs
 - src/ui/tab_surface.rs

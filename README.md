@@ -205,7 +205,11 @@ Commonly tuned options (values shown are the defaults):
 [ui]
 agent_panel_sort = "spaces"      # or "priority": blocked > working > done, most recent change first
 pane_borders = true              # draw borders around split panes
+pane_outer_borders = true        # false: keep internal splitters without an outside frame
+pane_scrollbars = true           # false: hide pane scrollbars and reclaim their column
 pane_gaps = true                 # keep split panes visually separated
+tab_bar_position = "top"         # or "bottom"; desktop only
+status_indicators = "dots"       # preserve existing marks, or use distinct "symbols"
 
 [theme]
 auto_switch = false              # true: follow the host terminal's light/dark appearance

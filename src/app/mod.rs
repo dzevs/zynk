@@ -613,6 +613,7 @@ impl App {
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
             agent_panel_sort,
+            status_indicators: config.ui.status_indicators,
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -624,9 +625,12 @@ impl App {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
+            pane_outer_borders: config.ui.pane_outer_borders,
+            pane_scrollbars: config.ui.pane_scrollbars,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
+            tab_bar_position: config.ui.tab_bar_position,
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
@@ -1356,12 +1360,16 @@ impl App {
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
                 self.state.prompt_new_workspace_name = config.ui.prompt_new_workspace_name;
                 self.state.pane_borders = config.ui.pane_borders;
+                self.state.pane_outer_borders = config.ui.pane_outer_borders;
+                self.state.pane_scrollbars = config.ui.pane_scrollbars;
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
+                self.state.tab_bar_position = config.ui.tab_bar_position;
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                self.state.status_indicators = config.ui.status_indicators;
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
@@ -2578,6 +2586,40 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_updates_tab_pane_and_indicator_options() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-pane-options");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+        assert!(app.state.pane_scrollbars);
+        assert!(app.state.pane_outer_borders);
+        assert_eq!(
+            app.state.tab_bar_position,
+            crate::config::TabBarPositionConfig::Top
+        );
+        assert_eq!(
+            app.state.status_indicators,
+            crate::config::StatusIndicatorStyle::Dots
+        );
+        std::fs::write(&path, "[ui]\npane_scrollbars = false\npane_outer_borders = false\ntab_bar_position = \"bottom\"\nstatus_indicators = \"symbols\"\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(!app.state.pane_scrollbars);
+        assert!(!app.state.pane_outer_borders);
+        assert_eq!(
+            app.state.tab_bar_position,
+            crate::config::TabBarPositionConfig::Bottom
+        );
+        assert_eq!(
+            app.state.status_indicators,
+            crate::config::StatusIndicatorStyle::Symbols
+        );
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn reload_config_updates_sidebar_bounds_and_reclamps() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-sidebar-bounds");
@@ -2919,6 +2961,34 @@ mod tests {
     }
 
     #[test]
+    fn save_status_indicators_persists_then_applies_live_config() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("save-status-indicators");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.status_indicators,
+            crate::config::StatusIndicatorStyle::Dots
+        );
+
+        app.save_status_indicators(crate::config::StatusIndicatorStyle::Symbols);
+
+        assert_eq!(
+            app.state.status_indicators,
+            crate::config::StatusIndicatorStyle::Symbols
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("status_indicators = \"symbols\""));
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn save_agent_panel_sort_persists_then_applies_live_config() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("save-agent-panel-sort");
@@ -2941,7 +3011,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_save_pane_history_persists_then_applies_live_config() {
+    fn reload_config_still_applies_pane_history_without_a_settings_tab() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("settings-save-pane-history");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2952,7 +3022,13 @@ mod tests {
         assert!(!app.persist_pane_history);
         assert!(!app.state.pane_history_persistence);
 
-        app.save_pane_history_persistence(true);
+        std::fs::write(
+            &path,
+            "onboarding = false\n[experimental]\npane_history = true\n",
+        )
+        .unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
 
         assert!(app.persist_pane_history);
         assert!(app.state.pane_history_persistence);

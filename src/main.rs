@@ -296,6 +296,14 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Draw borders around split panes.
 # pane_borders = true
 
+# Draw borders along the outside edge of the pane area.
+# Disable for tmux-style internal splitters without an outside frame.
+# pane_outer_borders = true
+
+# Draw interactive scrollbars beside terminal panes.
+# Set false to reclaim the scrollbar column and keep it out of terminal-native selections.
+# pane_scrollbars = true
+
 # Keep split panes visually separated instead of sharing divider borders.
 # pane_gaps = true
 
@@ -306,9 +314,16 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # New tabs can still be created with the configured keybinding.
 # hide_tab_bar_when_single_tab = false
 
+# Desktop tab row placement: "top" or "bottom".
+# tab_bar_position = "top"
+
 # Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
 # "workspaces" is accepted as an alias for "spaces".
 # agent_panel_sort = "spaces"
+
+# Agent status indicators: "dots" preserves the compact color marks; "symbols" uses
+# distinct static glyphs for blocked, working, done, idle, and unknown states.
+# status_indicators = "dots"
 
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
