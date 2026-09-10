@@ -76,6 +76,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 - Tab labels are centered by display width. Rename and new-worktree inputs position the host
   cursor at a blank caret cell, including wide text and overflowing names, so IME composition stays
   inside the input field.
+- Kitty CSI-u associated IME text is preserved as generated text, including multicodepoint
+  compositions, and bypasses key encoding and bindings.
 - Live handoff keeps imported hook identity provisional until the new detector
   observes that owner's process running. An exit after snapshot capture cannot
   leave a dead session receipt-capable; a still-running session needs no new hook report.

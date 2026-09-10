@@ -1875,6 +1875,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kitty_associated_ime_text_bypasses_key_encoding() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>15u", 2);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_input(b"\x1b[32;;20320:22909u".to_vec());
+
+        assert_eq!(rx.recv().await.unwrap().as_ref(), "你好".as_bytes());
+        assert!(rx.try_recv().is_err());
+        assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
     async fn physical_count_one_repeats_and_release_keep_the_pressed_pane() {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("test");

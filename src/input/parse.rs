@@ -16,13 +16,20 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
     let body = data.strip_prefix("\x1b[")?.strip_suffix('u')?;
 
     let (main, event_type) = match body.rsplit_once(':') {
+        Some((head, _)) if head.contains(";;") => (body, None),
         Some((head, tail)) if tail.chars().all(|ch| ch.is_ascii_digit()) && head.contains(';') => {
             (head, Some(tail))
         }
         _ => (body, None),
     };
 
-    let (key_part, modifier_part) = main.rsplit_once(';').unwrap_or((main, "1"));
+    let (key_part, modifier_part, associated_text) =
+        if let Some((key, text)) = main.split_once(";;") {
+            (key, "1", Some(parse_kitty_associated_text(text)?))
+        } else {
+            let (key, modifier) = main.rsplit_once(';').unwrap_or((main, "1"));
+            (key, modifier, None)
+        };
     let modifier = modifier_part.parse::<u8>().ok()?.checked_sub(1)?;
 
     let mut key_fields = key_part.split(':');
@@ -31,7 +38,6 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
         .next()
         .filter(|field| !field.is_empty())
         .and_then(|field| field.parse::<u32>().ok());
-
     let code = kitty_codepoint_to_keycode(codepoint)?;
     let kind = parse_kitty_event_type(event_type)?;
     let mut modifiers = key_modifiers_from_u8(modifier);
@@ -48,7 +54,19 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
     if let Some(shifted_codepoint) = shifted_codepoint {
         key = key.with_shifted_codepoint(shifted_codepoint);
     }
-    Some(key)
+    Some(key.with_generated_text(associated_text))
+}
+
+fn parse_kitty_associated_text(value: &str) -> Option<String> {
+    let mut text = String::new();
+    for codepoint in value.split(':') {
+        let ch = char::from_u32(codepoint.parse::<u32>().ok()?)?;
+        if ch.is_control() {
+            return None;
+        }
+        text.push(ch);
+    }
+    (!text.is_empty()).then_some(text)
 }
 
 #[allow(dead_code)] // Reserved for the upcoming raw stdin parser.
@@ -670,6 +688,24 @@ mod tests {
         assert_eq!(key.code, KeyCode::Modifier(ModifierKeyCode::LeftShift));
         assert_eq!(key.modifiers, KeyModifiers::SHIFT);
         assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+    }
+
+    #[test]
+    fn parse_kitty_sequence_with_multicodepoint_ime_text() {
+        let key = parse_terminal_key_sequence("\x1b[32;;20320:22909u").unwrap();
+
+        assert_eq!(key.code, KeyCode::Char(' '));
+        assert_eq!(key.modifiers, KeyModifiers::empty());
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+        assert_eq!(key.generated_text.as_deref(), Some("你好"));
+    }
+
+    #[test]
+    fn reject_malformed_kitty_associated_text() {
+        assert_eq!(parse_terminal_key_sequence("\x1b[32;;1114112u"), None);
+        assert_eq!(parse_terminal_key_sequence("\x1b[32;;20320:bad:u"), None);
+        assert_eq!(parse_terminal_key_sequence("\x1b[32;;27u"), None);
+        assert_eq!(parse_terminal_key_sequence("\x1b[32;;133u"), None);
     }
 
     #[test]
