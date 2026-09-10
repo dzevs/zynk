@@ -1298,7 +1298,7 @@ impl HeadlessServer {
 
     fn remove_client(&mut self, client_id: u64) -> bool {
         let was_foreground = self.foreground_client_id == Some(client_id);
-        self.app.release_input_source_headless(client_id);
+        self.app.clear_input_source(client_id);
         self.send_client_graphics_cleanup(client_id);
         let removed = self.clients.remove(&client_id);
         if let Some(removed) = removed {
@@ -6442,6 +6442,7 @@ next_tab = ""
         }));
         server.foreground_client_id = Some(2);
         server.sync_foreground_client_state();
+        server.app.pending_url_click_sources.extend([1, 2]);
 
         assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
             client_id: 1,
@@ -6458,6 +6459,10 @@ next_tab = ""
             Bytes::from_static(b"\x1b[106;5:3u")
         );
         assert!(server.app.input_leases.is_empty());
+        assert_eq!(
+            server.app.pending_url_click_sources,
+            std::collections::HashSet::from([1, 2])
+        );
     }
 
     #[tokio::test]
@@ -6482,6 +6487,7 @@ next_tab = ""
         }));
         server.foreground_client_id = Some(2);
         server.sync_foreground_client_state();
+        server.app.pending_url_click_sources.extend([1, 2]);
 
         assert!(!server.remove_client(1));
         assert!(!server.clients.contains_key(&1));
@@ -6497,6 +6503,10 @@ next_tab = ""
             Bytes::from_static(b"\x1b[106;5:3u")
         );
         assert!(server.app.input_leases.is_empty());
+        assert_eq!(
+            server.app.pending_url_click_sources,
+            std::collections::HashSet::from([2])
+        );
     }
 
     #[tokio::test]

@@ -301,15 +301,26 @@ impl App {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        self.handle_mouse_from_input_source(super::LOCAL_INPUT_SOURCE, mouse);
+    }
+
+    pub(super) fn handle_mouse_from_input_source(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+    ) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.pending_url_click = false;
+                self.pending_url_click_sources.remove(&source_id);
             }
-            MouseEventKind::Drag(MouseButton::Left) if self.pending_url_click => {
+            MouseEventKind::Drag(MouseButton::Left)
+                if self.pending_url_click_sources.contains(&source_id) =>
+            {
                 return;
             }
-            MouseEventKind::Up(MouseButton::Left) if self.pending_url_click => {
-                self.pending_url_click = false;
+            MouseEventKind::Up(MouseButton::Left)
+                if self.pending_url_click_sources.remove(&source_id) =>
+            {
                 return;
             }
             _ => {}
@@ -339,7 +350,7 @@ impl App {
             }
         }
 
-        if self.handle_modified_url_click(mouse) {
+        if self.handle_modified_url_click(source_id, mouse) {
             return;
         }
 
@@ -463,7 +474,11 @@ impl App {
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }
 
-    fn handle_modified_url_click(&mut self, mouse: MouseEvent) -> bool {
+    fn handle_modified_url_click(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+    ) -> bool {
         if self.state.mode != Mode::Terminal
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             || !mouse.modifiers.contains(modified_url_click_modifier())
@@ -484,7 +499,7 @@ impl App {
         };
 
         self.last_pane_click = None;
-        self.pending_url_click = true;
+        self.pending_url_click_sources.insert(source_id);
         match self.invoke_plugin_link_handler_for_url(&url, info.id) {
             Ok(true) => return true,
             Ok(false) => {}

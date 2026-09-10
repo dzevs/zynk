@@ -55,6 +55,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- A handled URL click retains ownership across host focus loss and cannot consume another
+  client's mouse gesture. Disconnect clears only that client's pending click and held keys.
 - Remote VS Code terminals prefer OSC 52 clipboard writes. When graphics are enabled and the
   host does not report pixel dimensions through the terminal ioctl, the client queries cell size
   and updates its resize geometry; split replies cannot leak into pane input.

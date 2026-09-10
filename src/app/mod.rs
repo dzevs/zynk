@@ -24,7 +24,7 @@ mod terminal_targets;
 mod theme_sync;
 mod worktrees;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -121,9 +121,9 @@ pub struct App {
     pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) last_sidebar_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
-    /// Set once a modified pane click has been consumed as a URL gesture, so
-    /// the matching drag/release never reaches a mouse-reporting pane.
-    pub(crate) pending_url_click: bool,
+    /// Sources whose modified pane click was consumed as a URL gesture, so
+    /// only their matching drag/release stays out of a mouse-reporting pane.
+    pub(crate) pending_url_click_sources: HashSet<InputSourceId>,
     pub(crate) next_resize_poll: Instant,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
@@ -735,7 +735,7 @@ impl App {
             next_api_worktree_operation_id: 1,
             last_sidebar_divider_click: None,
             last_pane_click: None,
-            pending_url_click: false,
+            pending_url_click_sources: HashSet::new(),
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
@@ -1648,7 +1648,7 @@ impl App {
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
                     if self.state.mouse_capture {
-                        self.handle_mouse_event_headless(mouse);
+                        self.handle_mouse_event_headless(source_id, mouse);
                     } else {
                         self.state
                             .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
@@ -1784,13 +1784,24 @@ impl App {
         }
     }
 
+    pub(crate) fn clear_input_source(&mut self, source_id: InputSourceId) {
+        // Only teardown clears a pending URL click. Opening a browser can cost
+        // the host focus before its mouse release arrives.
+        self.pending_url_click_sources.remove(&source_id);
+        self.release_input_source_headless(source_id);
+    }
+
     /// Handles a mouse event for the headless server.
     ///
     /// Delegates to the same mouse handling logic used in the monolithic
     /// mode (hit-testing against the rendered UI), which works because
     /// the server's AppState maintains view geometry from virtual rendering.
-    fn handle_mouse_event_headless(&mut self, mouse: crossterm::event::MouseEvent) {
-        self.handle_mouse(mouse);
+    fn handle_mouse_event_headless(
+        &mut self,
+        source_id: InputSourceId,
+        mouse: crossterm::event::MouseEvent,
+    ) {
+        self.handle_mouse_from_input_source(source_id, mouse);
     }
 }
 
