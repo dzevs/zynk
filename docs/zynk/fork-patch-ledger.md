@@ -2517,3 +2517,28 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
   attribution remains in the existing parse.rs notice and NOTICE entry.
   Protocol19, host-negotiation boundaries and all M5 deferrals are unchanged.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.
+
+### M6-10: Escape and Mouse Framing (2026-09-11)
+
+- **Sources:** `5d24d0d214d05858e344a9e15a63856dc1328eae` and
+  `cbc31d34a1fb3da64415737de57ad10fe6af5ba5`. Take both production deltas:
+  recognize a standalone Escape before a complete, parseable SGR mouse report;
+  map extended-button drags to motion because Crossterm cannot represent those
+  drag buttons. Preserve the coordinates and existing modifier bits.
+- Adapt the upstream controls into all report-split positions, both mouse
+  terminators, every supported modifier bit, and the original doubled-Escape
+  Alt-arrow positive. Incomplete reports, invalid numeric/zero coordinates,
+  and unsupported extended-button presses do not acquire the new behavior.
+  Both intended defects have independent behavioral reds; the Alt-arrow and
+  validation control already passes before the production delta.
+- No general SGR grammar rewrite, new mouse button type, protocol19 movement,
+  host negotiation or per-pane work is introduced. This previously modified
+  source already has its notice and NOTICE entry.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.
+
+M6-09 supplementary author calibration at `257b267b`: in a disposable
+Git-backed copy, independently reinstating the old text/key equality and
+single-codepoint restrictions each fails the unequal/multicodepoint control
+(actual nextest exit100). Both mutations were restored, the two controls then
+passed, and the copy retained the exact original SHA/tree with a clean status.
+This is mutation evidence, not a new M6-09 production change or peer approval.

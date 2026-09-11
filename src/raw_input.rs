@@ -859,6 +859,15 @@ fn complete_escape_sequence_len(buffer: &[u8]) -> Option<usize> {
         return None;
     }
 
+    if buffer.starts_with(b"\x1b\x1b[<") {
+        if let Some(mouse_len) = find_csi_final(&buffer[1..], b"Mm") {
+            let mouse_sequence = std::str::from_utf8(&buffer[1..1 + mouse_len]).ok()?;
+            if parse_sgr_mouse(mouse_sequence).is_some() {
+                return Some(1);
+            }
+        }
+    }
+
     if buffer.starts_with(b"\x1b\x1b") {
         return complete_escape_sequence_len(&buffer[1..]).map(|len| len + 1);
     }
@@ -1003,7 +1012,9 @@ fn parse_mouse_cb(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
         (1, true) => MouseEventKind::Drag(MouseButton::Middle),
         (2, true) => MouseEventKind::Drag(MouseButton::Right),
         (3, false) => MouseEventKind::Up(MouseButton::Left),
-        (3, true) | (4, true) | (5, true) => MouseEventKind::Moved,
+        // Crossterm cannot represent extended-button drags. Preserve their
+        // position as motion so a stuck host button cannot suppress hover.
+        (3, true) | (4, true) | (5, true) | (8, true) | (9, true) => MouseEventKind::Moved,
         (4, false) => MouseEventKind::ScrollUp,
         (5, false) => MouseEventKind::ScrollDown,
         (6, false) => MouseEventKind::ScrollLeft,
@@ -1131,6 +1142,36 @@ mod tests {
         assert_eq!(key.modifiers, KeyModifiers::SHIFT);
         assert_eq!(key.kind, KeyEventKind::Release);
         assert_eq!(key.shifted_codepoint, Some('L' as u32));
+    }
+
+    #[test]
+    fn parses_extended_button_drags_as_mouse_motion_with_modifiers() {
+        for button in [160u8, 161] {
+            for (modifier_bits, expected_modifiers) in [
+                (0, KeyModifiers::empty()),
+                (4, KeyModifiers::SHIFT),
+                (8, KeyModifiers::ALT),
+                (16, KeyModifiers::CONTROL),
+                (
+                    28,
+                    KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL,
+                ),
+            ] {
+                let input = format!("\x1b[<{};20;10M", button | modifier_bits);
+                let (RawInputEvent::Mouse(mouse), consumed) =
+                    extract_one_event(input.as_bytes()).unwrap()
+                else {
+                    panic!("expected extended-button motion: {input:?}");
+                };
+                assert_eq!(consumed, input.len());
+                assert_eq!(mouse.kind, MouseEventKind::Moved);
+                assert_eq!((mouse.column, mouse.row), (19, 9));
+                assert_eq!(mouse.modifiers, expected_modifiers);
+            }
+        }
+        for button in [128, 129] {
+            assert!(parse_sgr_mouse(&format!("\x1b[<{button};20;10M")).is_none());
+        }
     }
 
     #[test]
@@ -1810,6 +1851,51 @@ mod tests {
             KeyCode::Up,
             KeyModifiers::empty(),
         );
+    }
+
+    #[test]
+    fn lone_escape_before_split_sgr_mouse_preserves_both_events() {
+        for report in [b"\x1b[<35;10;20M".as_slice(), b"\x1b[<35;10;20m".as_slice()] {
+            for split in 0..=report.len() {
+                let mut framer = RawInputFramer::default();
+                assert!(framer.push(b"\x1b").is_empty());
+                let mut events = framer.push(&report[..split]);
+                if split < report.len() {
+                    assert!(events.is_empty(), "premature event at split={split}");
+                }
+                events.extend(framer.push(&report[split..]));
+                assert_eq!(events.len(), 2, "split={split}, report={report:?}");
+                let mut events = events.into_iter();
+                assert_raw_key(events.next().unwrap(), KeyCode::Esc, KeyModifiers::empty());
+                let RawInputEvent::Mouse(mouse) = events.next().unwrap() else {
+                    panic!("expected mouse after Escape");
+                };
+                assert_eq!(mouse.kind, MouseEventKind::Moved);
+                assert_eq!((mouse.column, mouse.row), (9, 19));
+                assert!(mouse.modifiers.is_empty());
+                assert!(framer.flush_timeout().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn doubled_escape_boundary_preserves_alt_arrow_and_validates_mouse() {
+        let mut framer = RawInputFramer::default();
+        let events = framer.push(b"\x1b\x1b[A");
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Up,
+            KeyModifiers::ALT,
+        );
+        assert!(framer.flush_timeout().is_empty());
+        for input in [
+            b"\x1b\x1b[<35;10;".as_slice(),
+            b"\x1b\x1b[<bad;10;20M".as_slice(),
+            b"\x1b\x1b[<35;0;20M".as_slice(),
+        ] {
+            assert_ne!(complete_escape_sequence_len(input), Some(1), "{input:?}");
+        }
     }
 
     #[test]
