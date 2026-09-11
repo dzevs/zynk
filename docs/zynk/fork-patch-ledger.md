@@ -2542,3 +2542,21 @@ single-codepoint restrictions each fails the unequal/multicodepoint control
 (actual nextest exit100). Both mutations were restored, the two controls then
 passed, and the copy retained the exact original SHA/tree with a clean status.
 This is mutation evidence, not a new M6-09 production change or peer approval.
+
+### M6-12: Preserve Live Follow Across Resize (2026-09-11)
+
+- **Source:** `b580103b956ef9cdf39798947a46ce4e8b78c322`. Take the complete
+  production delta in ghostty_set_scroll_offset_from_bottom: clamp first,
+  use the terminal's explicit bottom-follow operation for zero, otherwise
+  preserve the row-based scrollback position. No resize replay policy changes.
+- Two source regressions reproduce lost live-follow after empty/short resize
+  and after growth removes all scrollback. Extend the first to unchanged,
+  smaller and larger geometry. A separate user-scrolled positive pins an
+  unchanged visible viewport while new output still reaches bottom detection.
+  Existing reflow/clamping and active/background alternate-screen controls
+  remain part of verification; scrolling does not become a detection input.
+- The change adds one scalar branch to the existing scroll-offset setter, no
+  new per-frame pass, lock or terminal snapshot. Protocol19, M5's render guard,
+  source authority and D-M5-6/M9 are unchanged. The existing modified-file
+  notice and NOTICE entry already cover this source.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.

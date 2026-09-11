@@ -2391,7 +2391,12 @@ fn ghostty_set_scroll_offset_from_bottom(
         return;
     };
     let max_offset = scrollbar.total.saturating_sub(scrollbar.len);
-    terminal.scroll_viewport_row(max_offset.saturating_sub(offset_from_bottom));
+    let offset_from_bottom = offset_from_bottom.min(max_offset);
+    if offset_from_bottom == 0 {
+        terminal.scroll_viewport_bottom();
+    } else {
+        terminal.scroll_viewport_row(max_offset - offset_from_bottom);
+    }
 }
 
 fn ghostty_extract_selection(
@@ -4383,6 +4388,70 @@ mod tests {
         }
 
         assert!(pane.visible_text().contains("000000"));
+    }
+
+    #[test]
+    fn empty_or_short_resize_keeps_following_bottom_when_output_creates_scrollback() {
+        for initial in [b"".as_slice(), b"seed\r\n".as_slice()] {
+            for (rows, cols) in [(3, 10), (2, 9), (4, 12)] {
+                let (tx, _rx) = mpsc::channel(4);
+                let mut terminal = crate::ghostty::Terminal::new(10, 3, 100).unwrap();
+                terminal.write(initial);
+                let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+                let pane_id = PaneId::from_raw(1);
+
+                pane.resize(rows, cols, 0, 0);
+                pane.process_pty_bytes(
+                    pane_id,
+                    0,
+                    b"000000\r\n000001\r\n000002\r\n000003\r\n000004",
+                    &tx,
+                );
+
+                let metrics = pane.scroll_metrics().expect("scroll metrics after output");
+                assert_eq!(metrics.offset_from_bottom, 0, "resize to {rows}x{cols}");
+                assert!(pane.visible_text().contains("000004"));
+            }
+        }
+    }
+
+    #[test]
+    fn resize_that_removes_scrollback_restores_live_follow() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(10, 3, 100).unwrap();
+        terminal.write(b"000000\r\n000001\r\n000002\r\n000003\r\n000004");
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.set_scroll_offset_from_bottom(1);
+        pane.resize(5, 10, 0, 0);
+        let resized = pane.scroll_metrics().expect("scroll metrics after resize");
+        assert_eq!(resized.max_offset_from_bottom, 0);
+
+        pane.process_pty_bytes(pane_id, 0, b"\r\n000005\r\n000006", &tx);
+
+        let metrics = pane.scroll_metrics().expect("scroll metrics after output");
+        assert_eq!(metrics.offset_from_bottom, 0);
+        assert!(pane.visible_text().contains("000006"));
+    }
+
+    #[test]
+    fn scrolled_resize_keeps_user_viewport_when_more_output_arrives() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(10, 3, 10_000).unwrap();
+        write_numbered_lines(&mut terminal, 20);
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        pane.set_scroll_offset_from_bottom(10);
+        pane.resize(4, 10, 0, 0);
+        let before = pane.visible_text();
+        assert!(pane.scroll_metrics().unwrap().offset_from_bottom > 0);
+
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\r\nLATEST", &tx);
+
+        assert_eq!(pane.visible_text(), before);
+        assert!(pane.scroll_metrics().unwrap().offset_from_bottom > 0);
+        assert!(pane.detection_text().contains("LATEST"));
+        assert!(!pane.visible_text().contains("LATEST"));
     }
 
     #[test]
