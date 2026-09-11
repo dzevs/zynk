@@ -4229,12 +4229,161 @@ mod tests {
 
     #[test]
     fn new_terminal_cwd_follow_uses_source_cwd() {
+        let source = unique_temp_path("follow-source");
+        std::fs::create_dir_all(&source).unwrap();
         let cwd = creation::resolve_new_terminal_cwd(
             &crate::config::NewTerminalCwdConfig::Follow,
-            Some(std::path::PathBuf::from("/tmp/zynk-source")),
+            Some(source.clone()),
         );
 
-        assert_eq!(cwd, std::path::PathBuf::from("/tmp/zynk-source"));
+        assert_eq!(cwd, source);
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[test]
+    fn new_terminal_cwd_follow_rejects_moved_and_deleted_sources() {
+        for move_source in [false, true] {
+            let root = unique_temp_path(if move_source {
+                "follow-moved"
+            } else {
+                "follow-deleted"
+            });
+            let source = root.join("reported");
+            std::fs::create_dir_all(&source).unwrap();
+            if move_source {
+                std::fs::rename(&source, root.join("moved")).unwrap();
+            } else {
+                std::fs::remove_dir(&source).unwrap();
+            }
+
+            let cwd = creation::resolve_new_terminal_cwd(
+                &crate::config::NewTerminalCwdConfig::Follow,
+                Some(source.clone()),
+            );
+
+            assert_ne!(cwd, source, "stale Follow source was forwarded");
+            assert!(cwd.is_dir(), "Follow fallback is not a directory: {cwd:?}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn default_creation_routes_reject_stale_reported_follow_cwds() {
+        let mut failures = Vec::new();
+        for route in ["pane", "tab", "workspace", "layout"] {
+            for move_source in [false, true] {
+                let root = unique_temp_path(&format!(
+                    "follow-{route}-{}",
+                    if move_source { "moved" } else { "deleted" }
+                ));
+                let reported = root.join("reported");
+                std::fs::create_dir_all(&reported).unwrap();
+
+                let mut app = test_app();
+                app.state.default_shell = exiting_test_command().into();
+                app.state.workspaces = vec![Workspace::test_new("follow-source")];
+                app.state.ensure_test_terminals();
+                app.state.active = Some(0);
+                app.state.selected = 0;
+                let source_pane = app.state.workspaces[0].tabs[0].root_pane;
+                let source_terminal = app.state.workspaces[0].tabs[0]
+                    .terminal_id(source_pane)
+                    .unwrap()
+                    .clone();
+                let (runtime, _rx) = TerminalRuntime::test_with_channel(80, 24);
+                runtime.test_publish_reported_cwd(reported.clone());
+                if move_source {
+                    std::fs::rename(&reported, root.join("moved")).unwrap();
+                } else {
+                    std::fs::remove_dir(&reported).unwrap();
+                }
+                assert_eq!(
+                    runtime.cwd(),
+                    Some(reported.clone()),
+                    "test must exercise the accepted nonblocking CWD cache"
+                );
+                app.terminal_runtimes.insert(source_terminal, runtime);
+
+                let existing: std::collections::HashSet<_> =
+                    app.state.terminals.keys().cloned().collect();
+                let workspace_id = app.public_workspace_id(0);
+                let pane_id = app.public_pane_id(0, source_pane).unwrap();
+                let method = match route {
+                    "pane" => {
+                        crate::api::schema::Method::PaneSplit(crate::api::schema::PaneSplitParams {
+                            workspace_id: None,
+                            target_pane_id: Some(pane_id),
+                            direction: crate::api::schema::SplitDirection::Right,
+                            ratio: None,
+                            cwd: None,
+                            focus: false,
+                        })
+                    }
+                    "tab" => {
+                        crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+                            workspace_id: Some(workspace_id),
+                            cwd: None,
+                            focus: false,
+                            label: None,
+                        })
+                    }
+                    "workspace" => crate::api::schema::Method::WorkspaceCreate(
+                        crate::api::schema::WorkspaceCreateParams {
+                            cwd: None,
+                            focus: false,
+                            label: None,
+                        },
+                    ),
+                    "layout" => crate::api::schema::Method::LayoutApply(
+                        crate::api::schema::LayoutApplyParams {
+                            workspace_id: Some(workspace_id),
+                            tab_id: None,
+                            tab_label: None,
+                            focus: false,
+                            root: crate::api::schema::LayoutNode::Pane {
+                                pane: crate::api::schema::LayoutPane::default(),
+                            },
+                        },
+                    ),
+                    _ => unreachable!(),
+                };
+                let response = app.handle_api_request(crate::api::schema::Request {
+                    id: format!("test-follow-{route}"),
+                    method,
+                });
+                let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+                if response.get("error").is_some() {
+                    failures.push(format!("{route} failed with stale Follow CWD: {response}"));
+                }
+
+                let created: Vec<_> = app
+                    .state
+                    .terminals
+                    .iter()
+                    .filter(|(id, _)| !existing.contains(*id))
+                    .map(|(_, terminal)| terminal.cwd.clone())
+                    .collect();
+                if created.len() != 1 {
+                    failures.push(format!(
+                        "{route} created {} terminals instead of one",
+                        created.len()
+                    ));
+                }
+                for cwd in &created {
+                    if cwd == &reported || !cwd.is_dir() {
+                        failures.push(format!(
+                            "{route} forwarded stale/non-directory CWD {cwd:?} from {reported:?}"
+                        ));
+                    }
+                }
+
+                for (_, runtime) in app.terminal_runtimes.drain() {
+                    runtime.shutdown();
+                }
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

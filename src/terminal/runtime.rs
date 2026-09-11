@@ -503,6 +503,10 @@ impl TerminalRuntime {
 
 #[cfg(test)]
 impl TerminalRuntime {
+    pub(crate) fn test_publish_reported_cwd(&self, cwd: std::path::PathBuf) {
+        self.0.test_publish_reported_cwd(cwd);
+    }
+
     pub(crate) fn test_record_foreground_probe(
         &self,
         native_group: Option<u32>,

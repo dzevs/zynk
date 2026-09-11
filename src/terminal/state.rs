@@ -847,6 +847,11 @@ impl TerminalState {
         if self.opencode_state_report_is_cross_talk(&source, &agent_label, &session_ref) {
             return None;
         }
+        if self.known_agent_label_conflicts_with_detected_agent(&agent_label)
+            || self.current_session_owner_conflicts(&source, &agent_label)
+        {
+            return None;
+        }
         if !self.hook_report_survives_retirement(&source, &agent_label, &session_ref, None) {
             return None;
         }
@@ -859,11 +864,6 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
-        if self.known_agent_label_conflicts_with_detected_agent(&agent_label)
-            || self.current_session_owner_conflicts(&source, &agent_label)
-        {
-            return None;
-        }
         let session_ref = session_ref.map(|session_ref| {
             self.conflicting_same_owner_session_ref(&source, &agent_label, &session_ref, None)
                 .unwrap_or(session_ref)
@@ -954,6 +954,11 @@ impl TerminalState {
         seq: Option<u64>,
         now: Instant,
     ) -> Option<TerminalStateMutation> {
+        if self.known_agent_label_conflicts_with_detected_agent(&agent_label)
+            || self.current_session_owner_conflicts(&source, &agent_label)
+        {
+            return None;
+        }
         // Retirement is shared with the full-lifecycle path: a clear, a release or a
         // process exit retires this owner until a genuinely NEW session or fresh
         // process evidence arrives. A higher sequence alone is not a new session, and
@@ -962,11 +967,6 @@ impl TerminalState {
             return None;
         }
         if !self.accept_hook_report(&source, seq) {
-            return None;
-        }
-        if self.known_agent_label_conflicts_with_detected_agent(&agent_label)
-            || self.current_session_owner_conflicts(&source, &agent_label)
-        {
             return None;
         }
         // The same clamp the full-lifecycle path applies: a same-owner report that
@@ -2933,6 +2933,109 @@ mod tests {
             now,
         );
         terminal
+    }
+
+    fn assert_rejected_owner_report_preserves_state(
+        before: &TerminalState,
+        after: &TerminalState,
+        now: Instant,
+    ) {
+        assert_eq!(
+            after.current_session_identity_for_persistence(),
+            before.current_session_identity_for_persistence()
+        );
+        assert_eq!(after.session_owner_epoch, before.session_owner_epoch);
+        assert_eq!(after.hook_authority, before.hook_authority);
+        assert_eq!(after.hook_identity, before.hook_identity);
+        assert_eq!(after.handoff_confirmation, before.handoff_confirmation);
+        assert_eq!(
+            after.export_hook_retirement(now),
+            before.export_hook_retirement(now),
+            "a refused owner report must not alter sequences or retirement fences"
+        );
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.revision, before.revision);
+    }
+
+    #[test]
+    fn rejected_cross_owner_state_report_preserves_retry_and_owner_state() {
+        let now = Instant::now();
+        let mut terminal = persisted_owner_at(now);
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let before = terminal.clone();
+
+        let rejected = terminal.set_hook_authority_with_custom_status_at(
+            "zynk:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("pi-new-session"),
+            Some(21),
+            now + Duration::from_millis(1),
+        );
+
+        assert!(rejected.is_none());
+        assert_rejected_owner_report_preserves_state(
+            &before,
+            &terminal,
+            now + Duration::from_millis(1),
+        );
+        let accepted = terminal.set_agent_session_ref_for_session_start_at(
+            "zynk:pi".into(),
+            "pi".into(),
+            crate::agent_resume::AgentSessionRef::id("pi-new-session"),
+            Some(21),
+            Some("new".into()),
+            Some(ForegroundProcessObservation {
+                agent: Some(Agent::Pi),
+                observed_at: now + Duration::from_millis(2),
+            }),
+            now + Duration::from_millis(3),
+        );
+        assert!(
+            accepted.is_some(),
+            "the same sequence must remain retryable"
+        );
+    }
+
+    #[test]
+    fn rejected_cross_owner_identity_report_preserves_retry_and_owner_state() {
+        let now = Instant::now();
+        let mut terminal = persisted_owner_at(now);
+        terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
+        let before = terminal.clone();
+
+        let rejected = terminal.record_identity_only_hook_report_at(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("hermes-new-session"),
+            Some(21),
+            now + Duration::from_millis(1),
+        );
+
+        assert!(rejected.is_none());
+        assert_rejected_owner_report_preserves_state(
+            &before,
+            &terminal,
+            now + Duration::from_millis(1),
+        );
+        let accepted = terminal.set_agent_session_ref_for_session_start_at(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("hermes-new-session"),
+            Some(21),
+            Some("new".into()),
+            Some(ForegroundProcessObservation {
+                agent: Some(Agent::Hermes),
+                observed_at: now + Duration::from_millis(2),
+            }),
+            now + Duration::from_millis(3),
+        );
+        assert!(
+            accepted.is_some(),
+            "the same sequence must remain retryable"
+        );
     }
 
     fn claim_claude_at(

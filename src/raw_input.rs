@@ -981,6 +981,9 @@ fn parse_sgr_mouse(sequence: &str) -> Option<MouseEvent> {
     let cb = parts.next()?.parse::<u8>().ok()?;
     let column = parts.next()?.parse::<u16>().ok()?.checked_sub(1)?;
     let row = parts.next()?.parse::<u16>().ok()?.checked_sub(1)?;
+    if parts.next().is_some() {
+        return None;
+    }
     let (kind, modifiers) = parse_mouse_cb(cb)?;
 
     let kind = if final_char == 'm' {
@@ -1896,6 +1899,31 @@ mod tests {
         ] {
             assert_ne!(complete_escape_sequence_len(input), Some(1), "{input:?}");
         }
+    }
+
+    fn assert_malformed_sgr_mouse_is_unsupported(report: &[u8]) {
+        let direct = parse_raw_input_bytes_sync(report);
+        let mut escaped = vec![ESC];
+        escaped.extend_from_slice(report);
+        let escaped_events = parse_raw_input_bytes_sync(&escaped);
+        let boundary = complete_escape_sequence_len(&escaped);
+
+        assert!(
+            matches!(direct.as_slice(), [RawInputEvent::Unsupported])
+                && matches!(escaped_events.as_slice(), [RawInputEvent::Unsupported])
+                && boundary != Some(1),
+            "malformed SGR mouse escaped its frame: report={report:?}, direct={direct:?}, escaped={escaped_events:?}, boundary={boundary:?}"
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_rejects_trailing_empty_field_direct_and_after_escape() {
+        assert_malformed_sgr_mouse_is_unsupported(b"\x1b[<0;10;20;M");
+    }
+
+    #[test]
+    fn sgr_mouse_rejects_extra_field_direct_and_after_escape() {
+        assert_malformed_sgr_mouse_is_unsupported(b"\x1b[<0;10;20;7M");
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub(crate) fn resolve_new_terminal_cwd(
 ) -> PathBuf {
     match policy {
         NewTerminalCwdConfig::Follow => follow_cwd
+            .filter(|cwd| cwd.is_absolute() && cwd.is_dir())
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("/")),

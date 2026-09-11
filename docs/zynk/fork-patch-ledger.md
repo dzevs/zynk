@@ -3025,3 +3025,37 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   This approved design/clarification releases the earlier M6-06 hold; it does
   not approve implementation. Protocol19, D-M5-6 to M9 and all other deferrals
   remain unchanged. **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6 Gate-3 Corrections: CWD, Owner Refusal, and SGR Arity (2026-09-11)
+
+- **G3-M6-CWD-001 / AUD-M6-CWD-001:** keep the M6 nonblocking reported-CWD
+  cache: a path admitted while it exists may still be returned after a move or
+  deletion. The terminal-creation Follow boundary now rejects a supplied path
+  unless it is absolute and still a directory, then uses the existing
+  HOME/current/root fallback. A real admitted cache value is moved or deleted
+  before each default pane-split, tab, workspace, and layout route; all eight
+  route cases must create with an existing fallback instead of the stale path.
+- This appends to, rather than rewrites, the historical **D-M6-2** row. That
+  row's no-consumption statement described the original M6 candidate. This
+  correction consumes only the general creation-boundary
+  `cwd.is_absolute() && cwd.is_dir()` safety predicate, not the deferred M8
+  getter, foreground-group-leader choice, runtime/Tab forwarding, routing, or
+  API controls. M8 must preserve and account for this validation rather than
+  recreating a duplicate or weaker check; every other D-M6-2 obligation stands.
+- **G3-M6-CROSSOWNER-SEQ-002 / ARCH-M6-CROSSOWNER-SEQ-001:** both ordinary
+  full-lifecycle and identity-only report funnels reject a conflicting current
+  session owner (and a known label conflicting with the detected agent) before
+  the retirement gate or sequence acceptance can mutate state. Regressions
+  assert the owner, epoch, retirement fences, sequence map, lifecycle state,
+  and revision stay unchanged, then accept a proof-backed session-start retry
+  with the same sequence. The separate reasoned takeover path and allowlist are
+  unchanged.
+- **G3-M6-INPUT-001 / AUD-M6-INPUT-001:** SGR mouse reports have exactly three
+  semicolon-separated fields. Trailing empty and extra fields are Unsupported
+  both directly and behind a leading Escape; malformed reports cannot make the
+  doubled-Escape boundary emit an Escape followed by Mouse. Existing valid SGR
+  movement/release and Alt-arrow behavior remain positive controls.
+- Protocol remains 19. No IPC method, wire field, database schema, dependency,
+  detector authority, deferred feature, or deployment disposition changes.
+  **IMPLEMENTED / PENDING successor Gate2/Gate3 verification**; the rejected
+  `89ccbd1` object remains unapproved.

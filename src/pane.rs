@@ -2845,6 +2845,11 @@ impl PaneRuntime {
 
 #[cfg(test)]
 impl PaneRuntime {
+    pub(crate) fn test_publish_reported_cwd(&self, cwd: std::path::PathBuf) {
+        let (events, _rx) = mpsc::channel(1);
+        publish_reported_cwd(self.pane_id, cwd, &self.reported_cwd, &events);
+    }
+
     pub(crate) fn test_record_foreground_probe(
         &self,
         native_group: Option<u32>,
