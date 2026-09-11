@@ -273,7 +273,7 @@ mod tests {
                 space: Some(crate::workspace::GitSpaceMetadata {
                     key: "/.git".into(),
                     checkout_key: "/".into(),
-                    label: "repo".into(),
+                    repo_name: "repo".into(),
                     repo_root: cache_key.clone(),
                     is_linked_worktree: false,
                 }),

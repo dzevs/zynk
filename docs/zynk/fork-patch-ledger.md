@@ -2677,3 +2677,31 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   implementation; do not introduce an equivalent no-op match or platform cfg.
   No production behavior, protocol 19, host negotiation, detection or M6-06 policy
   changes. **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-16: Repository Names and Checkout Labels (2026-09-11)
+
+- **Sources:** `e16d7d8c07a20f5ee0b4111808680bbcfd7df9ac` and
+  `b8387818f0224bd7aa2c135970de63ea8e83215b`. Rename GitSpaceMetadata.label to
+  repo_name and derive it from the shared Git directory, using the containing
+  repository for .git and verified embedded .bare layouts. An unrelated parent
+  .git marker must not rename a standalone .bare repository. Group keys remain
+  common-directory identities; checkout keys and automatic labels remain
+  checkout-specific. Existing explicit worktree membership labels are a
+  different type and retain their semantics.
+- **Already consumed by M5-20:** e16d7d8c's automatic_workspace_label helper,
+  export and discovery/cache call corrections were prerequisites for d46d9a22.
+  Keep those exact production pieces rather than reapplying or replacing them.
+  This slice takes the remaining repo_name/grouping delta and updates the
+  M5-added git_refresh fixture literal, without changing pure-state/runtime
+  ownership, per-workspace fallback projection, or production Git routing.
+- Three behavioral reds cover standalone, embedded and unrelated-parent bare
+  grouping. Normal linked identity and refreshed checkout-label controls were
+  already green with M5's adaptation and are retained as positive controls.
+  New real-Git fixture helpers call the existing B1 prefix scrub and explicit
+  repository-local identity setter; initializer containment is asserted before
+  identity writes. Do not reintroduce upstream's direct config writes or weaken
+  ambient/command-local GIT_* removal. Existing helper implementations remain.
+- api/worktrees.rs and git/test_support.rs receive their first modified-file
+  notices and NOTICE entries. No protocol 19, public API schema, dependency, receipt,
+  identity or M6-06 policy change. **IMPLEMENTED / PENDING VERIFICATION** by
+  Gate2/Gate3.

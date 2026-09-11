@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,6 +16,68 @@ pub(super) fn temp_test_dir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(unique);
     std::fs::create_dir_all(&path).unwrap();
     path
+}
+
+fn init_repo_with_commit(repo: &Path) {
+    std::fs::create_dir_all(repo).unwrap();
+    run_git(repo, &["init", "--quiet"]);
+    assert!(repo.join(".git").is_dir());
+    set_repo_identity(repo);
+    run_git(
+        repo,
+        &["commit", "--quiet", "--allow-empty", "-m", "initial"],
+    );
+}
+
+pub(crate) fn create_repo_with_linked_worktree(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let base = temp_test_dir(name);
+    let repo = base.join("repo");
+    let checkout = base.join("topic");
+    init_repo_with_commit(&repo);
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "topic",
+            checkout.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    (base, repo, checkout)
+}
+
+pub(crate) fn create_bare_repo_with_linked_worktree(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let base = temp_test_dir(name);
+    let seed = base.join("seed");
+    let bare = base.join(".bare");
+    let checkout = base.join("feature");
+    init_repo_with_commit(&seed);
+    run_git(
+        &base,
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            seed.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    run_git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "feature",
+            checkout.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    (base, bare, checkout)
 }
 
 pub(super) fn write_fake_tracked_repo(root: &Path) {

@@ -62,6 +62,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/api/panes.rs
 - src/app/api/plugins/panes.rs
 - src/app/api/tabs.rs
+- src/app/api/worktrees.rs
 - src/app/config_io.rs
 - src/app/creation.rs
 - src/app/git_refresh.rs
@@ -166,6 +167,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/workspace/git/discovery.rs
 - src/workspace/git/mod.rs
 - src/workspace/git/status.rs
+- src/workspace/git/test_support.rs
 - src/workspace/tab.rs
 - tests/cli_wrapper.rs
 - tests/client_mode.rs

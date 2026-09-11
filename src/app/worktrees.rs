@@ -58,7 +58,7 @@ impl App {
                 Some(crate::workspace::GitSpaceMetadata {
                     key: membership.key.clone(),
                     checkout_key: membership.checkout_path.display().to_string(),
-                    label: membership.label.clone(),
+                    repo_name: membership.label.clone(),
                     repo_root: membership.repo_root.clone(),
                     is_linked_worktree: membership.is_linked_worktree,
                 })
@@ -89,7 +89,7 @@ impl App {
                 }
             };
 
-        let repo_name = space.label.clone();
+        let repo_name = space.repo_name.clone();
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_micros().min(u128::from(u64::MAX)) as u64)
@@ -225,7 +225,7 @@ impl App {
             source_checkout_path,
             source_repo_root: space.repo_root,
             repo_key: space.key,
-            repo_name: space.label,
+            repo_name: space.repo_name,
             entries,
             selected: 0,
             query: String::new(),

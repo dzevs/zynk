@@ -1718,6 +1718,24 @@ mod tests {
     }
 
     #[test]
+    fn linked_worktree_auto_label_uses_checkout_name_not_repo_name() {
+        let (base, repo, checkout) =
+            self::git::test_support::create_repo_with_linked_worktree("linked-auto-label");
+        let (parent, parent_label, _) = discover_workspace_git_identity(&repo);
+        let (linked, linked_label, _) = discover_workspace_git_identity(&checkout);
+        let parent = parent.unwrap();
+        let linked = linked.unwrap();
+
+        assert_eq!(parent.repo_name, "repo");
+        assert_eq!(linked.repo_name, parent.repo_name);
+        assert_eq!(parent.key, linked.key);
+        assert_ne!(parent.checkout_key, linked.checkout_key);
+        assert_eq!(parent_label, "repo");
+        assert_eq!(linked_label, "topic");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn display_name_reads_cached_identity_without_rechecking_filesystem() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

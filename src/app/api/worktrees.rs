@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::path::{Path, PathBuf};
 
 use crate::api::schema::{
@@ -210,7 +212,7 @@ impl App {
                 source_checkout_path: space.repo_root.clone(),
                 source_repo_root: space.repo_root,
                 repo_key: space.key,
-                repo_name: space.label,
+                repo_name: space.repo_name,
             };
             return Ok(source);
         }
@@ -322,7 +324,7 @@ impl App {
             source_checkout_path: space.repo_root.clone(),
             source_repo_root: space.repo_root,
             repo_key: space.key,
-            repo_name: space.label,
+            repo_name: space.repo_name,
         })
     }
 
@@ -663,7 +665,7 @@ fn worktree_source_from_space(
         source_checkout_path: source_checkout_path.clone(),
         source_repo_root: source_checkout_path,
         repo_key: space.key,
-        repo_name: space.label,
+        repo_name: space.repo_name,
     }
 }
 

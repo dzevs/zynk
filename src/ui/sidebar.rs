@@ -2221,7 +2221,7 @@ mod tests {
         ws.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
             key: key.into(),
             checkout_key: format!("/repo/{name}"),
-            label: "zynk".into(),
+            repo_name: "zynk".into(),
             repo_root: std::path::PathBuf::from(format!("/repo/{name}")),
             is_linked_worktree: false,
         });

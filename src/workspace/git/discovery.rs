@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 pub struct GitSpaceMetadata {
     pub key: String,
     pub checkout_key: String,
-    pub label: String,
+    pub repo_name: String,
     pub repo_root: PathBuf,
     pub is_linked_worktree: bool,
 }
@@ -77,17 +77,16 @@ pub(super) fn git_space_metadata_from_info(info: &GitWorktreeInfo) -> GitSpaceMe
     let checkout_key = canonicalize_best_effort_path(&info.repo_root)
         .display()
         .to_string();
-    let label_path = if info
+    let common_dir_name = info
         .git_common_dir
         .file_name()
-        .and_then(|name| name.to_str())
-        == Some(".git")
-    {
-        info.git_common_dir.parent().unwrap_or(&info.repo_root)
-    } else {
-        &info.repo_root
+        .and_then(|name| name.to_str());
+    let label_path = match common_dir_name {
+        Some(".git") => info.git_common_dir.parent().unwrap_or(&info.repo_root),
+        Some(".bare") => embedded_bare_repo_container(info).unwrap_or(&info.git_common_dir),
+        _ => &info.git_common_dir,
     };
-    let label = label_path
+    let repo_name = label_path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("repo")
@@ -95,10 +94,16 @@ pub(super) fn git_space_metadata_from_info(info: &GitWorktreeInfo) -> GitSpaceMe
     GitSpaceMetadata {
         key,
         checkout_key,
-        label,
+        repo_name,
         repo_root: info.repo_root.clone(),
         is_linked_worktree: info.is_linked_worktree,
     }
+}
+
+fn embedded_bare_repo_container(info: &GitWorktreeInfo) -> Option<&Path> {
+    let parent = info.git_common_dir.parent()?;
+    let parent_git_dir = git_dir_for_repo_root(parent)?;
+    (canonicalize_best_effort_path(&parent_git_dir) == info.git_common_dir).then_some(parent)
 }
 
 pub(super) fn canonicalize_best_effort_path(path: &Path) -> PathBuf {
@@ -437,6 +442,74 @@ mod tests {
         assert!(!metadata.is_linked_worktree);
 
         std::fs::remove_dir_all(bare).unwrap();
+    }
+
+    #[test]
+    fn bare_source_and_linked_checkout_share_repo_name_but_not_auto_label() {
+        let (base, bare, checkout) =
+            crate::workspace::git::test_support::create_bare_repo_with_linked_worktree(
+                "bare-linked-labels",
+            );
+        let bare_space = git_space_metadata(&bare).unwrap();
+        let checkout_space = git_space_metadata(&checkout).unwrap();
+
+        assert_eq!(bare_space.key, checkout_space.key);
+        assert_ne!(bare_space.checkout_key, checkout_space.checkout_key);
+        assert_eq!(bare_space.repo_name, ".bare");
+        assert_eq!(checkout_space.repo_name, bare_space.repo_name);
+        assert_eq!(
+            automatic_workspace_label(&bare, &bare_space.repo_root),
+            ".bare"
+        );
+        assert_eq!(
+            automatic_workspace_label(&checkout, &checkout_space.repo_root),
+            "feature"
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn embedded_dot_bare_source_and_checkout_use_container_repo_name() {
+        let (base, bare, checkout) =
+            crate::workspace::git::test_support::create_bare_repo_with_linked_worktree(
+                "embedded-dot-bare",
+            );
+        std::fs::write(base.join(".git"), "gitdir: ./.bare\n").unwrap();
+        let source = git_space_metadata(&base).unwrap();
+        let linked = git_space_metadata(&checkout).unwrap();
+        let expected = base.file_name().unwrap().to_str().unwrap();
+
+        assert_eq!(source.repo_name, expected);
+        assert_eq!(linked.repo_name, source.repo_name);
+        assert_eq!(source.key, linked.key);
+        assert_eq!(
+            source.key,
+            canonicalize_best_effort_path(&bare).display().to_string()
+        );
+        assert_ne!(source.checkout_key, linked.checkout_key);
+        assert_eq!(
+            automatic_workspace_label(&checkout, &linked.repo_root),
+            "feature"
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn unrelated_parent_gitdir_does_not_name_a_dot_bare_repository() {
+        let (base, bare, checkout) =
+            crate::workspace::git::test_support::create_bare_repo_with_linked_worktree(
+                "unrelated-bare-parent",
+            );
+        run_git(&base, &["init", "--bare", "--quiet", "other.git"]);
+        std::fs::write(base.join(".git"), "gitdir: ./other.git\n").unwrap();
+        let source = git_space_metadata(&bare).unwrap();
+        let linked = git_space_metadata(&checkout).unwrap();
+
+        assert_eq!(source.repo_name, ".bare");
+        assert_eq!(linked.repo_name, ".bare");
+        assert_eq!(source.key, linked.key);
+        assert_ne!(source.key, git_space_metadata(&base).unwrap().key);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

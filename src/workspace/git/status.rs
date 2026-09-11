@@ -531,6 +531,18 @@ mod tests {
     }
 
     #[test]
+    fn linked_worktree_refresh_keeps_checkout_name_as_auto_label() {
+        let (base, _, checkout) =
+            crate::workspace::git::test_support::create_repo_with_linked_worktree(
+                "linked-refresh-label",
+            );
+        let (snapshot, _) = git_status_snapshot_for_cwd(&checkout, None);
+        assert_eq!(snapshot.auto_label, "topic");
+        assert_eq!(snapshot.space.unwrap().repo_name, "repo");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn git_status_cache_key_is_per_linked_worktree_checkout() {
         let base = temp_test_dir("linked-worktree-keys");
         let common_dir = base.join("repo/.git");
