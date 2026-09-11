@@ -2329,3 +2329,12 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
   ordered steps, and these two are scheduled outside the step table. Mention
   coverage alone is bookkeeping, not proof that every hunk or test was ported.
   Whole-M5 review must inspect the actual dispositions and affected invariants.
+
+### M5 deferred-test dependency anchors (2026-09-11)
+
+- **D-M5-3:** apply the deferred `0bd44502` terminal-mode report-all flag and
+  expectation when M8 reaches `aa0768b7`, which creates `src/terminal_modes.rs`.
+- **D-M5-5:** apply `b76adc15`'s six protocol-version expectations in
+  `tests/cli/sessions.rs` when M8 reaches `3f809476`, which creates that suite.
+  Both are existing deferrals, not new feature scope; keep protocol versions
+  monotone and account for the version actually reached by M8.
