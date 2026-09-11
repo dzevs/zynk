@@ -2705,3 +2705,16 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   notices and NOTICE entries. No protocol 19, public API schema, dependency, receipt,
   identity or M6-06 policy change. **IMPLEMENTED / PENDING VERIFICATION** by
   Gate2/Gate3.
+
+### M6-19: Word Ends Beyond Wide Soft Wraps (2026-09-11)
+
+- **Source:** `f459a0df315e0963aec5e4dcf2fc394a252ea320`. Word-motion targets
+  identify the start cell of an atom; compare that point with the final atom's
+  start rather than its trailing column. This lets the existing bounded read
+  window expand past a final wide glyph at a soft-wrap boundary.
+- The real-emulator regression writes a 66-row wide-character word beyond the
+  initial 64-row window and asserts the final glyph's head cell for both NextEnd
+  and NextBigEnd. Before the fix, NextEnd stopped at row63 instead of row65.
+  Keep the existing narrow-cell, big-word and blank-history positive controls.
+  No window sizing, render, IME-mode, authority or protocol19 change; M6-06 held.
+  **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.

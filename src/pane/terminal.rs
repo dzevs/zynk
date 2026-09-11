@@ -924,14 +924,12 @@ impl RetainedTextBuffer {
     }
 
     fn point_is_final_atom(&self, point: TerminalTextPoint) -> bool {
+        // Word motion targets are atom starts, not the trailing cell of a wide glyph.
         self.atoms
             .iter()
             .rev()
             .find(|atom| atom.point.is_some())
-            .is_some_and(|atom| {
-                atom.point
-                    .is_some_and(|start| start.row == point.row && atom.end_col == point.col)
-            })
+            .is_some_and(|atom| atom.point == Some(point))
     }
 }
 
@@ -3299,6 +3297,29 @@ mod tests {
             ),
             Some(text_match.end)
         );
+    }
+
+    #[test]
+    fn live_terminal_word_end_expands_through_a_long_wide_soft_wrap() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(2, 3, 200).unwrap();
+        let word = "界".repeat(66);
+        terminal.write(word.as_bytes());
+        let pane = PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx).unwrap());
+        let text_match = pane.search_text_matches(&word, true)[0];
+        assert!(text_match.end.row - text_match.start.row >= 64);
+        assert_eq!(text_match.end.col, 1);
+
+        for motion in [TerminalWordMotion::NextEnd, TerminalWordMotion::NextBigEnd] {
+            assert_eq!(
+                pane.word_motion_target(text_match.start.row, text_match.start.col, motion),
+                Some(TerminalTextPoint {
+                    row: text_match.end.row,
+                    col: 0,
+                }),
+                "motion={motion:?}"
+            );
+        }
     }
 
     #[test]
