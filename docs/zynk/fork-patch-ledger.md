@@ -2970,3 +2970,58 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   The six controls and existing terminal/render suites require verification;
   D-M5-6 to M9, held M6-06 and all host/wire deferrals remain unchanged.
   **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-06: Reasoned Native Session Owner Transition
+
+- **ADAPT** `74a771d12623726983ed2186380f6a216e797a06` and
+  `797981c7e907bc6e3050373ba150fb7a8bc651fb`: a native session-start report
+  can replace another owner's persisted session only after both old live hook
+  representations have retired. Exclude upstream's reasonless full-state
+  takeover and direct retirement of an installed foreign authority. Existing
+  same-owner rules, ADR0014 caller checks and receipt authority remain intact.
+- A separate cross-owner source/label/reason allowlist admits Claude/Codex
+  startup, clear, resume, compact; Hermes startup, new, resume; Pi new, resume,
+  fork; Qwen startup, clear, resume, compact, branch; OpenCode select only.
+  Missing/unknown reasons, agy/None, omp, aliases, custom sources and OpenCode
+  new/resume cannot inherit this eligibility. Resume adapters still validate
+  reference kinds. All new eligibility checks precede the mutating incoming
+  retirement/sequence gates; refusal cannot spend a retry's sequence. Existing
+  permitted generation resets survive, but no new reset policy is introduced.
+- PaneRuntime owns one bounded, non-serialized process-observation slot.
+  Only actual probes in the normal and handoff detector loops can provide a
+  positive; they must match a natively observed foreground group, never an
+  M6-18 inferred group. Cached screen updates do not create or refresh it.
+  Capture-time ordering ignores older writes and makes equal-time loss or
+  conflicting labels non-authorizing. Exit publishes invalidate before queue
+  waits; release/reset, child-wait completion and poisoned storage fail closed.
+- Only AgentSessionReported dispatch copies the current runtime observation
+  into pure state. The private owner epoch advances monotonically on accepted
+  anchor setters and restore/import, not when detection copies an existing
+  retiring anchor. The positive must be strictly newer than this epoch.
+  Missing runtime, no observation, stale/equal capture, wrong agent or a live
+  old authority/identity cannot authorize replacement. No runtime handle goes
+  into any State; no new event, protocol field, persisted schema or detector
+  identity is introduced.
+- **Chosen import behavior:** B may replace retired A while A's owner-scoped
+  import fence remains outstanding, but only on genuine post-import B proof.
+  B never confirms or clears A's fence. A's retired session stays recorded and
+  a late A callback without new eligible A proof cannot regain the anchor.
+  Identity-only B acquires identity, not lifecycle authority; other B session
+  reports still require a subsequent full hook report for that authority.
+- Dispatch time is captured after reading the runtime slot, not at receipt.
+  The positive queue control covers T_r < T_o <= T_d. The upper-time check is
+  internal consistency and vacuous for legitimate production observations;
+  synthetic future rejection is not an exercised production refusal class.
+  The strict epoch lower bound carries freshness, not a TTL or continuous
+  kernel-liveness guarantee. No pending-report queue or automatic retry is
+  added: an early one-shot report needs a later native retry.
+- Controls cover imported/cold/retired anchors, both live representations,
+  the allowlist and reference kinds, unchanged sequence maps on refusal,
+  incoming retirement, epoch setters, both real process-probe loops, loss
+  under queue backpressure, native-versus-inferred evidence and App forwarding.
+  Detector controls use a disposable PTY child with a process hint, not a live
+  agent or receipt proof. Focused one-site mutations must reach behavioral
+  assertions; setter/writer inventory must be re-enumerated at the candidate.
+  This approved design/clarification releases the earlier M6-06 hold; it does
+  not approve implementation. Protocol19, D-M5-6 to M9 and all other deferrals
+  remain unchanged. **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.

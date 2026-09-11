@@ -19,6 +19,12 @@ use crate::layout::PaneId;
 pub struct TerminalRuntime(crate::pane::PaneRuntime);
 
 impl TerminalRuntime {
+    pub(crate) fn foreground_process_observation(
+        &self,
+    ) -> Option<crate::terminal::state::ForegroundProcessObservation> {
+        self.0.foreground_process_observation()
+    }
+
     pub(crate) fn pending_process_exits(
         &self,
     ) -> Vec<(Option<crate::detect::Agent>, std::time::Instant)> {
@@ -497,6 +503,17 @@ impl TerminalRuntime {
 
 #[cfg(test)]
 impl TerminalRuntime {
+    pub(crate) fn test_record_foreground_probe(
+        &self,
+        native_group: Option<u32>,
+        probed_group: Option<u32>,
+        agent: Option<crate::detect::Agent>,
+        observed_at: std::time::Instant,
+    ) {
+        self.0
+            .test_record_foreground_probe(native_group, probed_group, agent, observed_at);
+    }
+
     pub(crate) async fn test_publish_process_exit(
         &self,
         tx: mpsc::Sender<AppEvent>,

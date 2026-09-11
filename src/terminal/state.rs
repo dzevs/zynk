@@ -18,6 +18,14 @@ use crate::terminal::TerminalId;
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
 
+/// Capture of an actual native foreground-process probe, never a screen update
+/// or a session identity. The live runtime owns its storage; state receives a copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ForegroundProcessObservation {
+    pub agent: Option<Agent>,
+    pub observed_at: Instant,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAuthority {
     pub source: String,
@@ -439,6 +447,9 @@ pub struct TerminalState {
     pub hook_identity: Option<HookIdentity>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
+    // A replacement needs a process observation after this anchor/import boundary.
+    // Copying an existing anchor on detector retirement must not advance it.
+    session_owner_epoch: Option<Instant>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
     hook_report_sequences: HashMap<String, u64>,
@@ -484,6 +495,7 @@ impl TerminalState {
             hook_identity: None,
             agent_metadata: HashMap::new(),
             persisted_agent_session: None,
+            session_owner_epoch: None,
             manual_label: None,
             agent_name: None,
             hook_report_sequences: HashMap::new(),
@@ -891,6 +903,7 @@ impl TerminalState {
             session_ref,
             unconfirmed_since,
         });
+        self.advance_session_owner_epoch(now);
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -981,6 +994,7 @@ impl TerminalState {
             reported_at: now,
             unconfirmed_since: self.unanswered_exit_to_inherit(&source, &agent_label),
         });
+        self.advance_session_owner_epoch(now);
         if let Some(session_ref) = session_ref {
             self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
                 source,
@@ -1046,6 +1060,7 @@ impl TerminalState {
     }
 
     pub fn require_imported_hook_identity_confirmation(&mut self, imported_at: Instant) {
+        self.advance_session_owner_epoch(imported_at);
         self.handoff_confirmation = self.hook_identity.as_ref().map(|identity| {
             (
                 HookOwner::new(&identity.source, &identity.agent_label),
@@ -1313,6 +1328,7 @@ impl TerminalState {
     /// live `hook_authority` is deliberately NOT re-installed: the owner's next report
     /// re-establishes it, and it is the FENCE, not the authority, that must survive.
     pub fn restore_hook_retirement(&mut self, snapshot: HookRetirementSnapshot, now: Instant) {
+        self.advance_session_owner_epoch(now);
         for (source, seq) in snapshot.sequences {
             self.hook_report_sequences.insert(source, seq);
         }
@@ -2225,7 +2241,76 @@ impl TerminalState {
         &mut self,
         session: crate::agent_resume::PersistedAgentSession,
     ) {
+        self.set_persisted_agent_session_at(session, Instant::now());
+    }
+
+    fn set_persisted_agent_session_at(
+        &mut self,
+        session: crate::agent_resume::PersistedAgentSession,
+        now: Instant,
+    ) {
         self.persisted_agent_session = Some(session);
+        self.advance_session_owner_epoch(now);
+    }
+
+    fn advance_session_owner_epoch(&mut self, now: Instant) {
+        self.session_owner_epoch = Some(self.session_owner_epoch.map_or(now, |old| old.max(now)));
+    }
+
+    fn session_start_allows_different_owner(
+        source: &str,
+        agent_label: &str,
+        reason: Option<&str>,
+    ) -> bool {
+        // Separate from same-owner repointing: agy/None and shared-server
+        // OpenCode new/resume must never inherit cross-owner eligibility.
+        matches!(
+            (source, agent_label, reason),
+            (
+                "zynk:claude",
+                "claude",
+                Some("startup" | "clear" | "resume" | "compact")
+            ) | (
+                "zynk:codex",
+                "codex",
+                Some("startup" | "clear" | "resume" | "compact")
+            ) | ("zynk:hermes", "hermes", Some("startup" | "new" | "resume"))
+                | ("zynk:pi", "pi", Some("new" | "resume" | "fork"))
+                | (
+                    "zynk:qwen",
+                    "qwen",
+                    Some("startup" | "clear" | "resume" | "compact" | "branch")
+                )
+                | ("zynk:opencode", "opencode", Some("select"))
+        )
+    }
+
+    fn process_observation_allows_different_owner(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+        reason: Option<&str>,
+        observation: Option<ForegroundProcessObservation>,
+        now: Instant,
+    ) -> bool {
+        let (Some(epoch), Some(observation), Some(agent)) = (
+            self.session_owner_epoch,
+            observation,
+            crate::detect::parse_agent_label(agent_label),
+        ) else {
+            return false;
+        };
+        self.hook_authority.is_none()
+            && self.hook_identity.is_none()
+            && Self::session_start_allows_different_owner(source, agent_label, reason)
+            && crate::agent_resume::plan(source, agent_label, session_ref, None).is_some()
+            && self.detected_agent == Some(agent)
+            && observation.agent == Some(agent)
+            && epoch < observation.observed_at
+            // Dispatch follows the runtime read, so this is consistency only,
+            // not another production liveness guard or a receipt-time bound.
+            && observation.observed_at <= now
     }
 
     pub fn set_agent_session_ref(
@@ -2246,10 +2331,49 @@ impl TerminalState {
         seq: Option<u64>,
         session_start_source: Option<String>,
     ) -> Option<TerminalStateMutation> {
+        self.set_agent_session_ref_for_session_start_at(
+            source,
+            agent_label,
+            session_ref,
+            seq,
+            session_start_source,
+            None,
+            Instant::now(),
+        )
+    }
+
+    // Existing hook fields plus copied process evidence and deterministic dispatch time.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn set_agent_session_ref_for_session_start_at(
+        &mut self,
+        source: String,
+        agent_label: String,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        seq: Option<u64>,
+        session_start_source: Option<String>,
+        observation: Option<ForegroundProcessObservation>,
+        now: Instant,
+    ) -> Option<TerminalStateMutation> {
         let session_ref = session_ref?;
+        let owner_conflicts = self.current_session_owner_conflicts(&source, &agent_label);
+        // This MUST precede retirement/sequence acceptance: retirement can reset
+        // the incoming source's sequence even before a report is accepted.
+        if owner_conflicts
+            && !self.process_observation_allows_different_owner(
+                &source,
+                &agent_label,
+                &session_ref,
+                session_start_source.as_deref(),
+                observation,
+                now,
+            )
+        {
+            return None;
+        }
         // A session-identity-only owner reports its IDENTITY through this path too, so
         // the same retirement gate applies here as on the state-report path.
-        if crate::detect::session_identity_only_integration(&source, &agent_label)
+        if (owner_conflicts
+            || crate::detect::session_identity_only_integration(&source, &agent_label))
             && !self.hook_report_survives_retirement(
                 &source,
                 &agent_label,
@@ -2301,15 +2425,14 @@ impl TerminalState {
             &agent_label,
             session_start_source.as_deref(),
         );
-        if self.current_session_owner_conflicts(&source, &agent_label)
-            || self
-                .conflicting_same_owner_session_ref(
-                    &source,
-                    &agent_label,
-                    &session_ref,
-                    session_start_source.as_deref(),
-                )
-                .is_some()
+        if self
+            .conflicting_same_owner_session_ref(
+                &source,
+                &agent_label,
+                &session_ref,
+                session_start_source.as_deref(),
+            )
+            .is_some()
         {
             return None;
         }
@@ -2327,7 +2450,6 @@ impl TerminalState {
             return None;
         }
 
-        let now = Instant::now();
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
@@ -2336,8 +2458,8 @@ impl TerminalState {
         // A start source this owner may replace on RECLAIMS the session it names:
         // an earlier replacement may have retired it, and leaving it retired would
         // refuse every later report for the session that is now live again. Upstream
-        // also admits a foreground takeover here; this fork has no takeover path, so
-        // only the replacement gate reaches it.
+        // admits reasonless takeover too; cross-owner admission here has already
+        // passed its separate process/reason and incoming-retirement gates.
         if session_replacement_allowed {
             self.forget_stale_hook_session(&source, &agent_label, &session_ref);
         }
@@ -2352,6 +2474,18 @@ impl TerminalState {
             );
             self.hook_authority = None;
         }
+        if owner_conflicts {
+            if let Some(old) = self.persisted_agent_session.as_ref() {
+                self.remember_stale_hook_session(
+                    old.source.clone(),
+                    old.agent.clone(),
+                    old.session_ref.clone(),
+                    now,
+                    None,
+                    None,
+                );
+            }
+        }
         if crate::detect::session_identity_only_integration(&source, &agent_label) {
             // For these integrations the session report IS the identity report: the
             // agent named it over its own hook, so it anchors identity (never state).
@@ -2363,7 +2497,7 @@ impl TerminalState {
             self.hook_identity = Some(HookIdentity {
                 source: source.clone(),
                 agent_label: agent_label.clone(),
-                reported_at: Instant::now(),
+                reported_at: now,
                 unconfirmed_since: self.unanswered_exit_to_inherit(&source, &agent_label),
             });
         }
@@ -2372,6 +2506,7 @@ impl TerminalState {
             agent: agent_label,
             session_ref,
         });
+        self.advance_session_owner_epoch(now);
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -2660,6 +2795,7 @@ impl TerminalState {
         self.hook_authority = None;
         self.hook_identity = None;
         self.persisted_agent_session = None;
+        self.session_owner_epoch = None;
         self.agent_metadata.clear();
         self.suppressed_hook_reports.clear();
         self.stale_hook_sessions.clear();
@@ -2752,6 +2888,616 @@ mod tests {
             .join(name)
             .display()
             .to_string()
+    }
+
+    #[test]
+    fn cross_owner_report_without_process_proof_keeps_retry_sequence() {
+        for (source, label, agent, reason) in [
+            ("zynk:claude", "claude", Agent::Claude, "startup"),
+            ("zynk:hermes", "hermes", Agent::Hermes, "new"),
+        ] {
+            let mut terminal = test_terminal();
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "zynk:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("old-session").unwrap(),
+            });
+            terminal.set_detected_state(Some(agent), AgentState::Idle);
+            terminal.hook_report_sequences.insert(source.into(), 5);
+            let before = terminal.current_session_identity_for_persistence();
+            let sequences = terminal.hook_report_sequences.clone();
+            assert!(terminal
+                .set_agent_session_ref_for_session_start(
+                    source.into(),
+                    label.into(),
+                    crate::agent_resume::AgentSessionRef::id("new-session"),
+                    Some(21),
+                    Some(reason.into()),
+                )
+                .is_none());
+            assert_eq!(terminal.current_session_identity_for_persistence(), before);
+            assert_eq!(terminal.hook_report_sequences, sequences, "{source}");
+            assert!(terminal.hook_authority.is_none());
+            assert!(terminal.hook_identity.is_none());
+        }
+    }
+
+    fn persisted_owner_at(now: Instant) -> TerminalState {
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session_at(
+            crate::agent_resume::PersistedAgentSession {
+                source: "zynk:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("old-session").unwrap(),
+            },
+            now,
+        );
+        terminal
+    }
+
+    fn claim_claude_at(
+        terminal: &mut TerminalState,
+        observation: Option<ForegroundProcessObservation>,
+        now: Instant,
+    ) -> Option<TerminalStateMutation> {
+        terminal.set_agent_session_ref_for_session_start_at(
+            "zynk:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-session"),
+            Some(21),
+            Some("startup".into()),
+            observation,
+            now,
+        )
+    }
+
+    #[test]
+    fn imported_owner_replacement_requires_new_owner_post_import_evidence() {
+        let imported_at = Instant::now();
+        let mut original = test_terminal();
+        original.record_identity_only_hook_report_at(
+            "zynk:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("imported-hermes"),
+            Some(10),
+            imported_at - Duration::from_secs(2),
+        );
+        let snapshot = original
+            .export_hook_retirement(imported_at - Duration::from_secs(1))
+            .unwrap();
+        let mut imported = test_terminal();
+        imported.restore_hook_retirement(snapshot, imported_at);
+        imported.require_imported_hook_identity_confirmation(imported_at);
+        let fence = imported.handoff_confirmation.clone();
+        assert!(fence.is_some());
+        // A real contradictory observation retires A, but does not confirm A.
+        let fresh_at = imported_at + Duration::from_millis(1);
+        observe_at(&mut imported, Some(Agent::Claude), false, fresh_at);
+        assert!(imported.hook_identity.is_none());
+        assert_eq!(imported.handoff_confirmation, fence);
+        assert!(imported.persisted_agent_session.is_some());
+        let dispatch_at = fresh_at + Duration::from_millis(1);
+        for (name, observation, accepted) in [
+            ("missing", None, false),
+            (
+                "old",
+                Some((Some(Agent::Claude), imported_at - Duration::from_millis(1))),
+                false,
+            ),
+            ("equal", Some((Some(Agent::Claude), imported_at)), false),
+            ("exit", Some((None, fresh_at)), false),
+            ("wrong", Some((Some(Agent::Pi), fresh_at)), false),
+            ("post-import", Some((Some(Agent::Claude), fresh_at)), true),
+        ] {
+            let mut terminal = imported.clone();
+            let before = terminal.current_session_identity_for_persistence();
+            let sequences = terminal.hook_report_sequences.clone();
+            let epoch = terminal.session_owner_epoch;
+            let mutation = claim_claude_at(
+                &mut terminal,
+                observation.map(|(agent, observed_at)| ForegroundProcessObservation {
+                    agent,
+                    observed_at,
+                }),
+                dispatch_at,
+            );
+            assert_eq!(mutation.is_some(), accepted, "{name}");
+            assert_eq!(terminal.handoff_confirmation, fence, "B must not confirm A");
+            assert!(terminal.hook_authority.is_none());
+            assert!(terminal.hook_identity.is_none());
+            if accepted {
+                assert!(mutation.unwrap().session_ref_changed);
+                let session = terminal.persisted_agent_session.as_ref().unwrap();
+                assert_eq!(
+                    (
+                        &*session.source,
+                        &*session.agent,
+                        &*session.session_ref.value
+                    ),
+                    ("zynk:claude", "claude", "claude-session")
+                );
+                let late = terminal.set_agent_session_ref_for_session_start_at(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("imported-hermes"),
+                    Some(99),
+                    Some("resume".into()),
+                    Some(ForegroundProcessObservation {
+                        agent: Some(Agent::Claude),
+                        observed_at: fresh_at,
+                    }),
+                    dispatch_at + Duration::from_millis(1),
+                );
+                assert!(late.is_none(), "late A callback regained the anchor");
+                assert_eq!(
+                    terminal.persisted_agent_session.as_ref().unwrap().agent,
+                    "claude"
+                );
+                assert!(
+                    !terminal.hook_report_sequences.contains_key("zynk:hermes")
+                        || terminal.hook_report_sequences["zynk:hermes"] == 10
+                );
+            } else {
+                assert_eq!(terminal.current_session_identity_for_persistence(), before);
+                assert_eq!(terminal.hook_report_sequences, sequences);
+                assert_eq!(terminal.session_owner_epoch, epoch);
+            }
+        }
+    }
+
+    #[test]
+    fn cross_owner_claim_requires_retired_live_representations_and_recorded_epoch() {
+        let now = Instant::now();
+        let mut persisted = persisted_owner_at(now);
+        observe_at(&mut persisted, Some(Agent::Claude), false, now);
+        let fresh = Some(ForegroundProcessObservation {
+            agent: Some(Agent::Claude),
+            observed_at: now + Duration::from_millis(1),
+        });
+        for shape in ["persisted", "full", "identity", "no-epoch"] {
+            let mut terminal = persisted.clone();
+            match shape {
+                "full" => {
+                    terminal.hook_authority = Some(HookAuthority {
+                        source: "zynk:codex".into(),
+                        agent_label: "codex".into(),
+                        state: AgentState::Idle,
+                        message: None,
+                        custom_status: None,
+                        reported_at: now,
+                        session_ref: crate::agent_resume::AgentSessionRef::id("old-session"),
+                        unconfirmed_since: None,
+                    })
+                }
+                "identity" => {
+                    terminal.hook_identity = Some(HookIdentity {
+                        source: "zynk:codex".into(),
+                        agent_label: "codex".into(),
+                        reported_at: now,
+                        unconfirmed_since: None,
+                    })
+                }
+                "no-epoch" => terminal.session_owner_epoch = None,
+                _ => {}
+            }
+            let before = terminal.clone();
+            assert_eq!(
+                claim_claude_at(&mut terminal, fresh, now + Duration::from_millis(2)).is_some(),
+                shape == "persisted",
+                "{shape}"
+            );
+            if shape != "persisted" {
+                assert_eq!(terminal.hook_authority, before.hook_authority);
+                assert_eq!(terminal.hook_identity, before.hook_identity);
+                assert_eq!(terminal.hook_report_sequences, before.hook_report_sequences);
+                assert_eq!(
+                    terminal.current_session_identity_for_persistence(),
+                    before.current_session_identity_for_persistence()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retiring_full_owner_preserves_epoch_of_the_copied_anchor() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:codex".into(),
+                "codex".into(),
+                AgentState::Idle,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("old-session"),
+                Some(1),
+                now,
+            )
+            .unwrap();
+        let capture = now + Duration::from_millis(1);
+        observe_at(&mut terminal, Some(Agent::Claude), false, capture);
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(terminal.session_owner_epoch, Some(now));
+        assert!(claim_claude_at(
+            &mut terminal,
+            Some(ForegroundProcessObservation {
+                agent: Some(Agent::Claude),
+                observed_at: capture,
+            }),
+            capture + Duration::from_millis(1)
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn newer_anchor_and_reimport_invalidate_older_owner_proof() {
+        let now = Instant::now();
+        let mut terminal = persisted_owner_at(now);
+        observe_at(&mut terminal, Some(Agent::Claude), false, now);
+        let observation = Some(ForegroundProcessObservation {
+            agent: Some(Agent::Claude),
+            observed_at: now + Duration::from_millis(1),
+        });
+        terminal.require_imported_hook_identity_confirmation(now + Duration::from_millis(2));
+        terminal.require_imported_hook_identity_confirmation(now);
+        assert!(
+            claim_claude_at(&mut terminal, observation, now + Duration::from_millis(3)).is_none()
+        );
+        assert_eq!(
+            terminal.session_owner_epoch,
+            Some(now + Duration::from_millis(2))
+        );
+        // Future-time rejection is internal consistency, not a live refusal class.
+        let mut future_control = persisted_owner_at(now);
+        observe_at(&mut future_control, Some(Agent::Claude), false, now);
+        assert!(claim_claude_at(
+            &mut future_control,
+            Some(ForegroundProcessObservation {
+                agent: Some(Agent::Claude),
+                observed_at: now + Duration::from_secs(2),
+            }),
+            now
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn cross_owner_reason_allowlist_and_reference_kinds_are_explicit() {
+        let now = Instant::now();
+        for (source, label, agent, reasons) in [
+            (
+                "zynk:claude",
+                "claude",
+                Agent::Claude,
+                &["startup", "clear", "resume", "compact"][..],
+            ),
+            (
+                "zynk:codex",
+                "codex",
+                Agent::Codex,
+                &["startup", "clear", "resume", "compact"][..],
+            ),
+            (
+                "zynk:hermes",
+                "hermes",
+                Agent::Hermes,
+                &["startup", "new", "resume"][..],
+            ),
+            ("zynk:pi", "pi", Agent::Pi, &["new", "resume", "fork"][..]),
+            (
+                "zynk:qwen",
+                "qwen",
+                Agent::Qwen,
+                &["startup", "clear", "resume", "compact", "branch"][..],
+            ),
+            (
+                "zynk:opencode",
+                "opencode",
+                Agent::OpenCode,
+                &["select"][..],
+            ),
+        ] {
+            for reason in reasons {
+                for path in [false, true] {
+                    let mut terminal = persisted_owner_at(now);
+                    if agent == Agent::Codex {
+                        let old = terminal.persisted_agent_session.as_mut().unwrap();
+                        old.source = "zynk:hermes".into();
+                        old.agent = "hermes".into();
+                    }
+                    let captured_at = now + Duration::from_millis(1);
+                    observe_at(&mut terminal, Some(agent), false, captured_at);
+                    let before = terminal.current_session_identity_for_persistence();
+                    let session_ref = if path {
+                        crate::agent_resume::AgentSessionRef::path(test_session_path(
+                            "session.jsonl",
+                        ))
+                    } else {
+                        crate::agent_resume::AgentSessionRef::id("new-session")
+                    };
+                    let expected_ref = session_ref.clone().unwrap();
+                    let mutation = terminal.set_agent_session_ref_for_session_start_at(
+                        source.into(),
+                        label.into(),
+                        session_ref,
+                        Some(1),
+                        Some((*reason).into()),
+                        Some(ForegroundProcessObservation {
+                            agent: Some(agent),
+                            observed_at: captured_at,
+                        }),
+                        captured_at + Duration::from_millis(1),
+                    );
+                    let accepted = !path || agent == Agent::Pi;
+                    assert_eq!(
+                        mutation.is_some(),
+                        accepted,
+                        "{source}/{reason}/path={path}"
+                    );
+                    if accepted {
+                        assert!(mutation.unwrap().session_ref_changed);
+                        let session = terminal.persisted_agent_session.as_ref().unwrap();
+                        assert_eq!((&*session.source, &*session.agent), (source, label));
+                        assert_eq!(session.session_ref, expected_ref);
+                        assert!(terminal.hook_authority.is_none());
+                        assert_eq!(
+                            terminal.hook_identity.is_some(),
+                            matches!(agent, Agent::Hermes | Agent::Qwen)
+                        );
+                    } else {
+                        assert_eq!(terminal.current_session_identity_for_persistence(), before);
+                        assert!(terminal.hook_report_sequences.is_empty());
+                    }
+                }
+            }
+        }
+        for (source, label, agent, reason) in [
+            ("zynk:claude", "claude", Some(Agent::Claude), None),
+            ("zynk:claude", "claude", Some(Agent::Claude), Some("other")),
+            (
+                "custom:claude",
+                "claude",
+                Some(Agent::Claude),
+                Some("startup"),
+            ),
+            (
+                "zynk:claude",
+                "Claude",
+                Some(Agent::Claude),
+                Some("startup"),
+            ),
+            (
+                "zynk:opencode",
+                "opencode",
+                Some(Agent::OpenCode),
+                Some("new"),
+            ),
+            (
+                "zynk:opencode",
+                "opencode",
+                Some(Agent::OpenCode),
+                Some("resume"),
+            ),
+            (
+                "zynk:antigravity_cli",
+                "agy",
+                Some(Agent::Antigravity),
+                None,
+            ),
+            ("zynk:omp", "omp", None, Some("new")),
+            ("zynk:pi", "pi", Some(Agent::Pi), Some("startup")),
+        ] {
+            let mut terminal = persisted_owner_at(now);
+            observe_at(&mut terminal, agent, false, now);
+            let before = terminal.current_session_identity_for_persistence();
+            assert!(
+                terminal
+                    .set_agent_session_ref_for_session_start_at(
+                        source.into(),
+                        label.into(),
+                        crate::agent_resume::AgentSessionRef::id("new"),
+                        Some(1),
+                        reason.map(str::to_string),
+                        Some(ForegroundProcessObservation {
+                            agent,
+                            observed_at: now + Duration::from_millis(1)
+                        }),
+                        now + Duration::from_millis(2),
+                    )
+                    .is_none(),
+                "{source}/{label}/{reason:?}"
+            );
+            assert_eq!(terminal.current_session_identity_for_persistence(), before);
+            assert!(terminal.hook_report_sequences.is_empty());
+        }
+    }
+
+    #[test]
+    fn cross_owner_wrong_detected_label_does_not_spend_the_retry_sequence() {
+        let now = Instant::now();
+        for detected in [None, Some(Agent::Pi)] {
+            let mut terminal = persisted_owner_at(now);
+            observe_at(&mut terminal, detected, false, now);
+            terminal
+                .hook_report_sequences
+                .insert("zynk:claude".into(), 5);
+            let before = terminal.current_session_identity_for_persistence();
+            assert!(claim_claude_at(
+                &mut terminal,
+                Some(ForegroundProcessObservation {
+                    agent: Some(Agent::Claude),
+                    observed_at: now + Duration::from_millis(1),
+                }),
+                now + Duration::from_millis(2),
+            )
+            .is_none());
+            assert_eq!(terminal.hook_report_sequences["zynk:claude"], 5);
+            assert_eq!(terminal.current_session_identity_for_persistence(), before);
+            assert_eq!(terminal.session_owner_epoch, Some(now));
+        }
+    }
+
+    #[test]
+    fn cross_owner_eligibility_precedes_mutating_retirement_and_allows_a_fresh_generation() {
+        let now = Instant::now();
+        for (source, label, agent, reason, resets_retired_sequence) in [
+            ("zynk:pi", "pi", Agent::Pi, "new", true),
+            ("zynk:hermes", "hermes", Agent::Hermes, "new", true),
+            ("zynk:claude", "claude", Agent::Claude, "startup", false),
+        ] {
+            assert_eq!(
+                TerminalState::hook_report_retirement_applies(source, label),
+                resets_retired_sequence
+            );
+            let mut terminal = persisted_owner_at(now);
+            let captured_at = now + Duration::from_millis(1);
+            observe_at(&mut terminal, Some(agent), false, captured_at);
+            terminal.remember_stale_hook_session(
+                source.into(),
+                label.into(),
+                crate::agent_resume::AgentSessionRef::id("retired-B").unwrap(),
+                now,
+                Some(captured_at),
+                None,
+            );
+            terminal.hook_report_sequences.insert(source.into(), 900);
+            for proof in [false, true] {
+                let result = terminal.set_agent_session_ref_for_session_start_at(
+                    source.into(),
+                    label.into(),
+                    crate::agent_resume::AgentSessionRef::id("new-B"),
+                    Some(1),
+                    Some(reason.into()),
+                    proof.then_some(ForegroundProcessObservation {
+                        agent: Some(agent),
+                        observed_at: captured_at,
+                    }),
+                    now + Duration::from_millis(2),
+                );
+                let accepted = proof && resets_retired_sequence;
+                assert_eq!(result.is_some(), accepted, "{source}/proof={proof}");
+                assert_eq!(
+                    terminal.hook_report_sequences[source],
+                    if accepted { 1 } else { 900 }
+                );
+                assert_eq!(
+                    terminal.persisted_agent_session.as_ref().unwrap().agent,
+                    if accepted { label } else { "codex" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cross_owner_incoming_retired_session_still_requires_its_existing_reclaim_evidence() {
+        let now = Instant::now();
+        for (source, label, agent, evidence) in [
+            ("zynk:hermes", "hermes", Agent::Hermes, false),
+            ("zynk:hermes", "hermes", Agent::Hermes, true),
+            ("zynk:pi", "pi", Agent::Pi, false),
+            ("zynk:pi", "pi", Agent::Pi, true),
+        ] {
+            let mut terminal = persisted_owner_at(now);
+            let capture = now + Duration::from_millis(1);
+            observe_at(&mut terminal, Some(agent), false, capture);
+            let reference = crate::agent_resume::AgentSessionRef::id("old-B").unwrap();
+            terminal.remember_stale_hook_session(
+                source.into(),
+                label.into(),
+                reference.clone(),
+                now,
+                evidence.then_some(capture),
+                None,
+            );
+            terminal.hook_report_sequences.insert(source.into(), 900);
+            let result = terminal.set_agent_session_ref_for_session_start_at(
+                source.into(),
+                label.into(),
+                Some(reference),
+                Some(1),
+                Some("resume".into()),
+                Some(ForegroundProcessObservation {
+                    agent: Some(agent),
+                    observed_at: capture,
+                }),
+                capture + Duration::from_millis(1),
+            );
+            assert_eq!(result.is_some(), evidence, "{source}/evidence={evidence}");
+            assert_eq!(
+                terminal.hook_report_sequences[source],
+                if evidence { 1 } else { 900 }
+            );
+        }
+    }
+
+    #[test]
+    fn owner_epoch_tracks_accepted_setters_but_not_metadata_and_resets_on_respawn() {
+        let now = Instant::now();
+        for shape in ["full", "identity", "session", "persisted"] {
+            let mut terminal = test_terminal();
+            for offset in [2, 1, 3] {
+                let report_at = now + Duration::from_millis(offset);
+                let reference = crate::agent_resume::AgentSessionRef::id("same");
+                match shape {
+                    "full" => {
+                        terminal
+                            .set_hook_authority_with_custom_status_at(
+                                "zynk:claude".into(),
+                                "claude".into(),
+                                AgentState::Idle,
+                                None,
+                                None,
+                                reference,
+                                None,
+                                report_at,
+                            )
+                            .unwrap();
+                    }
+                    "identity" => {
+                        terminal.record_identity_only_hook_report_at(
+                            "zynk:hermes".into(),
+                            "hermes".into(),
+                            reference,
+                            None,
+                            report_at,
+                        );
+                    }
+                    "session" => {
+                        terminal
+                            .set_agent_session_ref_for_session_start_at(
+                                "zynk:claude".into(),
+                                "claude".into(),
+                                reference,
+                                None,
+                                Some("resume".into()),
+                                None,
+                                report_at,
+                            )
+                            .unwrap();
+                    }
+                    _ => terminal.set_persisted_agent_session_at(
+                        crate::agent_resume::PersistedAgentSession {
+                            source: "zynk:claude".into(),
+                            agent: "claude".into(),
+                            session_ref: reference.unwrap(),
+                        },
+                        report_at,
+                    ),
+                }
+                assert_eq!(
+                    terminal.session_owner_epoch,
+                    Some(now + Duration::from_millis(offset.max(2))),
+                    "{shape}"
+                );
+            }
+            terminal.set_agent_name("name only".into());
+            assert_eq!(
+                terminal.session_owner_epoch,
+                Some(now + Duration::from_millis(3))
+            );
+            terminal.clear_agent_runtime_identity_after_respawn();
+            assert_eq!(terminal.session_owner_epoch, None);
+        }
     }
 
     /// The instant the production code ACTUALLY stamped on the hook authority it just

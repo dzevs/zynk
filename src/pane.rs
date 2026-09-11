@@ -23,6 +23,7 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 use crate::render_signal::RenderSignal;
+use crate::terminal::state::ForegroundProcessObservation;
 
 mod agent_detection;
 mod cursor;
@@ -179,11 +180,47 @@ fn active_pending_release(
 }
 
 type PendingProcessExits = Arc<Mutex<Vec<(Option<Agent>, std::time::Instant)>>>;
+type ProcessObservationSlot = Arc<Mutex<Option<ForegroundProcessObservation>>>;
+
+fn record_process_observation(
+    slot: &Mutex<Option<ForegroundProcessObservation>>,
+    agent: Option<Agent>,
+    observed_at: std::time::Instant,
+) {
+    let Ok(mut current) = slot.lock() else {
+        return;
+    };
+    match current.as_mut() {
+        Some(old) if old.observed_at > observed_at => {}
+        Some(old) if old.observed_at == observed_at => {
+            // Equal-time loss or contradictory labels cannot be revived by a
+            // positive arriving later. Recovery needs a strictly newer probe.
+            if old.agent != agent {
+                old.agent = None;
+            }
+        }
+        _ => *current = Some(ForegroundProcessObservation { agent, observed_at }),
+    }
+}
 
 #[derive(Clone)]
 struct DetectionEventSender {
     sender: mpsc::Sender<AppEvent>,
     pending_exits: PendingProcessExits,
+    process_observation: ProcessObservationSlot,
+}
+
+impl DetectionEventSender {
+    fn record_foreground_probe(
+        &self,
+        native_group: Option<u32>,
+        probed_group: Option<u32>,
+        agent: Option<Agent>,
+        observed_at: std::time::Instant,
+    ) {
+        let native_agent = agent.filter(|_| native_group.is_some() && native_group == probed_group);
+        record_process_observation(&self.process_observation, native_agent, observed_at);
+    }
 }
 
 async fn publish_state_changed_event(
@@ -199,6 +236,7 @@ async fn publish_state_changed_event(
     // Record before the first queue await. Receipt and handoff readers must see
     // the exit even when the bounded AppEvent channel has no free slot.
     if process_exited {
+        record_process_observation(&state_events.process_observation, None, observed_at);
         state_events
             .pending_exits
             .lock()
@@ -674,6 +712,7 @@ fn spawn_basic_detection_task(
             tokio::select! {
                 _ = tokio::time::sleep(sleep_duration) => {}
                 _ = detect_reset.notified() => {
+                    record_process_observation(&state_events.process_observation, None, std::time::Instant::now());
                     agent_presence = AgentDetectionPresence::from_agent(None);
                     state = AgentState::Unknown;
                     last_visible_idle = false;
@@ -750,6 +789,12 @@ fn spawn_basic_detection_task(
                         *pending_release = None;
                     }
                 }
+                state_events.record_foreground_probe(
+                    foreground_pgid,
+                    process_group_id,
+                    new_agent,
+                    now,
+                );
                 let previous_agent = agent_presence.current_agent();
                 fresh_process_agent = new_agent;
                 let changed = match foreground_shell_agent_action(
@@ -1027,6 +1072,7 @@ pub struct PaneRuntime {
     // A single detector awaits each send, bounding this to queue capacity + one.
     // Entries retire only after AppState has applied that exact observation.
     pending_process_exits: PendingProcessExits,
+    process_observation: ProcessObservationSlot,
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
@@ -1824,6 +1870,7 @@ impl PaneRuntime {
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let pending_process_exits = Arc::new(Mutex::new(Vec::new()));
+        let process_observation = Arc::new(Mutex::new(None));
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
             pane_id,
             child_pid.clone(),
@@ -1833,6 +1880,7 @@ impl PaneRuntime {
             DetectionEventSender {
                 sender: events,
                 pending_exits: pending_process_exits.clone(),
+                process_observation: process_observation.clone(),
             },
         );
 
@@ -1849,6 +1897,7 @@ impl PaneRuntime {
             detection_content_seq,
             full_lifecycle_authority_active,
             pending_process_exits,
+            process_observation,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: true,
@@ -1902,6 +1951,7 @@ impl PaneRuntime {
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let pending_process_exits = Arc::new(Mutex::new(Vec::new()));
+        let process_observation = Arc::new(Mutex::new(None));
         {
             let child_pid = child_pid.clone();
             let child_start_time = child_start_time.clone();
@@ -2003,6 +2053,7 @@ impl PaneRuntime {
             let state_events = DetectionEventSender {
                 sender: events.clone(),
                 pending_exits: pending_process_exits.clone(),
+                process_observation: process_observation.clone(),
             };
             let detection_content_seq = detection_content_seq.clone();
             let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
@@ -2054,6 +2105,7 @@ impl PaneRuntime {
                     tokio::select! {
                         _ = tokio::time::sleep(tick) => {}
                         _ = detect_reset.notified() => {
+                            record_process_observation(&state_events.process_observation, None, Instant::now());
                             agent_presence = AgentDetectionPresence::from_agent(None);
                             state = AgentState::Unknown;
                             last_visible_idle = false;
@@ -2138,6 +2190,12 @@ impl PaneRuntime {
                                 }
                             }
 
+                            state_events.record_foreground_probe(
+                                foreground_pgid,
+                                process_group_id,
+                                new_agent,
+                                now,
+                            );
                             let previous_agent = agent_presence.current_agent();
                             fresh_process_agent = new_agent;
                             let changed = match foreground_shell_agent_action(
@@ -2381,6 +2439,7 @@ impl PaneRuntime {
             detection_content_seq,
             full_lifecycle_authority_active,
             pending_process_exits,
+            process_observation,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: false,
@@ -2389,6 +2448,7 @@ impl PaneRuntime {
     }
 
     pub fn begin_graceful_release(&self, agent: Agent) {
+        record_process_observation(&self.process_observation, None, std::time::Instant::now());
         if let Ok(mut pending_release) = self.pending_release.lock() {
             *pending_release = Some(PendingAgentRelease {
                 agent,
@@ -2399,7 +2459,19 @@ impl PaneRuntime {
     }
 
     pub fn reset_agent_detection(&self) {
+        record_process_observation(&self.process_observation, None, std::time::Instant::now());
         self.detect_reset_notify.notify_one();
+    }
+
+    pub(crate) fn foreground_process_observation(&self) -> Option<ForegroundProcessObservation> {
+        if self
+            .child_wait_completed
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            return None;
+        }
+        *self.process_observation.lock().ok()?
     }
 
     #[cfg(test)]
@@ -2773,6 +2845,22 @@ impl PaneRuntime {
 
 #[cfg(test)]
 impl PaneRuntime {
+    pub(crate) fn test_record_foreground_probe(
+        &self,
+        native_group: Option<u32>,
+        probed_group: Option<u32>,
+        agent: Option<Agent>,
+        observed_at: std::time::Instant,
+    ) {
+        let (sender, _rx) = mpsc::channel(1);
+        DetectionEventSender {
+            sender,
+            pending_exits: self.pending_process_exits.clone(),
+            process_observation: self.process_observation.clone(),
+        }
+        .record_foreground_probe(native_group, probed_group, agent, observed_at);
+    }
+
     pub(crate) async fn test_publish_process_exit(
         &self,
         tx: mpsc::Sender<AppEvent>,
@@ -2784,6 +2872,7 @@ impl PaneRuntime {
             DetectionEventSender {
                 sender: tx,
                 pending_exits: self.pending_process_exits.clone(),
+                process_observation: self.process_observation.clone(),
             },
             pane_id,
             Some(agent),
@@ -2858,6 +2947,7 @@ impl PaneRuntime {
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
                 pending_process_exits: Arc::new(Mutex::new(Vec::new())),
+                process_observation: Arc::new(Mutex::new(None)),
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
@@ -2871,6 +2961,322 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_process_slot_orders_capture_time_and_equal_time_loss() {
+        let now = std::time::Instant::now();
+        for reverse in [false, true] {
+            for other in [None, Some(Agent::Pi)] {
+                let slot = Mutex::new(None);
+                let mut agents = [Some(Agent::Claude), other];
+                if reverse {
+                    agents.reverse();
+                }
+                for agent in agents {
+                    record_process_observation(&slot, agent, now);
+                }
+                assert_eq!(slot.lock().unwrap().unwrap().agent, None);
+                record_process_observation(&slot, Some(Agent::Claude), now);
+                assert_eq!(
+                    slot.lock().unwrap().unwrap().agent,
+                    None,
+                    "equal proof revived loss"
+                );
+                record_process_observation(
+                    &slot,
+                    Some(Agent::Claude),
+                    now - std::time::Duration::from_millis(1),
+                );
+                assert_eq!(slot.lock().unwrap().unwrap().observed_at, now);
+                let newer = now + std::time::Duration::from_millis(1);
+                record_process_observation(&slot, Some(Agent::Claude), newer);
+                record_process_observation(&slot, None, now);
+                assert_eq!(
+                    *slot.lock().unwrap(),
+                    Some(ForegroundProcessObservation {
+                        agent: Some(Agent::Claude),
+                        observed_at: newer,
+                    })
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_proof_requires_a_matching_native_group_not_an_inferred_group() {
+        for (native, probed, agent, expected) in [
+            (Some(7), Some(7), Some(Agent::Claude), Some(Agent::Claude)),
+            (Some(7), Some(8), Some(Agent::Claude), None),
+            (None, Some(7), Some(Agent::Claude), None),
+            (None, None, Some(Agent::Claude), None),
+            (Some(7), None, Some(Agent::Claude), None),
+            (Some(7), Some(7), None, None),
+        ] {
+            let (sender, _rx) = mpsc::channel(1);
+            let slot = Arc::new(Mutex::new(None));
+            let events = DetectionEventSender {
+                sender,
+                pending_exits: Arc::new(Mutex::new(Vec::new())),
+                process_observation: slot.clone(),
+            };
+            let capture = std::time::Instant::now();
+            events.record_foreground_probe(native, probed, agent, capture);
+            assert_eq!(
+                *slot.lock().unwrap(),
+                Some(ForegroundProcessObservation {
+                    agent: expected,
+                    observed_at: capture,
+                }),
+                "{native:?}/{probed:?}/{agent:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_screen_publication_cannot_supply_owner_process_proof() {
+        let (sender, mut rx) = mpsc::channel(1);
+        let slot = Arc::new(Mutex::new(None));
+        let events = DetectionEventSender {
+            sender,
+            pending_exits: Arc::new(Mutex::new(Vec::new())),
+            process_observation: slot.clone(),
+        };
+        let capture = std::time::Instant::now();
+        for has_probe in [false, true] {
+            if has_probe {
+                events.record_foreground_probe(Some(7), Some(7), Some(Agent::Claude), capture);
+            }
+            let before = *slot.lock().unwrap();
+            publish_state_changed_event(
+                events.clone(),
+                PaneId::alloc(),
+                Some(Agent::Claude),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                capture + std::time::Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(
+                *slot.lock().unwrap(),
+                before,
+                "screen publish refreshed proof"
+            );
+            rx.recv().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn process_exit_invalidates_owner_proof_before_waiting_for_queue_space() {
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(AppEvent::PaneDied {
+            pane_id: PaneId::alloc(),
+        })
+        .unwrap();
+        let capture = std::time::Instant::now();
+        runtime.test_record_foreground_probe(Some(7), Some(7), Some(Agent::Claude), capture);
+        assert_eq!(
+            runtime.foreground_process_observation().unwrap().agent,
+            Some(Agent::Claude)
+        );
+        let exit_at = capture + std::time::Duration::from_millis(1);
+        let publish =
+            runtime.test_publish_process_exit(tx, PaneId::alloc(), Agent::Claude, exit_at);
+        tokio::pin!(publish);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut publish)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            runtime.foreground_process_observation(),
+            Some(ForegroundProcessObservation {
+                agent: None,
+                observed_at: exit_at,
+            }),
+            "exit was hidden behind a full event queue"
+        );
+        rx.recv().await.unwrap();
+        publish.await;
+    }
+
+    #[tokio::test]
+    async fn owner_process_proof_is_invalidated_by_release_reset_wait_and_poison() {
+        let (mut runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        assert_eq!(runtime.foreground_process_observation(), None);
+        for release in [false, true] {
+            let now = std::time::Instant::now();
+            runtime.test_record_foreground_probe(Some(7), Some(7), Some(Agent::Claude), now);
+            assert_eq!(
+                runtime.foreground_process_observation().unwrap().agent,
+                Some(Agent::Claude)
+            );
+            if release {
+                runtime.begin_graceful_release(Agent::Claude);
+            } else {
+                runtime.reset_agent_detection();
+            }
+            assert_eq!(
+                runtime.foreground_process_observation().unwrap().agent,
+                None
+            );
+            runtime.test_record_foreground_probe(Some(7), Some(7), Some(Agent::Claude), now);
+            assert_eq!(
+                runtime.foreground_process_observation().unwrap().agent,
+                None,
+                "in-flight pre-reset probe revived"
+            );
+        }
+        runtime.test_record_foreground_probe(
+            Some(7),
+            Some(7),
+            Some(Agent::Claude),
+            std::time::Instant::now(),
+        );
+        let wait = Arc::new(AtomicBool::new(false));
+        runtime.child_wait_completed = Some(wait.clone());
+        assert_eq!(
+            runtime.foreground_process_observation().unwrap().agent,
+            Some(Agent::Claude)
+        );
+        wait.store(true, Ordering::Release);
+        assert_eq!(runtime.foreground_process_observation(), None);
+        wait.store(false, Ordering::Release);
+        let slot = runtime.process_observation.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = slot.lock().unwrap();
+            panic!("poison owner observation for refusal control");
+        })
+        .join()
+        .is_err());
+        assert_eq!(runtime.foreground_process_observation(), None);
+        runtime.test_record_foreground_probe(
+            Some(7),
+            Some(7),
+            Some(Agent::Claude),
+            std::time::Instant::now(),
+        );
+        assert_eq!(runtime.foreground_process_observation(), None);
+        let (fresh_runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        assert_eq!(fresh_runtime.foreground_process_observation(), None);
+    }
+
+    async fn runtime_with_native_probe_child() -> (PaneRuntime, mpsc::Receiver<AppEvent>) {
+        let (events, rx) = mpsc::channel(16);
+        let runtime = PaneRuntime::spawn_argv_command(
+            PaneId::alloc(),
+            24,
+            80,
+            std::env::current_dir().unwrap(),
+            &["/usr/bin/sleep".into(), "30".into()],
+            &PaneLaunchEnv::from_extra(vec![("ZYNK_AGENT".into(), "claude".into())]),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+        (runtime, rx)
+    }
+
+    async fn wait_for_native_owner_proof(runtime: &PaneRuntime) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if runtime
+                .foreground_process_observation()
+                .is_some_and(|o| o.agent == Some(Agent::Claude))
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "real detector never published native owner evidence"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn detector_reset_invalidates_without_a_new_probe(runtime: &PaneRuntime) {
+        struct RestorePid<'a>(&'a AtomicU32, u32);
+        impl Drop for RestorePid<'_> {
+            fn drop(&mut self) {
+                self.0.store(self.1, Ordering::Release);
+            }
+        }
+        let first = runtime.foreground_process_observation().unwrap();
+        // Stop probe eligibility, not the real child. Restore even on panic so
+        // runtime teardown still owns and reaps that exact child.
+        let restore = RestorePid(
+            &runtime.child_pid,
+            runtime.child_pid.swap(0, Ordering::AcqRel),
+        );
+        runtime.detect_reset_notify.notify_one();
+        let reset = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if runtime
+                    .foreground_process_observation()
+                    .is_some_and(|o| o.agent.is_none() && o.observed_at > first.observed_at)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        drop(restore);
+        reset.expect("detector reset left positive proof while no new probe was possible");
+    }
+
+    #[tokio::test]
+    async fn spawn_detector_records_native_owner_process_proof() {
+        let (runtime, _rx) = runtime_with_native_probe_child().await;
+        wait_for_native_owner_proof(&runtime).await;
+        let pid = runtime.child_pid.load(Ordering::Acquire);
+        assert_eq!(
+            crate::platform::process_agent_hint(pid),
+            Some(Agent::Claude)
+        );
+        assert_eq!(crate::platform::foreground_process_group_id(pid), Some(pid));
+        detector_reset_invalidates_without_a_new_probe(&runtime).await;
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn handoff_detector_records_native_owner_process_proof() {
+        let (mut runtime, _rx) = runtime_with_native_probe_child().await;
+        runtime.detect_handle.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !runtime.detect_handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (sender, _rx) = mpsc::channel(16);
+        runtime.process_observation = Arc::new(Mutex::new(None));
+        let (handle, reset, pending_release) = spawn_basic_detection_task(
+            runtime.pane_id,
+            runtime.child_pid.clone(),
+            runtime.terminal.clone(),
+            runtime.detection_content_seq.clone(),
+            runtime.full_lifecycle_authority_active.clone(),
+            DetectionEventSender {
+                sender,
+                pending_exits: runtime.pending_process_exits.clone(),
+                process_observation: runtime.process_observation.clone(),
+            },
+        );
+        runtime.detect_handle = handle;
+        runtime.detect_reset_notify = reset;
+        runtime.pending_release = pending_release;
+        wait_for_native_owner_proof(&runtime).await;
+        detector_reset_invalidates_without_a_new_probe(&runtime).await;
+        runtime.shutdown();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn imported_runtime_reports_size_and_ignores_empty_clipboard_before_resize() {
@@ -3449,6 +3855,7 @@ mod tests {
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             pending_process_exits: Arc::new(Mutex::new(Vec::new())),
+            process_observation: Arc::new(Mutex::new(None)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
@@ -3482,6 +3889,7 @@ mod tests {
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             pending_process_exits: Arc::new(Mutex::new(Vec::new())),
+            process_observation: Arc::new(Mutex::new(None)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
@@ -4179,6 +4587,7 @@ mod tests {
             DetectionEventSender {
                 sender: tx.clone(),
                 pending_exits: Arc::new(Mutex::new(Vec::new())),
+                process_observation: Arc::new(Mutex::new(None)),
             },
             pane_id,
             Some(Agent::Pi),
@@ -4265,6 +4674,7 @@ mod tests {
         let state_events = DetectionEventSender {
             sender: tx,
             pending_exits: Arc::new(Mutex::new(Vec::new())),
+            process_observation: Arc::new(Mutex::new(None)),
         };
         assert!(
             skip_screen_detection_under_hook_authority(

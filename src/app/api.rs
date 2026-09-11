@@ -251,7 +251,18 @@ impl App {
             None
         };
         let previous_toast = self.state.toast.clone();
-        let pane_updates = self.state.handle_app_event(ev);
+        let pane_updates = if let AppEvent::AgentSessionReported { pane_id, .. } = &ev {
+            let observation = self.find_pane(*pane_id).and_then(|(ws_idx, _)| {
+                self.lookup_runtime_sender(ws_idx, *pane_id)
+                    .and_then(|runtime| runtime.foreground_process_observation())
+            });
+            // Capture AFTER the slot read: a probe during queue delay remains
+            // eligible. Neither this time nor the observation comes from IPC.
+            self.state
+                .handle_app_event_with_process_observation_at(ev, observation, Instant::now())
+        } else {
+            self.state.handle_app_event(ev)
+        };
         if let Some((pane_id, agent, observed_at)) = applied_exit {
             if let Some((ws_idx, _)) = self.find_pane(pane_id) {
                 if let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) {
@@ -1299,6 +1310,91 @@ mod tests {
             },
         );
         app
+    }
+
+    #[tokio::test]
+    async fn queued_session_report_uses_process_evidence_captured_before_dispatch() {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("owner-transition")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "zynk:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("old-session").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let report = || AppEvent::AgentSessionReported {
+            pane_id,
+            source: "zynk:claude".into(),
+            agent_label: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("new-session"),
+            seq: Some(21),
+            session_start_source: Some("startup".into()),
+        };
+        app.state.session_dirty = false;
+        // Missing runtime and an empty runtime must both refuse without spending seq21.
+        app.handle_internal_event(report());
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        app.handle_internal_event(report());
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .persisted_agent_session
+                .as_ref()
+                .unwrap()
+                .agent,
+            "codex"
+        );
+        assert!(!app.state.session_dirty);
+
+        let received_at = Instant::now();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(report()).await.unwrap();
+        let captured_at = loop {
+            let captured = Instant::now();
+            if captured > received_at {
+                break captured;
+            }
+            std::hint::spin_loop();
+        };
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_record_foreground_probe(Some(7), Some(7), Some(Agent::Claude), captured_at);
+        // The same event through pure-state dispatch has no runtime evidence.
+        assert!(app.state.handle_app_event(report()).is_empty());
+        assert!(!app.state.session_dirty);
+        app.handle_internal_event(rx.recv().await.unwrap());
+        let terminal = &app.state.terminals[&terminal_id];
+        let session = terminal.persisted_agent_session.as_ref().unwrap();
+        assert_eq!(
+            (
+                &*session.source,
+                &*session.agent,
+                &*session.session_ref.value
+            ),
+            ("zynk:claude", "claude", "new-session"),
+            "queued report did not use post-receipt, pre-dispatch process evidence"
+        );
+        assert!(app.state.session_dirty);
+        assert!(
+            terminal.hook_authority.is_none(),
+            "session-only report created lifecycle authority"
+        );
+        assert!(terminal.confirmed_hook_owner().is_none());
     }
 
     #[tokio::test]

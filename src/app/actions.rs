@@ -2599,6 +2599,15 @@ impl AppState {
     }
 
     pub fn handle_app_event(&mut self, event: AppEvent) -> Vec<PaneStateUpdate> {
+        self.handle_app_event_with_process_observation_at(event, None, std::time::Instant::now())
+    }
+
+    pub(crate) fn handle_app_event_with_process_observation_at(
+        &mut self,
+        event: AppEvent,
+        process_observation: Option<crate::terminal::state::ForegroundProcessObservation>,
+        dispatch_at: std::time::Instant,
+    ) -> Vec<PaneStateUpdate> {
         match event {
             AppEvent::PaneDied { pane_id } => {
                 self.handle_pane_died(pane_id);
@@ -2739,12 +2748,14 @@ impl AppState {
                 session_start_source,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_agent_session_ref_for_session_start(
+                    terminal.set_agent_session_ref_for_session_start_at(
                         source,
                         agent_label,
                         session_ref,
                         seq,
                         session_start_source,
+                        process_observation,
+                        dispatch_at,
                     )
                 })
                 .into_iter()
