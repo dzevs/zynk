@@ -2799,3 +2799,21 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   notice and NOTICE index for the post-relicense source.
   Protocol19 and D-M5-6's full-feature M9 deferral remain unchanged.
   **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-20: Pane Automation Tab Modifiers
+
+- **TAKE** `adb50cba9b15583db019bb655119915869e8c44e`: Ghostty represents
+  BackTab as Tab plus SHIFT. Add the implied modifier without replacing any
+  explicit CTRL/ALT/SUPER bits. Port the API shift+tab byte control and the
+  legacy/Kitty pane controls, with repeat-count and explicit-Control positives.
+- **TAKE / ADAPT** `ea047db8e47defc80aee2d1972cdccc3b61ad4e1`: legacy
+  CTRL+Tab uses the fork encoder, not Ghostty's modifyOtherKeys sequence.
+  Put this inside encode_terminal_key_once so the existing repeat-count
+  wrapper still handles all events. Keep Kitty CTRL+Tab encoded as CSI-u;
+  press/repeat/release and count3 controls cover the legacy side.
+- All three new controls failed behaviorally before the production change:
+  Shift-Tab emitted TAB through both pane and API, while legacy CTRL+Tab
+  emitted an unsupported escape sequence. Do not import upstream's release
+  changelog file. No API/caller policy, session authority or protocol change;
+  protocol19 stays pinned and M6-06 stays held.
+  **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.

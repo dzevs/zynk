@@ -1705,6 +1705,13 @@ impl GhosttyPaneTerminal {
         key: crate::input::TerminalKey,
         protocol: crate::input::KeyboardProtocol,
     ) -> Vec<u8> {
+        if matches!(protocol, crate::input::KeyboardProtocol::Legacy)
+            && key.code == crossterm::event::KeyCode::Tab
+            && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+        {
+            return crate::input::encode_terminal_key(key, protocol);
+        }
+
         if ghostty_prefers_zynk_text_encoding(&key) {
             return crate::input::encode_terminal_key(key, protocol);
         }
@@ -3740,6 +3747,92 @@ mod tests {
         );
 
         assert_eq!(encoded, b"a");
+    }
+
+    #[test]
+    fn ghostty_backtab_preserves_shift_across_keyboard_protocols() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        for (kitty_flags, expected) in [
+            (None, b"\x1b[Z".as_slice()),
+            (Some(1), b"\x1b[9;2u".as_slice()),
+        ] {
+            let (tx, _rx) = mpsc::channel(4);
+            let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+            if let Some(flags) = kitty_flags {
+                terminal.write(format!("\x1b[>{flags}u").as_bytes());
+            }
+            let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            let protocol = pane.keyboard_protocol().unwrap();
+            for modifiers in [KeyModifiers::empty(), KeyModifiers::SHIFT] {
+                let key = crate::input::TerminalKey::new(KeyCode::BackTab, modifiers);
+                assert_eq!(pane.encode_terminal_key(key.clone(), protocol), expected);
+                assert_eq!(
+                    pane.encode_terminal_key(key.with_repeat_count(3), protocol),
+                    expected.repeat(3)
+                );
+            }
+            if kitty_flags.is_some() {
+                assert_eq!(
+                    pane.encode_terminal_key(
+                        crate::input::TerminalKey::new(KeyCode::BackTab, KeyModifiers::CONTROL),
+                        protocol,
+                    ),
+                    b"\x1b[9;6u",
+                    "implicit Shift must retain explicit Control"
+                );
+            }
+        }
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        assert_eq!(
+            pane.encode_terminal_key(
+                crate::input::TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()),
+                crate::input::KeyboardProtocol::Legacy,
+            ),
+            b"\t"
+        );
+    }
+
+    #[test]
+    fn ghostty_ctrl_tab_matches_the_pane_keyboard_protocol() {
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let legacy = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let key = crate::input::TerminalKey::new(KeyCode::Tab, KeyModifiers::CONTROL);
+        for kind in [
+            KeyEventKind::Press,
+            KeyEventKind::Repeat,
+            KeyEventKind::Release,
+        ] {
+            let expected = if kind == KeyEventKind::Release {
+                b"".as_slice()
+            } else {
+                b"\t"
+            };
+            assert_eq!(
+                legacy.encode_terminal_key(
+                    key.clone().with_kind(kind),
+                    crate::input::KeyboardProtocol::Legacy
+                ),
+                expected
+            );
+        }
+        assert_eq!(
+            legacy.encode_terminal_key(
+                key.clone().with_repeat_count(3),
+                crate::input::KeyboardProtocol::Legacy
+            ),
+            b"\t\t\t"
+        );
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>3u");
+        let kitty = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        assert_eq!(
+            kitty.encode_terminal_key(key, crate::input::KeyboardProtocol::Kitty { flags: 3 }),
+            b"\x1b[9;5u"
+        );
     }
 
     #[test]

@@ -1800,6 +1800,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_pane_send_keys_encodes_shift_tab_as_backtab() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id,
+                keys: vec!["shift+tab".into()],
+            }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"\x1b[Z"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn api_pane_send_keys_accepts_control_navigation_chords() {
         let (mut app, pane_id, mut rx) = app_with_send_key_runtime(4);
 
