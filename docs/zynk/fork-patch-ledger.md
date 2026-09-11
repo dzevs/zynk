@@ -2451,3 +2451,28 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
   work still M8. Protocol19 and D-M5-6 to M9 are unchanged. Both source files
   already carry modified-file notices and NOTICE entries.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.
+
+### M6-07: Bounded Recent Terminal Reads (2026-09-11)
+
+- **Source:** `5abdae1ac7d5475e63e39681f7014acc35d36a89`. Take the portable
+  terminal-parameter read helpers, shared inclusive read range, explicit
+  zero-lines/zero-size guards, and screen-row parameter adaptation. Call the
+  helpers directly from Linux callers under their existing core lock instead
+  of retaining the source's core wrappers, whose added behavior is Windows-only.
+- Exclude `windows_recent_fallback.rs`, its core cache/init/update/fallback
+  branches, and the Windows-only `RowIter::wrap_state` accessor. No fallback
+  snapshot, lazy cache, or per-PTY-write work is added on Linux. The related
+  `00f04ac6` storage/mutability disposition is accounted for in M6-25.
+- The existing physical bottom-window and logical soft-wrap joining semantics
+  are retained, including the B1 detection-region controls and styled ANSI.
+  The zero-line behavioral red was an invalid range returned by libghostty
+  (`Error(-2)`) and hidden by the public wrapper; it now succeeds empty without
+  attempting that range. Positive controls cover bounded/oversized reads,
+  hard/soft line breaks, ANSI parity and a 1x1 terminal. The vendor refuses
+  zero dimensions at creation; that refusal is tested, not presented as a
+  synthetic live zero-size terminal exercising the defensive range guard.
+- This changes no detection scheduling or presentation frequency, adds no
+  formatting pass, and keeps one terminal lock per existing read. Protocol19,
+  source authority and the D-M5-6/M9 boundary are unchanged. This previously
+  modified source already has its notice and NOTICE entry.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.

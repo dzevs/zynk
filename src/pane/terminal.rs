@@ -1477,7 +1477,7 @@ impl GhosttyPaneTerminal {
                 == Some(crate::ghostty::ActiveScreen::Primary)
                 && bottom_before_resize
             {
-                ghostty_recent_ansi(&core, resize_recovery_probe_lines, true)
+                ghostty_recent_ansi(&core.terminal, resize_recovery_probe_lines, true)
                     .ok()
                     .filter(|ansi| !ansi.trim().is_empty())
             } else {
@@ -1822,7 +1822,7 @@ impl GhosttyPaneTerminal {
         self.core
             .lock()
             .ok()
-            .and_then(|core| ghostty_recent_text(&core, lines).ok())
+            .and_then(|core| ghostty_recent_text(&core.terminal, lines).ok())
             .unwrap_or_default()
     }
 
@@ -1830,7 +1830,7 @@ impl GhosttyPaneTerminal {
         self.core
             .lock()
             .ok()
-            .and_then(|core| ghostty_recent_ansi(&core, lines, false).ok())
+            .and_then(|core| ghostty_recent_ansi(&core.terminal, lines, false).ok())
             .unwrap_or_default()
     }
 
@@ -1838,7 +1838,7 @@ impl GhosttyPaneTerminal {
         self.core
             .lock()
             .ok()
-            .and_then(|core| ghostty_recent_text_unwrapped(&core, lines).ok())
+            .and_then(|core| ghostty_recent_text_unwrapped(&core.terminal, lines).ok())
             .unwrap_or_default()
     }
 
@@ -1846,7 +1846,7 @@ impl GhosttyPaneTerminal {
         self.core
             .lock()
             .ok()
-            .and_then(|core| ghostty_recent_ansi(&core, lines, true).ok())
+            .and_then(|core| ghostty_recent_ansi(&core.terminal, lines, true).ok())
             .unwrap_or_default()
     }
 
@@ -2312,7 +2312,7 @@ fn ghostty_detection_rows(core: &GhosttyPaneCore) -> usize {
 }
 
 fn ghostty_detection_text(core: &GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
-    ghostty_recent_text(core, ghostty_detection_rows(core))
+    ghostty_recent_text(&core.terminal, ghostty_detection_rows(core))
 }
 
 /// The same window as `ghostty_detection_text`, with soft wraps joined so one agent line is one
@@ -2320,56 +2320,66 @@ fn ghostty_detection_text(core: &GhosttyPaneCore) -> Result<String, crate::ghost
 fn ghostty_detection_unwrapped_text(
     core: &GhosttyPaneCore,
 ) -> Result<String, crate::ghostty::Error> {
-    ghostty_recent_text_unwrapped(core, ghostty_detection_rows(core))
+    ghostty_recent_text_unwrapped(&core.terminal, ghostty_detection_rows(core))
 }
 
 fn ghostty_recent_text(
-    core: &GhosttyPaneCore,
+    terminal: &crate::ghostty::Terminal,
     lines: usize,
 ) -> Result<String, crate::ghostty::Error> {
-    let total_rows = core.terminal.total_rows()?;
-    let cols = core.terminal.cols()?;
-    if total_rows == 0 || cols == 0 {
+    let Some((start, end, cols)) = ghostty_recent_read_range(terminal, lines)? else {
         return Ok(String::new());
-    }
-    let start = total_rows.saturating_sub(lines);
-    let mut rows = Vec::with_capacity(total_rows.saturating_sub(start));
-    for y in start..total_rows {
-        rows.push(ghostty_screen_row(core, cols, y as u32)?);
+    };
+    let mut rows = Vec::with_capacity(end.saturating_sub(start).saturating_add(1));
+    for y in start..=end {
+        rows.push(ghostty_screen_row(terminal, cols, y as u32)?);
     }
     trim_trailing_blank_rows(&mut rows);
     Ok(recent_text_from_rows(&rows, lines))
 }
 
 fn ghostty_recent_text_unwrapped(
-    core: &GhosttyPaneCore,
+    terminal: &crate::ghostty::Terminal,
     lines: usize,
 ) -> Result<String, crate::ghostty::Error> {
-    let total_rows = core.terminal.total_rows()?;
-    let cols = core.terminal.cols()?;
-    if total_rows == 0 || cols == 0 {
+    let Some((start, end, cols)) = ghostty_recent_read_range(terminal, lines)? else {
         return Ok(String::new());
-    }
-    let start = total_rows.saturating_sub(lines) as u32;
-    let end = total_rows.saturating_sub(1) as u32;
-    core.terminal
-        .read_text_screen((0, start), (cols.saturating_sub(1), end), false)
+    };
+    terminal.read_text_screen(
+        (0, start as u32),
+        (cols.saturating_sub(1), end as u32),
+        false,
+    )
 }
 
 fn ghostty_recent_ansi(
-    core: &GhosttyPaneCore,
+    terminal: &crate::ghostty::Terminal,
     lines: usize,
     unwrap: bool,
 ) -> Result<String, crate::ghostty::Error> {
-    let total_rows = core.terminal.total_rows()?;
-    let cols = core.terminal.cols()?;
-    if total_rows == 0 || cols == 0 {
+    let Some((start, end, cols)) = ghostty_recent_read_range(terminal, lines)? else {
         return Ok(String::new());
+    };
+    terminal.read_ansi_screen(
+        (0, start as u32),
+        (cols.saturating_sub(1), end as u32),
+        false,
+        unwrap,
+    )
+}
+
+fn ghostty_recent_read_range(
+    terminal: &crate::ghostty::Terminal,
+    lines: usize,
+) -> Result<Option<(usize, usize, u16)>, crate::ghostty::Error> {
+    let total_rows = terminal.total_rows()?;
+    let cols = terminal.cols()?;
+    if total_rows == 0 || cols == 0 || lines == 0 {
+        return Ok(None);
     }
-    let start = total_rows.saturating_sub(lines) as u32;
-    let end = total_rows.saturating_sub(1) as u32;
-    core.terminal
-        .read_ansi_screen((0, start), (cols.saturating_sub(1), end), false, unwrap)
+    let end = total_rows.saturating_sub(1);
+    let start = total_rows.saturating_sub(lines);
+    Ok(Some((start, end, cols)))
 }
 
 fn ghostty_set_scroll_offset_from_bottom(
@@ -2394,13 +2404,13 @@ fn ghostty_extract_selection(
 }
 
 fn ghostty_screen_row(
-    core: &GhosttyPaneCore,
+    terminal: &crate::ghostty::Terminal,
     cols: u16,
     y: u32,
 ) -> Result<String, crate::ghostty::Error> {
     let mut line = String::new();
     for x in 0..cols {
-        let (wide, graphemes) = core.terminal.screen_cell(x, y)?;
+        let (wide, graphemes) = terminal.screen_cell(x, y)?;
         if wide == crate::ghostty::CellWide::SpacerTail {
             continue;
         }
@@ -4402,6 +4412,88 @@ mod tests {
 
         assert_eq!(pane.recent_text(3), "ABCDE\nFGHIJ\n");
         assert_eq!(pane.recent_unwrapped_text(3), "ABCDEFGHIJ");
+    }
+
+    #[test]
+    fn recent_read_range_bounds_zero_requests_and_minimum_terminal_size() {
+        assert!(crate::ghostty::Terminal::new(0, 1, 0).is_err());
+        assert!(crate::ghostty::Terminal::new(1, 0, 0).is_err());
+        let terminal = crate::ghostty::Terminal::new(1, 1, 0).unwrap();
+        assert_eq!(ghostty_recent_read_range(&terminal, 0).unwrap(), None);
+        for lines in [1, usize::MAX] {
+            assert_eq!(
+                ghostty_recent_read_range(&terminal, lines).unwrap(),
+                Some((0, 0, 1))
+            );
+        }
+    }
+
+    #[test]
+    fn zero_recent_lines_are_empty_without_terminal_read_errors() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(6, 3, 100).unwrap();
+        terminal.write(b"\x1b[31mABCDEFGHIJ\x1b[0m\r\nKLM");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let core = pane.core.lock().unwrap();
+        assert_eq!(ghostty_recent_text(&core.terminal, 0).unwrap(), "");
+        assert_eq!(
+            ghostty_recent_text_unwrapped(&core.terminal, 0).unwrap(),
+            ""
+        );
+        for unwrap in [false, true] {
+            assert_eq!(ghostty_recent_ansi(&core.terminal, 0, unwrap).unwrap(), "");
+        }
+        drop(core);
+        assert_eq!(pane.recent_text(0), "");
+        assert_eq!(pane.recent_unwrapped_text(0), "");
+        assert_eq!(pane.recent_ansi(0), "");
+        assert_eq!(pane.recent_unwrapped_ansi(0), "");
+    }
+
+    #[test]
+    fn recent_reads_keep_the_same_physical_window_and_ansi_styles() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(6, 3, 100).unwrap();
+        terminal.write(b"OLD\r\nABCDEFGHIJ\r\nKLM\r\n\x1b[31mNOPQRSTU\x1b[0m");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        assert_eq!(pane.recent_text(3), "KLM\nNOPQRS\nTU\n");
+        assert_eq!(pane.recent_unwrapped_text(3), "KLM\nNOPQRSTU");
+        assert_eq!(pane.recent_text(2), "NOPQRS\nTU\n");
+        assert_eq!(pane.recent_unwrapped_text(2), "NOPQRSTU");
+        assert_eq!(
+            pane.recent_text(usize::MAX),
+            "OLD\nABCDEF\nGHIJ\nKLM\nNOPQRS\nTU\n"
+        );
+        assert_eq!(
+            pane.recent_unwrapped_text(usize::MAX),
+            "OLD\nABCDEFGHIJ\nKLM\nNOPQRSTU"
+        );
+
+        let core = pane.core.lock().unwrap();
+        let total = core.terminal.total_rows().unwrap();
+        for (unwrap, actual) in [
+            (
+                false,
+                ghostty_recent_ansi(&core.terminal, 3, false).unwrap(),
+            ),
+            (true, ghostty_recent_ansi(&core.terminal, 3, true).unwrap()),
+        ] {
+            let expected = core
+                .terminal
+                .read_ansi_screen(
+                    (0, (total - 3) as u32),
+                    (5, (total - 1) as u32),
+                    false,
+                    unwrap,
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert!(actual.contains("\x1b["), "lost cell style: {actual:?}");
+            assert!(actual.contains("KLM"));
+            assert!(!actual.contains("OLD"));
+        }
     }
 
     // --- Claude approval-footer detection on the production snapshot path ---
