@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct KittyKeyboardTracker {
     pending: Vec<u8>,
@@ -112,13 +114,18 @@ mod tests {
 
     #[test]
     fn buffers_split_csi_sequences() {
-        let mut tracker = KittyKeyboardTracker::default();
+        for chunks in [
+            [b"\x1b[>1u\x1b[>5".as_slice(), b"u\x1b[<", b"u"],
+            [b"\x1b[>1u\x1b[>4;".as_slice(), b"01m\x1b[>5u\x1b[<", b"u"],
+        ] {
+            let mut tracker = KittyKeyboardTracker::default();
+            for chunk in chunks {
+                tracker.observe(chunk);
+            }
 
-        tracker.observe(b"\x1b[>1u\x1b[>5");
-        tracker.observe(b"u\x1b[<");
-        tracker.observe(b"u");
-
-        assert_eq!(tracker.flags, 1);
-        assert_eq!(tracker.stack, vec![0]);
+            assert_eq!(tracker.flags, 1);
+            assert_eq!(tracker.stack, vec![0]);
+            assert_eq!(tracker.replay_ansi().as_deref(), Some("\x1b[>1u"));
+        }
     }
 }

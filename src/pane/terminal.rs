@@ -4017,16 +4017,21 @@ mod tests {
 
     #[test]
     fn ghostty_modify_other_keys_mode_one_preserves_shift_enter() {
-        let (tx, _rx) = mpsc::channel(4);
-        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
-        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
-        let pane_id = PaneId::from_raw(1);
-        pane.process_pty_bytes(pane_id, 0, b"\x1b[>4;1m", &tx);
+        for seed_history in [false, true] {
+            let (tx, _rx) = mpsc::channel(4);
+            let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+            if seed_history {
+                pane.seed_history_ansi("\x1b[>4;1m");
+            } else {
+                pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[>4;1m", &tx);
+            }
 
-        let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+            let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
+            let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
 
-        assert_eq!(encoded, b"\x1b[27;2;13~");
+            assert_eq!(encoded, b"\x1b[27;2;13~", "seed_history={seed_history}");
+        }
     }
 
     #[test]

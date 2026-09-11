@@ -2657,3 +2657,23 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   the compiler's internal defect is not claimed fixed. Retained author evidence
   also discloses the debugger failure and removal of a help-created local cache.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3; no deployment implied.
+
+### M6-15: Linux Shift-Enter Fixtures (2026-09-11)
+
+- **Source:** `04205ac070f1b5673b7afec930a561900a3bb31e`. Take its Linux-relevant
+  test changes only: the App routing fixture processes the modifyOtherKeys
+  request through the existing runtime PTY-byte path instead of scrollback
+  construction; the pane encoder control covers history seeding as well as
+  the existing live-byte path. Both assert the same exact Shift-Enter output.
+  TestChannel remains in use; no real-PTY or Windows behavior is claimed.
+- Retain the old fragmented Kitty push/pop fixture and add the upstream
+  interleaved modifyOtherKeys fragment vector, pinning flags, stack and replay.
+  The tracker gets its first modified-file notice and NOTICE entry. This is
+  characterization of existing Linux behavior, not a claimed new red-first
+  Linux runtime fix.
+- **Excluded:** Windows modifyOtherKeys tracking/reset/getter, the ConPTY
+  Shift-Enter encoder and routing branch, Windows seed observation and Windows
+  assertions. Keep the existing Linux emulator state query and tracker
+  implementation; do not introduce an equivalent no-op match or platform cfg.
+  No production behavior, protocol 19, host negotiation, detection or M6-06 policy
+  changes. **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.

@@ -129,6 +129,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/main.rs
 - src/pane.rs
 - src/pane/input.rs
+- src/pane/kitty_keyboard.rs
 - src/pane/osc.rs
 - src/pane/terminal.rs
 - src/pane/xtgettcap.rs
