@@ -1294,6 +1294,14 @@ impl Terminal {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS)
     }
 
+    pub fn effective_foreground_color(&self) -> Result<Option<RgbColor>, Error> {
+        self.get_optional_rgb_color(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND)
+    }
+
+    pub fn effective_cursor_color(&self) -> Result<Option<RgbColor>, Error> {
+        self.get_optional_rgb_color(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_CURSOR)
+    }
+
     fn width_px(&self) -> Result<u32, Error> {
         self.get_u32(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_WIDTH_PX)
     }
@@ -1329,6 +1337,27 @@ impl Terminal {
                 .into_result()?;
         }
         Ok(out)
+    }
+
+    fn get_optional_rgb_color(
+        &self,
+        data: ffi::GhosttyTerminalData,
+    ) -> Result<Option<RgbColor>, Error> {
+        let mut out = ffi::GhosttyColorRgb::default();
+        // SAFETY: the two color data kinds used here write GhosttyColorRgb,
+        // as specified by vendor/libghostty-vt/include/ghostty/vt/terminal.h.
+        let result = unsafe {
+            ffi::ghostty_terminal_get(
+                self.raw,
+                data,
+                (&mut out as *mut ffi::GhosttyColorRgb).cast(),
+            )
+        };
+        match result {
+            ffi::GhosttyResult_GHOSTTY_SUCCESS => Ok(Some(out.into())),
+            ffi::GhosttyResult_GHOSTTY_NO_VALUE => Ok(None),
+            other => Err(Error(other)),
+        }
     }
 
     fn get_bool(&self, data: ffi::GhosttyTerminalData) -> Result<bool, Error> {
@@ -3059,6 +3088,39 @@ impl<'a> RowCellIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_color_accessors_match_vendor_rgb_and_no_value_contract() {
+        assert_eq!(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND,
+            18
+        );
+        assert_eq!(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_CURSOR,
+            20
+        );
+        let mut terminal = Terminal::new(20, 5, 0).unwrap();
+        assert_eq!(terminal.effective_cursor_color().unwrap(), None);
+        terminal.write(b"\x1b]10;rgb:11/22/33\x07\x1b]12;rgb:44/55/66\x07");
+        assert_eq!(
+            terminal.effective_foreground_color().unwrap(),
+            Some(RgbColor {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33
+            })
+        );
+        assert_eq!(
+            terminal.effective_cursor_color().unwrap(),
+            Some(RgbColor {
+                r: 0x44,
+                g: 0x55,
+                b: 0x66
+            })
+        );
+        terminal.write(b"\x1b]112\x07");
+        assert_eq!(terminal.effective_cursor_color().unwrap(), None);
+    }
 
     fn write_numbered_lines(terminal: &mut Terminal, count: usize) {
         for i in 0..count {

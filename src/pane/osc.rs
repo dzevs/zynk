@@ -13,6 +13,7 @@ use super::terminal::GhosttyPaneCore;
 pub(super) enum DefaultColorQuery {
     Foreground,
     Background,
+    Cursor,
 }
 
 impl DefaultColorQuery {
@@ -20,6 +21,7 @@ impl DefaultColorQuery {
         match self {
             Self::Foreground => 10,
             Self::Background => 11,
+            Self::Cursor => 12,
         }
     }
 }
@@ -260,6 +262,7 @@ fn parse_default_color_events(body: &[u8]) -> Vec<DefaultColorEvent> {
     let single = match body {
         b"10;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Foreground)),
         b"11;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Background)),
+        b"12;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Cursor)),
         b"110" | b"110;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Foreground)),
         b"111" | b"111;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Background)),
         _ => parse_palette_color_query(body),
@@ -1182,7 +1185,7 @@ mod tests {
         let mut tracker = DefaultColorEventTracker::default();
 
         tracker.observe(
-            b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]4;0;?\x07\x1b]10;rgb:11/22/33\x07\x1b]111\x07",
+            b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]12;?\x07\x1b]4;0;?\x07\x1b]10;rgb:11/22/33\x07\x1b]111\x07",
         );
 
         assert_eq!(
@@ -1190,6 +1193,7 @@ mod tests {
             vec![
                 DefaultColorEvent::Query(DefaultColorQuery::Foreground),
                 DefaultColorEvent::Query(DefaultColorQuery::Background),
+                DefaultColorEvent::Query(DefaultColorQuery::Cursor),
                 DefaultColorEvent::PaletteQuery(0),
                 DefaultColorEvent::Set(DefaultColorQuery::Foreground),
                 DefaultColorEvent::Reset(DefaultColorQuery::Background),

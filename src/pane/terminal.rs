@@ -2698,12 +2698,15 @@ fn default_color_event_response(
 
 fn default_color_query_response(query: DefaultColorQuery, core: &GhosttyPaneCore) -> Option<Bytes> {
     let color = match query {
-        DefaultColorQuery::Foreground if !core.child_default_foreground_changed => {
-            core.host_terminal_theme.foreground
-        }
-        DefaultColorQuery::Background if !core.child_default_background_changed => {
-            core.host_terminal_theme.background
-        }
+        DefaultColorQuery::Foreground if !core.child_default_foreground_changed => core
+            .host_terminal_theme
+            .foreground
+            .map(host_theme_color_to_ghostty),
+        DefaultColorQuery::Background if !core.child_default_background_changed => core
+            .host_terminal_theme
+            .background
+            .map(host_theme_color_to_ghostty),
+        DefaultColorQuery::Cursor => cursor_color_query_color(core),
         _ => None,
     }?;
     Some(osc_rgb_response(
@@ -2712,6 +2715,31 @@ fn default_color_query_response(query: DefaultColorQuery, core: &GhosttyPaneCore
         color.g,
         color.b,
     ))
+}
+
+fn cursor_color_query_color(core: &GhosttyPaneCore) -> Option<crate::ghostty::RgbColor> {
+    core.terminal
+        .effective_cursor_color()
+        .ok()
+        .flatten()
+        .or_else(|| {
+            if core.child_default_foreground_changed {
+                core.terminal.effective_foreground_color().ok().flatten()
+            } else {
+                core.host_terminal_theme
+                    .foreground
+                    .map(host_theme_color_to_ghostty)
+                    .or_else(|| core.terminal.effective_foreground_color().ok().flatten())
+            }
+        })
+}
+
+fn host_theme_color_to_ghostty(color: crate::terminal_theme::RgbColor) -> crate::ghostty::RgbColor {
+    crate::ghostty::RgbColor {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+    }
 }
 
 fn palette_color_query_response(index: u8, core: &mut GhosttyPaneCore) -> Option<Bytes> {
@@ -2755,6 +2783,7 @@ fn mark_child_default_color_changed(
     match query {
         DefaultColorQuery::Foreground => core.child_default_foreground_changed = changed,
         DefaultColorQuery::Background => core.child_default_background_changed = changed,
+        DefaultColorQuery::Cursor => {}
     }
 }
 
@@ -5586,6 +5615,79 @@ mod tests {
     }
 
     #[test]
+    fn cursor_color_query_uses_explicit_or_foreground_fallback() {
+        for (updates, expected, reset_expected) in [
+            (b"".as_slice(), "6565/7b7b/8383", "6565/7b7b/8383"),
+            (
+                b"\x1b]10;rgb:11/22/33\x07",
+                "1111/2222/3333",
+                "1111/2222/3333",
+            ),
+            (
+                b"\x1b]12;rgb:44/55/66\x07",
+                "4444/5555/6666",
+                "6565/7b7b/8383",
+            ),
+            (
+                b"\x1b]10;rgb:11/22/33\x07\x1b]12;rgb:44/55/66\x07",
+                "4444/5555/6666",
+                "1111/2222/3333",
+            ),
+        ] {
+            let (tx, mut rx) = mpsc::channel(4);
+            let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+            let pane_id = PaneId::from_raw(1);
+            pane.apply_host_terminal_theme(crate::terminal_theme::TerminalTheme {
+                foreground: Some(crate::terminal_theme::RgbColor {
+                    r: 0x65,
+                    g: 0x7b,
+                    b: 0x83,
+                }),
+                ..Default::default()
+            });
+
+            let update = pane.process_pty_bytes(pane_id, 0, updates, &tx);
+            assert!(update.terminal_responses.is_empty());
+            let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]12;?\x07", &tx);
+            assert_eq!(
+                result.terminal_responses,
+                vec![Bytes::from(format!("\x1b]12;rgb:{expected}\x1b\\"))],
+                "updates: {updates:?}"
+            );
+            let reset = pane.process_pty_bytes(pane_id, 0, b"\x1b]112\x07\x1b]12;?\x07", &tx);
+            assert_eq!(
+                reset.terminal_responses,
+                vec![Bytes::from(format!("\x1b]12;rgb:{reset_expected}\x1b\\"))]
+            );
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn process_pty_bytes_returns_split_cursor_color_query_response() {
+        for query in [b"\x1b]12;?\x1b\\".as_slice(), b"\x1b]12;?\x07"] {
+            for split in 1..query.len() {
+                let (tx, mut rx) = mpsc::channel(4);
+                let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+                let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+                let pane_id = PaneId::from_raw(1);
+                pane.process_pty_bytes(pane_id, 0, b"\x1b]10;rgb:11/22/33\x07", &tx);
+
+                let partial = pane.process_pty_bytes(pane_id, 0, &query[..split], &tx);
+                assert!(partial.terminal_responses.is_empty(), "split: {split}");
+                let complete = pane.process_pty_bytes(pane_id, 0, &query[split..], &tx);
+                assert_eq!(
+                    complete.terminal_responses,
+                    vec![Bytes::from_static(b"\x1b]12;rgb:1111/2222/3333\x1b\\")],
+                    "split: {split}"
+                );
+                assert!(rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
     fn process_pty_bytes_returns_default_color_query_responses_in_order() {
         let (tx, mut rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
@@ -5605,13 +5707,15 @@ mod tests {
             ..Default::default()
         });
 
-        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]10;?\x07\x1b]11;?\x07", &tx);
+        let result =
+            pane.process_pty_bytes(pane_id, 0, b"\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07", &tx);
 
         assert_eq!(
             result.terminal_responses,
             vec![
                 Bytes::from_static(b"\x1b]10;rgb:6565/7b7b/8383\x1b\\"),
                 Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\"),
+                Bytes::from_static(b"\x1b]12;rgb:6565/7b7b/8383\x1b\\"),
             ]
         );
         assert!(rx.try_recv().is_err());

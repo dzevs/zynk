@@ -2338,3 +2338,32 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
   `tests/cli/sessions.rs` when M8 reaches `3f809476`, which creates that suite.
   Both are existing deferrals, not new feature scope; keep protocol versions
   monotone and account for the version actually reached by M8.
+
+### M6-01: Cursor Color Replies (2026-09-11)
+
+- **Source:** `292a98a91e35662fd65993956278787ee0ca9840`, adapted into
+  `src/ghostty/mod.rs`, `src/pane/osc.rs`, and `src/pane/terminal.rs`.
+  The M2 vendor already answers OSC12, so this is not a claim of previously
+  absent cursor replies. The missing fork tracker entry let a split ST query
+  reply at the ESC before its final backslash; the permanent split control
+  reproduced that at split7 before production edits. Earlier red controls
+  stopped only on BEL versus ST normalization, which is distinct evidence.
+- Reuse M2's ordered response path and partial-query suppression. Explicit
+  cursor color takes precedence over child foreground, then host foreground
+  and terminal default. Cursor reset is owned by the vendor. Ordinary replies
+  are normalized to the same ST shape as tracked OSC10/11 without duplicate
+  pending input. Aggregate queries remain on the existing vendor path.
+- Use the current generated named FFI constants for foreground18/cursor20,
+  not upstream's now-obsolete local numeric aliases. The private scalar
+  accessor follows `terminal.h`'s `GhosttyColorRgb`/`GHOSTTY_NO_VALUE` contract;
+  the core's immutable borrow remains sufficient. No bindings/vendor rewrite.
+  OSC12 and its query/reset meaning are documented in
+  [XTerm Operating System Commands](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Operating-System-Commands).
+- Controls cover explicit/host/child fallback, cursor reset, every split of
+  BEL/ST queries, ordered OSC10/11/12 replies, no queued-input duplicate, and
+  the actual RGB/no-value accessor ABI. Work is per received color query,
+  not added to pane-scaled rendering or detection. Existing modified-file
+  notices/NOTICE entries cover all three source files.
+- Protocol19, all M5 carry-forwards and the held M6-06 identity design remain
+  unchanged. **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3; no merge,
+  installation or release is implied.
