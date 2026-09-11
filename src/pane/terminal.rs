@@ -3369,6 +3369,45 @@ mod tests {
     }
 
     #[test]
+    fn libghostty_pwd_callbacks_preserve_split_linux_paths_and_reject_empty_updates() {
+        for (sequence, empty, expected) in [
+            (
+                b"\x1b]7;file:///tmp/zynk%20repo\x07".as_slice(),
+                b"\x1b]7;\x07".as_slice(),
+                "/tmp/zynk repo",
+            ),
+            (
+                b"\x1b]9;9;/tmp/zynk conemu\x1b\\",
+                b"\x1b]9;9;\x1b\\",
+                "/tmp/zynk conemu",
+            ),
+            (
+                b"\x1b]1337;CurrentDir=/tmp/zynk iterm\x1b\\",
+                b"\x1b]1337;CurrentDir=\x1b\\",
+                "/tmp/zynk iterm",
+            ),
+        ] {
+            let (tx, _rx) = mpsc::channel(4);
+            let terminal = crate::ghostty::Terminal::new(80, 24, 100).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+            let pane_id = PaneId::from_raw(1);
+            let split = sequence.len() - 5;
+            let partial = pane.process_pty_bytes(pane_id, 0, &sequence[..split], &tx);
+            assert_eq!(partial.reported_cwd, None, "sequence {sequence:?}");
+            let complete = pane.process_pty_bytes(pane_id, 0, &sequence[split..], &tx);
+            assert_eq!(
+                complete.reported_cwd,
+                Some(std::path::PathBuf::from(expected)),
+                "sequence {sequence:?}"
+            );
+            assert_eq!(
+                pane.process_pty_bytes(pane_id, 0, empty, &tx).reported_cwd,
+                None
+            );
+        }
+    }
+
+    #[test]
     fn process_pty_bytes_surfaces_clipboard_writes_without_other_results() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 100).unwrap();

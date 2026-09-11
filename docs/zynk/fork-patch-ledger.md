@@ -2379,3 +2379,27 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
   The existing modified-file notice and NOTICE entry already cover the file.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, not an approval of
   M6 or any deployment action.
+
+### M6-03: CWD Presentation Signaling (2026-09-11)
+
+- **Sources:** `8b1d77acf6059e6688fb6a875c3176c95602b6c4` and
+  `2c422e60f1724ac5639c80abb73dc1f10a91b5c6`. Adapt the former's two render
+  signals to the fork's `RenderSignal::request_generic`, retaining M5's Git
+  identity refresh request. The new app control first reproduced the missing
+  render request after a valid CWD update; it also requires a renderer wakeup.
+- Keep M2's `8d2af4e0` libghostty PWD callback instead of resurrecting the old
+  `CwdOscTracker`. Independent OSC7/OSC9;9/OSC1337 Linux-path cases pin split
+  payload completion and empty-update rejection. These callback controls
+  already passed before this slice; no new parser behavior is claimed.
+- Exclude Windows PowerShell launch/prompt injection, process-exit respawn
+  state and grace timers, prompt/screen inference, platform launch-policy
+  variants and their Windows fixtures from both sources. `PaneShellConfig`
+  predates these commits and remains unchanged. The no-op stub exclusion
+  follows M1/ADR0013 and M5's `6cfaa079` disposition, not a dormant Linux
+  implementation. No identity, lifecycle, wire or protocol19 change.
+- The first author test command failed to compile because its new fixture
+  named an unavailable `tempfile` crate; the corrected fixture uses an
+  existing directory without writing files. That failure is retained, not
+  counted as the behavioral red control. Both touched source files already
+  carry modified-file notices and NOTICE entries.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3. No deployment implied.

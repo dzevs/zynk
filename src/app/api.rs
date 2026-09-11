@@ -278,6 +278,8 @@ impl App {
         self.sync_full_lifecycle_authority_detection_pauses();
         if terminal_cwd_reported {
             self.request_git_identity_refresh(Instant::now());
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
         }
         for update in &pane_updates {
             self.refresh_new_zynk_toast_context_for_update(update, &previous_toast);
@@ -1297,6 +1299,46 @@ mod tests {
             },
         );
         app
+    }
+
+    #[tokio::test]
+    async fn terminal_cwd_report_schedules_identity_refresh_and_render() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("cwd-report")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let cwd = std::env::temp_dir();
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = cwd.join("old-cwd");
+        app.state.session_dirty = false;
+        app.git_identity_refresh_requested = false;
+        app.render_dirty.take();
+        app.render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        app.handle_internal_event(AppEvent::TerminalCwdReported {
+            pane_id,
+            cwd: cwd.clone(),
+        });
+
+        assert_eq!(app.state.terminals[&terminal_id].cwd, cwd);
+        assert!(app.state.session_dirty);
+        assert!(app.git_identity_refresh_requested);
+        assert!(app.git_refresh_deadline().unwrap() <= Instant::now());
+        assert!(
+            app.render_dirty.take().generic,
+            "CWD change did not request render"
+        );
+        tokio::time::timeout(Duration::from_millis(100), app.render_notify.notified())
+            .await
+            .expect("CWD change did not wake the renderer");
     }
 
     #[tokio::test]
