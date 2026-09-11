@@ -126,6 +126,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/integration/registry.rs
 - src/integration/targets.rs
 - src/integration/tests.rs
+- src/layout.rs
 - src/integration/types.rs
 - src/main.rs
 - src/pane.rs

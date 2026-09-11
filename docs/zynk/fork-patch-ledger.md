@@ -2817,3 +2817,32 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   changelog file. No API/caller policy, session authority or protocol change;
   protocol19 stays pinned and M6-06 stays held.
   **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-21: Preserve The Origin Of Pane Focus
+
+- **TAKE / ADAPT** `09cdd88d0aca35617eb05468c2421b0467656e4f`: keep a
+  one-slot prev_focus in pure TileLayout. Only a real focus change records it;
+  focused close consumes a still-existing origin or falls back to tree order.
+  Saved layouts start with no transient history. Resize's temporary internal
+  focus assignment remains deliberately outside set_focus and is regression-tested.
+- Target-taking split_pane/close_pane and insert_pane_near's focus argument
+  avoid fabricated history. Thread target/focus through Tab shell and argv
+  construction, Workspace and the existing pane.move handler. Preserve this
+  fork's argument order and runtime/state ownership. A runtime failure removes
+  only the new split; only successful focused construction moves focus.
+  Background detach/move and unfocused destination insertion do not bounce
+  focus through the affected pane. Runtime creation still flows through Tab;
+  no PTY or async state was added to TileLayout or PaneState.
+- Five initial behavioral reds cover wrong close destinations and failed
+  runtime-split history. Controls additionally cover missing/removed/no-op
+  focus, one-time history consumption, background close/move, unfocused
+  insertion, rollback and successful targeted runtime split. The existing API
+  no-focus move test now closes its prior focus and asserts the preserved
+  origin, rather than checking only the immediate focus value.
+- Use allocated pane IDs throughout the new layout controls. Do not combine
+  sample_layout's from_raw IDs with fresh allocations: those can collide in
+  an isolated nextest process and make a split control vacuous. The allocated
+  fixture reconstructs the same tree with from_saved to reset history.
+  Add layout.rs to NOTICE with its modified-file header. No wire, DB, caller
+  or identity policy change; protocol19 and the held M6-06 boundary remain.
+  **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.

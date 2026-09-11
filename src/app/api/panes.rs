@@ -864,10 +864,6 @@ impl App {
                     self.recover_failed_pane_move(recovery_context, moved);
                     return encode_error(id, "pane_move_failed", "target tab disappeared");
                 };
-                let previous_target_focus = self.state.workspaces[target_ws_idx].tabs
-                    [target_tab_idx]
-                    .layout
-                    .focused();
                 let direction = split_direction_to_layout(split);
                 let moved_pane_id = match self.state.workspaces[target_ws_idx]
                     .insert_moved_pane_into_tab(
@@ -876,6 +872,7 @@ impl App {
                         moved,
                         direction,
                         ratio,
+                        focus,
                     ) {
                     Ok(pane_id) => pane_id,
                     Err(moved) => {
@@ -887,11 +884,6 @@ impl App {
                         );
                     }
                 };
-                if !focus {
-                    self.state.workspaces[target_ws_idx].tabs[target_tab_idx]
-                        .layout
-                        .focus_pane(previous_target_focus);
-                }
                 (target_ws_idx, target_tab_idx, moved_pane_id)
             }
             ResolvedPaneMoveDestination::NewTab {
@@ -2713,8 +2705,13 @@ mod tests {
         let target_tab = app.state.workspaces[0].test_add_tab(Some("target"));
         let previously_focused = app.state.workspaces[0].tabs[target_tab].root_pane;
         app.state.workspaces[0].active_tab = target_tab;
+        let previous_origin =
+            app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
         let explicit_target =
             app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[target_tab]
+            .layout
+            .focus_pane(previous_origin);
         app.state.workspaces[0].tabs[target_tab]
             .layout
             .focus_pane(previously_focused);
@@ -2747,6 +2744,11 @@ mod tests {
         assert_eq!(
             app.state.workspaces[0].tabs[0].layout.focused(),
             previously_focused
+        );
+        assert!(!app.state.workspaces[0].close_pane(previously_focused));
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            previous_origin
         );
     }
 

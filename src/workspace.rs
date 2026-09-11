@@ -910,70 +910,40 @@ impl Workspace {
         let tab_number = self.tabs[tab_idx].number;
         let launch_env = self.launch_env_for_new_pane(tab_number, pane_number, extra_env);
         let tab = &mut self.tabs[tab_idx];
-        let previous_focus = tab.layout.focused();
-        tab.layout.focus_pane(pane_id);
         let new_pane = match if let Some(argv) = argv {
-            match ratio {
-                Some(ratio) => tab.split_focused_argv_command_with_ratio(
-                    direction,
-                    ratio,
-                    rows,
-                    cols,
-                    cwd,
-                    argv,
-                    scrollback_limit_bytes,
-                    host_terminal_theme,
-                    host_terminal_appearance,
-                    &launch_env,
-                ),
-                None => tab.split_focused_argv_command(
-                    direction,
-                    rows,
-                    cols,
-                    cwd,
-                    argv,
-                    scrollback_limit_bytes,
-                    host_terminal_theme,
-                    host_terminal_appearance,
-                    &launch_env,
-                ),
-            }
+            tab.split_pane_argv(
+                pane_id,
+                focus_new_pane,
+                direction,
+                ratio,
+                rows,
+                cols,
+                cwd,
+                argv,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                host_terminal_appearance,
+                &launch_env,
+            )
         } else {
-            match ratio {
-                Some(ratio) => tab.split_focused_with_ratio(
-                    direction,
-                    ratio,
-                    rows,
-                    cols,
-                    cwd,
-                    scrollback_limit_bytes,
-                    host_terminal_theme,
-                    host_terminal_appearance,
-                    shell_config,
-                    &launch_env,
-                ),
-                None => tab.split_focused(
-                    direction,
-                    rows,
-                    cols,
-                    cwd,
-                    scrollback_limit_bytes,
-                    host_terminal_theme,
-                    host_terminal_appearance,
-                    shell_config,
-                    &launch_env,
-                ),
-            }
+            tab.split_pane_shell(
+                pane_id,
+                focus_new_pane,
+                direction,
+                ratio,
+                rows,
+                cols,
+                cwd,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                host_terminal_appearance,
+                shell_config,
+                &launch_env,
+            )
         } {
             Ok(new_pane) => new_pane,
-            Err(err) => {
-                tab.layout.focus_pane(previous_focus);
-                return Some(Err(err));
-            }
+            Err(err) => return Some(Err(err)),
         };
-        if !focus_new_pane {
-            tab.layout.focus_pane(previous_focus);
-        }
         self.register_new_pane_with_number(new_pane.pane_id, pane_number);
         Some(Ok((tab_idx, new_pane)))
     }
@@ -1053,12 +1023,13 @@ impl Workspace {
         moved: MovedPane,
         direction: Direction,
         ratio: f32,
+        focus: bool,
     ) -> Result<PaneId, MovedPane> {
         let pane_id = moved.pane_id;
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return Err(moved);
         };
-        tab.insert_existing_pane(target_pane_id, moved, direction, ratio)?;
+        tab.insert_existing_pane(target_pane_id, moved, direction, ratio, focus)?;
         if !self.public_pane_numbers.contains_key(&pane_id) {
             self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
         }
@@ -1658,6 +1629,100 @@ mod tests {
         ws.assert_invariants_for_test();
     }
 
+    #[tokio::test]
+    async fn failed_runtime_split_preserves_layout_and_close_focus_history() {
+        for focus_new in [false, true] {
+            let mut ws = Workspace::test_new("failed-split");
+            let first = ws.tabs[0].root_pane;
+            ws.test_split(Direction::Horizontal);
+            let third = ws.test_split(Direction::Vertical);
+            ws.tabs[0].layout.focus_pane(first);
+            ws.tabs[0].layout.focus_pane(third);
+            let ids = ws.tabs[0].layout.pane_ids();
+            let result = ws
+                .split_pane_argv_command(
+                    first,
+                    Direction::Horizontal,
+                    20,
+                    80,
+                    Some(std::env::current_dir().unwrap()),
+                    &["/dev/null".to_string()],
+                    Vec::new(),
+                    0,
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    focus_new,
+                )
+                .expect("target exists");
+            assert!(
+                result.is_err(),
+                "non-executable device must refuse the runtime spawn"
+            );
+            assert_eq!(ws.tabs[0].layout.pane_ids(), ids);
+            assert_eq!(ws.tabs[0].layout.focused(), third);
+            ws.assert_invariants_for_test();
+            assert!(!ws.close_pane(third));
+            assert_eq!(ws.tabs[0].layout.focused(), first);
+        }
+    }
+
+    #[tokio::test]
+    async fn targeted_runtime_split_preserves_focus_intent_and_history() {
+        for focus_new in [false, true] {
+            let mut ws = Workspace::test_new("targeted-split");
+            let first = ws.tabs[0].root_pane;
+            ws.test_split(Direction::Horizontal);
+            let third = ws.test_split(Direction::Vertical);
+            ws.tabs[0].layout.focus_pane(first);
+            ws.tabs[0].layout.focus_pane(third);
+            let (_, created) = ws
+                .split_pane_argv_command(
+                    first,
+                    Direction::Horizontal,
+                    20,
+                    80,
+                    Some(std::env::current_dir().unwrap()),
+                    &["/usr/bin/true".to_string()],
+                    Vec::new(),
+                    0,
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    focus_new,
+                )
+                .expect("target exists")
+                .expect("runtime spawn succeeds");
+            ws.assert_invariants_for_test();
+            let focus = if focus_new { created.pane_id } else { third };
+            assert_eq!(ws.tabs[0].layout.focused(), focus);
+            assert!(!ws.close_pane(focus));
+            assert_eq!(
+                ws.tabs[0].layout.focused(),
+                if focus_new { third } else { first }
+            );
+        }
+    }
+
+    #[test]
+    fn background_detach_and_move_preserve_close_focus_origin() {
+        for moving in [false, true] {
+            let mut ws = Workspace::test_new("background");
+            let first = ws.tabs[0].root_pane;
+            let second = ws.test_split(Direction::Horizontal);
+            ws.test_split(Direction::Vertical);
+            let fourth = ws.test_split(Direction::Horizontal);
+            ws.tabs[0].layout.focus_pane(second);
+            ws.tabs[0].layout.focus_pane(fourth);
+            if moving {
+                assert!(ws.take_pane_for_move(first).is_some());
+            } else {
+                assert!(!ws.close_pane(first));
+            }
+            assert_eq!(ws.tabs[0].layout.focused(), fourth);
+            assert!(!ws.close_pane(fourth));
+            assert_eq!(ws.tabs[0].layout.focused(), second);
+        }
+    }
+
     #[test]
     fn failed_moved_pane_insert_returns_pane_for_recovery() {
         let mut source = Workspace::test_new("source");
@@ -1669,7 +1734,14 @@ mod tests {
         let missing_target = PaneId::alloc();
 
         let recovered = target
-            .insert_moved_pane_into_tab(0, missing_target, taken.moved, Direction::Horizontal, 0.5)
+            .insert_moved_pane_into_tab(
+                0,
+                missing_target,
+                taken.moved,
+                Direction::Horizontal,
+                0.5,
+                true,
+            )
             .expect_err("invalid target should return the moved pane");
 
         assert_eq!(recovered.pane_id, source_pane);
