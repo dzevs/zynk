@@ -2292,3 +2292,40 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
 - Release-profile prerequisite: the new benchmark exposed E0560 in the pre-existing `a_captured_exit_blocks_receipts_before_the_event_queue_accepts_it` test, introduced by `5aba0ac`. Its literal set the debug-only `ApiCaller::trusted_as_pane_child` field in a release test build. Change only that test to call the dispatcher's existing receipt handler directly, retaining every queue/fence/refusal/fresh-owner assertion. The previous seam already bypassed caller-origin checks; the independent internal-caller refusal and seam-gating controls remain unchanged. Do not enable the seam in release or merely gate the literal field (which would reject the no-peer fixture before reaching the receipt fence). Verify this test in both profiles. A passing debug `just check` or release artifact build is not evidence that release-mode unit tests compile; the failed benchmark build is retained, with no timing claim from it.
 - `6cfaa079a921e8ba7d01e0fdf14f88a13845cb9a` (SPLIT): no executable Linux delta is needed. Its platform-boundary changes only narrow three unused non-macOS no-op stubs, already absent since M1. Exclude the Windows implementation/config/input plumbing; keep the existing removed-key diagnostic and tests for the dropped prefix-mode IME key rather than resurrecting inert APIs or settings.
 - Protocol remains 19 and the operator-ratified **D-M5-6 -> M9 `2863b715`** stands. `e48d8306` status/config/dependency/platform-helper code is not imported by this slice: its status feature calls all five deferred platform APIs, so whether the dependent feature moves to M9 with them is an explicit operator decision still pending here. This is not M5 completion or a new deferral ratification. The render slice is **IMPLEMENTED / PENDING VERIFICATION** until its exact-SHA reviews; earlier approvals remain bound to their own objects.
+
+### M5-25 status-feature deferral ratification (2026-09-11)
+
+- The operator explicitly approved moving the dependent custom tab-bar status feature to M9 with its helpers. This resolves the pending question in the preceding row without reversing the earlier **D-M5-6** decision or rewriting that historical record. It is a scheduling change, not feature removal, and is unrelated to the separately requested agent-panel `current`/`all` filtering.
+- **D-M5-6 expanded carry-forward:** defer the complete Linux-applicable status
+  feature from `e48d8306`, not only its +84 platform lines. M9 must bring
+  `src/app/tab_bar_status.rs`, `src/config/tab_bar.rs`, their config, event,
+  runtime and UI wiring, and tests together with `hostname`, `local_datetime`,
+  `status_commands_supported`, `configure_status_command` and `StatusCommandGuard`
+  at the `2863b715` platform handoff. Adapt to the M5 runtime/state boundaries;
+  do not import unsupported-platform implementations from that dependency.
+- The `time` dependency and tokio `process`/`io-util` additions travel with the
+  feature. Before landing them in M9, run `cargo deny` and `cargo audit`, inspect
+  the actual results against the then-recorded advisory baseline, and resolve
+  any gate failure. This deferral waives no check. Config-key registration and
+  full-path typo tests also travel with the feature. Website/config-reference
+  tooling stays excluded; the decision against a fork-owned documentation gate
+  is unchanged.
+- No feature, inert config, dependency, helper or weaker process cleanup is
+  added in M5 by this disposition. It supersedes the older M5 sheet's TAKE,
+  recommended-retarget and new-dependency acceptance rows only for this feature.
+  `e2aa86a9`'s render guard remains M5 work, implemented by `a6cc7d4` with its
+  named `e7c38ab3` scalar prerequisite. Protocol stays 19. This closes the operator
+  scope question, not whole-M5 review or any merge, install or publish gate.
+
+### M5 whole-commit carry-forward reconciliation (2026-09-11)
+
+- **D-M5-4:** carry `5b91dae1` (sidebar entry gaps) to M8 after `5cfe5e5e`
+  creates `src/config/sidebar.rs` and `src/ui/sidebar/tokens.rs`. Keep its
+  config and UI pieces together. Carry `a0678a38`'s portable popup CLI help
+  and examples to M8 after `2c7c8beb`, retaining the website exclusions.
+  Both whole-source deferrals were already in the plan. This adds the missing
+  source IDs to the ledger, not a new scope choice or an execution claim.
+- The upstream M5 source list has 98 distinct SHAs: 96 are assigned to the 25
+  ordered steps, and these two are scheduled outside the step table. Mention
+  coverage alone is bookkeeping, not proof that every hunk or test was ported.
+  Whole-M5 review must inspect the actual dispositions and affected invariants.
