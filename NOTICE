@@ -166,6 +166,8 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/ui/tabs.rs
 - src/workspace.rs
 - src/workspace/aggregate.rs
+- src/workspace/git/config.rs
+- src/workspace/git/config_tests.rs
 - src/workspace/git/discovery.rs
 - src/workspace/git/mod.rs
 - src/workspace/git/status.rs

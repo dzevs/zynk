@@ -139,6 +139,7 @@ fn deduplicate_git_refresh_items(
     let mut jobs = Vec::<WorkspaceGitRefreshJob>::new();
 
     for item in items {
+        let reconcile = item.cache_key_hint.is_none();
         let cache_key = item.cache_key_hint.unwrap_or_else(|| {
             crate::workspace::git_status_cache_key(&item.resolved_identity_cwd)
                 .unwrap_or_else(|| item.resolved_identity_cwd.clone())
@@ -148,11 +149,12 @@ fn deduplicate_git_refresh_items(
             resolved_identity_cwd: item.resolved_identity_cwd,
         };
         if let Some(&index) = indexes.get(&cache_key) {
+            jobs[index].cached = jobs[index].cached.take().filter(|_| !reconcile);
             jobs[index].targets.push(target);
             continue;
         }
 
-        let cached = cache.get(&cache_key).cloned();
+        let cached = cache.get(&cache_key).filter(|_| !reconcile).cloned();
         indexes.insert(cache_key.clone(), jobs.len());
         jobs.push(WorkspaceGitRefreshJob {
             cache_key,
@@ -351,6 +353,67 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].cache_key_hint, None);
+        let cache_key = items[0].resolved_identity_cwd.clone();
+        let cached = GitStatusCacheEntry {
+            fingerprint: None,
+            retry_after: None,
+            snapshot: crate::workspace::WorkspaceGitStatusSnapshot {
+                auto_label: "stale".into(),
+                branch: None,
+                ahead_behind: None,
+                space: None,
+            },
+        };
+        let jobs = deduplicate_git_refresh_items(items, &HashMap::from([(cache_key, cached)]));
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].cached, None);
+    }
+
+    #[test]
+    fn any_reconciliation_target_invalidates_the_shared_cached_job() {
+        let root = std::env::var_os("ZYNK_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("zynk-reconcile-dedup-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let mut command = std::process::Command::new("git");
+        crate::workspace::scrub_git_env(&mut command);
+        let output = command.arg("-C").arg(&root).arg("init").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(root.join(".git").is_dir());
+        let (_, cached) = crate::workspace::git_status_snapshot_for_cwd_with_demand(
+            &root,
+            None,
+            GitStatusRefreshDemand::ALL,
+        );
+        let cached = cached.unwrap();
+        for hints in [[true, false], [false, true], [true, true]] {
+            let items = hints
+                .into_iter()
+                .enumerate()
+                .map(|(idx, hinted)| WorkspaceGitRefreshItem {
+                    workspace_id: format!("workspace-{idx}"),
+                    resolved_identity_cwd: root.clone(),
+                    cache_key_hint: hinted.then(|| root.clone()),
+                })
+                .collect();
+            let jobs = deduplicate_git_refresh_items(
+                items,
+                &HashMap::from([(root.clone(), cached.clone())]),
+            );
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].targets.len(), 2);
+            assert_eq!(
+                jobs[0].cached,
+                hints.iter().all(|hint| *hint).then(|| cached.clone())
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

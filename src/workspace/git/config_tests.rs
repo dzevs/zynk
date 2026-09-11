@@ -1,9 +1,122 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use super::config::*;
 use crate::workspace::git::{
     discovery::git_worktree_info,
     status::git_status_fingerprint,
     test_support::{temp_test_dir, write_fake_tracked_repo},
 };
+
+#[test]
+fn config_symlink_retarget_invalidates_context() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_test_dir("config-symlink-retarget");
+    write_fake_tracked_repo(&root);
+    let alias = root.join("branch.cfg");
+    let first = root.join("first.cfg");
+    let second = root.join("second.cfg");
+    std::fs::write(&first, "").unwrap();
+    std::fs::write(&second, "").unwrap();
+    let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for path in [&first, &second] {
+        std::fs::File::open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+    assert_eq!(stamp(first.clone(), None).1, stamp(second.clone(), None).1);
+    symlink(&first, &alias).unwrap();
+    let context = read_config_with_user_paths(
+        &git_worktree_info(&root).unwrap(),
+        "main",
+        vec![alias.clone()],
+    );
+    std::fs::remove_file(&alias).unwrap();
+    symlink(&second, &alias).unwrap();
+
+    assert!(!deps_current(&context.2));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn config_read_error_retries_next_refresh() {
+    let root = temp_test_dir("config-read-error");
+    write_fake_tracked_repo(&root);
+    std::fs::write(root.join(".git/config"), [0xff]).unwrap();
+    let context = read_config(&git_worktree_info(&root).unwrap(), "main");
+    assert!(!deps_current(&context.2));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn config_reader_reads_each_canonical_file_once() {
+    let root = temp_test_dir("config-read-count");
+    write_fake_tracked_repo(&root);
+    let included = root.join(".git/included.cfg");
+    std::fs::write(&included, "[branch \"main\"]\nremote = fork\n").unwrap();
+    std::fs::write(
+        root.join(".git/config"),
+        "[branch \"main\"]\nremote = origin\nmerge = refs/heads/main\n[include]\npath = included.cfg\npath = included.cfg\n",
+    )
+    .unwrap();
+    let alias = root.join("alias.cfg");
+    std::os::unix::fs::symlink(&included, &alias).unwrap();
+    CONFIG_READ_COUNT.set(0);
+    let context =
+        read_config_with_user_paths(&git_worktree_info(&root).unwrap(), "main", vec![alias]);
+    let reads = CONFIG_READ_COUNT.get();
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(context.1.unwrap().remote, "fork");
+    assert_eq!(
+        reads, 2,
+        "three parse passes and repeated aliases reread files"
+    );
+}
+
+#[test]
+fn config_missing_file_is_reusable_until_it_appears() {
+    let root = temp_test_dir("config-missing-dep");
+    write_fake_tracked_repo(&root);
+    let missing = root.join("missing.cfg");
+    let context = read_config_with_user_paths(
+        &git_worktree_info(&root).unwrap(),
+        "main",
+        vec![missing.clone()],
+    );
+    assert!(deps_current(&context.2));
+    std::fs::write(missing, "").unwrap();
+    let current = deps_current(&context.2);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(!current);
+}
+
+#[test]
+fn config_metadata_permission_error_is_not_reusable() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp_test_dir("config-metadata-permission");
+    let parent = root.join("private");
+    std::fs::create_dir(&parent).unwrap();
+    let path = parent.join("config");
+    std::fs::write(&path, "").unwrap();
+    let permissions = std::fs::metadata(&parent).unwrap().permissions();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let inaccessible = std::fs::metadata(&path);
+    let dep = stamp(path, None);
+    let current = deps_current(std::slice::from_ref(&dep));
+    std::fs::set_permissions(&parent, permissions).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    if inaccessible.is_ok() {
+        eprintln!("UNEXERCISED: privileged process can traverse mode-000 ancestor");
+        return;
+    }
+    assert_eq!(
+        inaccessible.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert!(!dep.2);
+    assert!(!current);
+}
 
 #[test]
 fn git_status_fingerprint_honors_remote_fetch_refspec() {
@@ -74,7 +187,9 @@ fn git_status_branch_config_reads_user_config_before_repo_config() {
         .unwrap();
 
     let info = git_worktree_info(&root).unwrap();
-    let config = read_branch_config_with_user_paths(&info, "main", vec![user_config]).unwrap();
+    let config = read_config_with_user_paths(&info, "main", vec![user_config])
+        .1
+        .unwrap();
 
     assert_eq!(config.remote, "global");
     assert_eq!(
@@ -97,7 +212,9 @@ fn git_status_branch_config_repo_config_overrides_user_config() {
         .unwrap();
 
     let info = git_worktree_info(&root).unwrap();
-    let config = read_branch_config_with_user_paths(&info, "main", vec![user_config]).unwrap();
+    let config = read_config_with_user_paths(&info, "main", vec![user_config])
+        .1
+        .unwrap();
 
     assert_eq!(config.remote, "origin");
     assert_eq!(
@@ -475,7 +592,9 @@ fn git_status_fingerprint_matches_user_hasconfig_against_repo_remote_url() {
         .unwrap();
 
     let info = git_worktree_info(&root).unwrap();
-    let config = read_branch_config_with_user_paths(&info, "main", vec![user_config]).unwrap();
+    let config = read_config_with_user_paths(&info, "main", vec![user_config])
+        .1
+        .unwrap();
 
     assert_eq!(config.remote, "included");
     assert_eq!(config.merge_ref, "refs/heads/main");
@@ -511,7 +630,9 @@ fn git_status_fingerprint_skips_hasconfig_include_that_defines_remote_url() {
         .unwrap();
 
     let info = git_worktree_info(&root).unwrap();
-    let config = read_branch_config_with_user_paths(&info, "main", vec![user_config]).unwrap();
+    let config = read_config_with_user_paths(&info, "main", vec![user_config])
+        .1
+        .unwrap();
 
     assert_eq!(config.remote, "origin");
     assert_eq!(config.merge_ref, "refs/heads/main");
@@ -552,7 +673,9 @@ fn git_status_fingerprint_skips_hasconfig_include_chain_that_defines_remote_url(
         .unwrap();
 
     let info = git_worktree_info(&root).unwrap();
-    let config = read_branch_config_with_user_paths(&info, "main", vec![user_config]).unwrap();
+    let config = read_config_with_user_paths(&info, "main", vec![user_config])
+        .1
+        .unwrap();
 
     assert_eq!(config.remote, "origin");
     assert_eq!(config.merge_ref, "refs/heads/main");

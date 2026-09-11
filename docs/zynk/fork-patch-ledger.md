@@ -2865,3 +2865,33 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   Keep ordinary recent reads unchanged. No protocol, detection, identity or
   persistence change; protocol19 and the held M6-06 boundary remain.
   **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-22: Reuse Git Configuration With Dependency Checks
+
+- **TAKE / ADAPT** `5600197f00e871764465d4e3d9ba5e6aa6fd9547`: reuse one
+  canonical-file read across the configuration parser's passes. Carry the
+  selected branch, configuration result and file dependencies in the runtime
+  Git status fingerprint. Reuse discovery only while its dependencies remain
+  current; HEAD/ref values still refresh. Missing files are reusable until
+  creation, while metadata/read failures other than NotFound are not stable
+  cache entries. Logical aliases also retain the resolved target so a symlink
+  retarget invalidates even if metadata stamps match.
+- Branch-only refreshes retain discovery without computing ahead/behind.
+  Periodic reconciliation ignores cached results, including when a later
+  target sharing the same job requires discovery. Preserve M5's fixed sidebar
+  demand and M6-16's repo_name/checkout label separation. No new Git subprocess
+  policy, fixture environment exemption, production routing or render I/O.
+- Controls cover missing HEAD, appearing include, changed worktree override,
+  onbranch selection, identical-stamp alias retarget, malformed-file read
+  refusal and actual inaccessible metadata. A thread-local test-only counter
+  observes the real configuration read call: repeated canonical aliases read
+  once, and unchanged subsequent status refresh performs zero config reads.
+  Existing packed/reftable HEAD and upstream tests remain in the focused set.
+  New real-Git fixture creation uses B1's scrub and asserts a local .git.
+- The inaccessible-metadata test restores permissions before assertions and
+  reports UNEXERCISED if privilege permits traversal; do not count that branch
+  as a negative. File stamps retain upstream's modification-time/length cache
+  model, not content attestation or an atomic filesystem snapshot guarantee.
+  Add modified-file attribution for config.rs and config_tests.rs. Protocol19,
+  D-M5-6 to M9 and held M6-06 stay unchanged.
+  **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
