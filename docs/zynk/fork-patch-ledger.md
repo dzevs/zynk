@@ -2589,3 +2589,31 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   B1 identity or runtime ownership change. No new render work or cache state.
   The previously modified pane.rs notice and NOTICE entry remain applicable.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.
+
+### M6-13: Bidirectional PTY Progress (2026-09-11)
+
+- **Source:** `ef85fa0c7ebb48bb59fe7593af5a67f3e02ff3d4`, adapted to the
+  Linux-only fd/actor modules without reintroducing platform cfg gates.
+  Remove the nested 50ms write-ready wait; dispatch readable output before
+  writable input. During handoff drain, poll both directions and the wake fd
+  until the existing deadline; refuse read EOF instead of timing out as if
+  the peer were only blocked. Partial-write offset and queue order stay intact.
+- `poll_pty_and_wake` keeps one deadline across EINTR, clears revents before
+  retries and preserves zero/infinite timeout behavior. The no-longer-used
+  write-only poll helper is removed. This follows the interruption, timeout
+  and readiness contract in [Linux poll(2)](https://man7.org/linux/man-pages/man2/poll.2.html).
+- Permanent behavioral reds: the running actor must drain 512KiB output while
+  input is blocked; a handoff peer refuses input until its output callback
+  fires; read EOF with pending input is BrokenPipe, not TimedOut; thread-local
+  signal interruptions must not restart a 100ms poll budget. The latter took
+  about 1.1s before the fix. Timing thresholds are bounded fixture controls,
+  not production-latency claims. Signals target only the test pthread; the
+  sender joins before the original mask and handler are restored.
+- Positive controls retain exact partial-write suffix/FIFO bytes, zero-timeout
+  readiness and infinite-wait wake behavior. Peer workers are joined before
+  outcome assertions; existing quiesce/rollback and response-order controls
+  remain. TestChannel fixtures are not replaced by PTYs. No process detector,
+  identity, receipt, protocol 19, dependency or M6-06 policy change.
+- fd.rs receives its first modified-file notice and NOTICE entry. Actor
+  attribution already existed. **IMPLEMENTED / PENDING VERIFICATION** by
+  Gate2/Gate3; no deployment implied.

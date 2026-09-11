@@ -136,6 +136,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/protocol/render_ansi.rs
 - src/protocol/wire.rs
 - src/pty/actor/unix.rs
+- src/pty/fd.rs
 - src/raw_input.rs
 - src/render_signal.rs
 - src/selection.rs

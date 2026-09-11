@@ -18,7 +18,6 @@ use crate::pty::fd;
 // timeout is only a fallback for missed wakes; PTY and wake readiness drive
 // normal responsiveness.
 const ACTOR_IDLE_POLL_MS: i32 = 1000;
-const ACTOR_WRITE_READY_POLL_MS: i32 = 50;
 const ACTOR_COMMAND_BUFFER: usize = 1024;
 const HANDOFF_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -474,14 +473,14 @@ impl PtyIoActorRunner {
                         }
                         continue;
                     }
-                    if readiness.pty_write_ready && !self.pending_writes.is_empty() {
-                        self.flush_pending_writes_once();
-                    }
                     if self.state == ActorState::Running
                         && readiness.pty_read_ready
                         && !self.read_once()
                     {
                         break;
+                    }
+                    if readiness.pty_write_ready && !self.pending_writes.is_empty() {
+                        self.flush_pending_writes_once();
                     }
                 }
                 Err(err) => {
@@ -609,14 +608,35 @@ impl PtyIoActorRunner {
             ));
         }
         let deadline = Instant::now() + HANDOFF_DRAIN_TIMEOUT;
+        self.flush_pending_writes_once();
         while !self.pending_writes.is_empty() {
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "timed out draining PTY writes before handoff",
                 ));
             }
-            self.flush_pending_writes_once();
+            let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+            let readiness = fd::poll_pty_and_wake(
+                self.file.as_raw_fd(),
+                self.wake_read_fd.as_raw_fd(),
+                true,
+                true,
+                timeout_ms,
+            )?;
+            if readiness.wake_ready {
+                fd::drain_wake_fd(self.wake_read_fd.as_raw_fd())?;
+            }
+            if readiness.pty_read_ready && !self.read_once() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "PTY closed while draining writes before handoff",
+                ));
+            }
+            if readiness.pty_write_ready {
+                self.flush_pending_writes_once();
+            }
         }
         self.state = ActorState::Quiesced;
         Ok(())
@@ -714,10 +734,7 @@ impl PtyIoActorRunner {
                         self.current_write_offset = 0;
                     }
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    let _ = fd::poll_write_ready(self.file.as_raw_fd(), ACTOR_WRITE_READY_POLL_MS);
-                    return;
-                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return,
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => return,
                 Err(err) => {
                     warn!(pane = self.pane_id, err = %err, "PTY actor write failed");
@@ -895,6 +912,176 @@ mod tests {
         peer.read_exact(&mut buf).expect("peer receives write");
         assert_eq!(&buf, b"hello");
         handle.shutdown();
+    }
+
+    fn fill_socket_send_buffer(writer: &mut impl Write) -> usize {
+        let mut filled = 0;
+        for _ in 0..1024 {
+            match writer.write(&[0xAA; 8192]) {
+                Ok(0) => panic!("socket stopped accepting bytes before WouldBlock"),
+                Ok(written) => filled += written,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(filled > 0);
+                    return filled;
+                }
+                Err(err) => panic!("failed to fill socket: {err}"),
+            }
+        }
+        panic!("socket never backpressured within the bounded fixture");
+    }
+
+    #[test]
+    fn actor_reads_output_while_input_is_backpressured() {
+        let (mut socket, mut peer) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+        peer.set_write_timeout(Some(Duration::from_secs(4)))
+            .unwrap();
+        let prefilled = fill_socket_send_buffer(&mut socket);
+        let (read_tx, read_rx) = std_mpsc::channel();
+        let (exit_tx, exit_rx) = std_mpsc::channel();
+        let handle = PtyIoActor::spawn(PtyIoActorConfig {
+            pane_id: 1,
+            master_fd: socket.into(),
+            initially_quiesced: false,
+            on_read: Box::new(move |bytes| {
+                read_tx.send(Bytes::copy_from_slice(bytes)).unwrap();
+                PtyReadResult::empty()
+            }),
+            on_reader_exit: Some(Box::new(move || {
+                let _ = exit_tx.send(());
+            })),
+        })
+        .unwrap();
+        let marker = Bytes::from_static(b"queued-input");
+        handle.try_write_user_input(marker.clone()).unwrap();
+        const OUTPUT_LEN: usize = 512 * 1024;
+        let mut peer_writer = peer.try_clone().unwrap();
+        let writer = std::thread::spawn(move || peer_writer.write_all(&vec![0xBB; OUTPUT_LEN]));
+        let result = (|| -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut output = Vec::new();
+            while output.len() < OUTPUT_LEN {
+                let bytes = read_rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .map_err(std::io::Error::other)?;
+                output.extend_from_slice(&bytes);
+            }
+            let mut input = vec![0; prefilled + marker.len()];
+            peer.read_exact(&mut input)?;
+            Ok((input, output))
+        })();
+        handle.shutdown();
+        let shutdown = peer.shutdown(std::net::Shutdown::Both);
+        let writer_result = writer.join().expect("output writer joined");
+        exit_rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("actor exited");
+
+        let (input, output) =
+            result.expect("actor must drain output without waiting for peer input reads");
+        shutdown.expect("peer shut down");
+        writer_result.expect("peer wrote all output");
+        assert_eq!(output, vec![0xBB; OUTPUT_LEN]);
+        assert!(input[..prefilled].iter().all(|byte| *byte == 0xAA));
+        assert_eq!(&input[prefilled..], marker.as_ref());
+    }
+
+    #[test]
+    fn handoff_reads_output_to_unblock_queued_input() {
+        let (mut runner, mut peer) = actor_runner_for_unit_test();
+        let (_wake, wake_read) = test_wake_pair();
+        runner.wake_read_fd = wake_read;
+        peer.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+        let prefilled = fill_socket_send_buffer(&mut runner.file);
+        runner.enqueue_write(Bytes::from_static(b"first"));
+        runner.enqueue_write(Bytes::from_static(b"second"));
+        let (read_tx, read_rx) = std_mpsc::channel();
+        runner.on_read = Box::new(move |bytes| {
+            read_tx.send(Bytes::copy_from_slice(bytes)).unwrap();
+            PtyReadResult::empty()
+        });
+
+        let exchange = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            peer.write_all(b"x")?;
+            // The peer cannot accept input until its output has been processed.
+            let output = read_rx
+                .recv_timeout(Duration::from_secs(4))
+                .map_err(std::io::Error::other)?;
+            assert_eq!(output.as_ref(), b"x");
+            let mut input = vec![0; prefilled + b"firstsecond".len()];
+            peer.read_exact(&mut input)?;
+            Ok(input)
+        });
+        let result = runner.begin_handoff();
+        let state = runner.state;
+        let remaining = runner.pending_writes.len();
+        drop(runner);
+        let input = exchange.join().expect("peer thread joined");
+
+        result.expect("handoff must read output while draining blocked input");
+        assert_eq!(state, ActorState::Quiesced);
+        assert_eq!(remaining, 0);
+        let input = input.expect("peer completed both directions");
+        assert!(input[..prefilled].iter().all(|byte| *byte == 0xAA));
+        assert_eq!(&input[prefilled..], b"firstsecond");
+    }
+
+    #[test]
+    fn handoff_refuses_read_eof_while_input_is_backpressured() {
+        let (mut runner, peer) = actor_runner_for_unit_test();
+        let (_wake, wake_read) = test_wake_pair();
+        runner.wake_read_fd = wake_read;
+        fill_socket_send_buffer(&mut runner.file);
+        runner.enqueue_write(Bytes::from_static(b"pending"));
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let err = runner
+            .begin_handoff()
+            .expect_err("EOF cannot quiesce input");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(runner.state, ActorState::Running);
+        assert_eq!(runner.pending_writes.front().unwrap().as_ref(), b"pending");
+    }
+
+    #[test]
+    fn handoff_preserves_partial_write_suffix_and_queue_order() {
+        let (mut runner, mut peer) = actor_runner_for_unit_test();
+        let (_wake, wake_read) = test_wake_pair();
+        runner.wake_read_fd = wake_read;
+        peer.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+        let payload = Bytes::from(
+            (0..2 * 1024 * 1024)
+                .map(|n| (n % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
+        runner.enqueue_write(payload.clone());
+        runner.enqueue_write(Bytes::from_static(b"tail"));
+        runner.flush_pending_writes_once();
+        assert!(runner.current_write_offset > 0);
+        assert!(runner.current_write_offset < payload.len());
+        assert_eq!(runner.pending_writes.len(), 2);
+
+        let input_len = payload.len() + 4;
+        let reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut input = vec![0; input_len];
+            peer.read_exact(&mut input)?;
+            Ok(input)
+        });
+        let result = runner.begin_handoff();
+        let state = runner.state;
+        let remaining = (runner.pending_writes.len(), runner.current_write_offset);
+        drop(runner);
+        let input = reader.join().expect("reader joined");
+
+        result.expect("handoff drains the remaining suffix");
+        assert_eq!(state, ActorState::Quiesced);
+        assert_eq!(remaining, (0, 0));
+        let input = input.expect("peer received every queued byte");
+        assert_eq!(&input[..payload.len()], payload.as_ref());
+        assert_eq!(&input[payload.len()..], b"tail");
     }
 
     #[test]
