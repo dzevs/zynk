@@ -2718,3 +2718,41 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   Keep the existing narrow-cell, big-word and blank-history positive controls.
   No window sizing, render, IME-mode, authority or protocol19 change; M6-06 held.
   **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-17: Pane Associated-Text Encoding (2026-09-11)
+
+- **Source:** `cfa112e741eef8565261a0d404d92ad425829f3b`. Encode a printable
+  scalar as associated text when requested by the pane protocol, composing with
+  alternate keys and event types. Share character selection with ordinary text
+  encoding; release events and control characters produce no associated text.
+  The flag and scalar boundary follow the [Kitty protocol sections on associated
+  text and text code points](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#report-associated-text).
+- **FORWARD ADAPTATION from M8:** `e7fc85bfdb51f89488430adbfe5bbced3be79c2f`
+  contributes only pane-encoder kitty-first ordering for report-all/event
+  releases and its byte controls. Keep the existing local REPORT_ALL constant
+  and the fork's generated_text fast path before protocol encoding, including
+  mirrored raw VT commits and unequal/multicodepoint IME payloads. No input
+  model or source-discrimination policy change; do not reuse the Prefix-only
+  has_associated_text policy here.
+- **Additional M8 prerequisite:** `d190c1f55e05419b299fc68f60ea0aabc1ff7379`
+  contributes only is_shifted_ascii_punctuation, its shifted_text_char call and
+  encoder controls. Without this, cfa112e7's literal SHIFT+colon (no reported
+  shifted scalar) loses its associated text. Keep layout inference absent for
+  SHIFT+1, and preserve CTRL/ALT/SUPER chords. Its printable-release expectation
+  is updated by e7fc85bf, not retained as a stale silent-release control.
+- **Still due at M8:** d190c1f5's
+  api_pane_send_keys_sends_shifted_punctuation_as_text_in_kitty_mode test in
+  src/app/api/panes.rs. Account for both consumed encoder creators alongside
+  the earlier M5 e7fc85bf source-id prerequisites; neither creator is declared
+  wholly ported here. Exclude the Windows changelog sentence, host flag
+  streamer, ClientMessage additions, terminal_modes module, input-source APIs
+  and protocol-18 bump. The M6 authority remains41 sources, plus separately
+  recorded prerequisites. Protocol19 stays pinned and M6-06 stays held.
+- Separate controls cover report-all ordering, explicit shifted scalar versus
+  literal punctuation, event/alternate composition, control/release/chord
+  exclusions and exact committed bytes. A fixture type error was corrected
+  before seven behavioral reds; the compile failure remains distinct evidence.
+  Acceptance requires disposable-copy one-site mutations of ordering,
+  associated-text emission and punctuation recognition, with captured assertion
+  failures and exact restoration. A passing unmutated suite alone is not enough.
+  **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.

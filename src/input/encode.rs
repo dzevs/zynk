@@ -1,5 +1,7 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
+use std::fmt::Write as _;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{KeyboardProtocol, MouseProtocolEncoding, TerminalKey};
@@ -7,6 +9,7 @@ use super::{KeyboardProtocol, MouseProtocolEncoding, TerminalKey};
 const KITTY_FLAG_REPORT_EVENT_TYPES: u16 = 0b0000_0010;
 const KITTY_FLAG_REPORT_ALTERNATE_KEYS: u16 = 0b0000_0100;
 const KITTY_FLAG_REPORT_ALL_KEYS: u16 = 0b0000_1000;
+const KITTY_FLAG_REPORT_ASSOCIATED_TEXT: u16 = 0b0001_0000;
 
 /// Encode a key event for a PTY child using the pane's negotiated keyboard protocol.
 #[allow(dead_code)] // exercised in input unit tests; production uses TerminalRuntime helpers
@@ -30,13 +33,26 @@ pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<
         return Vec::new();
     }
 
+    let kitty_first = matches!(protocol, KeyboardProtocol::Kitty { flags } if flags & KITTY_FLAG_REPORT_ALL_KEYS != 0)
+        || (key.kind == crossterm::event::KeyEventKind::Release && protocol.reports_event_types());
+
+    if kitty_first {
+        if let KeyboardProtocol::Kitty { flags } = protocol {
+            if let Some(bytes) = try_encode_csi_u(&key, flags) {
+                return bytes;
+            }
+        }
+    }
+
     if let Some(bytes) = encode_text_input(&key) {
         return bytes;
     }
 
-    if let KeyboardProtocol::Kitty { flags } = protocol {
-        if let Some(bytes) = try_encode_csi_u(&key, flags) {
-            return bytes;
+    if !kitty_first {
+        if let KeyboardProtocol::Kitty { flags } = protocol {
+            if let Some(bytes) = try_encode_csi_u(&key, flags) {
+                return bytes;
+            }
         }
     }
     if key.kind == crossterm::event::KeyEventKind::Release && protocol.reports_event_types() {
@@ -229,14 +245,29 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
 
     let modifier = kitty_modifier(mods);
 
-    let sequence = match (alternate_shifted, event_suffix) {
-        (Some(shifted), Some(event)) => format!("\x1b[{codepoint}:{shifted};{modifier}:{event}u"),
-        (Some(shifted), None) => format!("\x1b[{codepoint}:{shifted};{modifier}u"),
-        (None, Some(event)) => format!("\x1b[{codepoint};{modifier}:{event}u"),
-        (None, None) => format!("\x1b[{codepoint};{modifier}u"),
-    };
+    let mut sequence = String::with_capacity(32);
+    sequence.push_str("\x1b[");
+    write!(&mut sequence, "{codepoint}").ok()?;
+    if let Some(shifted) = alternate_shifted {
+        write!(&mut sequence, ":{shifted}").ok()?;
+    }
+    write!(&mut sequence, ";{modifier}").ok()?;
+    if let Some(event) = event_suffix {
+        write!(&mut sequence, ":{event}").ok()?;
+    }
+    if flags & KITTY_FLAG_REPORT_ASSOCIATED_TEXT != 0 {
+        if let Some(text) = text_codepoint_for_key(key) {
+            write!(&mut sequence, ";{text}").ok()?;
+        }
+    }
+    sequence.push('u');
 
     Some(sequence.into_bytes())
+}
+
+fn text_codepoint_for_key(key: &TerminalKey) -> Option<u32> {
+    let ch = text_char_for_key(key)?;
+    (!ch.is_control()).then_some(ch as u32)
 }
 
 /// Legacy terminal encoding (standard escape sequences).
@@ -341,34 +372,27 @@ fn kitty_modifier(mods: KeyModifiers) -> u32 {
 }
 
 fn encode_text_input(key: &TerminalKey) -> Option<Vec<u8>> {
-    let ch = match key.code {
-        KeyCode::Char(ch) => ch,
-        _ => return None,
-    };
+    let ch = text_char_for_key(key)?;
+    let mut buf = [0u8; 4];
+    Some(ch.encode_utf8(&mut buf).as_bytes().to_vec())
+}
 
-    if key.modifiers.is_empty() {
-        match key.kind {
-            crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat => {
-                let mut buf = [0u8; 4];
-                return Some(ch.encode_utf8(&mut buf).as_bytes().to_vec());
-            }
-            crossterm::event::KeyEventKind::Release => return Some(Vec::new()),
-        }
-    }
-
-    if key.modifiers != KeyModifiers::SHIFT {
+fn text_char_for_key(key: &TerminalKey) -> Option<char> {
+    if key.kind == crossterm::event::KeyEventKind::Release {
         return None;
     }
 
-    let shifted_ch = shifted_text_char(key, ch)?;
+    let KeyCode::Char(ch) = key.code else {
+        return None;
+    };
 
-    match key.kind {
-        crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat => {
-            let mut buf = [0u8; 4];
-            Some(shifted_ch.encode_utf8(&mut buf).as_bytes().to_vec())
-        }
-        crossterm::event::KeyEventKind::Release => Some(Vec::new()),
+    if key.modifiers.is_empty() {
+        return Some(ch);
     }
+    if key.modifiers == KeyModifiers::SHIFT {
+        return shifted_text_char(key, ch);
+    }
+    None
 }
 
 fn shifted_text_char(key: &TerminalKey, ch: char) -> Option<char> {
@@ -384,7 +408,37 @@ fn shifted_text_char(key: &TerminalKey, ch: char) -> Option<char> {
         return Some(ch.to_ascii_uppercase());
     }
 
+    if is_shifted_ascii_punctuation(ch) {
+        return Some(ch);
+    }
+
     None
+}
+
+fn is_shifted_ascii_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '!' | '@'
+            | '#'
+            | '$'
+            | '%'
+            | '^'
+            | '&'
+            | '*'
+            | '('
+            | ')'
+            | '_'
+            | '+'
+            | '{'
+            | '}'
+            | '|'
+            | ':'
+            | '"'
+            | '<'
+            | '>'
+            | '?'
+            | '~'
+    )
 }
 
 fn canonical_kitty_char(ch: char, mods: KeyModifiers) -> char {
@@ -838,6 +892,208 @@ mod tests {
     }
 
     #[test]
+    fn kitty_report_all_keys_encodes_printable_event_kinds() {
+        use crossterm::event::KeyEventKind::{Press, Release, Repeat};
+        for flags in [9, 15] {
+            for (kind, expected) in [
+                (Press, b"\x1b[106;1:1u".as_slice()),
+                (Repeat, b"\x1b[106;1:2u".as_slice()),
+                (Release, b"\x1b[106;1:3u".as_slice()),
+            ] {
+                let key = KeyEvent::new_with_kind(KeyCode::Char('j'), KeyModifiers::empty(), kind);
+                let expected: &[u8] = if flags == 15 {
+                    expected
+                } else if kind == Release {
+                    b""
+                } else {
+                    b"\x1b[106;1u"
+                };
+                assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags }), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_printable_release_is_encoded_without_report_all() {
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('j'),
+            KeyModifiers::empty(),
+            crossterm::event::KeyEventKind::Release,
+        );
+        assert_eq!(
+            encode_key(release, KeyboardProtocol::Kitty { flags: 3 }),
+            b"\x1b[106;1:3u"
+        );
+    }
+
+    #[test]
+    fn kitty_report_associated_text_embeds_shifted_printables() {
+        for (key, expected) in [
+            (
+                TerminalKey::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+                b"\x1b[97;2;65u".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char('1'), KeyModifiers::SHIFT)
+                    .with_shifted_codepoint('!' as u32),
+                b"\x1b[49;2;33u".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char(':'), KeyModifiers::SHIFT),
+                b"\x1b[58;2;58u".as_slice(),
+            ),
+        ] {
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 25 }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_associated_text_composes_with_alternates_and_events() {
+        use crossterm::event::KeyEventKind::{Press, Release, Repeat};
+        for (kind, expected) in [
+            (Press, b"\x1b[97:65;2:1;65u".as_slice()),
+            (Repeat, b"\x1b[97:65;2:2;65u".as_slice()),
+            (Release, b"\x1b[97:65;2:3u".as_slice()),
+        ] {
+            let key = TerminalKey::new(KeyCode::Char('A'), KeyModifiers::SHIFT).with_kind(kind);
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 31 }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_associated_text_excludes_controls_chords_and_releases() {
+        use crossterm::event::KeyEventKind::Release;
+        for (key, expected) in [
+            (
+                TerminalKey::new(KeyCode::Char('\0'), KeyModifiers::empty()),
+                b"\x1b[0;1:1u".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char('\u{7f}'), KeyModifiers::empty()),
+                b"\x1b[127;1:1u".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char('\u{85}'), KeyModifiers::empty()),
+                b"\x1b[133;1:1u".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+                b"\x1b[13;1:1u".as_slice(),
+            ),
+            (
+                TerminalKey::new(
+                    KeyCode::Char('A'),
+                    KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+                ),
+                b"\x1b[97:65;6:1u".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()).with_kind(Release),
+                b"\x1b[106;1:3u".as_slice(),
+            ),
+            (
+                TerminalKey::new(KeyCode::Null, KeyModifiers::empty()).with_kind(Release),
+                b"".as_slice(),
+            ),
+        ] {
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 31 }),
+                expected
+            );
+        }
+        let key = TerminalKey::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 9 }),
+            b"\x1b[97;2u"
+        );
+    }
+
+    #[test]
+    fn kitty_report_all_preserves_explicit_and_raw_vt_text_commits() {
+        for flags in [15, 25, 31] {
+            for (sequence, expected) in [
+                ("\x1b[32;5;20320:22909u", "\u{4f60}\u{597d}"),
+                ("\x1b[65;;100u", "d"),
+                ("\x1b[65;;128512:128515u", "\u{1f600}\u{1f603}"),
+            ] {
+                let key = parse_terminal_key_sequence(sequence)
+                    .unwrap()
+                    .with_vt_bytes(sequence.as_bytes().to_vec());
+                assert_eq!(
+                    encode_terminal_key(key, KeyboardProtocol::Kitty { flags }),
+                    expected.as_bytes()
+                );
+            }
+            let raw = TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty())
+                .with_text_commit()
+                .with_vt_bytes(b"q".to_vec());
+            assert!(!raw.has_associated_text());
+            assert_eq!(
+                encode_terminal_key(raw, KeyboardProtocol::Kitty { flags }),
+                b"q"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_shifted_punctuation_literals_send_text() {
+        use crossterm::event::KeyEventKind::{Press, Release, Repeat};
+        for ch in "!@#$%^&*()_+{}|:\"<>?~".chars() {
+            for kind in [Press, Repeat, Release] {
+                let key = TerminalKey::new(KeyCode::Char(ch), KeyModifiers::SHIFT).with_kind(kind);
+                assert_eq!(key.shifted_codepoint, None);
+                let expected = if kind == Release {
+                    format!("\x1b[{};2:3u", ch as u32)
+                } else {
+                    ch.to_string()
+                };
+                assert_eq!(
+                    encode_terminal_key(key.clone(), KeyboardProtocol::Kitty { flags: 7 }),
+                    expected.as_bytes(),
+                    "{ch} {kind:?}"
+                );
+                if kind == Release {
+                    assert!(
+                        encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 1 }).is_empty()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_shifted_punctuation_does_not_infer_layout_or_erase_modifiers() {
+        let key = TerminalKey::new(KeyCode::Char('1'), KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_terminal_key(key.clone(), KeyboardProtocol::Kitty { flags: 7 }),
+            b"\x1b[49;2:1u"
+        );
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 31 }),
+            b"\x1b[49;2:1u"
+        );
+        for (modifier, expected) in [
+            (KeyModifiers::CONTROL, b"\x1b[33;6:1u".as_slice()),
+            (KeyModifiers::ALT, b"\x1b[33;4:1u".as_slice()),
+            (KeyModifiers::SUPER, b"\x1b[33;10:1u".as_slice()),
+        ] {
+            let key = TerminalKey::new(KeyCode::Char('!'), modifier | KeyModifiers::SHIFT);
+            for flags in [7, 31] {
+                assert_eq!(
+                    encode_terminal_key(key.clone(), KeyboardProtocol::Kitty { flags }),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
     fn kitty_shift_tab() {
         let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
         assert_eq!(
@@ -869,13 +1125,16 @@ mod tests {
     }
 
     #[test]
-    fn kitty_shift_letter_release_does_not_emit_text() {
+    fn kitty_shift_letter_release_uses_csi_u() {
         let key = KeyEvent::new_with_kind(
             KeyCode::Char('L'),
             KeyModifiers::SHIFT,
             crossterm::event::KeyEventKind::Release,
         );
-        assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 7 }), b"");
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 7 }),
+            b"\x1b[108:76;2:3u"
+        );
     }
 
     #[test]
