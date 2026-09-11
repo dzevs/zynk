@@ -865,6 +865,21 @@ impl Terminal {
         }
     }
 
+    pub fn default_palette(&self) -> Result<[RgbColor; 256], Error> {
+        let mut out = [ffi::GhosttyColorRgb::default(); 256];
+        // SAFETY: self.raw is a live terminal handle, and out is exactly the
+        // 256-entry array this data kind writes.
+        unsafe {
+            ffi::ghostty_terminal_get(
+                self.raw,
+                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
+                out.as_mut_ptr().cast(),
+            )
+            .into_result()?;
+        }
+        Ok(out.map(Into::into))
+    }
+
     pub fn resize(
         &mut self,
         cols: u16,
@@ -3141,6 +3156,50 @@ impl<'a> RowCellIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_palette_accessor_preserves_all_256_entries_across_osc_overrides() {
+        assert_eq!(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
+            25
+        );
+        assert_eq!(std::mem::size_of::<ffi::GhosttyColorRgb>(), 3);
+        assert_eq!(std::mem::align_of::<ffi::GhosttyColorRgb>(), 1);
+        let palette = std::array::from_fn(|index| RgbColor {
+            r: index as u8,
+            g: 255 - index as u8,
+            b: (index as u8).wrapping_add(17),
+        });
+        let mut terminal = Terminal::new(20, 5, 0).unwrap();
+        terminal.set_default_palette(&palette).unwrap();
+        assert_eq!(terminal.default_palette().unwrap(), palette);
+        terminal.write(b"\x1b]4;0;rgb:aa/bb/cc;255;rgb:11/22/33\x1b\\");
+        let mut render_state = RenderState::new().unwrap();
+        render_state.update(&terminal).unwrap();
+        let active = render_state.colors().unwrap().palette;
+        assert_eq!(
+            active[0],
+            RgbColor {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc
+            }
+        );
+        assert_eq!(
+            active[255],
+            RgbColor {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33
+            }
+        );
+        assert_eq!(active[1..255], palette[1..255]);
+        assert_eq!(terminal.default_palette().unwrap(), palette);
+        terminal.write(b"\x1b]104\x1b\\");
+        render_state.update(&terminal).unwrap();
+        assert_eq!(render_state.colors().unwrap().palette, palette);
+        assert_eq!(terminal.default_palette().unwrap(), palette);
+    }
 
     #[test]
     fn underline_style_conversion_matches_vendor_values_and_unknown_fallback() {

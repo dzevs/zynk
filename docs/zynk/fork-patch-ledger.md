@@ -2945,3 +2945,28 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   stays in M9, M6-06 stays held, and operator deployment gates remain separate.
   This append changes no source/test/dependency bytes; disposition accounting
   is **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-26: Child Palette Overrides
+
+- **TAKE** `f83980db5c91e0b8e155ed7fff4e1dbb89c17bcc`: read the configured
+  terminal default palette and compare with the active palette once per full
+  render or dirty-row collection, outside the per-cell loop. Only differing
+  entries become RGB; unchanged entries remain indexed and follow the host
+  theme. Direct RGB stays unchanged. No allocation per palette lookup; dirty
+  clean/full early returns still precede the comparison.
+- The existing vendored C header declares COLOR_PALETTE_DEFAULT as a
+  GhosttyColorRgb[256] output; terminal/c/terminal.zig returns the original
+  palette, not OSC overrides. The wrapper uses that existing binding without
+  changing vendor source or regenerating the ABI. A real terminal control
+  checks all 256 custom default entries, overrides at both ends, and reset.
+- Preserve upstream's three mapping controls, plus actual OSC4/OSC104 full
+  render and dirty-row regressions. Check foreground, background, background
+  fill, untouched indices and direct RGB, with full/dirty frame parity.
+  Underline color is checked in the local ratatui style: protocol19 CellData
+  has no underline-color field, so this slice adds none and claims no new
+  underline-color wire transport. Existing wire attributes remain unchanged.
+- Render profiles compare the existing populated 1/15/50-pane workloads
+  before and after this slice, not production latency or a CI timing threshold.
+  The six controls and existing terminal/render suites require verification;
+  D-M5-6 to M9, held M6-06 and all host/wire deferrals remain unchanged.
+  **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.

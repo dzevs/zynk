@@ -1911,6 +1911,9 @@ impl GhosttyPaneTerminal {
             .and_then(|c| ghostty_default_fg(c.foreground, host_theme, initial_default_foreground));
         let resolved_fg = colors.map(|c| ghostty_color(c.foreground));
         let resolved_bg = colors.map(|c| ghostty_color(c.background));
+        let palette_overrides = colors
+            .zip(terminal.default_palette().ok())
+            .and_then(|(colors, default)| PaletteOverrides::new(&colors.palette, &default));
         let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
 
         let mut row_iterator = match crate::ghostty::RowIterator::new() {
@@ -1945,6 +1948,7 @@ impl GhosttyPaneTerminal {
                         default_bg,
                         resolved_fg,
                         resolved_bg,
+                        palette_overrides.as_ref(),
                     );
                     let symbol = match ghostty_buffer_symbol_into(
                         &cells,
@@ -2149,6 +2153,9 @@ fn ghostty_collect_dirty_patch(
         .and_then(|c| ghostty_default_fg(c.foreground, host_theme, initial_default_foreground));
     let resolved_fg = colors.map(|c| ghostty_color(c.foreground));
     let resolved_bg = colors.map(|c| ghostty_color(c.background));
+    let palette_overrides = colors
+        .zip(terminal.default_palette().ok())
+        .and_then(|(colors, default)| PaletteOverrides::new(&colors.palette, &default));
     let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
 
     let Ok(mut row_iterator) = crate::ghostty::RowIterator::new() else {
@@ -2193,6 +2200,7 @@ fn ghostty_collect_dirty_patch(
                     default_bg,
                     resolved_fg,
                     resolved_bg,
+                    palette_overrides.as_ref(),
                 );
                 let symbol = match ghostty_buffer_symbol_into(
                     &cells,
@@ -2589,11 +2597,12 @@ fn ghostty_cell_style(
     default_bg: Option<Color>,
     resolved_fg: Option<Color>,
     resolved_bg: Option<Color>,
+    palette_overrides: Option<&PaletteOverrides>,
 ) -> Style {
     let mut fg = basic
         .style
         .fg_color
-        .map(ghostty_cell_color)
+        .map(|color| ghostty_cell_color(color, palette_overrides))
         .or_else(|| cells.fg_color().ok().flatten().map(ghostty_color))
         .or(default_fg);
     let mut bg = cells
@@ -2601,7 +2610,7 @@ fn ghostty_cell_style(
         .ok()
         .flatten()
         .or(basic.style.bg_color)
-        .map(ghostty_cell_color)
+        .map(|color| ghostty_cell_color(color, palette_overrides))
         .or_else(|| cells.bg_color().ok().flatten().map(ghostty_color))
         .or(default_bg);
     if basic.style.invisible {
@@ -2623,7 +2632,11 @@ fn ghostty_cell_style(
     }
 
     let mut style = ghostty_default_style(fg, bg);
-    if let Some(underline_color) = basic.style.underline_color.map(ghostty_cell_color) {
+    if let Some(underline_color) = basic
+        .style
+        .underline_color
+        .map(|color| ghostty_cell_color(color, palette_overrides))
+    {
         style = style.underline_color(underline_color);
     }
     let mut modifiers = Modifier::empty();
@@ -2852,9 +2865,42 @@ fn terminal_theme_color(color: crate::ghostty::RgbColor) -> crate::terminal_them
     }
 }
 
-fn ghostty_cell_color(color: crate::ghostty::CellColor) -> Color {
+// Only child-overridden entries become RGB; untouched entries keep following
+// the host palette. The common case has no overrides.
+struct PaletteOverrides([Option<crate::ghostty::RgbColor>; 256]);
+
+impl PaletteOverrides {
+    fn new(
+        active: &[crate::ghostty::RgbColor; 256],
+        default: &[crate::ghostty::RgbColor; 256],
+    ) -> Option<Self> {
+        let mut overrides = [None; 256];
+        let mut any = false;
+        for (index, (active, default)) in active.iter().zip(default.iter()).enumerate() {
+            if active != default {
+                overrides[index] = Some(*active);
+                any = true;
+            }
+        }
+        any.then_some(Self(overrides))
+    }
+
+    fn get(&self, index: u8) -> Option<crate::ghostty::RgbColor> {
+        self.0[usize::from(index)]
+    }
+}
+
+fn ghostty_cell_color(
+    color: crate::ghostty::CellColor,
+    palette_overrides: Option<&PaletteOverrides>,
+) -> Color {
     match color {
-        crate::ghostty::CellColor::Palette(index) => Color::Indexed(index),
+        crate::ghostty::CellColor::Palette(index) => {
+            match palette_overrides.and_then(|overrides| overrides.get(index)) {
+                Some(color) => ghostty_color(color),
+                None => Color::Indexed(index),
+            }
+        }
         crate::ghostty::CellColor::Rgb(color) => ghostty_color(color),
     }
 }
@@ -2909,6 +2955,51 @@ mod tests {
     use super::*;
     use ratatui::{layout::Rect, style::Color};
     use tokio::sync::mpsc;
+
+    fn rgb(r: u8, g: u8, b: u8) -> crate::ghostty::RgbColor {
+        crate::ghostty::RgbColor { r, g, b }
+    }
+
+    #[test]
+    fn palette_overrides_are_none_without_an_osc4_write() {
+        let default = [rgb(1, 2, 3); 256];
+        assert!(PaletteOverrides::new(&default, &default).is_none());
+    }
+
+    #[test]
+    fn redefined_palette_entries_render_as_rgb_and_others_stay_indexed() {
+        let default = [rgb(1, 2, 3); 256];
+        let mut active = default;
+        active[18] = rgb(169, 177, 214);
+        let overrides = PaletteOverrides::new(&active, &default).expect("index 18 differs");
+        assert_eq!(
+            ghostty_cell_color(crate::ghostty::CellColor::Palette(18), Some(&overrides)),
+            Color::Rgb(169, 177, 214)
+        );
+        assert_eq!(
+            ghostty_cell_color(crate::ghostty::CellColor::Palette(19), Some(&overrides)),
+            Color::Indexed(19)
+        );
+        assert_eq!(
+            ghostty_cell_color(crate::ghostty::CellColor::Palette(18), None),
+            Color::Indexed(18)
+        );
+    }
+
+    #[test]
+    fn direct_rgb_cells_are_unaffected_by_palette_overrides() {
+        let default = [rgb(1, 2, 3); 256];
+        let mut active = default;
+        active[18] = rgb(169, 177, 214);
+        let overrides = PaletteOverrides::new(&active, &default).expect("index 18 differs");
+        assert_eq!(
+            ghostty_cell_color(
+                crate::ghostty::CellColor::Rgb(rgb(122, 162, 247)),
+                Some(&overrides)
+            ),
+            Color::Rgb(122, 162, 247)
+        );
+    }
 
     #[test]
     fn plain_page_keys_host_scroll_for_shell_like_decckm_with_bracketed_paste() {
@@ -5390,6 +5481,125 @@ mod tests {
         assert_eq!(buffer[(0, 0)].style().bg, expected_bg);
         assert_eq!(buffer[(2, 0)].symbol(), " ");
         assert_eq!(buffer[(2, 0)].style().bg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn osc4_palette_overrides_and_reset_reach_full_render_styles() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut core = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let mut palette = crate::ghostty::default_palette();
+        palette[18] = crate::ghostty::RgbColor {
+            r: 12,
+            g: 23,
+            b: 34,
+        };
+        core.set_default_palette(&palette).unwrap();
+        let pane = GhosttyPaneTerminal::new(core, tx.clone()).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        for (command, expected) in [
+            ("", Color::Indexed(18)),
+            ("\x1b]4;18;rgb:a9/b1/d6\x1b\\", Color::Rgb(169, 177, 214)),
+            ("\x1b]104;18\x1b\\", Color::Indexed(18)),
+        ] {
+            pane.process_pty_bytes(PaneId::from_raw(1), 0, command.as_bytes(), &tx);
+            pane.process_pty_bytes(
+                PaneId::from_raw(1),
+                0,
+                b"\x1b[H\x1b[0;38;5;18;48;5;18;4m\x1b[58:5:18mO\
+                  \x1b[0;38;5;19;48;5;19;4m\x1b[58:5:19mI\
+                  \x1b[0;38;2;1;2;3;48;2;4;5;6;4m\x1b[58:2::7:8:9mR\
+                  \x1b[0;48;5;18m\x1b[K",
+                &tx,
+            );
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for (x, symbol, fg, bg, underline) in [
+                (0, "O", expected, expected, expected),
+                (
+                    1,
+                    "I",
+                    Color::Indexed(19),
+                    Color::Indexed(19),
+                    Color::Indexed(19),
+                ),
+                (
+                    2,
+                    "R",
+                    Color::Rgb(1, 2, 3),
+                    Color::Rgb(4, 5, 6),
+                    Color::Rgb(7, 8, 9),
+                ),
+            ] {
+                let cell = &buffer[(x, 0)];
+                assert_eq!(cell.symbol(), symbol);
+                assert_eq!(
+                    (cell.fg, cell.bg, cell.underline_color),
+                    (fg, bg, underline),
+                    "full render {symbol}, command {command:?}"
+                );
+            }
+            assert_eq!(buffer[(3, 0)].symbol(), " ");
+            assert_eq!(buffer[(3, 0)].bg, expected, "background fill {command:?}");
+        }
+    }
+
+    #[test]
+    fn osc4_palette_overrides_and_reset_match_full_and_dirty_frames() {
+        let (tx, _rx) = mpsc::channel(4);
+        let core = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(core, tx.clone()).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        for (command, expected) in [
+            ("\x1b]4;18;rgb:a9/b1/d6\x1b\\", Color::Rgb(169, 177, 214)),
+            ("\x1b]104;18\x1b\\", Color::Indexed(18)),
+        ] {
+            pane.process_pty_bytes(PaneId::from_raw(1), 0, command.as_bytes(), &tx);
+            // Clear the palette-wide invalidation before exercising the row patch.
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+                .unwrap();
+            pane.process_pty_bytes(
+                PaneId::from_raw(1),
+                0,
+                b"\x1b[H\x1b[0;38;5;18;48;5;18mO\
+                  \x1b[0;38;5;19;48;5;19mI\
+                  \x1b[0;38;2;1;2;3;48;2;4;5;6mR\
+                  \x1b[0;48;5;18m\x1b[K",
+                &tx,
+            );
+            let patch = match pane.collect_dirty_patch(20, 5) {
+                TerminalDirtyPatchOutcome::Patch(patch) => patch,
+                other => panic!("expected row patch, got {other:?}"),
+            };
+            let (_, cells) = patch.rows.iter().find(|(row, _)| *row == 0).unwrap();
+            for (x, symbol, fg, bg) in [
+                (0, "O", expected, expected),
+                (1, "I", Color::Indexed(19), Color::Indexed(19)),
+                (2, "R", Color::Rgb(1, 2, 3), Color::Rgb(4, 5, 6)),
+            ] {
+                assert_eq!(cells[x].symbol, symbol);
+                assert_eq!(
+                    (cells[x].fg, cells[x].bg),
+                    (
+                        crate::protocol::color_to_u32(fg),
+                        crate::protocol::color_to_u32(bg)
+                    ),
+                    "dirty render {symbol}, command {command:?}"
+                );
+            }
+            assert_eq!(cells[3].bg, crate::protocol::color_to_u32(expected));
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+                .unwrap();
+            let frame =
+                crate::protocol::FrameData::from_ratatui_buffer(terminal.backend().buffer(), None);
+            assert_eq!(frame.cells[..20], cells[..], "full/dirty {command:?}");
+        }
     }
 
     #[test]
