@@ -1323,11 +1323,23 @@ mod tests {
     }
 
     #[test]
-    fn osc52_clipboard_accepts_clear_clipboard() {
-        let mut terminal = crate::ghostty::Terminal::new(10, 5, 0).unwrap();
-        terminal.write(b"\x1b]52;c;\x07");
-        let pending = terminal.take_clipboard_writes();
-        assert_eq!(pending, vec![Vec::<u8>::new()]);
+    fn osc52_clipboard_ignores_clear_without_discarding_later_writes() {
+        for clear in [
+            b"\x1b]52;c;\x07".as_slice(),
+            b"\x1b]52;c;\x1b\\",
+            b"\x1b]52;;\x07",
+            b"\x1b]52;;\x1b\\",
+        ] {
+            for split in 0..=clear.len() {
+                let mut terminal = crate::ghostty::Terminal::new(10, 5, 0).unwrap();
+                terminal.write(&clear[..split]);
+                assert!(terminal.take_clipboard_writes().is_empty());
+                terminal.write(&clear[split..]);
+                assert!(terminal.take_clipboard_writes().is_empty());
+                terminal.write(b"\x1b]52;c;aGVsbG8=\x07");
+                assert_eq!(terminal.take_clipboard_writes(), vec![b"hello".to_vec()]);
+            }
+        }
     }
 
     #[test]

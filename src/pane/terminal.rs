@@ -5030,6 +5030,96 @@ mod tests {
     }
 
     #[test]
+    fn xtwinops_size_queries_preserve_fragmented_reply_order() {
+        let queries = b"\x1b[14t\x1b[5n\x1b[16t\x1b[18t";
+        for split in 0..=queries.len() {
+            let (tx, _rx) = mpsc::channel(4);
+            let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+            pane.resize(24, 80, 9, 18);
+            let mut replies = pane
+                .process_pty_bytes(PaneId::from_raw(1), 0, &queries[..split], &tx)
+                .terminal_responses;
+            replies.extend(
+                pane.process_pty_bytes(PaneId::from_raw(1), 0, &queries[split..], &tx)
+                    .terminal_responses,
+            );
+
+            assert_eq!(
+                replies,
+                vec![
+                    Bytes::from_static(b"\x1b[4;432;720t"),
+                    Bytes::from_static(b"\x1b[0n"),
+                    Bytes::from_static(b"\x1b[6;18;9t"),
+                    Bytes::from_static(b"\x1b[8;24;80t"),
+                ],
+                "split {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn xtwinops_size_queries_follow_only_successful_resize() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        pane.resize(24, 80, 9, 18);
+        pane.resize(30, 100, 10, 20);
+        for (cols, rows) in [(100, 30), (0, 30), (100, 0)] {
+            let resize = pane
+                .core
+                .lock()
+                .unwrap()
+                .terminal
+                .resize(cols, rows, 10, 20);
+            assert_eq!(resize.is_ok(), cols != 0 && rows != 0);
+            let result =
+                pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[14t\x1b[16t\x1b[18t", &tx);
+            assert_eq!(
+                result.terminal_responses,
+                vec![
+                    Bytes::from_static(b"\x1b[4;600;1000t"),
+                    Bytes::from_static(b"\x1b[6;20;10t"),
+                    Bytes::from_static(b"\x1b[8;30;100t"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn xtwinops_size_queries_stay_silent_without_pixel_geometry() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let queries = b"\x1b[14t\x1b[16t\x1b[18t";
+        assert!(pane
+            .process_pty_bytes(PaneId::from_raw(1), 0, queries, &tx)
+            .terminal_responses
+            .is_empty());
+        for (width, height) in [(0, 0), (0, 18), (9, 0)] {
+            pane.resize(24, 80, 9, 18);
+            pane.resize(24, 80, width, height);
+            assert!(pane
+                .process_pty_bytes(PaneId::from_raw(1), 0, queries, &tx)
+                .terminal_responses
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn empty_clipboard_writes_do_not_escape_the_terminal_boundary() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        for bytes in [b"\x1b]52;c;\x07".as_slice(), b"\x1b]52;c;\x1b\\"] {
+            let result = pane.process_pty_bytes(PaneId::from_raw(1), 0, bytes, &tx);
+            assert!(result.clipboard_writes.is_empty());
+        }
+        let result = pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b]52;c;eA==\x07", &tx);
+        assert_eq!(result.clipboard_writes, vec![b"x".to_vec()]);
+    }
+
+    #[test]
     fn synchronized_output_suppresses_intermediate_render_requests_until_batch_ends() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();

@@ -1714,6 +1714,9 @@ impl PaneRuntime {
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
         let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
+        terminal
+            .resize(cols, rows, cell_width_px, cell_height_px)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         if crate::kitty_graphics::is_enabled() {
             terminal
                 .enable_kitty_graphics()
@@ -2856,6 +2859,72 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn imported_runtime_reports_size_and_ignores_empty_clipboard_before_resize() {
+        use std::{
+            io::{Read, Write},
+            os::{fd::IntoRawFd, unix::net::UnixStream},
+        };
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let pid = std::process::id();
+        let import = crate::handoff_runtime::ImportedHandoffRuntime {
+            master_fd: socket.into_raw_fd(),
+            state: crate::handoff_runtime::HandoffRuntimeState {
+                pane_id: 1,
+                child_pid: pid,
+                child_start_time: crate::platform::process_start_time(pid).unwrap(),
+                rows: 24,
+                cols: 80,
+                cell_width_px: 9,
+                cell_height_px: 18,
+                keyboard_protocol_flags: 0,
+                keyboard_protocol_ansi: None,
+                input_state: None,
+                initial_history_ansi: None,
+            },
+        };
+        let (events, mut rx) = mpsc::channel(32);
+        let runtime = PaneRuntime::from_handoff_fd(
+            import,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+        assert!(
+            runtime.preserve_processes_on_drop,
+            "fixture must never own the test process"
+        );
+        runtime.io.set_handoff_paused(false).unwrap();
+        peer.write_all(b"\x1b]52;c;\x07\x1b]52;c;eA==\x1b\\\x1b[14t\x1b[16t\x1b[18t\x1b[5n")
+            .unwrap();
+        let expected = b"\x1b[4;432;720t\x1b[6;18;9t\x1b[8;24;80t\x1b[0n";
+        let mut replies = vec![0; expected.len()];
+        let result = peer.read_exact(&mut replies);
+        let mut clipboard = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::ClipboardWrite { content } = event {
+                clipboard.push(content);
+            }
+        }
+        drop(runtime);
+        drop(peer);
+
+        result.expect("imported geometry is available before any later resize");
+        assert_eq!(replies, expected);
+        assert_eq!(
+            clipboard,
+            vec![b"x".to_vec()],
+            "only the nonempty write may produce an event"
+        );
+    }
 
     struct CwdTestProbe {
         base: std::path::PathBuf,

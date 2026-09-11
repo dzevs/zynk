@@ -2617,3 +2617,43 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
 - fd.rs receives its first modified-file notice and NOTICE entry. Actor
   attribution already existed. **IMPLEMENTED / PENDING VERIFICATION** by
   Gate2/Gate3; no deployment implied.
+
+### M6-14: Pane Size Replies and Empty Clipboard (2026-09-11)
+
+- **Sources:** `169a4fd90c20a00aec77d684ecec98b9f0f996cc` and
+  `471041690af928d9a4d4cda8e4963cc7dcb3d6a8`. Register the existing vendored
+  size callback, initialize row/column geometry, and update the reported size
+  only after a successful terminal resize. Preserve raw unknown pixel sizes
+  for query refusal rather than reporting the emulator's minimum-one fallback.
+  Seed imported runtime geometry before replay/reader startup.
+- The ABI already exists in vendor include/ghostty/vt/terminal.h and the Rust
+  bindings; neither changes. Query/reply geometry follows the
+  [xterm XTWINOPS reference](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html)
+  for CSI 14/16/18 t. Controls pin every split of a mixed size/status query
+  stream, changed geometry, rejected zero-row/column resize preserving the
+  last valid size, and unknown pixel geometry remaining silent.
+- Empty clipboard requests return success without creating a queued write;
+  unsupported content, size bounds and nonempty writes retain the previous
+  policy. BEL/ST and callback controls pin the empty case. A socket-backed
+  imported-runtime control asserts first-query geometry without another
+  resize and exactly one nonempty ClipboardWrite event; it does not assert a
+  live remote handoff, process identity, or caller authority.
+- Six behavioral reds precede implementation. The additional runtime fixture
+  first failed compilation because its Duration import was missing; that
+  exit101 is retained separately from the corrected missing-reply red.
+  Existing in-band reports, host appearance and response-order behavior stay
+  intact. No protocol 19, vendor, dependency, detection or M6-06 policy change.
+  All four source files already carry modified-file notices/NOTICE entries.
+- The first whole check found the fork's old clear-acceptance expectation in
+  pane/osc.rs (exit100, later tests cancelled). Adapt that test to the same
+  intentionally changed empty-write policy, covering both selectors and
+  terminators at every split plus a later nonempty write. This additional
+  file changes tests only; no OSC parser or callback policy is changed again.
+- Vendor verification preserves its harness failures: ReleaseFast failed a
+  Debug-safety compile assertion; non-SIMD Debug compiler processes segfaulted.
+  The unchanged suite passed in Debug with default SIMD (4873 pass/50 skip),
+  and both original non-SIMD module commands passed with the documented LLVM
+  backend (4869 pass/54 skip). No vendor assertion or test filter was changed;
+  the compiler's internal defect is not claimed fixed. Retained author evidence
+  also discloses the debugger failure and removal of a help-created local cache.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3; no deployment implied.
