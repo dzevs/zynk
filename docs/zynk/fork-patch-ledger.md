@@ -2846,3 +2846,22 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   Add layout.rs to NOTICE with its modified-file header. No wire, DB, caller
   or identity policy change; protocol19 and the held M6-06 boundary remain.
   **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-24: Logical Lines In The Scrollback Editor
+
+- **TAKE / ADAPT** `952729ee03e0939d7a9d893f87f24179cf0eb7cb`: route the
+  existing scrollback-editor action through recent_unwrapped_text(usize::MAX).
+  The fork already has that logical-line reader and its runtime forwarding;
+  do not import c0fb777e's M8 snapshot/truncation interfaces just to obtain text.
+- Retain the three recent_text forwarders and the production Ghostty reader:
+  pane.read and agent read still use them for ReadSource::Recent in this fork.
+  Upstream's wrapper removals and test-only annotation depend on M8 c0fb777e
+  having migrated those consumers. M8 must re-enumerate callers when applying
+  that migration, including this already-adapted editor call.
+- Replace the existing editor fixture with a five-column terminal containing
+  a wrapped ten-character line and a separate five-character hard line. The
+  exact editor-file assertion failed with three physical lines before the
+  one-line routing correction and passes with the two logical lines after it.
+  Keep ordinary recent reads unchanged. No protocol, detection, identity or
+  persistence change; protocol19 and the held M6-06 boundary remain.
+  **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.

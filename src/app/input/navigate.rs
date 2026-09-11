@@ -918,7 +918,7 @@ impl App {
             .state
             .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
             .ok_or_else(|| std::io::Error::other("focused pane has no scrollback runtime"))?
-            .recent_text(usize::MAX);
+            .recent_unwrapped_text(usize::MAX);
 
         let path = write_scrollback_temp_file(&scrollback)?;
 
@@ -3536,7 +3536,7 @@ navigate_pane_down = "ctrl+j"
     }
 
     #[tokio::test]
-    async fn edit_scrollback_key_opens_focused_runtime_scrollback_in_editor_pane() {
+    async fn edit_scrollback_key_preserves_logical_lines_in_editor_pane() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
@@ -3550,10 +3550,10 @@ navigate_pane_down = "ctrl+j"
         workspace.tabs[0].runtimes.insert(
             root_pane,
             crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
-                20,
+                5,
                 5,
                 4096,
-                b"alpha\nbeta\n",
+                b"ABCDEFGHIJ\r\nKLMNO",
             ),
         );
         app.state.workspaces = vec![workspace];
@@ -3583,11 +3583,9 @@ navigate_pane_down = "ctrl+j"
         }
 
         let content = wait_for_file(&output_path);
-        assert!(content.contains("alpha"));
-        assert!(content.contains("beta"));
-        assert_eq!(app.state.mode, Mode::Terminal);
-
         let _ = std::fs::remove_file(output_path);
+        assert_eq!(content, "ABCDEFGHIJ\nKLMNO");
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]
