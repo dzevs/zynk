@@ -4039,6 +4039,29 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_kitty_pane_preserves_legacy_ctrl_alt_letters() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[>5u", &tx);
+
+        for (raw, expected) in [
+            (&b"\x1b\x06"[..], &b"\x1b[102;7u"[..]),
+            (&b"\x1b\x1f"[..], &b"\x1b[95;7u"[..]),
+        ] {
+            let mut events = crate::raw_input::parse_raw_input_bytes_sync(raw);
+            assert_eq!(events.len(), 1);
+            let crate::raw_input::RawInputEvent::Key(key) = events.remove(0) else {
+                panic!("expected key event");
+            };
+            assert_eq!(
+                pane.encode_terminal_key(key, pane.keyboard_protocol().unwrap()),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn ghostty_report_all_pane_preserves_basic_key_events() {
         use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
         for flags in [9, 11] {

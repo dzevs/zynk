@@ -115,8 +115,9 @@ fn parse_legacy_key_sequence(data: &str) -> Option<TerminalKey> {
         _ if data.starts_with('\x1b') => {
             let rest = data.strip_prefix('\x1b')?;
             if rest.chars().count() == 1 {
-                let ch = rest.chars().next()?;
-                Some(TerminalKey::new(KeyCode::Char(ch), KeyModifiers::ALT))
+                let mut key = parse_legacy_key_sequence(rest)?;
+                key.modifiers |= KeyModifiers::ALT;
+                Some(key)
             } else {
                 None
             }
@@ -152,7 +153,7 @@ fn parse_legacy_ctrl_char(ch: char) -> Option<TerminalKey> {
         28 => Some(TerminalKey::new(KeyCode::Char('\\'), KeyModifiers::CONTROL)),
         29 => Some(TerminalKey::new(KeyCode::Char(']'), KeyModifiers::CONTROL)),
         30 => Some(TerminalKey::new(KeyCode::Char('^'), KeyModifiers::CONTROL)),
-        31 => Some(TerminalKey::new(KeyCode::Char('-'), KeyModifiers::CONTROL)),
+        31 => Some(TerminalKey::new(KeyCode::Char('_'), KeyModifiers::CONTROL)),
         _ => None,
     }
 }
@@ -872,6 +873,54 @@ mod tests {
     }
 
     #[test]
+    fn parse_legacy_alt_shift_letters_preserve_case_and_modifiers() {
+        for (sequence, code, modifiers) in [
+            ("\x1bA", 'A', KeyModifiers::ALT | KeyModifiers::SHIFT),
+            ("\x1bZ", 'Z', KeyModifiers::ALT | KeyModifiers::SHIFT),
+            ("\x1ba", 'a', KeyModifiers::ALT),
+            ("\x1b<", '<', KeyModifiers::ALT),
+            ("\x1b\u{e9}", '\u{e9}', KeyModifiers::ALT),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).unwrap();
+            assert_eq!(key.code, KeyCode::Char(code));
+            assert_eq!(key.modifiers, modifiers);
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Legacy),
+                sequence.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_legacy_alt_control_bytes_compose_modifiers_and_roundtrip() {
+        for byte in 0u8..=31 {
+            let sequence = [0x1b, byte];
+            let key = parse_terminal_key_sequence(std::str::from_utf8(&sequence).unwrap()).unwrap();
+            let (code, modifiers) = match byte {
+                9 => (KeyCode::Tab, KeyModifiers::ALT),
+                13 => (KeyCode::Enter, KeyModifiers::ALT),
+                27 => (KeyCode::Esc, KeyModifiers::ALT),
+                _ => {
+                    let ch = match byte {
+                        0 => ' ',
+                        1..=26 => char::from(byte + b'a' - 1),
+                        28 => '\\',
+                        29 => ']',
+                        30 => '^',
+                        31 => '_',
+                        _ => unreachable!(),
+                    };
+                    (KeyCode::Char(ch), KeyModifiers::CONTROL | KeyModifiers::ALT)
+                }
+            };
+            assert_eq!(key.code, code, "byte={byte}");
+            assert_eq!(key.modifiers, modifiers, "byte={byte}");
+            assert!(key.generated_text.is_none());
+            assert_eq!(encode_terminal_key(key, KeyboardProtocol::Legacy), sequence);
+        }
+    }
+
+    #[test]
     fn legacy_ctrl_byte_matrix_is_covered() {
         for (byte, expected) in [
             (b'\x01', 'a'),
@@ -893,7 +942,7 @@ mod tests {
             (b'\x1c', '\\'),
             (b'\x1d', ']'),
             (b'\x1e', '^'),
-            (b'\x1f', '-'),
+            (b'\x1f', '_'),
         ] {
             let key = parse_terminal_key_sequence(std::str::from_utf8(&[byte]).unwrap()).unwrap();
             assert_terminal_key_eq(

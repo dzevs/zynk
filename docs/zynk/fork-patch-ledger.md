@@ -2476,3 +2476,28 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
   source authority and the D-M5-6/M9 boundary are unchanged. This previously
   modified source already has its notice and NOTICE entry.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.
+
+### M6-08: Legacy Alt, Shift and Control Composition (2026-09-11)
+
+- **Sources:** `e98c49658caf054f2cfdc0f52831f29d59ed6fba`,
+  `39ba6b7a0242768b7d3684e8163d13a0609fcaa3`,
+  `d950fdfe7d3f178aec9543d3b6b2e69be998becf`,
+  `d277d2f83b749a38c90eb96ef7cd329cc2171cd7`. Take all executable input
+  changes and applicable controls. The final Alt parser from `d277d2f8`
+  subsumes `39ba6b7a` by parsing the inner single key before adding Alt, keeping
+  both uppercase Shift and control-byte semantics. The upstream changelog
+  sentence is accounted for here, not copied as a second release changelog.
+- Pass TerminalKey through legacy encoding so shifted punctuation/codepoints
+  survive. Remove only Alt from the owned key, preserving its private source
+  without widening KeySource visibility or synthesizing a replacement key.
+  Decode 0x1f canonically as Ctrl-underscore; M6-02's Ctrl-slash alias remains.
+- Five independent behavioral red controls cover shifted punctuation, uppercase
+  Alt letters, Alt control composition, the 0x1f key identity and real Kitty
+  pane bytes from raw Alt-Ctrl input. Positives include all 32 prefixed control
+  bytes, Tab/Enter/Escape special cases, lower/non-ASCII characters, non-US
+  shifted pairs, plain Alt punctuation, release silence and explicit associated
+  text. The existing IME source distinction and strict alternate grammar remain
+  intact; no generated-text dispatch or binding policy changed.
+- No host negotiation, protocol19 change, new platform path or dependency.
+  All three source files already carry modified-file notices and NOTICE entries.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.
