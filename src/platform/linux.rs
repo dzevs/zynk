@@ -1,14 +1,53 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::{
-    io::Write,
+    io::{self, Write},
     os::fd::RawFd,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::{Once, OnceLock},
 };
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
     LimitedRead, Signal,
 };
+
+const PROCESS_DETECTION_ENV_VAR: &str = "ZYNK_PROCESS_DETECTION";
+const CHILD_GROUPS_SCAN_LIMIT: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessDetectionMode {
+    Native,
+    ChildGroups,
+}
+
+fn parse_process_detection_mode(value: Option<&str>) -> Result<ProcessDetectionMode, &str> {
+    match value {
+        None | Some("") | Some("native") => Ok(ProcessDetectionMode::Native),
+        Some("child-groups") => Ok(ProcessDetectionMode::ChildGroups),
+        Some(value) => Err(value),
+    }
+}
+
+fn process_detection_mode_from_value(value: Option<&str>) -> ProcessDetectionMode {
+    parse_process_detection_mode(value).unwrap_or_else(|value| {
+        tracing::warn!(
+            variable = PROCESS_DETECTION_ENV_VAR,
+            %value,
+            "unknown process detection mode; using native detection"
+        );
+        ProcessDetectionMode::Native
+    })
+}
+
+fn process_detection_mode() -> ProcessDetectionMode {
+    static MODE: OnceLock<ProcessDetectionMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        let value = std::env::var(PROCESS_DETECTION_ENV_VAR).ok();
+        process_detection_mode_from_value(value.as_deref())
+    })
+}
 
 pub fn raise_server_nofile_limit() {}
 
@@ -60,7 +99,30 @@ pub fn current_uid() -> u32 {
 
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
-    let tpgid = foreground_process_group_id(child_pid)?;
+    foreground_job_with(
+        foreground_process_group_id(child_pid),
+        process_detection_mode,
+        || child_groups_foreground_process_group(child_pid),
+        foreground_job_for_group,
+    )
+}
+
+fn foreground_job_with(
+    observed_group: Option<u32>,
+    mode: impl FnOnce() -> ProcessDetectionMode,
+    child_group: impl FnOnce() -> Option<u32>,
+    job_for_group: impl FnOnce(u32) -> Option<ForegroundJob>,
+) -> Option<ForegroundJob> {
+    if let Some(group) = observed_group {
+        return job_for_group(group);
+    }
+    if mode() != ProcessDetectionMode::ChildGroups {
+        return None;
+    }
+    job_for_group(child_group()?)
+}
+
+fn foreground_job_for_group(tpgid: u32) -> Option<ForegroundJob> {
     let mut processes = Vec::new();
 
     for entry in std::fs::read_dir("/proc").ok()? {
@@ -105,6 +167,88 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
         process_group_id: tpgid,
         processes,
     })
+}
+
+/// Best effort only: without the native terminal signal, a background job can
+/// be mistaken for the foreground. No recursive process-tree scan is used.
+fn child_groups_foreground_process_group(child_pid: u32) -> Option<u32> {
+    let shell_group_id = process_pgrp_and_comm(child_pid)
+        .map(|(pgrp, _)| pgrp)
+        .filter(|pgrp| *pgrp > 0)? as u32;
+    let result = child_groups_foreground_process_group_with(
+        child_pid,
+        shell_group_id,
+        process_task_ids,
+        process_task_children,
+        |pid| process_pgrp_and_comm(pid).map(|(pgrp, _)| pgrp),
+    );
+    match result {
+        Ok(group) => group,
+        Err(error) => {
+            // A missing /proc children reader must not look like an empty job.
+            // Keep retries enabled, but do not log on every detector tick.
+            static WARNED: Once = Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(child_pid, %error, "child-group reader failed; no fallback group for this probe (further warnings suppressed)");
+            });
+            None
+        }
+    }
+}
+
+fn child_groups_foreground_process_group_with(
+    child_pid: u32,
+    shell_group_id: u32,
+    mut task_ids: impl FnMut(u32) -> io::Result<Vec<u32>>,
+    mut task_children: impl FnMut(u32, u32) -> io::Result<Vec<u32>>,
+    mut process_group_id: impl FnMut(u32) -> Option<i32>,
+) -> io::Result<Option<u32>> {
+    let mut newest = None;
+    let mut scanned = 0usize;
+    for tid in task_ids(child_pid)? {
+        for child in task_children(child_pid, tid)? {
+            if scanned >= CHILD_GROUPS_SCAN_LIMIT {
+                return Ok(None);
+            }
+            scanned += 1;
+            let Some(pgrp) = process_group_id(child) else {
+                continue;
+            };
+            if pgrp <= 0 || pgrp as u32 == shell_group_id {
+                continue;
+            }
+            let pgrp = pgrp as u32;
+            newest = Some(newest.map_or(pgrp, |current: u32| current.max(pgrp)));
+        }
+    }
+    Ok(newest.or(Some(shell_group_id)))
+}
+
+fn process_task_ids(pid: u32) -> io::Result<Vec<u32>> {
+    let mut tids = Vec::new();
+    for entry in std::fs::read_dir(format!("/proc/{pid}/task"))? {
+        if let Some(tid) = numeric_file_name(&entry?) {
+            tids.push(tid);
+        }
+    }
+    Ok(tids)
+}
+
+fn process_task_children(pid: u32, tid: u32) -> io::Result<Vec<u32>> {
+    let children = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children"))?;
+    Ok(children
+        .split_whitespace()
+        .filter_map(|pid| pid.parse().ok())
+        .collect())
+}
+
+fn numeric_file_name(entry: &std::fs::DirEntry) -> Option<u32> {
+    let name = entry.file_name();
+    let name = name.to_str()?;
+    if !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    name.parse().ok()
 }
 
 pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {
@@ -557,6 +701,268 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn process_detection_mode_requires_explicit_child_groups_value() {
+        for value in [None, Some(""), Some("native")] {
+            assert_eq!(
+                parse_process_detection_mode(value),
+                Ok(ProcessDetectionMode::Native)
+            );
+        }
+        assert_eq!(
+            parse_process_detection_mode(Some("child-groups")),
+            Ok(ProcessDetectionMode::ChildGroups)
+        );
+        for value in ["gvisor", "auto", "Child-Groups", "child-groups "] {
+            assert_eq!(parse_process_detection_mode(Some(value)), Err(value));
+        }
+    }
+
+    #[test]
+    fn unknown_process_detection_mode_warns_and_uses_native() {
+        #[derive(Clone)]
+        struct LogBuffer(std::sync::Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for LogBuffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = LogBuffer(std::sync::Arc::new(Mutex::new(Vec::new())));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .without_time()
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(
+                process_detection_mode_from_value(Some("gvisor")),
+                ProcessDetectionMode::Native
+            );
+        });
+        let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("WARN"), "{log}");
+        assert!(
+            log.contains("unknown process detection mode; using native detection"),
+            "{log}"
+        );
+        assert!(
+            log.contains("ZYNK_PROCESS_DETECTION") && log.contains("gvisor"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn native_foreground_group_wins_even_when_its_job_lookup_fails() {
+        for mode in [
+            ProcessDetectionMode::Native,
+            ProcessDetectionMode::ChildGroups,
+        ] {
+            for found in [false, true] {
+                let job = foreground_job_with(
+                    Some(42),
+                    || mode,
+                    || panic!("native lookup invoked fallback"),
+                    |group| {
+                        assert_eq!(group, 42);
+                        found.then_some(ForegroundJob {
+                            process_group_id: group,
+                            processes: Vec::new(),
+                        })
+                    },
+                );
+                assert_eq!(job.map(|job| job.process_group_id), found.then_some(42));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_native_group_requires_opt_in_and_a_fallback_group() {
+        assert!(foreground_job_with(
+            None,
+            || ProcessDetectionMode::Native,
+            || panic!("default invoked fallback"),
+            |_| panic!("default looked up a group"),
+        )
+        .is_none());
+        for inferred in [None, Some(300)] {
+            let job = foreground_job_with(
+                None,
+                || ProcessDetectionMode::ChildGroups,
+                || inferred,
+                |group| {
+                    assert_eq!(Some(group), inferred);
+                    Some(ForegroundJob {
+                        process_group_id: group,
+                        processes: Vec::new(),
+                    })
+                },
+            );
+            assert_eq!(job.map(|job| job.process_group_id), inferred);
+        }
+    }
+
+    #[test]
+    fn child_groups_foreground_group_picks_the_newest_job() {
+        let group = child_groups_foreground_process_group_with(
+            100,
+            90,
+            |pid| {
+                assert_eq!(pid, 100);
+                Ok(vec![100, 101])
+            },
+            |pid, tid| {
+                assert_eq!(pid, 100, "must not recurse into children");
+                Ok(if tid == 100 {
+                    vec![200]
+                } else {
+                    vec![300, 250]
+                })
+            },
+            |pid| Some(pid as i32),
+        )
+        .unwrap();
+        assert_eq!(group, Some(300));
+    }
+
+    #[test]
+    fn child_groups_foreground_group_returns_to_the_shell_group() {
+        let group = child_groups_foreground_process_group_with(
+            100,
+            90,
+            |_| Ok(vec![100]),
+            |_, _| Ok(vec![150, 160]),
+            |_| Some(90),
+        )
+        .unwrap();
+        assert_eq!(group, Some(90));
+    }
+
+    #[test]
+    fn child_groups_foreground_group_skips_the_shell_group_and_invalid_groups() {
+        let groups = std::collections::HashMap::from([
+            (150, 90),
+            (160, 90),
+            (200, -1),
+            (250, 0),
+            (300, 300),
+        ]);
+        let group = child_groups_foreground_process_group_with(
+            100,
+            90,
+            |_| Ok(vec![100]),
+            |_, _| Ok(vec![150, 160, 200, 250, 300, 400]),
+            |pid| groups.get(&pid).copied(),
+        )
+        .unwrap();
+        assert_eq!(group, Some(300));
+    }
+
+    #[test]
+    fn child_groups_foreground_group_fails_closed_at_the_scan_limit() {
+        for count in [64u32, 65, 74] {
+            let mut inspected = 0usize;
+            let group = child_groups_foreground_process_group_with(
+                100,
+                100,
+                |_| Ok(vec![100, 101]),
+                |_, tid| {
+                    Ok(if tid == 100 {
+                        (1..=32).collect()
+                    } else {
+                        (33..=count).collect()
+                    })
+                },
+                |pid| {
+                    inspected += 1;
+                    Some(pid as i32)
+                },
+            )
+            .unwrap();
+            assert_eq!(inspected, 64, "cap must apply across all tasks");
+            assert_eq!(group, if count == 64 { Some(64) } else { None });
+        }
+    }
+
+    #[test]
+    fn child_groups_readable_empty_is_not_reader_unavailable() {
+        let empty = child_groups_foreground_process_group_with(
+            100,
+            90,
+            |_| Ok(vec![100]),
+            |_, _| Ok(vec![]),
+            |_| panic!("empty children probed"),
+        )
+        .unwrap();
+        assert_eq!(empty, Some(90));
+        let unavailable_tasks = child_groups_foreground_process_group_with(
+            100,
+            90,
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            |_, _| panic!("unreadable tasks enumerated"),
+            |_| panic!("unreadable tasks probed"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            unavailable_tasks.kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let unavailable_children = child_groups_foreground_process_group_with(
+            100,
+            90,
+            |_| Ok(vec![100, 101]),
+            |_, tid| {
+                if tid == 100 {
+                    Ok(vec![300])
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+                }
+            },
+            |pid| Some(pid as i32),
+        )
+        .unwrap_err();
+        assert_eq!(
+            unavailable_children.kind(),
+            std::io::ErrorKind::NotFound,
+            "partial result must not hide an unavailable reader"
+        );
+    }
+
+    #[test]
+    fn proc_task_readers_report_live_children_empty_and_missing_files() {
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = ChildGuard(
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let me = std::process::id();
+        // SAFETY: gettid takes no arguments and always returns this thread's ID.
+        let tid = unsafe { libc::gettid() } as u32;
+        assert!(process_task_ids(me).unwrap().contains(&tid));
+        assert!(process_task_children(me, tid)
+            .unwrap()
+            .contains(&child.0.id()));
+        assert!(process_task_children(child.0.id(), child.0.id())
+            .unwrap()
+            .is_empty());
+        assert!(process_task_ids(u32::MAX).is_err());
+        assert!(process_task_children(me, u32::MAX).is_err());
     }
 
     #[test]

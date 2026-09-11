@@ -227,6 +227,14 @@ remote_image_paste = "ctrl+v"    # raw-key image paste, only in `zynk --remote`;
 `ui.agent_panel_scope` (3.0.x) is no longer supported: the agent panel shows all workspaces, and
 `ui.agent_panel_sort` controls ordering only. Custom keys and prefixes displace conflicting defaults.
 
+For environments without native terminal foreground-group information, start a new server with
+`ZYNK_PROCESS_DETECTION=child-groups` to opt into best-effort process detection from direct child
+groups. Native foreground groups still take precedence. The default is `native`; unknown values
+warn and use that default. This fallback can confuse background jobs with foreground jobs and
+depends on readable `/proc/<pid>/task/<tid>/children` files. Reader failures warn once and yield
+no fallback group for that probe; more than 64 inspected children also yields no group. Setting
+the variable only on a client attached to an existing server does not reconfigure that server.
+
 If a database from an earlier build already occupies `~/.zynk/zynk.db`, zynk **fails closed** rather than
 overwrite it, and points you at the explicit `zynk db` adopt/backup/import action.
 

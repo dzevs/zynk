@@ -2756,3 +2756,46 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   associated-text emission and punctuation recognition, with captured assertion
   failures and exact restoration. A passing unmutated suite alone is not enough.
   **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-18: Opt-In Child-Group Process Detection
+
+- **TAKE / ADAPT** `38b7b540e1d1e5cdcd8fcc31bc8bcf1cde44b603`: use
+  `ZYNK_PROCESS_DETECTION=child-groups` only when the native foreground group
+  is absent. Missing/empty/native values keep native behavior; unknown values
+  warn and fall back to native. An observed native group wins even when its
+  job lookup returns None. Preserve the fork's fresh, pgid-filtered global
+  `/proc` scan and transient-entry tolerance, not upstream's tree-walk backend.
+- **New consumer of previously excluded M3 leaves:** adapt only
+  process_task_ids, process_task_children and numeric_file_name from
+  `80d2958abad152f515aa356e8190e89a80485342`. The accepted M3 row above excluded
+  that net-state rewrite because ef67a970's cache never existed in this fork;
+  it did not prohibit these readers for a later opt-in consumer. That historical
+  row is unchanged. Do not import process_tree_pids,
+  foreground_process_group_members, ProcGroupMember or the snapshot cache.
+- **Reader distinction chosen deliberately:** task/children I/O returns Result,
+  not an empty Vec on error. Readable empty children returns the shell group;
+  failure at any task refuses even an earlier partial candidate. The first
+  reader error warns once per server, without disabling retries. Missing
+  child process metadata is still skipped as a normal exit race. Real owned
+  child/empty/missing-file controls complement injected task PermissionDenied
+  and child-reader NotFound controls; no kernel-configuration change is claimed.
+- Keep upstream's fail-closed CHILD_GROUPS_SCAN_LIMIT=64. The count spans all
+  tasks; a 65th child refuses the result without a 65th group lookup. Tests
+  cover exactly64,65,74, shell-only, invalid/missing groups and newest-group
+  selection. This bounds child group inspections, **not** task enumeration,
+  children-file allocation or the existing native global scan. This is a
+  heuristic, not a precise process snapshot: the [kernel proc documentation,
+  section3.7](https://www.kernel.org/doc/html/latest/filesystems/proc.html#proc-pid-task-tid-children-information-about-task-children)
+  describes first-level children and possible omissions during concurrent exits.
+- In both basic and full detector loops, inferred groups cannot populate the
+  kernel-observed change-tracking slot. Lifecycle authority cannot suppress
+  periodic probes when an observed foreground group is absent. Keep B1's
+  process-exit publication and hook identity/receipt boundaries unchanged;
+  this adds no reporting method, session identity, or caller exemption.
+  M6-06 remains held; this group heuristic is not its freshness proof.
+- Adapt upstream website configuration notes into README, with explicit
+  background-job ambiguity, reader dependence and server-environment scope;
+  omit its release changelog/website files. Add the linux.rs modified-file
+  notice and NOTICE index for the post-relicense source.
+  Protocol19 and D-M5-6's full-feature M9 deferral remain unchanged.
+  **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
