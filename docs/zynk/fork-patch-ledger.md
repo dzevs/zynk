@@ -3157,3 +3157,38 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   dependency, detection authority, D-M5-6/M9 boundary, or other M6 deferral is
   changed. **IMPLEMENTED / PENDING exact-successor Gate2/Gate3 verification**;
   neither `89ccbd1` nor `10b57dc` gains approval from this append.
+
+### M6 Gate-3 Successor: RenamePane Intent and Accepted Mouse Ownership (2026-09-12)
+
+- This append binds the successor to rejected parent `a51be5b98176ed330594fe8292c9ab060f6ac665`
+  and closes only `AUD-M6-LAYOUT-006` plus `G3-M5-INPUT-001`. The historical
+  a51 remediation row's broad statement that relocation cancels rename state
+  was wrong for `RenamePane`, whose target is a stable `PaneId`. Cancellation
+  remains correct for index-bound `RenameWorkspace`/`RenameTab` state and for
+  orphaned `rename_pane_target` cleanup outside `Mode::RenamePane`.
+- A successful cross-workspace move now preserves an accepted moved-pane
+  rename's target, typed label, replace-on-type state, and mode. Focused moves
+  also preserve that exact relocation modal. Enter resolves the stable pane ID
+  globally, derives its public ID from the pane's current workspace, and
+  renames only that pane; normal modal teardown still runs afterward. Named
+  focus-false/focus-true controls retain an unaffected source sibling and
+  destination pane so active-workspace substitution cannot pass unnoticed.
+- Terminal mouse forwarding now separates `Unhandled`, `Rejected`, and
+  `Accepted`. Queue acceptance, not successful encoding alone, creates
+  `TerminalMouseGesture` or `RightClickPassthroughGesture` ownership. A
+  rejected Full/Closed send remains consumed for host routing but installs no
+  durable owner, so later unowned Drag/Up cannot replay against a relocated
+  pane. A rejected repeated Down leaves an existing `(source, button)` owner
+  unchanged rather than replacing or removing it.
+- The three forwarding call sites retain distinct responsibilities:
+  `handle_pane_mouse_only` discards the outcome as before; normal pane routing
+  treats both Rejected and Accepted as handled and falls back to host selection
+  only for Unhandled; configured right-click passthrough consumes Rejected but
+  installs terminal and passthrough ownership together only for Accepted.
+  Accepted gesture routing, per-source/button isolation, coordinate clamping,
+  teardown, and pane-removal controls remain positive controls.
+- Protocol remains 19. No method, wire field, schema, dependency, detection
+  authority, deferral, or deployment disposition changes. Broad checks skipped
+  after a51's Gate-3 rejection still require fresh exact-successor execution.
+  **IMPLEMENTED / PENDING exact-successor Gate2/Gate3 verification**; a51 gains
+  no approval from this append.

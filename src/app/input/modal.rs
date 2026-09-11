@@ -1101,17 +1101,18 @@ impl App {
                 }
             }
             Mode::RenamePane => {
-                if let (Some(ws_idx), Some(pane_id)) =
-                    (self.state.active, self.state.rename_pane_target)
-                {
-                    if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                        self.runtime_pane_rename(
-                            "tui.pane.rename",
-                            crate::api::schema::PaneRenameParams {
-                                pane_id,
-                                label: Some(new_name),
-                            },
-                        );
+                if let Some(pane_id) = self.state.rename_pane_target {
+                    let ws_idx = self.find_pane(pane_id).map(|(ws_idx, _)| ws_idx);
+                    if let Some(ws_idx) = ws_idx {
+                        if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                            self.runtime_pane_rename(
+                                "tui.pane.rename",
+                                crate::api::schema::PaneRenameParams {
+                                    pane_id,
+                                    label: Some(new_name),
+                                },
+                            );
+                        }
                     }
                 }
             }

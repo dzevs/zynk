@@ -942,6 +942,7 @@ impl App {
         let preserve_relocation_modal = cross_workspace
             && match self.state.mode {
                 Mode::RenameWorkspace => self.state.pending_workspace_create_cwd.is_some(),
+                Mode::RenamePane => self.state.rename_pane_target == Some(moved_pane_id),
                 Mode::NewLinkedWorktree => self.state.worktree_create.is_some(),
                 Mode::OpenExistingWorktree => self.state.worktree_open.is_some(),
                 Mode::ConfirmRemoveWorktree => self.state.worktree_remove.is_some(),
@@ -1122,15 +1123,14 @@ impl App {
             && self.state.pending_workspace_create_cwd.is_none();
         let cancel_rename_tab = self.state.mode == Mode::RenameTab;
         let moved_rename_pane_target = self.state.rename_pane_target == Some(moved_pane_id);
-        if moved_rename_pane_target {
+        let preserve_rename_pane = self.state.mode == Mode::RenamePane && moved_rename_pane_target;
+        if moved_rename_pane_target && !preserve_rename_pane {
             self.state.rename_pane_target = None;
             self.state.name_input.clear();
             self.state.name_input_replace_on_type = false;
         }
-        let cancel_rename_pane = self.state.mode == Mode::RenamePane && moved_rename_pane_target;
         let cancel_index_bound_mode = cancel_rename_workspace
             || cancel_rename_tab
-            || cancel_rename_pane
             || matches!(
                 self.state.mode,
                 Mode::Resize | Mode::ConfirmClose | Mode::ContextMenu
@@ -2588,11 +2588,61 @@ mod tests {
     }
 
     #[test]
+    fn cross_workspace_move_preserves_accepted_rename_pane_intent() {
+        for focus in [false, true] {
+            let (mut app, source, sibling, target) = app_with_cross_workspace_move_source(true);
+            let sibling = sibling.unwrap();
+            let source_terminal_id = app.state.workspaces[0].terminal_id(source).unwrap().clone();
+            let sibling_terminal_id = app.state.workspaces[0]
+                .terminal_id(sibling)
+                .unwrap()
+                .clone();
+            let target_terminal_id = app.state.workspaces[1].terminal_id(target).unwrap().clone();
+            app.state.mode = Mode::RenamePane;
+            app.state.rename_pane_target = Some(source);
+            app.state.name_input = "relocated pane".into();
+            app.state.name_input_replace_on_type = false;
+
+            move_between_workspaces(&mut app, 0, source, 1, target, focus);
+
+            assert_eq!(app.state.mode, Mode::RenamePane, "focus={focus}");
+            assert_eq!(app.state.rename_pane_target, Some(source), "focus={focus}");
+            assert_eq!(app.state.name_input, "relocated pane", "focus={focus}");
+            assert!(!app.state.name_input_replace_on_type, "focus={focus}");
+
+            app.handle_rename_key_via_api(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::empty(),
+            ));
+
+            assert_eq!(
+                app.state.terminals[&source_terminal_id]
+                    .manual_label
+                    .as_deref(),
+                Some("relocated pane"),
+                "focus={focus}: moved pane"
+            );
+            assert_eq!(
+                app.state.terminals[&sibling_terminal_id].manual_label, None,
+                "focus={focus}: source sibling"
+            );
+            assert_eq!(
+                app.state.terminals[&target_terminal_id].manual_label, None,
+                "focus={focus}: destination pane"
+            );
+            assert_eq!(app.state.mode, Mode::Terminal, "focus={focus}");
+            assert!(app.state.rename_pane_target.is_none(), "focus={focus}");
+            assert!(app.state.name_input.is_empty(), "focus={focus}");
+            assert!(!app.state.name_input_replace_on_type, "focus={focus}");
+            app.state.assert_invariants_for_test();
+        }
+    }
+
+    #[test]
     fn cross_workspace_move_cancels_index_bound_modal_targets() {
         for mode in [
             Mode::RenameWorkspace,
             Mode::RenameTab,
-            Mode::RenamePane,
             Mode::Resize,
             Mode::ConfirmClose,
             Mode::ContextMenu,
@@ -2605,7 +2655,6 @@ mod tests {
                     app.state.creating_new_tab = true;
                     app.state.requested_new_tab_name = Some("stale tab".into());
                 }
-                Mode::RenamePane => app.state.rename_pane_target = Some(source),
                 Mode::ContextMenu => {
                     app.state.context_menu = Some(crate::app::state::ContextMenuState {
                         kind: crate::app::state::ContextMenuKind::Workspace { ws_idx: 0 },
@@ -2785,6 +2834,148 @@ mod tests {
             assert!(source_rx.try_recv().is_err(), "capture={capture}");
             assert!(sibling_rx.try_recv().is_err(), "capture={capture}");
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_terminal_mouse_down_does_not_survive_cross_workspace_relocation() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(true);
+        let mut source_rx =
+            install_global_reporting_runtime(&mut app, 0, source, b"\x1b[?1002h\x1b[?1006h", 1);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
+        let info = app.state.pane_info_by_id(source).unwrap().clone();
+        let column = info.inner_rect.x + 2;
+        let row = info.inner_rect.y + 3;
+        app.state
+            .runtime_for_pane(&app.terminal_runtimes, source)
+            .unwrap()
+            .try_send_bytes(bytes::Bytes::from_static(b"filler"))
+            .expect("fill bounded input channel");
+        app.state.selection = Some(crate::selection::Selection::range(source, 0, 0, 1, None));
+
+        app.handle_mouse_from_input_source(
+            7,
+            pane_mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+        );
+
+        assert!(
+            app.state.selection.is_none(),
+            "a rejected reported Down must remain consumed by terminal routing"
+        );
+        assert!(
+            !app.state
+                .terminal_mouse_gestures
+                .contains_key(&(7, MouseButton::Left)),
+            "a rejected Down must not establish durable gesture ownership"
+        );
+
+        move_between_workspaces(&mut app, 0, source, 1, target, false);
+        assert_eq!(
+            source_rx.try_recv().expect("queued filler"),
+            bytes::Bytes::from_static(b"filler")
+        );
+        for kind in [
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse_from_input_source(7, pane_mouse(kind, column, row));
+        }
+
+        assert!(source_rx.try_recv().is_err());
+        assert!(!app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(7, MouseButton::Left)));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
+    async fn closed_terminal_mouse_down_does_not_create_owned_gesture() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let (mut app, source, _sibling, _target) = app_with_cross_workspace_move_source(false);
+        let source_rx =
+            install_global_reporting_runtime(&mut app, 0, source, b"\x1b[?1002h\x1b[?1006h", 1);
+        drop(source_rx);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
+        let info = app.state.pane_info_by_id(source).unwrap().clone();
+        let column = info.inner_rect.x + 2;
+        let row = info.inner_rect.y + 3;
+        app.state.selection = Some(crate::selection::Selection::range(source, 0, 0, 1, None));
+
+        app.handle_mouse_from_input_source(
+            7,
+            pane_mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+        );
+
+        assert!(app.state.selection.is_none());
+        assert!(!app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(7, MouseButton::Left)));
+        for kind in [
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse_from_input_source(7, pane_mouse(kind, column, row));
+        }
+        assert!(!app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(7, MouseButton::Left)));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
+    async fn rejected_right_passthrough_is_consumed_without_durable_ownership() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, source, _sibling, _target) = app_with_cross_workspace_move_source(false);
+        app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
+        let mut source_rx =
+            install_global_reporting_runtime(&mut app, 0, source, b"\x1b[?1002h\x1b[?1006h", 1);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
+        let info = app.state.pane_info_by_id(source).unwrap().clone();
+        app.state
+            .runtime_for_pane(&app.terminal_runtimes, source)
+            .unwrap()
+            .try_send_bytes(bytes::Bytes::from_static(b"filler"))
+            .expect("fill bounded input channel");
+
+        app.handle_mouse_from_input_source(
+            7,
+            MouseEvent {
+                modifiers: KeyModifiers::CONTROL,
+                ..pane_mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    info.inner_rect.x + 2,
+                    info.inner_rect.y + 3,
+                )
+            },
+        );
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.context_menu.is_none());
+        assert!(app.state.right_click_passthrough.is_none());
+        assert!(!app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(7, MouseButton::Right)));
+        assert_eq!(
+            source_rx.try_recv().expect("queued filler"),
+            bytes::Bytes::from_static(b"filler")
+        );
+        app.handle_mouse_from_input_source(
+            7,
+            pane_mouse(
+                MouseEventKind::Up(MouseButton::Right),
+                info.inner_rect.x + 2,
+                info.inner_rect.y + 3,
+            ),
+        );
+        assert!(source_rx.try_recv().is_err());
+        app.state.assert_invariants_for_test();
     }
 
     #[tokio::test]

@@ -68,6 +68,19 @@ enum MobileMouseResult {
     Action(MouseAction),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PaneMouseForwardResult {
+    Unhandled,
+    Rejected,
+    Accepted,
+}
+
+impl PaneMouseForwardResult {
+    fn is_handled(self) -> bool {
+        self != Self::Unhandled
+    }
+}
+
 impl AppState {
     fn chrome_press_pending(&self, source_id: crate::app::InputSourceId) -> bool {
         self.tab_presses.contains_key(&source_id) || self.workspace_presses.contains_key(&source_id)
@@ -713,13 +726,16 @@ impl AppState {
                         self.mode = Mode::Terminal;
                     }
 
-                    if self.forward_pane_mouse_button(
-                        terminal_runtimes,
-                        source_id,
-                        &info,
-                        mouse,
-                        crossterm::event::KeyModifiers::empty(),
-                    ) {
+                    if self
+                        .forward_pane_mouse_button(
+                            terminal_runtimes,
+                            source_id,
+                            &info,
+                            mouse,
+                            crossterm::event::KeyModifiers::empty(),
+                        )
+                        .is_handled()
+                    {
                         self.selection = None;
                         self.selection_autoscroll = None;
                         return self.mouse_pane_focus_action(info.id);
@@ -1618,7 +1634,9 @@ impl AppState {
         };
 
         self.focus_pane(info.id);
-        if !self.forward_pane_mouse_button(terminal_runtimes, source_id, &info, mouse, modifiers) {
+        let result =
+            self.forward_pane_mouse_button(terminal_runtimes, source_id, &info, mouse, modifiers);
+        if result == PaneMouseForwardResult::Unhandled {
             return false;
         }
 
@@ -1627,10 +1645,12 @@ impl AppState {
         self.clear_chrome_press(source_id);
         self.clear_chrome_drag(source_id);
         self.context_menu = None;
-        self.right_click_passthrough = Some(RightClickPassthroughGesture {
-            source_id,
-            pane_info: info,
-        });
+        if result == PaneMouseForwardResult::Accepted {
+            self.right_click_passthrough = Some(RightClickPassthroughGesture {
+                source_id,
+                pane_info: info,
+            });
+        }
         true
     }
 
@@ -1690,23 +1710,24 @@ impl AppState {
         info: &PaneInfo,
         mouse: MouseEvent,
         modifiers_to_strip: crossterm::event::KeyModifiers,
-    ) -> bool {
+    ) -> PaneMouseForwardResult {
         let Some(ws_idx) = self.active else {
-            return false;
+            return PaneMouseForwardResult::Unhandled;
         };
         let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         else {
-            return false;
+            return PaneMouseForwardResult::Unhandled;
         };
         let column = mouse.column.saturating_sub(info.inner_rect.x);
         let row = mouse.row.saturating_sub(info.inner_rect.y);
         let modifiers = mouse.modifiers.difference(modifiers_to_strip);
         let Some(bytes) = rt.encode_mouse_button(mouse.kind, column, row, modifiers) else {
-            return false;
+            return PaneMouseForwardResult::Unhandled;
         };
         rt.scroll_reset();
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(pane = info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward mouse button event");
+            return PaneMouseForwardResult::Rejected;
         }
         if let MouseEventKind::Down(button) = mouse.kind {
             self.terminal_mouse_gestures.insert(
@@ -1717,7 +1738,7 @@ impl AppState {
                 },
             );
         }
-        true
+        PaneMouseForwardResult::Accepted
     }
 
     pub(crate) fn forward_owned_terminal_mouse_gesture(
@@ -2302,8 +2323,11 @@ mod tests {
                 second_info.inner_rect.height,
                 0,
                 b"\x1b[?1002h\x1b[?1006h",
-                4,
+                1,
             );
+        second_runtime
+            .try_send_bytes(Bytes::from_static(b"filler"))
+            .expect("fill the second pane input queue");
         ws.insert_test_runtime(first_pane, first_runtime);
         ws.insert_test_runtime(second_pane, second_runtime);
 
@@ -2314,19 +2338,50 @@ mod tests {
         app.state.view.pane_infos = pane_infos;
         app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
 
-        for info in [&first_info, &second_info] {
-            app.handle_mouse_from_input_source(
-                7,
-                MouseEvent {
-                    modifiers: KeyModifiers::CONTROL,
-                    ..mouse(
-                        MouseEventKind::Down(MouseButton::Right),
-                        info.inner_rect.x + 1,
-                        info.inner_rect.y + 1,
-                    )
-                },
-            );
-        }
+        app.handle_mouse_from_input_source(
+            7,
+            MouseEvent {
+                modifiers: KeyModifiers::CONTROL,
+                ..mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    first_info.inner_rect.x + 1,
+                    first_info.inner_rect.y + 1,
+                )
+            },
+        );
+        app.handle_mouse_from_input_source(
+            7,
+            MouseEvent {
+                modifiers: KeyModifiers::CONTROL,
+                ..mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    second_info.inner_rect.x + 1,
+                    second_info.inner_rect.y + 1,
+                )
+            },
+        );
+        assert_eq!(
+            app.state
+                .terminal_mouse_gestures
+                .get(&(7, MouseButton::Right))
+                .map(|gesture| gesture.pane_info.id),
+            Some(first_pane),
+            "a repeated routed Down replaced the unreleased gesture owner"
+        );
+        app.state.forward_pane_mouse_button(
+            &app.terminal_runtimes,
+            7,
+            &second_info,
+            MouseEvent {
+                modifiers: KeyModifiers::CONTROL,
+                ..mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    second_info.inner_rect.x + 1,
+                    second_info.inner_rect.y + 1,
+                )
+            },
+            KeyModifiers::CONTROL,
+        );
 
         assert_eq!(
             app.state
@@ -2342,6 +2397,10 @@ mod tests {
                 .get(&(7, MouseButton::Right))
                 .map(|gesture| gesture.pane_info.id),
             Some(first_pane)
+        );
+        assert_eq!(
+            second_input_rx.try_recv().expect("queued filler"),
+            Bytes::from_static(b"filler")
         );
 
         app.handle_mouse_from_input_source(
