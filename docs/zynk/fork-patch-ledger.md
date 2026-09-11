@@ -2560,3 +2560,32 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   source authority and D-M5-6/M9 are unchanged. The existing modified-file
   notice and NOTICE entry already cover this source.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.
+
+### M6-11: CWD Reads and the M8 Creation Cluster (2026-09-11)
+
+- **Sources taken:** `9450b168c727e9e4cbee95e6edf4f11cfe6f2154` and
+  `0a800b8f2e9894433c6ef9d106d10766ac408218`. Read an already-admitted reported
+  CWD without another directory check. For foreground reporting, shell, leader
+  and member CWDs use absolute proc-derived paths without traversing them.
+  Rename the existing helper to absolute_process_cwd; the directory-validating
+  wrapper has no remaining caller until the deferred creation-follow lands.
+- OSC admission is unchanged: usable_reported_cwd/publish_reported_cwd still
+  require an absolute existing directory. Negatives cover relative, missing
+  and file paths. Behavioral reds cover removed-after-admission CWD and a real
+  PTY child's untraversable ancestor; the fixture restores permissions, reaps
+  the child and removes its sandbox on failure as well as success. The existing
+  helper-CWD API test remains reporting evidence, not creation-follow evidence.
+- Gate-1 addendum `msg_7e879ebe27845429` supersedes the original M6-11 creation
+  acceptance only. It carries all of `550e9f8cc085f428429f5cf2da0bb2dba897e8b8`
+  as **D-M6-2 to M8**, importing no unused getter or vacuous API control.
+  The source count remains 41; this is an explicit dependency deferral, not a
+  claim that 550e9f8c's behavior has been implemented or exercised in M6.
+
+| M8 Cluster | Sources and Blocker | Required Follow-Through |
+| --- | --- | --- |
+| **D-M6-2: complete CWD creation-follow cluster**, incorporating the historical M5-16 carry-forward above | `48d58648aefcc59964a99be9c23778fe69346663` (cached focused-pane lookup), `cf3769feb9837c6040820c3e6096c5cc2907adc0` (workspace routing), `4f7fcc48d1f760ab6057d0964f009c05b753456a` (creator of the absent Tab::follow_cwd_for_pane), then `550e9f8cc085f428429f5cf2da0bb2dba897e8b8` (foreground group leader) | Port the complete 550e9f8c getter/TerminalRuntime forwarding/Tab adaptation plus runtime fallback and leader/helper API tests when the M8 creation routes exist. Include **begin_tui_workspace_create** alongside the runtime workspace handler, all applicable split/tab/workspace/layout creation paths, cached fallback without runtime and explicit/policy overrides. Recreate the creation-follow predicate literally: process-derived `cwd.is_absolute() && cwd.is_dir()`, as usable_process_cwd at 7050825 and the validating wrapper in 0a800b8f; the reporting-only helper in M6 is not sufficient. Controls must distinguish leader CWD from both shell and helper CWD so existing seed behavior cannot satisfy them. No part of this cluster is claimed consumed by M6. |
+
+- No app creation, public API/schema, protocol 19, dependency, process detection,
+  B1 identity or runtime ownership change. No new render work or cache state.
+  The previously modified pane.rs notice and NOTICE entry remain applicable.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.

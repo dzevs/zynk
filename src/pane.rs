@@ -321,8 +321,8 @@ struct AgentDetectionPresence {
     consecutive_misses: u8,
 }
 
-fn usable_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
-    crate::platform::process_cwd(pid).filter(|cwd| cwd.is_absolute() && cwd.is_dir())
+fn absolute_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    crate::platform::process_cwd(pid).filter(|cwd| cwd.is_absolute())
 }
 
 fn foreground_member_cwd_different_from_shell(
@@ -334,7 +334,7 @@ fn foreground_member_cwd_different_from_shell(
         if process.pid == shell_pid {
             continue;
         }
-        let Some(cwd) = usable_process_cwd(process.pid) else {
+        let Some(cwd) = absolute_process_cwd(process.pid) else {
             continue;
         };
         if shell_cwd != Some(&cwd) {
@@ -2712,7 +2712,6 @@ impl PaneRuntime {
             .lock()
             .ok()
             .and_then(|reported_cwd| reported_cwd.clone())
-            .and_then(usable_reported_cwd)
         {
             return Some(cwd);
         }
@@ -2741,12 +2740,12 @@ impl PaneRuntime {
     /// Get the current working directory of the process group controlling the pane PTY.
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Acquire);
-        let shell_cwd = usable_process_cwd(pid);
+        let shell_cwd = absolute_process_cwd(pid);
         let foreground_pgid = self
             .io
             .foreground_process_group_id()
             .or_else(|| crate::platform::foreground_process_group_id(pid));
-        let leader_cwd = foreground_pgid.and_then(usable_process_cwd);
+        let leader_cwd = foreground_pgid.and_then(absolute_process_cwd);
 
         if leader_cwd.as_ref() == shell_cwd.as_ref() {
             foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()).or(leader_cwd)
@@ -2857,6 +2856,124 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CwdTestProbe {
+        base: std::path::PathBuf,
+        restricted: Option<(std::path::PathBuf, std::fs::Permissions)>,
+        child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    }
+
+    impl CwdTestProbe {
+        fn new() -> Self {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::var_os("ZYNK_TEST_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let base = root.join(format!("cwd-probe-{}-{stamp}", std::process::id()));
+            std::fs::create_dir(&base).unwrap();
+            Self {
+                base,
+                restricted: None,
+                child: None,
+            }
+        }
+    }
+
+    impl Drop for CwdTestProbe {
+        fn drop(&mut self) {
+            if let Some((path, permissions)) = self.restricted.take() {
+                if let Err(err) = std::fs::set_permissions(&path, permissions) {
+                    eprintln!("failed to restore CWD probe permissions: {err}");
+                }
+            }
+            if let Some(child) = self.child.as_mut() {
+                let _ = child.kill();
+                if let Err(err) = child.wait() {
+                    eprintln!("failed to reap CWD probe child: {err}");
+                }
+            }
+            if let Err(err) = std::fs::remove_dir_all(&self.base) {
+                eprintln!("failed to remove CWD probe: {err}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cwd_returns_accepted_report_without_rechecking_filesystem() {
+        let probe = CwdTestProbe::new();
+        let cwd = probe.base.join("accepted");
+        std::fs::create_dir(&cwd).unwrap();
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        let (events, mut event_rx) = mpsc::channel(1);
+        publish_reported_cwd(runtime.pane_id, cwd.clone(), &runtime.reported_cwd, &events);
+        assert_eq!(runtime.reported_cwd.lock().unwrap().as_ref(), Some(&cwd));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::TerminalCwdReported { .. })
+        ));
+        std::fs::remove_dir(&cwd).unwrap();
+
+        assert_eq!(runtime.cwd(), Some(cwd));
+    }
+
+    #[tokio::test]
+    async fn reported_cwd_admission_still_rejects_relative_missing_and_file_paths() {
+        let probe = CwdTestProbe::new();
+        let file = probe.base.join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        let (events, mut event_rx) = mpsc::channel(4);
+        for path in [
+            std::path::PathBuf::from("."),
+            probe.base.join("missing"),
+            file,
+        ] {
+            publish_reported_cwd(runtime.pane_id, path, &runtime.reported_cwd, &events);
+            assert!(runtime.reported_cwd.lock().unwrap().is_none());
+            assert!(event_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_cwd_does_not_require_traversing_the_directory_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut probe = CwdTestProbe::new();
+        let private = probe.base.join("private");
+        let cwd = private.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new("/usr/bin/sleep");
+        command.arg("30");
+        command.cwd(&cwd);
+        probe.child = Some(pair.slave.spawn_command(command).unwrap());
+        let pid = probe.child.as_ref().unwrap().process_id().unwrap();
+        assert_eq!(crate::platform::foreground_process_group_id(pid), Some(pid));
+        let expected = crate::platform::process_cwd(pid).unwrap();
+        assert_eq!(expected, cwd);
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        runtime.child_pid.store(pid, Ordering::Release);
+        assert_eq!(runtime.foreground_cwd(), Some(expected.clone()));
+        let permissions = std::fs::metadata(&private).unwrap().permissions();
+        probe.restricted = Some((private.clone(), permissions));
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if cwd.is_dir() {
+            eprintln!("UNEXERCISED: privileged process can traverse the restricted CWD");
+            return;
+        }
+
+        assert_eq!(runtime.foreground_cwd(), Some(expected));
+    }
 
     #[test]
     fn pane_launch_env_removes_outer_codex_thread_id() {
