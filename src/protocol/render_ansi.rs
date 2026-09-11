@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Frame blitting — renders FrameData to the terminal using diff-based updates.
 //!
 //! The blitting strategy:
@@ -31,7 +33,7 @@ use std::io::Write;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::protocol::{CellData, FrameData};
+use crate::protocol::{underline_style_from_modifier, CellData, FrameData};
 
 /// Bytes produced by a [`BlitEncoder`] for one terminal frame.
 pub(crate) struct EncodedBlit {
@@ -294,7 +296,13 @@ fn modifier_to_sgr_parts(val: u16) -> Vec<&'static str> {
         parts.push("3");
     }
     if val & UNDERLINED != 0 {
-        parts.push("4");
+        parts.push(match underline_style_from_modifier(val) {
+            2 => "4:2",
+            3 => "4:3",
+            4 => "4:4",
+            5 => "4:5",
+            _ => "4",
+        });
     }
     if val & SLOW_BLINK != 0 {
         parts.push("5");
@@ -833,6 +841,22 @@ mod tests {
     #[test]
     fn build_sgr_resets_previous_modifiers_when_cell_is_plain() {
         assert_eq!(build_sgr(0x00_00_00_00, 0x00_00_00_00, 0), "\x1b[0;39;49m");
+    }
+
+    #[test]
+    fn build_sgr_preserves_underline_styles_and_falls_back_for_unknown_kind() {
+        for (kind, sgr) in [
+            (3, "4:3"),
+            (1, "4"),
+            (2, "4:2"),
+            (4, "4:4"),
+            (5, "4:5"),
+            (15, "4"),
+        ] {
+            let modifier = ratatui::style::Modifier::UNDERLINED.bits() | (kind << 12);
+            assert_eq!(build_sgr(0, 0, modifier), format!("\x1b[0;{sgr};39;49m"));
+        }
+        assert_eq!(build_sgr(0, 0, 3 << 12), "\x1b[0;39;49m");
     }
 
     #[test]

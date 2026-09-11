@@ -376,6 +376,7 @@ pub struct CellStyle {
     pub invisible: bool,
     pub strikethrough: bool,
     pub overline: bool,
+    pub underline: u8,
     pub underlined: bool,
 }
 
@@ -393,8 +394,16 @@ impl From<ffi::GhosttyStyle> for CellStyle {
             invisible: value.invisible,
             strikethrough: value.strikethrough,
             overline: value.overline,
+            underline: normalize_underline_style(value.underline),
             underlined: value.underline != 0,
         }
+    }
+}
+
+fn normalize_underline_style(value: std::os::raw::c_int) -> u8 {
+    match value {
+        0..=5 => value as u8,
+        _ => 1,
     }
 }
 
@@ -3088,6 +3097,21 @@ impl<'a> RowCellIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn underline_style_conversion_matches_vendor_values_and_unknown_fallback() {
+        for raw in [0, 1, 2, 3, 4, 5, -1, 6, i32::MAX] {
+            let style = CellStyle::from(ffi::GhosttyStyle {
+                underline: raw,
+                ..Default::default()
+            });
+            assert_eq!(
+                style.underline,
+                if (0..=5).contains(&raw) { raw as u8 } else { 1 }
+            );
+            assert_eq!(style.underlined, raw != 0);
+        }
+    }
 
     #[test]
     fn effective_color_accessors_match_vendor_rgb_and_no_value_contract() {

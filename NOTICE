@@ -131,7 +131,9 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/pane/input.rs
 - src/pane/osc.rs
 - src/pane/terminal.rs
+- src/pane/xtgettcap.rs
 - src/persist/restore.rs
+- src/protocol/render_ansi.rs
 - src/protocol/wire.rs
 - src/pty/actor/unix.rs
 - src/raw_input.rs

@@ -2403,3 +2403,27 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
   counted as the behavioral red control. Both touched source files already
   carry modified-file notices and NOTICE entries.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3. No deployment implied.
+
+### M6-04: Underline Styles Through Presentation (2026-09-11)
+
+- **Source:** `b7015f17a49501e99642009ebadabcbefc0fbad0`, all five source
+  files accounted for. Preserve libghostty underline kinds0..5 with unknown
+  vendor values falling back to single underline. Carry the kind through
+  existing modifier bits12..15 into full frames, dirty patches and ANSI SGR;
+  advertise `Smulx` with the working encoder in this same slice.
+- Keep the `CellData` shape and protocol19. Tests pin ordinary and extended
+  cell serialization bytes, disjoint ratatui modifier bits and stripping the
+  extension for the test-only ratatui conversion. No ClientMessage, host
+  negotiation, native ABI layout or vendored source change.
+- The [Kitty underline specification](https://sw.kovidgoyal.net/kitty/underlines/)
+  defines the zero-through-five styles and reset forms; the active vendor's
+  `include/ghostty/vt/sgr.h` and `style.h` define the matching integer field.
+  The port adds scalar normalization/bit operations, no per-cell allocation,
+  I/O, extra aggregate terminal read or state/runtime ownership change.
+- Four behavioral reds cover lost style bits, ANSI shape and capability
+  responses. Green controls cover all six kinds, reset, full/dirty parity,
+  unknown-value fallback, wire bytes and the existing hot-path guard.
+  Add modified-file notices and NOTICE entries for `src/pane/xtgettcap.rs`
+  and `src/protocol/render_ansi.rs`; the other three files were already listed.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3. No source hunk deferred,
+  no merge or deployment implied.

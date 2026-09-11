@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use bytes::Bytes;
 
 #[derive(Debug, Default)]
@@ -174,8 +176,7 @@ fn xtgettcap_response(cap_hex: &[u8]) -> Option<Bytes> {
 }
 
 fn xtgettcap_value(cap_hex: &[u8]) -> Option<Option<&'static [u8]>> {
-    // Mirror only the Ghostty terminfo capabilities that this pane path can
-    // stand behind. Smulx is intentionally absent until underline shapes render.
+    // Mirror only the Ghostty terminfo capabilities that this pane path can stand behind.
     match cap_hex {
         b"5463" => Some(None),
         b"524742" => Some(Some(b"8")),
@@ -183,6 +184,7 @@ fn xtgettcap_value(cap_hex: &[u8]) -> Option<Option<&'static [u8]>> {
         b"73657472676262" => Some(Some(b"\\E[48:2:%p1%d:%p2%d:%p3%dm")),
         b"4D73" => Some(Some(b"\\E]52;%p1%s;%p2%s\\007")),
         b"5375" => Some(None),
+        b"536D756C78" => Some(Some(b"\\E[4:%p1%dm")),
         b"536574756C63" => Some(Some(
             b"\\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m",
         )),
@@ -255,9 +257,21 @@ mod tests {
     fn tracker_ignores_unsupported_capabilities() {
         let mut tracker = XtgettcapQueryTracker::default();
 
-        tracker.observe(b"\x1bP+q536D756C78;6E6F7065\x1b\\");
+        tracker.observe(b"\x1bP+q6E6F7065\x1b\\");
 
         assert!(response_bytes(tracker.drain_pending()).is_empty());
+    }
+
+    #[test]
+    fn tracker_returns_underline_style_capability() {
+        let mut tracker = XtgettcapQueryTracker::default();
+        tracker.observe(b"\x1bP+q536D756C78\x1b\\");
+        assert_eq!(
+            response_bytes(tracker.drain_pending()),
+            vec![Bytes::from_static(
+                b"\x1bP1+r536D756C78=5C455B343A25703125646D\x1b\\"
+            )]
+        );
     }
 
     #[test]

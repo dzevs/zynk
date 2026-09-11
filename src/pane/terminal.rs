@@ -2625,6 +2625,7 @@ fn ghostty_cell_style(
     if basic.style.strikethrough {
         modifiers |= Modifier::CROSSED_OUT;
     }
+    modifiers = crate::protocol::modifier_with_underline_style(modifiers, basic.style.underline);
     style.add_modifier(modifiers)
 }
 
@@ -5263,8 +5264,7 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
 
-        let result =
-            pane.process_pty_bytes(pane_id, 0, b"\x1bP+q6E6F7065;536D756C78;4D7\x1b\\", &tx);
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1bP+q6E6F7065;4D7\x1b\\", &tx);
 
         assert!(result.terminal_responses.is_empty());
         assert!(rx.try_recv().is_err());
@@ -5277,12 +5277,18 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
 
-        let result = pane.process_pty_bytes(pane_id, 0, b"\x1bP+q5375;536574756C63\x1b\\", &tx);
+        let result = pane.process_pty_bytes(
+            pane_id,
+            0,
+            b"\x1bP+q5375;536D756C78;536574756C63\x1b\\",
+            &tx,
+        );
 
         assert_eq!(
             result.terminal_responses,
             vec![
                 expected_xtgettcap_response("5375", None),
+                expected_xtgettcap_response("536D756C78", Some(b"\\E[4:%p1%dm")),
                 expected_xtgettcap_response(
                     "536574756C63",
                     Some(b"\\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m")
@@ -5311,6 +5317,48 @@ mod tests {
         let style = terminal.backend().buffer()[(0, 0)].style();
         assert!(style.add_modifier.contains(Modifier::UNDERLINED));
         assert_eq!(style.underline_color, Some(Color::Rgb(17, 34, 51)));
+    }
+
+    #[test]
+    fn underline_styles_survive_full_frames_and_dirty_patches() {
+        for kind in [3_u16, 0, 1, 2, 4, 5] {
+            let (tx, _rx) = mpsc::channel(4);
+            let core = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+            let pane = GhosttyPaneTerminal::new(core, tx.clone()).unwrap();
+            let backend = ratatui::backend::TestBackend::new(20, 5);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+                .unwrap();
+            pane.process_pty_bytes(
+                PaneId::from_raw(1),
+                0,
+                format!("\x1b[4:{kind}mU\x1b[24mN").as_bytes(),
+                &tx,
+            );
+
+            let patch = match pane.collect_dirty_patch(20, 5) {
+                TerminalDirtyPatchOutcome::Patch(patch) => patch,
+                other => panic!("expected dirty patch, got {other:?}"),
+            };
+            let cell = &patch.rows[0].1[0];
+            assert_eq!(cell.symbol, "U");
+            assert_eq!(cell.modifier & 0xF000, kind << 12, "style {kind}");
+            assert_eq!(cell.modifier & Modifier::UNDERLINED.bits() != 0, kind != 0);
+            assert_eq!(patch.rows[0].1[1].symbol, "N");
+            assert_eq!(patch.rows[0].1[1].modifier, 0, "underline reset");
+
+            terminal
+                .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+                .unwrap();
+            let frame =
+                crate::protocol::FrameData::from_ratatui_buffer(terminal.backend().buffer(), None);
+            assert_eq!(
+                frame.cells[..2],
+                patch.rows[0].1[..2],
+                "full/dirty style {kind}"
+            );
+        }
     }
 
     #[test]

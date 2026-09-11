@@ -364,7 +364,7 @@ pub struct CellData {
     pub fg: u32,
     /// Background color as a packed u32.
     pub bg: u32,
-    /// Bitmask of style modifiers (bold, italic, etc.).
+    /// Bitmask of style modifiers (bold, italic, etc.) plus zynk extension bits.
     pub modifier: u16,
     /// Whether this cell should be skipped during diff-based rendering.
     pub skip: bool,
@@ -667,15 +667,30 @@ fn u32_to_color(val: u32) -> ratatui::style::Color {
     }
 }
 
+const UNDERLINE_STYLE_SHIFT: u16 = 12;
+const UNDERLINE_STYLE_MASK: u16 = 0xF000;
+
 /// Converts a ratatui `Modifier` bitmask to a u16 for wire transport.
 pub(crate) fn modifier_to_u16(modifier: ratatui::style::Modifier) -> u16 {
     modifier.bits()
 }
 
+pub(crate) fn underline_style_from_modifier(modifier: u16) -> u8 {
+    ((modifier & UNDERLINE_STYLE_MASK) >> UNDERLINE_STYLE_SHIFT) as u8
+}
+
+pub(crate) fn modifier_with_underline_style(
+    modifier: ratatui::style::Modifier,
+    underline_style: u8,
+) -> ratatui::style::Modifier {
+    let bits = modifier.bits() | ((u16::from(underline_style) & 0x0F) << UNDERLINE_STYLE_SHIFT);
+    ratatui::style::Modifier::from_bits_retain(bits)
+}
+
 /// Converts a u16 back to a ratatui `Modifier`.
 #[cfg(test)]
 fn u16_to_modifier(val: u16) -> ratatui::style::Modifier {
-    ratatui::style::Modifier::from_bits_truncate(val)
+    ratatui::style::Modifier::from_bits_truncate(val & !UNDERLINE_STYLE_MASK)
 }
 
 // ---------------------------------------------------------------------------
@@ -1836,6 +1851,37 @@ mod tests {
     }
 
     // ---- Modifier conversion ----
+
+    #[test]
+    fn underline_extension_preserves_existing_cell_wire_shape_and_modifier_bits() {
+        assert_eq!(Modifier::all().bits() & 0xF000, 0);
+        for kind in 0..=5 {
+            let base = Modifier::BOLD | Modifier::ITALIC | Modifier::UNDERLINED;
+            let encoded = modifier_to_u16(modifier_with_underline_style(base, kind));
+            assert_eq!(encoded & 0x0FFF, base.bits());
+            assert_eq!(underline_style_from_modifier(encoded), kind);
+            assert_eq!(u16_to_modifier(encoded), base);
+        }
+        for (modifier, expected) in [
+            (8, vec![1, b'U', 0, 0, 8, 0, 0]),
+            (0x3008, vec![1, b'U', 0, 0, 251, 8, 48, 0, 0]),
+        ] {
+            let cell = CellData {
+                symbol: "U".into(),
+                fg: 0,
+                bg: 0,
+                modifier,
+                skip: false,
+                hyperlink: None,
+            };
+            let bytes = bincode::serde::encode_to_vec(&cell, bincode::config::standard()).unwrap();
+            assert_eq!(bytes, expected);
+            let (decoded, consumed): (CellData, _) =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+            assert_eq!(decoded, cell);
+            assert_eq!(consumed, bytes.len());
+        }
+    }
 
     #[test]
     fn modifier_roundtrip() {
