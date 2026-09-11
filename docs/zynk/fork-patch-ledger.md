@@ -2427,3 +2427,27 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
   and `src/protocol/render_ansi.rs`; the other three files were already listed.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3. No source hunk deferred,
   no merge or deployment implied.
+
+### M6-05: Basic-Key Compatibility Under Kitty (2026-09-11)
+
+- **Source:** `f4d216b63d010987775dc6eaf92afa72f86f2816`. Take the pane-side
+  encoder's REPORT_ALL_KEYS bit and compatibility decisions, replace the old
+  unmodified-Enter release expectation, and retain the Ctrl-Backspace positive
+  control. Exclude the Windows VTI mapper/record controls, not their Linux
+  counterparts. No Windows input mapper, host flag streaming or wire change.
+- Without report-all, unmodified Enter/Tab/Backspace press/repeat use their
+  legacy bytes and release stays silent. With report-all, basic key events
+  are encoded, with repeat/release distinguished when event reporting is set.
+  Modified basic keys keep their existing CSI-u controls. This follows the
+  [Kitty progressive enhancement contract](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement).
+- Three behavioral reds cover the fallback encoder and real pane wrapper.
+  The pane repeat failure also closes with the upstream fallback delta:
+  `encoded_key_preserves_event_kind` sends that case to the fallback; no new
+  runtime dispatch policy was needed. Pane report-all controls parse the
+  valid vendor framing, while fallback controls assert exact bytes. Explicit
+  committed-text precedence and M5's release-text guards remain unchanged.
+- This is not complete printable-key report-all or host negotiation support:
+  the scoped `e7fc85bf`/`cfa112e7` ordering prerequisites remain M6-17, with host
+  work still M8. Protocol19 and D-M5-6 to M9 are unchanged. Both source files
+  already carry modified-file notices and NOTICE entries.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.

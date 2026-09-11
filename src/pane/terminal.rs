@@ -3734,30 +3734,36 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_release_still_encoded_for_report_event_pane() {
+    fn ghostty_report_event_pane_keeps_basic_keys_legacy() {
         let (tx, _rx) = mpsc::channel(4);
         // Push kitty flags including REPORT_EVENT_TYPES (0b10) + DISAMBIGUATE (0b1).
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal.write(b"\x1b[>3u");
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
-        let release = pane.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Enter,
-                crossterm::event::KeyModifiers::empty(),
-            )
-            .with_kind(crossterm::event::KeyEventKind::Release),
-            pane.keyboard_protocol().unwrap(),
-        );
-        let parsed =
-            crate::input::parse_terminal_key_sequence(std::str::from_utf8(&release).unwrap())
-                .unwrap();
-        assert_eq!(parsed.code, crossterm::event::KeyCode::Enter);
-        assert_eq!(
-            parsed.kind,
-            crossterm::event::KeyEventKind::Release,
-            "report-event pane should encode a release, got {release:?}"
-        );
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+        for (code, expected) in [
+            (KeyCode::Enter, b'\r'),
+            (KeyCode::Tab, b'\t'),
+            (KeyCode::Backspace, 127),
+        ] {
+            for kind in [
+                KeyEventKind::Press,
+                KeyEventKind::Repeat,
+                KeyEventKind::Release,
+            ] {
+                let encoded = pane.encode_terminal_key(
+                    crate::input::TerminalKey::new(code, KeyModifiers::empty()).with_kind(kind),
+                    pane.keyboard_protocol().unwrap(),
+                );
+                let expected = if kind == KeyEventKind::Release {
+                    Vec::new()
+                } else {
+                    vec![expected]
+                };
+                assert_eq!(encoded, expected, "{code:?} {kind:?}");
+            }
+        }
     }
 
     #[test]
@@ -4020,6 +4026,70 @@ mod tests {
         let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(encoded, b"\x1b[127;3u");
+    }
+
+    #[test]
+    fn ghostty_report_all_pane_preserves_basic_key_events() {
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+        for flags in [9, 11] {
+            let (tx, _rx) = mpsc::channel(4);
+            let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+            terminal.write(format!("\x1b[>{flags}u").as_bytes());
+            let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            for code in [KeyCode::Enter, KeyCode::Tab, KeyCode::Backspace] {
+                for kind in [
+                    KeyEventKind::Press,
+                    KeyEventKind::Repeat,
+                    KeyEventKind::Release,
+                ] {
+                    let bytes = pane.encode_terminal_key(
+                        crate::input::TerminalKey::new(code, KeyModifiers::empty()).with_kind(kind),
+                        pane.keyboard_protocol().unwrap(),
+                    );
+                    if flags == 9 && kind == KeyEventKind::Release {
+                        assert!(bytes.is_empty());
+                        continue;
+                    }
+                    let parsed = crate::input::parse_terminal_key_sequence(
+                        std::str::from_utf8(&bytes).unwrap(),
+                    )
+                    .unwrap_or_else(|| panic!("not a key event: {bytes:?}"));
+                    assert_eq!(parsed.code, code);
+                    assert!(parsed.modifiers.is_empty());
+                    assert_eq!(
+                        parsed.kind,
+                        if flags == 9 {
+                            KeyEventKind::Press
+                        } else {
+                            kind
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ghostty_pane_characterizes_ctrl_backspace_encoding() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let ctrl = crate::input::TerminalKey::new(KeyCode::Backspace, KeyModifiers::CONTROL);
+        let plain = crate::input::TerminalKey::new(KeyCode::Backspace, KeyModifiers::empty());
+        assert_eq!(
+            pane.encode_terminal_key(ctrl.clone(), crate::input::KeyboardProtocol::Legacy),
+            b"\x08"
+        );
+        assert_eq!(
+            pane.encode_terminal_key(plain, crate::input::KeyboardProtocol::Legacy),
+            b"\x7f"
+        );
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[>1u", &tx);
+        assert_eq!(
+            pane.encode_terminal_key(ctrl, crate::input::KeyboardProtocol::Legacy),
+            b"\x1b[127;5u"
+        );
     }
 
     #[test]

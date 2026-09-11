@@ -6,6 +6,7 @@ use super::{KeyboardProtocol, MouseProtocolEncoding, TerminalKey};
 
 const KITTY_FLAG_REPORT_EVENT_TYPES: u16 = 0b0000_0010;
 const KITTY_FLAG_REPORT_ALTERNATE_KEYS: u16 = 0b0000_0100;
+const KITTY_FLAG_REPORT_ALL_KEYS: u16 = 0b0000_1000;
 
 /// Encode a key event for a PTY child using the pane's negotiated keyboard protocol.
 #[allow(dead_code)] // exercised in input unit tests; production uses TerminalRuntime helpers
@@ -166,9 +167,17 @@ fn push_mouse_codepoint(bytes: &mut Vec<u8>, value: u32) -> Option<()> {
 fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
     let mods = key.modifiers;
     let event_suffix = kitty_event_suffix(key, flags);
+    let report_all_keys = flags & KITTY_FLAG_REPORT_ALL_KEYS != 0;
+
+    if !report_all_keys
+        && mods.is_empty()
+        && matches!(key.code, KeyCode::Enter | KeyCode::Tab | KeyCode::Backspace)
+    {
+        return None;
+    }
 
     // Unmodified keys use legacy encoding (more compatible)
-    if mods.is_empty() && event_suffix.is_none() {
+    if mods.is_empty() && event_suffix.is_none() && !report_all_keys {
         return None;
     }
 
@@ -188,7 +197,7 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
         | KeyCode::Insert
         | KeyCode::Delete
         | KeyCode::F(_)
-            if event_suffix.is_none() =>
+            if event_suffix.is_none() && !report_all_keys =>
         {
             return None; // let legacy handle these
         }
@@ -742,6 +751,60 @@ mod tests {
     fn kitty_unmodified_uses_legacy() {
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty());
         assert_eq!(encode_key(key, KeyboardProtocol::Kitty { flags: 1 }), b"a");
+    }
+
+    #[test]
+    fn kitty_basic_keys_stay_legacy_without_report_all() {
+        use crossterm::event::KeyEventKind::{Press, Release, Repeat};
+        for flags in [3, 1, 7] {
+            for (code, expected) in [
+                (KeyCode::Enter, b'\r'),
+                (KeyCode::Tab, b'\t'),
+                (KeyCode::Backspace, 127),
+            ] {
+                for kind in [Press, Repeat, Release] {
+                    let key = KeyEvent::new_with_kind(code, KeyModifiers::empty(), kind);
+                    let expected = if kind == Release {
+                        Vec::new()
+                    } else {
+                        vec![expected]
+                    };
+                    assert_eq!(
+                        encode_key(key, KeyboardProtocol::Kitty { flags }),
+                        expected,
+                        "flags {flags}, {code:?} {kind:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_report_all_encodes_basic_key_presses_repeats_and_releases() {
+        use crossterm::event::KeyEventKind::{Press, Release, Repeat};
+        for flags in [9, 11] {
+            for (code, number) in [
+                (KeyCode::Enter, 13),
+                (KeyCode::Tab, 9),
+                (KeyCode::Backspace, 127),
+            ] {
+                for (kind, event) in [(Press, 1), (Repeat, 2), (Release, 3)] {
+                    let key = KeyEvent::new_with_kind(code, KeyModifiers::empty(), kind);
+                    let expected = if flags == 11 {
+                        format!("\x1b[{number};1:{event}u")
+                    } else if kind == Release {
+                        String::new()
+                    } else {
+                        format!("\x1b[{number};1u")
+                    };
+                    assert_eq!(
+                        encode_key(key, KeyboardProtocol::Kitty { flags }),
+                        expected.as_bytes(),
+                        "flags {flags}, {code:?} {kind:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
