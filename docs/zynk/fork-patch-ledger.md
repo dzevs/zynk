@@ -2895,3 +2895,53 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   Add modified-file attribution for config.rs and config_tests.rs. Protocol19,
   D-M5-6 to M9 and held M6-06 stay unchanged.
   **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
+
+### M6-23 And M6-25: Dependency And Platform Accounting
+
+- **D-M6-3 / DEFER ALL** `49e333ae87a57952fc82ba479a55c35b975ff3cc` to
+  **M8** with `5cfe5e5e730246948b0c9428ad876b6938590aad`, which creates
+  src/terminal/title.rs and its sidebar metadata consumers. Carry the exact
+  U+25D0/U+25D3/U+25D1/U+25D2 additions and the title-stripping regression.
+  The final source delta touches no detection manifest; this supersedes the
+  plan's overbroad "by manifest policy" wording. M6-23 is disposition-only
+  with no remaining M6 code work. The module and stripping symbols are absent;
+  recheck that absence at the final M6 candidate. No unused helper or early
+  sidebar/API plumbing, and no claim of exercised title stripping in M6.
+- **Shared M8 arrival:** 5cfe5e5e already carries **D-M5-4**. Reconcile D-M6-3
+  together with d4e0dd3d's configurable-token demand selector and five controls,
+  configurable gap and token-occurrence style controls, cc9fa475's token-renderer
+  status assertions, and 5b91dae1's sidebar entry gaps. Existing historical M5
+  rows remain unchanged; satisfying the title obligation does not close them.
+- **EXCLUDE** `df2cb2c3a585bdb22bb670f6da8147c7c1ffe982`: Windows runtime
+  marker/process discovery and its no-op non-Windows forwarding call. Keep
+  Linux group-scoped detection; do not add a dead apply_pane_runtime_marker.
+  **EXCLUDE** `00f04ac65cedf882f9785c0aa20831523c554dd0`: Windows recent-history
+  tracking/cache and its mutable read plumbing. The added max_scrollback
+  field/getter is consumed only by that absent Windows fallback; no dead
+  getter, tracked-row handle or redundant snapshots are added to Linux.
+  **EXCLUDE** `06ca0baa12f4203c5bbad9ecadf53f9a475a52b2`: Windows process
+  observation throttling and its schedule test. The non-Windows branch in
+  that source always observes; retain the fork's actual Linux observation
+  loop without the always-true gate or a test of unused Windows policy.
+- **ALREADY CONSUMED** `e7c38ab3`: M5's recorded scalar accessor prerequisite
+  already contains its four narrow forwardings and ui/panes.rs replacement.
+  Keep them and the M5 aggregate-read/geometry guards, not a second adaptation.
+- **D-M6-1 / DEFER** `e9222d1882effd62ddae9c4d81bc2d9390da7cac` to **M8**
+  after `aa0768b7` creates terminal_modes.rs, alongside `e7fc85bf` report-all
+  handling and D-M5-3/D-M5-7. Carry the replacement of SET with pop/push of
+  only the application's keyboard-stack entry and the byte-level regression:
+  ESC[<1u ESC[>15u ESC[<1u ESC[>7u. No unused host helper or M6 exercise claim;
+  protocol19 remains, and M8 must not reintroduce its skipped 17/18 bumps.
+- **M6-24 follow-through at M8 c0fb777e:** re-enumerate the retained
+  ReadSource::Recent consumers in app/api/{agents,panes}.rs, the editor's
+  already-adapted recent_unwrapped_text call in app/input/navigate.rs, and
+  explicitly decide whether the editor consumes the snapshot truncation
+  signal or remains an all-available-text export. That interface adds
+  truncation semantics, not just a reader rename. The plan's removal premise
+  is inapplicable while these API consumers still exist; do not remove live
+  forwarding or silently leave the editor outside the later migration.
+- M6 authority remains 41 sources with explicit dispositions, not 41 newly
+  implemented behaviors. D-M5-6's entire feature/helper/dependency deferral
+  stays in M9, M6-06 stays held, and operator deployment gates remain separate.
+  This append changes no source/test/dependency bytes; disposition accounting
+  is **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3.
