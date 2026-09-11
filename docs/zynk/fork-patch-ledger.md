@@ -2367,3 +2367,15 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
 - Protocol19, all M5 carry-forwards and the held M6-06 identity design remain
   unchanged. **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3; no merge,
   installation or release is implied.
+
+### M6-02: Legacy Ctrl-Slash Alias (2026-09-11)
+
+- **Source:** `a937f7e85bbf8780c6030c57f48dab2168bca932`, one mapping in
+  `src/input/encode.rs`. Ctrl-/ now aliases Ctrl-_ (byte31) in the fallback
+  legacy encoder. The pre-fix control observed byte47 rather than31.
+- Press/repeat are covered; ordinary slash, Alt-slash, silent legacy release,
+  and distinct Kitty CSI-u control remain pinned. No generated-text guard,
+  host negotiation, wire shape or protocol19 change. No source hunk deferred.
+  The existing modified-file notice and NOTICE entry already cover the file.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, not an approval of
+  M6 or any deployment action.

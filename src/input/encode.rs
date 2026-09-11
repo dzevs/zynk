@@ -429,7 +429,7 @@ fn encode_legacy_inner(key: KeyEvent) -> Vec<u8> {
                     '\\' | '4' => vec![28],
                     ']' | '5' => vec![29],
                     '^' | '6' => vec![30],
-                    '_' | '7' | '-' => vec![31],
+                    '_' | '/' | '7' | '-' => vec![31],
                     _ => vec![ch as u8],
                 }
             } else {
@@ -505,6 +505,41 @@ mod tests {
     fn legacy_ctrl_c() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![3]);
+    }
+
+    #[test]
+    fn legacy_ctrl_slash_aliases_ctrl_underscore() {
+        for kind in [
+            crossterm::event::KeyEventKind::Press,
+            crossterm::event::KeyEventKind::Repeat,
+        ] {
+            let key = KeyEvent {
+                kind,
+                ..KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL)
+            };
+            assert_eq!(encode_key(key, KeyboardProtocol::Legacy), vec![31]);
+        }
+    }
+
+    #[test]
+    fn ctrl_slash_alias_keeps_text_release_and_kitty_distinct() {
+        for (modifiers, expected) in [
+            (KeyModifiers::empty(), b"/".as_slice()),
+            (KeyModifiers::ALT, b"\x1b/"),
+        ] {
+            let key = KeyEvent::new(KeyCode::Char('/'), modifiers);
+            assert_eq!(encode_key(key, KeyboardProtocol::Legacy), expected);
+        }
+        let key = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[47;5u"
+        );
+        let release = KeyEvent {
+            kind: crossterm::event::KeyEventKind::Release,
+            ..key
+        };
+        assert!(encode_key(release, KeyboardProtocol::Legacy).is_empty());
     }
 
     #[test]
