@@ -81,14 +81,14 @@ impl App {
                 .custom_name
                 .clone()
         });
-        let replace_was_active = replace_target.is_some_and(|(target_ws, target_tab)| {
-            self.state.active == Some(target_ws)
-                && self
-                    .state
-                    .workspaces
-                    .get(target_ws)
-                    .is_some_and(|ws| ws.active_tab_index() == target_tab)
+        let replace_was_locally_active = replace_target.is_some_and(|(target_ws, target_tab)| {
+            self.state
+                .workspaces
+                .get(target_ws)
+                .is_some_and(|ws| ws.active_tab_index() == target_tab)
         });
+        let replace_was_globally_active =
+            replace_was_locally_active && self.state.active == Some(ws_idx);
         let root_leaf = first_layout_leaf(&params.root);
         let first_cwd = self.layout_root_cwd(ws_idx, replace_target, root_leaf);
         let (rows, cols) = self.state.estimate_pane_size();
@@ -190,9 +190,11 @@ impl App {
             return encode_error(id, "layout_apply_failed", "new layout tab disappeared");
         };
 
-        if params.focus || replace_was_active {
+        if params.focus || replace_was_globally_active {
             self.state.switch_workspace_tab(ws_idx, new_tab_idx);
             self.state.mode = Mode::Terminal;
+        } else if replace_was_locally_active {
+            self.state.workspaces[ws_idx].active_tab = new_tab_idx;
         }
         self.schedule_session_save();
         if let Some(tab) = self.tab_info(ws_idx, new_tab_idx) {
@@ -786,6 +788,89 @@ mod tests {
         assert_eq!(
             second_pane.command,
             Some(vec!["sh".into(), "-c".into(), "true".into()])
+        );
+    }
+
+    #[tokio::test]
+    async fn layout_apply_replaces_background_workspace_local_active_tab_without_focusing_it() {
+        let mut app = app_with_workspace();
+        app.state.workspaces.push(Workspace::test_new("background"));
+        let sibling_tab = app.state.workspaces[1].test_add_tab(Some("sibling"));
+        app.state.workspaces[1].active_tab = 0;
+        app.state.ensure_test_terminals();
+        let foreground_workspace_id = app.public_workspace_id(0);
+        let replaced_tab_id = app.public_tab_id(1, 0).unwrap();
+        let sibling_root = app.state.workspaces[1].tabs[sibling_tab].root_pane;
+
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: None,
+                tab_id: Some(replaced_tab_id),
+                tab_label: Some("replacement".into()),
+                focus: false,
+                root: LayoutNode::Pane {
+                    pane: LayoutPane {
+                        command: Some(vec!["sh".into(), "-c".into(), "true".into()]),
+                        ..Default::default()
+                    },
+                },
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutApply { layout } = success.result else {
+            panic!("expected layout apply response");
+        };
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 0);
+        assert_eq!(app.public_workspace_id(0), foreground_workspace_id);
+        let replacement_root = app.state.workspaces[1].focused_pane_id().unwrap();
+        assert_ne!(replacement_root, sibling_root);
+        assert_eq!(
+            app.public_pane_id(1, replacement_root).as_deref(),
+            Some(layout.focused_pane_id.as_str())
+        );
+
+        app.state.switch_workspace(1);
+        assert_eq!(
+            app.state.workspaces[1].focused_pane_id(),
+            Some(replacement_root)
+        );
+    }
+
+    #[tokio::test]
+    async fn layout_apply_focus_false_preserves_active_replacement_focus_semantics() {
+        let mut app = app_with_workspace();
+        let original_tab_id = app.public_tab_id(0, 0).unwrap();
+        app.state.mode = Mode::Navigate;
+
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: None,
+                tab_id: Some(original_tab_id),
+                tab_label: Some("replacement".into()),
+                focus: false,
+                root: LayoutNode::Pane {
+                    pane: LayoutPane {
+                        command: Some(vec!["sh".into(), "-c".into(), "true".into()]),
+                        ..Default::default()
+                    },
+                },
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutApply { layout } = success.result else {
+            panic!("expected layout apply response");
+        };
+        let replacement_root = app.state.workspaces[0].focused_pane_id().unwrap();
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.public_pane_id(0, replacement_root).as_deref(),
+            Some(layout.focused_pane_id.as_str())
         );
     }
 

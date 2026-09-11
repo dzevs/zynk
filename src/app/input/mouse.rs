@@ -8,8 +8,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, TerminalMouseGesture,
+        ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -131,8 +131,12 @@ impl AppState {
     pub(crate) fn handle_pane_mouse_only(
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
+        source_id: crate::app::InputSourceId,
         mouse: MouseEvent,
     ) {
+        if self.forward_owned_terminal_mouse_gesture(terminal_runtimes, source_id, mouse) {
+            return;
+        }
         if self.mode != Mode::Terminal {
             return;
         }
@@ -147,9 +151,16 @@ impl AppState {
             | MouseEventKind::ScrollRight => {
                 self.forward_pane_reported_wheel(terminal_runtimes, &info, mouse);
             }
-            MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
-                self.forward_pane_mouse_button(terminal_runtimes, &info, mouse);
+            MouseEventKind::Down(_) => {
+                self.forward_pane_mouse_button(
+                    terminal_runtimes,
+                    source_id,
+                    &info,
+                    mouse,
+                    crossterm::event::KeyModifiers::empty(),
+                );
             }
+            MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {}
             MouseEventKind::Moved => {
                 self.forward_pane_mouse_motion(terminal_runtimes, &info, mouse);
             }
@@ -162,6 +173,9 @@ impl AppState {
         source_id: crate::app::InputSourceId,
         mouse: MouseEvent,
     ) -> Option<MouseAction> {
+        if self.forward_owned_terminal_mouse_gesture(terminal_runtimes, source_id, mouse) {
+            return None;
+        }
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;
@@ -699,7 +713,13 @@ impl AppState {
                         self.mode = Mode::Terminal;
                     }
 
-                    if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
+                    if self.forward_pane_mouse_button(
+                        terminal_runtimes,
+                        source_id,
+                        &info,
+                        mouse,
+                        crossterm::event::KeyModifiers::empty(),
+                    ) {
                         self.selection = None;
                         self.selection_autoscroll = None;
                         return self.mouse_pane_focus_action(info.id);
@@ -734,18 +754,6 @@ impl AppState {
                 if self.selection.is_some() && !chrome_gesture {
                     self.update_selection_drag(terminal_runtimes, mouse.column, mouse.row);
                     return None;
-                }
-
-                if (self.drag.is_none() || self.chrome_drag_owned_by_other(source_id))
-                    && !self.chrome_press_pending(source_id)
-                {
-                    if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                        if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
-                            self.selection = None;
-                            self.selection_autoscroll = None;
-                            return None;
-                        }
-                    }
                 }
 
                 let workspace_drop_index = self.workspace_drop_index_at_row(mouse.row);
@@ -911,20 +919,6 @@ impl AppState {
                 }
 
                 let foreign_chrome_drag = self.chrome_drag_owned_by_other(source_id);
-                if (self.drag.is_none() || foreign_chrome_drag)
-                    && !self.chrome_press_pending(source_id)
-                {
-                    if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                        if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
-                            self.selection = None;
-                            self.selection_autoscroll = None;
-                            self.clear_chrome_press(source_id);
-                            self.clear_chrome_drag(source_id);
-                            return None;
-                        }
-                    }
-                }
-
                 let workspace_press = self.workspace_presses.remove(&source_id);
                 let tab_press = self.tab_presses.remove(&source_id);
                 if foreign_chrome_drag {
@@ -983,12 +977,7 @@ impl AppState {
             }
 
             MouseEventKind::Up(MouseButton::Middle) | MouseEventKind::Drag(MouseButton::Middle)
-                if !in_sidebar =>
-            {
-                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                    let _ = self.forward_pane_mouse_button(terminal_runtimes, &info, mouse);
-                }
-            }
+                if !in_sidebar => {}
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if self.mode_bar_covers_tab_row(mouse.column, mouse.row) => {}
@@ -1610,28 +1599,6 @@ impl AppState {
         mouse: MouseEvent,
         in_sidebar: bool,
     ) -> bool {
-        if let Some(gesture) = self.right_click_passthrough.clone() {
-            match mouse.kind {
-                MouseEventKind::Drag(MouseButton::Right)
-                | MouseEventKind::Up(MouseButton::Right) => {
-                    let forwarded_mouse =
-                        self.strip_right_click_passthrough_modifiers(mouse, gesture.modifiers);
-                    let _ = self.forward_pane_mouse_button(
-                        terminal_runtimes,
-                        &gesture.pane_info,
-                        forwarded_mouse,
-                    );
-                    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
-                        self.right_click_passthrough = None;
-                    }
-                    return true;
-                }
-                _ => {
-                    self.right_click_passthrough = None;
-                }
-            }
-        }
-
         if self.mode != Mode::Terminal
             || in_sidebar
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right))
@@ -1651,8 +1618,7 @@ impl AppState {
         };
 
         self.focus_pane(info.id);
-        let forwarded_mouse = self.strip_right_click_passthrough_modifiers(mouse, modifiers);
-        if !self.forward_pane_mouse_button(terminal_runtimes, &info, forwarded_mouse) {
+        if !self.forward_pane_mouse_button(terminal_runtimes, source_id, &info, mouse, modifiers) {
             return false;
         }
 
@@ -1662,21 +1628,10 @@ impl AppState {
         self.clear_chrome_drag(source_id);
         self.context_menu = None;
         self.right_click_passthrough = Some(RightClickPassthroughGesture {
+            source_id,
             pane_info: info,
-            modifiers,
         });
         true
-    }
-
-    fn strip_right_click_passthrough_modifiers(
-        &self,
-        mouse: MouseEvent,
-        modifiers: crossterm::event::KeyModifiers,
-    ) -> MouseEvent {
-        MouseEvent {
-            modifiers: mouse.modifiers.difference(modifiers),
-            ..mouse
-        }
     }
 
     pub(super) fn handle_terminal_wheel(
@@ -1729,10 +1684,12 @@ impl AppState {
     }
 
     pub(super) fn forward_pane_mouse_button(
-        &self,
+        &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
+        source_id: crate::app::InputSourceId,
         info: &PaneInfo,
         mouse: MouseEvent,
+        modifiers_to_strip: crossterm::event::KeyModifiers,
     ) -> bool {
         let Some(ws_idx) = self.active else {
             return false;
@@ -1743,12 +1700,79 @@ impl AppState {
         };
         let column = mouse.column.saturating_sub(info.inner_rect.x);
         let row = mouse.row.saturating_sub(info.inner_rect.y);
-        let Some(bytes) = rt.encode_mouse_button(mouse.kind, column, row, mouse.modifiers) else {
+        let modifiers = mouse.modifiers.difference(modifiers_to_strip);
+        let Some(bytes) = rt.encode_mouse_button(mouse.kind, column, row, modifiers) else {
             return false;
         };
         rt.scroll_reset();
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(pane = info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward mouse button event");
+        }
+        if let MouseEventKind::Down(button) = mouse.kind {
+            self.terminal_mouse_gestures.insert(
+                (source_id, button),
+                TerminalMouseGesture {
+                    pane_info: info.clone(),
+                    modifiers_to_strip,
+                },
+            );
+        }
+        true
+    }
+
+    pub(crate) fn forward_owned_terminal_mouse_gesture(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        source_id: crate::app::InputSourceId,
+        mouse: MouseEvent,
+    ) -> bool {
+        let (button, release) = match mouse.kind {
+            MouseEventKind::Down(button)
+                if self
+                    .terminal_mouse_gestures
+                    .contains_key(&(source_id, button)) =>
+            {
+                return true;
+            }
+            MouseEventKind::Drag(button) => (button, false),
+            MouseEventKind::Up(button) => (button, true),
+            _ => return false,
+        };
+        let key = (source_id, button);
+        let Some(gesture) = self.terminal_mouse_gestures.get(&key).cloned() else {
+            return false;
+        };
+        if release {
+            self.terminal_mouse_gestures.remove(&key);
+            if button == MouseButton::Right
+                && self
+                    .right_click_passthrough
+                    .as_ref()
+                    .is_some_and(|gesture| gesture.source_id == source_id)
+            {
+                self.right_click_passthrough = None;
+            }
+        }
+
+        let Some(runtime) = self.runtime_for_pane(terminal_runtimes, gesture.pane_info.id) else {
+            return true;
+        };
+        let (rows, columns) = runtime.current_size();
+        let column = mouse
+            .column
+            .saturating_sub(gesture.pane_info.inner_rect.x)
+            .min(columns.saturating_sub(1));
+        let row = mouse
+            .row
+            .saturating_sub(gesture.pane_info.inner_rect.y)
+            .min(rows.saturating_sub(1));
+        let modifiers = mouse.modifiers.difference(gesture.modifiers_to_strip);
+        let Some(bytes) = runtime.encode_mouse_button(mouse.kind, column, row, modifiers) else {
+            return true;
+        };
+        runtime.scroll_reset();
+        if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+            warn!(pane = gesture.pane_info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward owned mouse gesture");
         }
         true
     }
@@ -2248,6 +2272,168 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_right_click_passthrough_does_not_orphan_original_gesture() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_pane = ws.test_split(Direction::Horizontal);
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let first_info = pane_infos
+            .iter()
+            .find(|info| info.id == first_pane)
+            .expect("first pane info")
+            .clone();
+        let second_info = pane_infos
+            .iter()
+            .find(|info| info.id == second_pane)
+            .expect("second pane info")
+            .clone();
+        let (first_runtime, mut first_input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                first_info.inner_rect.width,
+                first_info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                4,
+            );
+        let (second_runtime, mut second_input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                second_info.inner_rect.width,
+                second_info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                4,
+            );
+        ws.insert_test_runtime(first_pane, first_runtime);
+        ws.insert_test_runtime(second_pane, second_runtime);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
+
+        for info in [&first_info, &second_info] {
+            app.handle_mouse_from_input_source(
+                7,
+                MouseEvent {
+                    modifiers: KeyModifiers::CONTROL,
+                    ..mouse(
+                        MouseEventKind::Down(MouseButton::Right),
+                        info.inner_rect.x + 1,
+                        info.inner_rect.y + 1,
+                    )
+                },
+            );
+        }
+
+        assert_eq!(
+            app.state
+                .right_click_passthrough
+                .as_ref()
+                .map(|gesture| gesture.pane_info.id),
+            Some(first_pane),
+            "a repeated right down replaced the unreleased gesture owner"
+        );
+        assert_eq!(
+            app.state
+                .terminal_mouse_gestures
+                .get(&(7, MouseButton::Right))
+                .map(|gesture| gesture.pane_info.id),
+            Some(first_pane)
+        );
+
+        app.handle_mouse_from_input_source(
+            7,
+            mouse(
+                MouseEventKind::Up(MouseButton::Right),
+                first_info.inner_rect.x + 1,
+                first_info.inner_rect.y + 1,
+            ),
+        );
+
+        assert_eq!(
+            first_input_rx.try_recv().expect("first right down"),
+            Bytes::from_static(b"\x1b[<2;2;2M")
+        );
+        assert_eq!(
+            first_input_rx.try_recv().expect("first right up"),
+            Bytes::from_static(b"\x1b[<2;2;2m")
+        );
+        assert!(first_input_rx.try_recv().is_err());
+        assert!(second_input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn left_release_does_not_clear_same_source_right_click_passthrough() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                8,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
+        let col = info.inner_rect.x + 1;
+        let row = info.inner_rect.y + 1;
+
+        app.handle_mouse_from_input_source(
+            7,
+            MouseEvent {
+                modifiers: KeyModifiers::CONTROL,
+                ..mouse(MouseEventKind::Down(MouseButton::Right), col, row)
+            },
+        );
+        app.handle_mouse_from_input_source(
+            7,
+            mouse(MouseEventKind::Down(MouseButton::Left), col, row),
+        );
+        app.handle_mouse_from_input_source(
+            7,
+            mouse(MouseEventKind::Up(MouseButton::Left), col, row),
+        );
+
+        assert_eq!(
+            app.state
+                .right_click_passthrough
+                .as_ref()
+                .map(|gesture| (gesture.source_id, gesture.pane_info.id)),
+            Some((7, pane_id)),
+            "a different button's release cleared the right-click passthrough"
+        );
+        assert!(app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(7, MouseButton::Right)));
+
+        app.handle_mouse_from_input_source(
+            7,
+            mouse(MouseEventKind::Up(MouseButton::Right), col, row),
+        );
+        assert!(app.state.right_click_passthrough.is_none());
+        assert!(app.state.terminal_mouse_gestures.is_empty());
+        for label in ["right down", "left down", "left up", "right up"] {
+            input_rx
+                .try_recv()
+                .unwrap_or_else(|error| panic!("missing {label}: {error}"));
+        }
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn captured_left_press_focuses_target_before_forwarding() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
@@ -2311,6 +2497,7 @@ mod tests {
 
         app.state.handle_pane_mouse_only(
             &app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
             mouse(
                 MouseEventKind::Moved,
                 info.inner_rect.x + 2,
@@ -2351,6 +2538,7 @@ mod tests {
 
         app.state.handle_pane_mouse_only(
             &app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
             mouse(
                 MouseEventKind::Moved,
                 info.inner_rect.x + 2,

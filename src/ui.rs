@@ -589,7 +589,9 @@ mod tests {
     fn workspace_creation_dialog_renders_new_workspace_title() {
         let mut app = crate::app::state::AppState::test_new();
         app.mode = Mode::RenameWorkspace;
-        app.pending_workspace_create_cwd = Some("/tmp/project".into());
+        app.pending_workspace_create_cwd = Some(
+            crate::app::state::PendingWorkspaceCreateCwd::Resolved("/tmp/project".into()),
+        );
         app.name_input = "project".into();
         let area = Rect::new(0, 0, 80, 20);
         compute_view(&mut app, area);

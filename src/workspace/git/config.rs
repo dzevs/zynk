@@ -16,23 +16,54 @@ pub(super) struct BranchConfig {
 }
 
 type FileStamp = Option<(Option<SystemTime>, u64)>;
-// Logical path, metadata stamp, reusable read, and optional resolved alias target.
-pub(super) type FileDep = (PathBuf, FileStamp, bool, Option<PathBuf>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileTopology {
+    Missing,
+    Symlink,
+    Other,
+    Unavailable,
+}
+
+// The logical path is retained separately from its followed metadata and alias target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FileDep {
+    path: PathBuf,
+    pub(super) stamp: FileStamp,
+    pub(super) reusable: bool,
+    target: Option<PathBuf>,
+    topology: FileTopology,
+}
 
 pub(super) fn stamp(path: PathBuf, target: Option<PathBuf>) -> FileDep {
     let meta = std::fs::metadata(&path);
-    let reusable = meta.is_ok() || matches!(&meta, Err(e) if e.kind() == ErrorKind::NotFound);
-    let stamp = meta.ok().map(|m| (m.modified().ok(), m.len()));
-    (path, stamp, reusable, target)
+    let topology_meta = std::fs::symlink_metadata(&path);
+    let reusable = (meta.is_ok() || matches!(&meta, Err(e) if e.kind() == ErrorKind::NotFound))
+        && (topology_meta.is_ok()
+            || matches!(&topology_meta, Err(e) if e.kind() == ErrorKind::NotFound));
+    let file_stamp = meta.ok().map(|m| (m.modified().ok(), m.len()));
+    let topology = match topology_meta {
+        Ok(meta) if meta.file_type().is_symlink() => FileTopology::Symlink,
+        Ok(_) => FileTopology::Other,
+        Err(err) if err.kind() == ErrorKind::NotFound => FileTopology::Missing,
+        Err(_) => FileTopology::Unavailable,
+    };
+    FileDep {
+        path,
+        stamp: file_stamp,
+        reusable,
+        target,
+        topology,
+    }
 }
 
 pub(super) fn deps_current(deps: &[FileDep]) -> bool {
     deps.iter().all(|dep| {
         let target = dep
-            .3
+            .target
             .as_ref()
-            .map(|_| canonicalize_best_effort_path(&dep.0));
-        dep.2 && stamp(dep.0.clone(), target) == *dep
+            .map(|_| canonicalize_best_effort_path(&dep.path));
+        dep.reusable && stamp(dep.path.clone(), target) == *dep
     })
 }
 
@@ -65,7 +96,8 @@ impl ConfigReader {
                 #[cfg(test)]
                 CONFIG_READ_COUNT.set(CONFIG_READ_COUNT.get() + 1);
                 let r = std::fs::read_to_string(&path);
-                dep.2 &= r.is_ok() || matches!(&r, Err(e) if e.kind() == ErrorKind::NotFound);
+                dep.reusable &=
+                    r.is_ok() || matches!(&r, Err(e) if e.kind() == ErrorKind::NotFound);
                 deps.push(dep);
                 r.ok()
             })

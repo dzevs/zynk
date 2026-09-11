@@ -3059,3 +3059,101 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   detector authority, deferred feature, or deployment disposition changes.
   **IMPLEMENTED / PENDING successor Gate2/Gate3 verification**; the rejected
   `89ccbd1` object remains unapproved.
+
+### M6 Gate-3 Scoped Remediation: Delayed CWD, Hook Admission, Git Topology, and Pane Relocation (2026-09-12)
+
+- This append binds the correction to rejected parent
+  `10b57dcb5054e7da743c693a883251360db0494b` and Pi's final canonical scoped
+  request SHA-256
+  `9650892252f37c77bb232d799c6d7a47ced2bdb34c816d6a867556d37fc02527`.
+  It implements only `AUD-M6-CWD-002`, `G3-M6-CWD-FALLBACK-001`,
+  `G3-M6-GIT-CACHE-TOPOLOGY-001`, `ARCH-M6-SESSIONLESS-LIVE-OWNER-001`,
+  `ARCH-M6-SESSIONSTART-POSTACCEPT-001`/`AUD-M6-OWNER-003`, and
+  `AUD-M6-LAYOUT-001` through `AUD-M6-LAYOUT-010`. The approved design,
+  clarification, Amendment 2, and F2 completion remain separate immutable
+  artifacts; the later pre-freeze clear-funnel correction supersedes only
+  their claim that `clear_hook_authority_with_mutation` stays unchanged.
+- **Delayed Follow CWD:** a named-workspace prompt stores either a resolved
+  non-Follow path or a Follow intent containing the source's stable workspace
+  ID and the prompt-time path used only for its suggested label. Confirmation
+  re-finds that workspace and resolves Follow immediately before creation.
+  Every Follow candidate is admitted only when absolute and currently a
+  directory: current source CWD, usable HOME, usable process CWD, then `/`.
+  Moved/deleted source paths, a removed source workspace, nonexistent HOME,
+  and file-valued HOME fall through safely. Direct API CWD, configured Path,
+  Home, and Current policy semantics do not change. This consumes no deferred
+  D-M6-2 follow-CWD getter or routing hunk; M8 must still preserve the existing
+  creation-boundary validation and the full recorded D-M6-2 cluster.
+- **Git dependency topology:** each config dependency records followed-target
+  metadata, logical-path topology from `symlink_metadata`, read reusability,
+  and any existing canonical alias target. Refresh compares all four, so a
+  regular file replaced by a same-length/same-mtime symlink cannot reuse the
+  old parse. Existing symlink retarget, missing-file, inaccessible-metadata,
+  read-error, and canonical-read-dedup behavior remains. This is cache
+  invalidation only; it adds no content attestation or atomic-filesystem claim.
+- **Owner precedence and proof:** the current owner is the live
+  `hook_authority`, otherwise live `hook_identity`, otherwise persisted
+  session. Tests pin all disagreement edges in both directions, including
+  authority over identity. Different-owner process proof remains reachable
+  only after both live representations retire; the mandatory
+  `hook_authority.is_none()` and `hook_identity.is_none()` conjuncts are not
+  weakened. Identity still comes from the authenticated hook report, never
+  detection, and protocol/caller authority from ADR 0014 is unchanged.
+- **Pure refusal boundary:** retirement and sequence admission now produces
+  either `Refuse` or one infallible `Accept { reset_sequence,
+  sequence_to_store }`, and only an accepted value mutates the anchor. The five
+  funnels are re-enumerated as full-lifecycle state, identity-only state,
+  session-start `_at`, release, and clear. Full-lifecycle state, session-start,
+  release, and clear evaluate every applicable owner/detector/session/
+  retirement/staleness refusal before commit; identity-only keeps its
+  accepted-no-visible-change return semantics without adding a late refusal.
+  Clear retains its existing stale-source
+  preflight but now also decides whether either live representation matches
+  before committing sequence state. A foreign sequenced clear, an
+  unsequenced foreign clear, and an ownerless clear are side-effect-free; after
+  a rejected sequenced clear the same sequence remains usable. The four
+  existing retirement-reset controls remain byte-unchanged and continue to
+  pin the accepted reset ordering.
+- Pre-existing takeover controls are converted only where their old setup
+  required the now-forbidden live-owner replacement: each proves refusal with
+  a complete snapshot, retires the old owner through the real path, then proves
+  the sanctioned retry. Two metadata controls reroute only their owner setup
+  through real release while retaining their original expiry/partial-update
+  assertions. No pre-existing control is deleted, and production conflict,
+  retirement, and sequence predicates remain mutation-pinned.
+- **Background layout apply (`AUD-M6-LAYOUT-001`):** replacing a target
+  workspace's locally active tab with `focus=false` updates only that local
+  active-tab index. It neither foregrounds the workspace nor changes global
+  selection; later activation reveals the replacement. The same operation on
+  the globally active tab retains the prior focus path and settles to Terminal
+  mode; the local-only branch is confined to a background workspace.
+- **Cross-workspace relocation (`LAYOUT-002..010`):** reconciliation runs once
+  after destination insertion succeeds and before focus changes, snapshots,
+  or lifecycle events. It rebinds the moved pane's focus-history, toast, and
+  delayed-notification workspace IDs; normalizes `last_focus` by stable pane
+  ID; rebases removed-workspace request/entry indices; and resets derived
+  navigator positions and entity-bearing view hit caches. It cancels
+  copy/selection/autoscroll bound to the moved pane and all index/path-bound
+  press, reorder, split-drag, menu, rename, resize, and close state before a
+  shifted replacement can consume it. Workspace-create intent survives by
+  stable ID and falls back when that source disappears. Worktree modals survive
+  only while their stable source/target workspace still exists. Failed
+  insertion runs the existing rollback before any reconciliation, and
+  same-workspace moves retain their prior behavior.
+- **Terminal gesture pairing (`LAYOUT-009`):** pure AppState owns each
+  successfully encoded Down by `(InputSourceId, MouseButton)` with stable pane
+  ID and its Down-time coordinate frame. Only an established Drag/Up receives
+  global pane-ID routing; translated coordinates clamp to the runtime's current
+  grid, and Up clears only its matching key. A repeated same-source/same-button
+  Down is consumed without replacing the unreleased owner; another button or
+  source cannot clear it. Right-click passthrough strips only its configured
+  modifiers and remains source-owned. Source teardown and pane removal discard
+  ownership. Unmatched terminal Drag/Up is never forwarded by current cursor
+  hit-testing, while ordinary Down, wheel, motion, selection, chrome, and
+  overlay routing keep their established boundaries.
+- `OverlayPaneState` remains an explicit no-finding and is unchanged.
+  `AUD-M6-LAYOUT-011` remains excluded for lack of a shipped dynamic-location
+  contract/consumer. Protocol remains 19; no method, wire field, schema,
+  dependency, detection authority, D-M5-6/M9 boundary, or other M6 deferral is
+  changed. **IMPLEMENTED / PENDING exact-successor Gate2/Gate3 verification**;
+  neither `89ccbd1` nor `10b57dc` gains approval from this append.

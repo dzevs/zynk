@@ -227,8 +227,11 @@ impl App {
                 if self.state.mouse_capture {
                     self.handle_mouse(mouse);
                 } else {
-                    self.state
-                        .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
+                    self.state.handle_pane_mouse_only(
+                        &self.terminal_runtimes,
+                        super::LOCAL_INPUT_SOURCE,
+                        mouse,
+                    );
                 }
                 changes_view
             }

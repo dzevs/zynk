@@ -57,7 +57,7 @@ fn repo_context(cwd: &Path) -> Option<RepoContext> {
     paths.push(info.git_common_dir.join("config"));
     paths.extend((info.git_dir != info.git_common_dir).then(|| info.git_dir.join("config")));
     let mut deps: Vec<_> = paths.into_iter().map(|path| stamp(path, None)).collect();
-    deps[0].2 &= git_worktree_info(cwd).as_ref() == Some(&info)
+    deps[0].reusable &= git_worktree_info(cwd).as_ref() == Some(&info)
         && git_ref_storage_is_reftable(&info.git_common_dir) == reftable
         && deps_current(&deps);
     Some((info, reftable, deps, None))

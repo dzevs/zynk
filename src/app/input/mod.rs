@@ -326,6 +326,14 @@ impl App {
             _ => {}
         }
 
+        if self.state.forward_owned_terminal_mouse_gesture(
+            &self.terminal_runtimes,
+            source_id,
+            mouse,
+        ) {
+            return;
+        }
+
         if self.handle_overlay_mouse(mouse) {
             return;
         }

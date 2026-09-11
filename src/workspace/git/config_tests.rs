@@ -25,7 +25,10 @@ fn config_symlink_retarget_invalidates_context() {
             .set_times(std::fs::FileTimes::new().set_modified(modified))
             .unwrap();
     }
-    assert_eq!(stamp(first.clone(), None).1, stamp(second.clone(), None).1);
+    assert_eq!(
+        stamp(first.clone(), None).stamp,
+        stamp(second.clone(), None).stamp
+    );
     symlink(&first, &alias).unwrap();
     let context = read_config_with_user_paths(
         &git_worktree_info(&root).unwrap(),
@@ -36,6 +39,43 @@ fn config_symlink_retarget_invalidates_context() {
     symlink(&second, &alias).unwrap();
 
     assert!(!deps_current(&context.2));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn config_regular_file_replaced_by_same_stamp_symlink_invalidates_context() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_test_dir("config-regular-to-symlink");
+    write_fake_tracked_repo(&root);
+    let logical = root.join(".git/config");
+    let target = root.join("replacement.cfg");
+    let first = "[branch \"main\"]\nremote = alpha\nmerge = refs/heads/main\n";
+    let second = "[branch \"main\"]\nremote = bravo\nmerge = refs/heads/main\n";
+    assert_eq!(first.len(), second.len());
+    std::fs::write(&logical, first).unwrap();
+    std::fs::write(&target, second).unwrap();
+    let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for path in [&logical, &target] {
+        std::fs::File::open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+
+    let info = git_worktree_info(&root).unwrap();
+    let context = read_config(&info, "main");
+    assert_eq!(context.1.as_ref().unwrap().remote, "alpha");
+    std::fs::remove_file(&logical).unwrap();
+    symlink(&target, &logical).unwrap();
+
+    assert!(
+        !deps_current(&context.2),
+        "regular-to-symlink topology change reused stale config"
+    );
+    let refreshed = read_config(&info, "main");
+    assert_eq!(refreshed.1.unwrap().remote, "bravo");
+
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -114,7 +154,7 @@ fn config_metadata_permission_error_is_not_reusable() {
         inaccessible.unwrap_err().kind(),
         std::io::ErrorKind::PermissionDenied
     );
-    assert!(!dep.2);
+    assert!(!dep.reusable);
     assert!(!current);
 }
 

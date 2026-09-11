@@ -11,15 +11,23 @@ use super::{
 };
 use crate::{config::NewTerminalCwdConfig, workspace::Workspace};
 
+fn usable_directory(path: PathBuf) -> Option<PathBuf> {
+    (path.is_absolute() && path.is_dir()).then_some(path)
+}
+
 pub(crate) fn resolve_new_terminal_cwd(
     policy: &NewTerminalCwdConfig,
     follow_cwd: Option<PathBuf>,
 ) -> PathBuf {
     match policy {
         NewTerminalCwdConfig::Follow => follow_cwd
-            .filter(|cwd| cwd.is_absolute() && cwd.is_dir())
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .or_else(|| std::env::current_dir().ok())
+            .and_then(usable_directory)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .and_then(usable_directory)
+            })
+            .or_else(|| std::env::current_dir().ok().and_then(usable_directory))
             .unwrap_or_else(|| PathBuf::from("/")),
         NewTerminalCwdConfig::Home => std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -61,11 +69,21 @@ impl App {
 
     pub(super) fn begin_tui_workspace_create(&mut self, request_id: &'static str) {
         if self.state.prompt_new_workspace_name {
-            let follow_cwd = self
-                .workspace_creation_source()
-                .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+            let source_ws_idx = self.workspace_creation_source();
+            let source_workspace_id = source_ws_idx
+                .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+                .map(|ws| ws.id.clone());
+            let follow_cwd = source_ws_idx.and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
             let cwd = self.resolve_new_terminal_cwd(follow_cwd);
-            super::input::open_new_workspace_dialog(&mut self.state, cwd);
+            let intent = if self.state.new_terminal_cwd == NewTerminalCwdConfig::Follow {
+                crate::app::state::PendingWorkspaceCreateCwd::Follow {
+                    source_workspace_id,
+                    suggested_cwd: cwd,
+                }
+            } else {
+                crate::app::state::PendingWorkspaceCreateCwd::Resolved(cwd)
+            };
+            super::input::open_new_workspace_dialog(&mut self.state, intent);
             return;
         }
 

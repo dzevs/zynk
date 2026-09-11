@@ -1204,6 +1204,9 @@ mod tests {
         });
         assert!(terminal.next_agent_metadata_expiry().is_some());
 
+        terminal
+            .release_agent_with_mutation("zynk:claude", "claude", None)
+            .expect("the Claude owner retires before Codex takes over");
         terminal.set_hook_authority(
             "zynk:codex".into(),
             "codex".into(),
@@ -1211,6 +1214,9 @@ mod tests {
             None,
             None,
         );
+        terminal
+            .release_agent_with_mutation("zynk:codex", "codex", None)
+            .expect("the Codex owner retires before Claude returns");
         terminal.set_hook_authority(
             "zynk:claude".into(),
             "claude".into(),
@@ -1265,6 +1271,9 @@ mod tests {
             ttl: None,
             seq: None,
         });
+        terminal
+            .release_agent_with_mutation("zynk:codex", "codex", None)
+            .expect("the Codex owner retires before Claude takes over");
         terminal.set_hook_authority(
             "zynk:claude".into(),
             "claude".into(),

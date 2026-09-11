@@ -1,7 +1,7 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use crate::config::{Keybinds, NewTerminalCwdConfig, SoundConfig, ToastConfig, ToastDelivery};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
 
@@ -45,8 +45,14 @@ pub(crate) struct SelectionAutoscroll {
 
 #[derive(Clone)]
 pub(crate) struct RightClickPassthroughGesture {
+    pub source_id: crate::app::InputSourceId,
     pub pane_info: PaneInfo,
-    pub modifiers: KeyModifiers,
+}
+
+#[derive(Clone)]
+pub(crate) struct TerminalMouseGesture {
+    pub pane_info: PaneInfo,
+    pub modifiers_to_strip: KeyModifiers,
 }
 use crate::terminal_theme::{HostAppearance, TerminalTheme};
 use crate::workspace::Workspace;
@@ -1414,6 +1420,26 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingWorkspaceCreateCwd {
+    Resolved(std::path::PathBuf),
+    Follow {
+        source_workspace_id: Option<String>,
+        suggested_cwd: std::path::PathBuf,
+    },
+}
+
+impl PendingWorkspaceCreateCwd {
+    pub(crate) fn suggested_cwd(&self) -> &std::path::Path {
+        match self {
+            Self::Resolved(cwd)
+            | Self::Follow {
+                suggested_cwd: cwd, ..
+            } => cwd,
+        }
+    }
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -1452,7 +1478,7 @@ pub struct AppState {
     pub request_clipboard_write: Option<Vec<u8>>,
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
-    pub pending_workspace_create_cwd: Option<std::path::PathBuf>,
+    pub(crate) pending_workspace_create_cwd: Option<PendingWorkspaceCreateCwd>,
     pub rename_pane_target: Option<PaneId>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
@@ -1516,6 +1542,8 @@ pub struct AppState {
     pub copy_on_select: bool,
     pub right_click_passthrough_modifiers: Option<KeyModifiers>,
     pub right_click_passthrough: Option<RightClickPassthroughGesture>,
+    pub(crate) terminal_mouse_gestures:
+        std::collections::HashMap<(crate::app::InputSourceId, MouseButton), TerminalMouseGesture>,
     pub redraw_on_focus_gained: bool,
     pub mouse_scroll_lines: usize,
     pub confirm_close: bool,
@@ -1717,7 +1745,6 @@ impl AppState {
         terminal_runtimes.get(terminal_id)
     }
 
-    #[cfg(test)]
     pub(crate) fn runtime_for_pane<'a>(
         &'a self,
         terminal_runtimes: &'a crate::terminal::TerminalRuntimeRegistry,
@@ -1886,6 +1913,7 @@ impl AppState {
             copy_on_select: true,
             right_click_passthrough_modifiers: None,
             right_click_passthrough: None,
+            terminal_mouse_gestures: std::collections::HashMap::new(),
             redraw_on_focus_gained: true,
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,
@@ -2037,6 +2065,10 @@ impl AppState {
             assert!(
                 self.right_click_passthrough.is_none(),
                 "empty app state must not keep right-click passthrough gesture"
+            );
+            assert!(
+                self.terminal_mouse_gestures.is_empty(),
+                "empty app state must not keep terminal mouse gestures"
             );
             assert!(
                 self.drag.is_none(),
@@ -2191,6 +2223,16 @@ impl AppState {
         }
         if let Some(gesture) = &self.right_click_passthrough {
             assert_live_pane(gesture.pane_info.id, "right-click passthrough gesture");
+            assert_eq!(
+                self.terminal_mouse_gestures
+                    .get(&(gesture.source_id, MouseButton::Right))
+                    .map(|owned| owned.pane_info.id),
+                Some(gesture.pane_info.id),
+                "right-click passthrough marker must match terminal gesture ownership"
+            );
+        }
+        for gesture in self.terminal_mouse_gestures.values() {
+            assert_live_pane(gesture.pane_info.id, "terminal mouse gesture");
         }
         if let Some(drag) = &self.drag {
             match &drag.target {
@@ -2237,6 +2279,25 @@ impl AppState {
         }
         for press in self.tab_presses.values() {
             assert_tab_index(press.ws_idx, press.tab_idx, "tab press");
+        }
+        for (index, context) in [
+            (self.request_new_linked_worktree, "new worktree request"),
+            (self.request_open_existing_worktree, "open worktree request"),
+            (
+                self.request_remove_linked_worktree,
+                "remove worktree request",
+            ),
+        ] {
+            if let Some(index) = index {
+                assert_workspace_index(index, context);
+            }
+        }
+        if let Some(open) = &self.worktree_open {
+            for entry in &open.entries {
+                if let Some(index) = entry.already_open_ws_idx {
+                    assert_workspace_index(index, "open worktree entry");
+                }
+            }
         }
         if let Some(menu) = &self.context_menu {
             match menu.kind {

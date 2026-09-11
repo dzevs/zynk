@@ -1031,7 +1031,9 @@ mod tests {
             let mut app = AppState::test_new();
             app.mode = mode;
             app.name_input = "new".into();
-            app.pending_workspace_create_cwd = Some("/projects/new".into());
+            app.pending_workspace_create_cwd = Some(
+                crate::app::state::PendingWorkspaceCreateCwd::Resolved("/projects/new".into()),
+            );
             app.creating_new_tab = true;
             let mut terminal =
                 Terminal::new(TestBackend::new(RENAME_AREA.width, RENAME_AREA.height)).unwrap();

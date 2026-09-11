@@ -383,11 +383,14 @@ pub(super) fn open_rename_workspace(
     state.mode = Mode::RenameWorkspace;
 }
 
-pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::PathBuf) {
-    let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
+pub(crate) fn open_new_workspace_dialog(
+    state: &mut AppState,
+    intent: crate::app::state::PendingWorkspaceCreateCwd,
+) {
+    let suggested_name = crate::workspace::derive_label_from_cwd(intent.suggested_cwd());
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
-    state.pending_workspace_create_cwd = Some(cwd);
+    state.pending_workspace_create_cwd = Some(intent);
     state.rename_pane_target = None;
     state.name_input = suggested_name;
     state.name_input_replace_on_type = true;
@@ -1015,9 +1018,27 @@ impl App {
 
         match self.state.mode {
             Mode::RenameWorkspace => {
-                if let Some(cwd) = self.state.pending_workspace_create_cwd.take() {
-                    let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
+                if let Some(intent) = self.state.pending_workspace_create_cwd.take() {
+                    let suggested_name =
+                        crate::workspace::derive_label_from_cwd(intent.suggested_cwd());
                     let label = workspace_create_label(&new_name, &suggested_name);
+                    let cwd = match intent {
+                        crate::app::state::PendingWorkspaceCreateCwd::Resolved(cwd) => cwd,
+                        crate::app::state::PendingWorkspaceCreateCwd::Follow {
+                            source_workspace_id,
+                            suggested_cwd: _,
+                        } => {
+                            let follow_cwd = source_workspace_id
+                                .and_then(|workspace_id| {
+                                    self.state
+                                        .workspaces
+                                        .iter()
+                                        .position(|ws| ws.id == workspace_id)
+                                })
+                                .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+                            self.resolve_new_terminal_cwd(follow_cwd)
+                        }
+                    };
                     self.runtime_workspace_create(
                         "tui.workspace.create_named",
                         crate::api::schema::WorkspaceCreateParams {

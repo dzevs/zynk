@@ -1538,6 +1538,15 @@ impl AppState {
     ) {
         let pane_ids = pane_ids.into_iter().collect::<Vec<_>>();
         self.clear_copy_mode_for_removed_panes(pane_ids.iter().copied());
+        self.terminal_mouse_gestures
+            .retain(|_, gesture| !pane_ids.contains(&gesture.pane_info.id));
+        if self
+            .right_click_passthrough
+            .as_ref()
+            .is_some_and(|gesture| pane_ids.contains(&gesture.pane_info.id))
+        {
+            self.right_click_passthrough = None;
+        }
         if self
             .previous_pane_focus
             .as_ref()

@@ -2230,7 +2230,12 @@ mod tests {
         assert_eq!(app.state.mode, Mode::RenameWorkspace);
         assert_eq!(app.state.name_input, suggested_name);
         assert!(app.state.name_input_replace_on_type);
-        assert_eq!(app.state.pending_workspace_create_cwd.as_ref(), Some(&cwd));
+        assert_eq!(
+            app.state.pending_workspace_create_cwd.as_ref(),
+            Some(&crate::app::state::PendingWorkspaceCreateCwd::Resolved(
+                cwd.clone()
+            ))
+        );
         assert_eq!(app.state.workspaces.len(), 1);
 
         app.state.new_terminal_cwd =

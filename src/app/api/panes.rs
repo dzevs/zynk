@@ -16,9 +16,7 @@ use crate::api::schema::{
     PaneZoomResult, ReadFormat, ReadSource, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
-use crate::app::App;
-#[cfg(test)]
-use crate::app::Mode;
+use crate::app::{App, Mode};
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 
 use super::super::api_helpers::{
@@ -795,7 +793,7 @@ impl App {
             }
         };
 
-        let previous_focus = self.state.current_pane_focus_target();
+        let mut previous_focus = self.state.current_pane_focus_target();
         let taken = match self
             .state
             .workspaces
@@ -931,12 +929,38 @@ impl App {
             }
         };
 
+        if cross_workspace {
+            let destination_workspace_id = self.state.workspaces[target_ws_idx].id.clone();
+            self.reconcile_cross_workspace_pane_move(
+                source_ws_idx,
+                closed_workspace_id.is_some(),
+                moved_pane_id,
+                &destination_workspace_id,
+                &mut previous_focus,
+            );
+        }
+        let preserve_relocation_modal = cross_workspace
+            && match self.state.mode {
+                Mode::RenameWorkspace => self.state.pending_workspace_create_cwd.is_some(),
+                Mode::NewLinkedWorktree => self.state.worktree_create.is_some(),
+                Mode::OpenExistingWorktree => self.state.worktree_open.is_some(),
+                Mode::ConfirmRemoveWorktree => self.state.worktree_remove.is_some(),
+                _ => false,
+            };
+
         if focus || self.state.active.is_none() {
+            let preserved_focus_history =
+                cross_workspace.then(|| self.state.previous_pane_focus.clone());
             self.state
                 .switch_workspace_tab(target_ws_idx, target_tab_idx);
+            if let Some(previous_pane_focus) = preserved_focus_history {
+                self.state.previous_pane_focus = previous_pane_focus;
+            }
             self.state
                 .record_pane_focus_change(previous_focus, target_ws_idx, moved_pane_id);
-            self.state.settle_terminal_mode_after_focus();
+            if !preserve_relocation_modal {
+                self.state.settle_terminal_mode_after_focus();
+            }
         }
         let created_workspace = created_workspace.then(|| self.workspace_info(target_ws_idx));
         let created_tab = if created_tab {
@@ -1022,6 +1046,183 @@ impl App {
         });
 
         encode_success(id, ResponseResult::PaneMove { move_result })
+    }
+
+    fn reconcile_cross_workspace_pane_move(
+        &mut self,
+        source_ws_idx: usize,
+        source_workspace_removed: bool,
+        moved_pane_id: PaneId,
+        destination_workspace_id: &str,
+        previous_focus: &mut Option<crate::app::state::PaneFocusTarget>,
+    ) {
+        let rebind_moved_pane = |target: &mut crate::app::state::PaneFocusTarget| {
+            if target.pane_id == moved_pane_id {
+                target.workspace_id = destination_workspace_id.to_string();
+            }
+        };
+        if let Some(target) = previous_focus {
+            rebind_moved_pane(target);
+        }
+        if let Some(target) = &mut self.state.previous_pane_focus {
+            rebind_moved_pane(target);
+        }
+        if let Some(target) = self
+            .state
+            .toast
+            .as_mut()
+            .and_then(|toast| toast.target.as_mut())
+            .filter(|target| target.pane_id == moved_pane_id)
+        {
+            target.workspace_id = destination_workspace_id.to_string();
+        }
+        if let Some(pending) = self
+            .state
+            .pending_agent_notifications
+            .get_mut(&moved_pane_id)
+        {
+            pending.workspace_id = destination_workspace_id.to_string();
+        }
+
+        self.last_focus = self.last_focus.and_then(|(_, pane_id)| {
+            self.state
+                .workspaces
+                .iter()
+                .position(|ws| ws.find_tab_index_for_pane(pane_id).is_some())
+                .map(|ws_idx| (ws_idx, pane_id))
+        });
+
+        if self
+            .state
+            .copy_mode
+            .as_ref()
+            .is_some_and(|copy| copy.pane_id == moved_pane_id)
+        {
+            self.state.copy_mode = None;
+            if self.state.mode == Mode::Copy {
+                self.state.mode = Mode::Terminal;
+            }
+        }
+        if self
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.pane_id == moved_pane_id)
+        {
+            self.state.clear_selection();
+            self.selection_autoscroll_deadline = None;
+        }
+
+        self.state.workspace_presses.clear();
+        self.state.tab_presses.clear();
+        self.state.drag = None;
+        self.state.context_menu = None;
+
+        let cancel_rename_workspace = self.state.mode == Mode::RenameWorkspace
+            && self.state.pending_workspace_create_cwd.is_none();
+        let cancel_rename_tab = self.state.mode == Mode::RenameTab;
+        let moved_rename_pane_target = self.state.rename_pane_target == Some(moved_pane_id);
+        if moved_rename_pane_target {
+            self.state.rename_pane_target = None;
+            self.state.name_input.clear();
+            self.state.name_input_replace_on_type = false;
+        }
+        let cancel_rename_pane = self.state.mode == Mode::RenamePane && moved_rename_pane_target;
+        let cancel_index_bound_mode = cancel_rename_workspace
+            || cancel_rename_tab
+            || cancel_rename_pane
+            || matches!(
+                self.state.mode,
+                Mode::Resize | Mode::ConfirmClose | Mode::ContextMenu
+            );
+        if cancel_index_bound_mode {
+            if cancel_rename_tab {
+                self.state.creating_new_tab = false;
+                self.state.requested_new_tab_name = None;
+            }
+            self.state.name_input.clear();
+            self.state.name_input_replace_on_type = false;
+            self.state.mode = if self.state.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+        }
+
+        if source_workspace_removed {
+            rebase_removed_workspace_index(
+                &mut self.state.request_new_linked_worktree,
+                source_ws_idx,
+            );
+            rebase_removed_workspace_index(
+                &mut self.state.request_open_existing_worktree,
+                source_ws_idx,
+            );
+            rebase_removed_workspace_index(
+                &mut self.state.request_remove_linked_worktree,
+                source_ws_idx,
+            );
+            if let Some(open) = &mut self.state.worktree_open {
+                for entry in &mut open.entries {
+                    rebase_removed_workspace_index(&mut entry.already_open_ws_idx, source_ws_idx);
+                }
+            }
+        }
+
+        let workspace_exists = |workspace_id: &str| {
+            self.state
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == workspace_id)
+        };
+        let drop_create = self
+            .state
+            .worktree_create
+            .as_ref()
+            .is_some_and(|state| !workspace_exists(&state.source_workspace_id));
+        let drop_open = self
+            .state
+            .worktree_open
+            .as_ref()
+            .is_some_and(|state| !workspace_exists(&state.source_workspace_id));
+        let drop_remove = self
+            .state
+            .worktree_remove
+            .as_ref()
+            .is_some_and(|state| !workspace_exists(&state.workspace_id));
+        if drop_create {
+            self.state.worktree_create = None;
+            self.state.request_submit_worktree_create = false;
+            if self.state.mode == Mode::NewLinkedWorktree {
+                self.state.mode = Mode::Terminal;
+            }
+        }
+        if drop_open {
+            self.state.worktree_open = None;
+            self.state.request_submit_worktree_open = false;
+            if self.state.mode == Mode::OpenExistingWorktree {
+                self.state.mode = Mode::Terminal;
+            }
+        }
+        if drop_remove {
+            self.state.worktree_remove = None;
+            self.state.request_submit_worktree_remove = false;
+            if self.state.mode == Mode::ConfirmRemoveWorktree {
+                self.state.mode = Mode::Terminal;
+            }
+        }
+
+        self.state.navigator.selected = 0;
+        self.state.navigator.scroll = 0;
+        self.state.view.workspace_card_areas.clear();
+        self.state.view.tab_hit_areas.clear();
+        self.state.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
+        self.state.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
+        self.state.view.new_tab_hit_area = ratatui::layout::Rect::default();
+        self.state.view.pane_infos.clear();
+        self.state.view.split_borders.clear();
+        self.state.view.toast_hit_area = ratatui::layout::Rect::default();
+        self.last_pane_click = None;
     }
 
     fn recover_failed_pane_move(
@@ -1516,6 +1717,14 @@ impl App {
     }
 }
 
+fn rebase_removed_workspace_index(index: &mut Option<usize>, removed: usize) {
+    *index = match *index {
+        Some(current) if current == removed => None,
+        Some(current) if current > removed => Some(current - 1),
+        current => current,
+    };
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     let value = value?.trim().to_string();
     (!value.is_empty()).then_some(value)
@@ -1948,6 +2157,1014 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn app_with_cross_workspace_move_source(
+        source_has_sibling: bool,
+    ) -> (App, PaneId, Option<PaneId>, PaneId) {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let sibling = source_has_sibling
+            .then(|| app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal));
+        app.state.workspaces[0].tabs[0].layout.focus_pane(source);
+        app.state
+            .workspaces
+            .push(Workspace::test_new("destination"));
+        let target = app.state.workspaces[1].tabs[0].root_pane;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        seed_terminal_states(&mut app);
+        (app, source, sibling, target)
+    }
+
+    fn move_between_workspaces(
+        app: &mut App,
+        source_ws_idx: usize,
+        source: PaneId,
+        target_ws_idx: usize,
+        target: PaneId,
+        focus: bool,
+    ) -> PaneMoveResult {
+        let response = app.handle_pane_move(
+            "move".into(),
+            PaneMoveParams {
+                pane_id: app.public_pane_id(source_ws_idx, source).unwrap(),
+                destination: PaneMoveDestination::Tab {
+                    tab_id: app.public_tab_id(target_ws_idx, 0).unwrap(),
+                    target_pane_id: Some(app.public_pane_id(target_ws_idx, target).unwrap()),
+                    split: SplitDirection::Right,
+                    ratio: None,
+                },
+                focus,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response)
+            .unwrap_or_else(|error| panic!("pane move failed: {error}; response: {response}"));
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        move_result
+    }
+
+    fn pane_mouse(
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        }
+    }
+
+    fn install_global_reporting_runtime(
+        app: &mut App,
+        ws_idx: usize,
+        pane_id: PaneId,
+        mode: &[u8],
+        capacity: usize,
+    ) -> tokio::sync::mpsc::Receiver<bytes::Bytes> {
+        let terminal_id = app.state.workspaces[ws_idx]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        let (runtime, receiver) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, mode, capacity,
+            );
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        receiver
+    }
+
+    fn route_mouse(
+        app: &mut App,
+        capture: bool,
+        source_id: crate::app::InputSourceId,
+        mouse: crossterm::event::MouseEvent,
+    ) {
+        if capture {
+            app.handle_mouse_from_input_source(source_id, mouse);
+        } else {
+            app.route_client_events_from(
+                source_id,
+                vec![crate::raw_input::RawInputEvent::Mouse(mouse)],
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn cross_workspace_move_rebinds_focus_history_and_notification_targets() {
+        let (mut app, source, sibling, target) = app_with_cross_workspace_move_source(true);
+        let sibling = sibling.unwrap();
+        let source_workspace_id = app.state.workspaces[0].id.clone();
+        let destination_workspace_id = app.state.workspaces[1].id.clone();
+        app.state.previous_pane_focus = Some(crate::app::state::PaneFocusTarget {
+            workspace_id: source_workspace_id.clone(),
+            pane_id: source,
+        });
+        app.last_focus = Some((0, source));
+        app.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::Finished,
+            title: "done".into(),
+            context: "source".into(),
+            position: None,
+            target: Some(crate::app::state::ToastTarget {
+                workspace_id: source_workspace_id.clone(),
+                pane_id: source,
+            }),
+        });
+        let terminal_id = app.state.workspaces[0].terminal_id(source).unwrap().clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority(
+                "zynk:codex".into(),
+                "codex".into(),
+                crate::detect::AgentState::Idle,
+                None,
+                Some(1),
+            );
+        let deadline = std::time::Instant::now();
+        app.state.pending_agent_notifications.insert(
+            source,
+            crate::app::state::PendingAgentNotification {
+                pane_id: source,
+                workspace_id: source_workspace_id,
+                agent_label: "codex".into(),
+                known_agent: Some(crate::detect::Agent::Codex),
+                kind: crate::app::state::ToastKind::Finished,
+                state: crate::detect::AgentState::Idle,
+                deadline,
+            },
+        );
+
+        move_between_workspaces(&mut app, 0, source, 1, target, false);
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(sibling));
+        assert_eq!(
+            app.state
+                .previous_pane_focus
+                .as_ref()
+                .map(|focus| (focus.workspace_id.as_str(), focus.pane_id,)),
+            Some((destination_workspace_id.as_str(), source))
+        );
+        assert_eq!(app.last_focus, Some((1, source)));
+        assert_eq!(
+            app.state
+                .toast
+                .as_ref()
+                .and_then(|toast| toast.target.as_ref())
+                .map(|target| (target.workspace_id.as_str(), target.pane_id)),
+            Some((destination_workspace_id.as_str(), source))
+        );
+        assert_eq!(
+            app.state
+                .pending_agent_notifications
+                .get(&source)
+                .map(|pending| pending.workspace_id.as_str()),
+            Some(destination_workspace_id.as_str())
+        );
+        let deliveries = app.state.drain_due_agent_notifications(deadline);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].workspace_id, destination_workspace_id);
+        app.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::Finished,
+            title: "done".into(),
+            context: "destination".into(),
+            position: None,
+            target: Some(crate::app::state::ToastTarget {
+                workspace_id: deliveries[0].workspace_id.clone(),
+                pane_id: source,
+            }),
+        });
+        app.focus_toast_target_via_api();
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(source));
+        assert!(app.state.toast.is_none());
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn cross_workspace_move_cancels_pane_and_structure_bound_transient_state() {
+        let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(true);
+        let info = app.state.workspaces[0].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(20, 2, 80, 20))
+            .into_iter()
+            .find(|info| info.id == source)
+            .unwrap();
+        app.state.copy_mode = Some(crate::app::state::CopyModeState {
+            pane_id: source,
+            cursor_row: 0,
+            cursor_col: 0,
+            entry_offset_from_bottom: 0,
+            selection: None,
+            search: Default::default(),
+        });
+        app.state.selection = Some(crate::selection::Selection::range(source, 0, 0, 2, None));
+        app.state.selection_autoscroll = Some(crate::app::state::SelectionAutoscroll {
+            direction: crate::app::state::SelectionAutoscrollDirection::Down,
+            last_mouse_screen_col: info.inner_rect.x,
+            last_mouse_screen_row: info.inner_rect.y,
+            inner_rect: info.inner_rect,
+        });
+        app.selection_autoscroll_deadline = Some(std::time::Instant::now());
+        app.state.context_menu = Some(crate::app::state::ContextMenuState {
+            kind: crate::app::state::ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: source,
+                source_pane_id: None,
+                has_manual_label: false,
+            },
+            x: 2,
+            y: 2,
+            list: crate::app::state::MenuListState::new(0),
+        });
+        app.state.drag = Some(crate::app::state::DragState {
+            target: crate::app::state::DragTarget::PaneSplit {
+                path: Vec::new(),
+                direction: ratatui::layout::Direction::Horizontal,
+                area: ratatui::layout::Rect::new(20, 2, 80, 20),
+                grab_offset: 0,
+            },
+        });
+        app.state.workspace_presses.insert(
+            7,
+            crate::app::state::WorkspacePressState {
+                ws_idx: 0,
+                start_col: 1,
+                start_row: 1,
+            },
+        );
+        app.state.tab_presses.insert(
+            7,
+            crate::app::state::TabPressState {
+                ws_idx: 0,
+                tab_idx: 0,
+                start_col: 2,
+                start_row: 2,
+            },
+        );
+        app.state.rename_pane_target = Some(source);
+        app.state.name_input = "stale".into();
+        app.state.mode = Mode::Copy;
+        app.state
+            .view
+            .workspace_card_areas
+            .push(crate::app::state::WorkspaceCardArea {
+                ws_idx: 0,
+                rect: ratatui::layout::Rect::new(0, 0, 10, 2),
+                indented: false,
+            });
+        app.state
+            .view
+            .tab_hit_areas
+            .push(ratatui::layout::Rect::new(20, 0, 10, 1));
+        app.state.view.pane_infos.push(info);
+        app.state
+            .view
+            .split_borders
+            .push(crate::layout::SplitBorder {
+                pos: 40,
+                direction: ratatui::layout::Direction::Horizontal,
+                ratio: 0.5,
+                area: ratatui::layout::Rect::new(20, 2, 80, 20),
+                path: Vec::new(),
+            });
+        app.state.view.toast_hit_area = ratatui::layout::Rect::new(1, 1, 2, 2);
+        app.last_pane_click = Some(crate::app::PaneClickState {
+            pane_id: source,
+            viewport_row: 0,
+            col: 0,
+            at: std::time::Instant::now(),
+        });
+
+        move_between_workspaces(&mut app, 0, source, 1, target, false);
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.copy_mode.is_none());
+        assert!(app.state.selection.is_none());
+        assert!(app.state.selection_autoscroll.is_none());
+        assert!(app.selection_autoscroll_deadline.is_none());
+        assert!(app.state.context_menu.is_none());
+        assert!(app.state.drag.is_none());
+        assert!(app.state.workspace_presses.is_empty());
+        assert!(app.state.tab_presses.is_empty());
+        assert!(app.state.rename_pane_target.is_none());
+        assert!(app.state.name_input.is_empty());
+        assert!(app.state.view.workspace_card_areas.is_empty());
+        assert!(app.state.view.tab_hit_areas.is_empty());
+        assert!(app.state.view.pane_infos.is_empty());
+        assert!(app.state.view.split_borders.is_empty());
+        assert_eq!(
+            app.state.view.toast_hit_area,
+            ratatui::layout::Rect::default()
+        );
+        assert!(app.last_pane_click.is_none());
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn cross_workspace_move_rebases_removed_workspace_indices_and_preserves_create_intent() {
+        let mut app = app_with_linked_worktree();
+        app.state
+            .workspaces
+            .insert(0, Workspace::test_new("before"));
+        app.state
+            .workspaces
+            .push(Workspace::test_new("destination"));
+        app.state.active = Some(2);
+        app.state.selected = 2;
+        seed_terminal_states(&mut app);
+        let source = app.state.workspaces[1].tabs[0].root_pane;
+        let source_workspace_id = app.state.workspaces[1].id.clone();
+        let target = app.state.workspaces[2].tabs[0].root_pane;
+        let destination_workspace_id = app.state.workspaces[2].id.clone();
+        app.state.request_new_linked_worktree = Some(1);
+        app.state.request_open_existing_worktree = Some(2);
+        app.state.request_remove_linked_worktree = Some(0);
+        app.state.worktree_open = Some(crate::app::state::WorktreeOpenState {
+            source_workspace_id: destination_workspace_id.clone(),
+            source_existing_membership: None,
+            source_checkout_path: "/repo/destination".into(),
+            source_repo_root: "/repo".into(),
+            repo_key: "repo".into(),
+            repo_name: "repo".into(),
+            entries: vec![
+                crate::app::state::WorktreeOpenEntry {
+                    path: "/repo/source".into(),
+                    branch: Some("source".into()),
+                    is_linked_worktree: true,
+                    already_open_ws_idx: Some(1),
+                },
+                crate::app::state::WorktreeOpenEntry {
+                    path: "/repo/destination".into(),
+                    branch: Some("destination".into()),
+                    is_linked_worktree: true,
+                    already_open_ws_idx: Some(2),
+                },
+            ],
+            selected: 1,
+            query: String::new(),
+            search_focused: false,
+            error: None,
+        });
+        app.state.pending_workspace_create_cwd =
+            Some(crate::app::state::PendingWorkspaceCreateCwd::Follow {
+                source_workspace_id: Some(source_workspace_id.clone()),
+                suggested_cwd: "/repo/source".into(),
+            });
+        app.state.name_input = "new workspace".into();
+        app.state.mode = Mode::RenameWorkspace;
+        app.last_focus = Some((2, target));
+        app.state.navigator.query = "destination".into();
+        app.state.navigator.selected = 9;
+        app.state.navigator.scroll = 7;
+        app.state
+            .navigator
+            .expanded_workspaces
+            .insert(destination_workspace_id.clone());
+
+        move_between_workspaces(&mut app, 1, source, 2, target, false);
+
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.request_new_linked_worktree, None);
+        assert_eq!(app.state.request_open_existing_worktree, Some(1));
+        assert_eq!(app.state.request_remove_linked_worktree, Some(0));
+        assert_eq!(app.last_focus, Some((1, target)));
+        let entries = &app.state.worktree_open.as_ref().unwrap().entries;
+        assert_eq!(entries[0].already_open_ws_idx, None);
+        assert_eq!(entries[1].already_open_ws_idx, Some(1));
+        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.name_input, "new workspace");
+        assert!(matches!(
+            app.state.pending_workspace_create_cwd,
+            Some(crate::app::state::PendingWorkspaceCreateCwd::Follow {
+                source_workspace_id: Some(ref id),
+                ..
+            }) if id == &source_workspace_id
+        ));
+        assert_eq!(app.state.navigator.selected, 0);
+        assert_eq!(app.state.navigator.scroll, 0);
+        assert_eq!(app.state.navigator.query, "destination");
+        assert!(app
+            .state
+            .navigator
+            .expanded_workspaces
+            .contains(&destination_workspace_id));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn focused_cross_workspace_move_preserves_workspace_create_prompt() {
+        let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(true);
+        app.state.pending_workspace_create_cwd = Some(
+            crate::app::state::PendingWorkspaceCreateCwd::Resolved("/repo/new".into()),
+        );
+        app.state.name_input = "new workspace".into();
+        app.state.name_input_replace_on_type = true;
+        app.state.mode = Mode::RenameWorkspace;
+
+        move_between_workspaces(&mut app, 0, source, 1, target, true);
+
+        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.name_input, "new workspace");
+        assert!(app.state.name_input_replace_on_type);
+        assert!(matches!(
+            app.state.pending_workspace_create_cwd,
+            Some(crate::app::state::PendingWorkspaceCreateCwd::Resolved(ref cwd))
+                if cwd == std::path::Path::new("/repo/new")
+        ));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn cross_workspace_move_cancels_index_bound_modal_targets() {
+        for mode in [
+            Mode::RenameWorkspace,
+            Mode::RenameTab,
+            Mode::RenamePane,
+            Mode::Resize,
+            Mode::ConfirmClose,
+            Mode::ContextMenu,
+        ] {
+            let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(false);
+            app.state.mode = mode;
+            app.state.name_input = "stale target".into();
+            match mode {
+                Mode::RenameTab => {
+                    app.state.creating_new_tab = true;
+                    app.state.requested_new_tab_name = Some("stale tab".into());
+                }
+                Mode::RenamePane => app.state.rename_pane_target = Some(source),
+                Mode::ContextMenu => {
+                    app.state.context_menu = Some(crate::app::state::ContextMenuState {
+                        kind: crate::app::state::ContextMenuKind::Workspace { ws_idx: 0 },
+                        x: 0,
+                        y: 0,
+                        list: crate::app::state::MenuListState::new(0),
+                    });
+                }
+                _ => {}
+            }
+
+            move_between_workspaces(&mut app, 0, source, 1, target, false);
+
+            assert_eq!(app.state.mode, Mode::Terminal, "{mode:?}");
+            assert!(app.state.name_input.is_empty(), "{mode:?}");
+            assert!(!app.state.creating_new_tab, "{mode:?}");
+            assert!(app.state.requested_new_tab_name.is_none(), "{mode:?}");
+            assert!(app.state.rename_pane_target.is_none(), "{mode:?}");
+            assert!(app.state.context_menu.is_none(), "{mode:?}");
+            app.state.assert_invariants_for_test();
+        }
+    }
+
+    #[test]
+    fn cross_workspace_move_cancels_worktree_modal_with_removed_stable_workspace() {
+        for mode in [
+            Mode::NewLinkedWorktree,
+            Mode::OpenExistingWorktree,
+            Mode::ConfirmRemoveWorktree,
+        ] {
+            let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(false);
+            let source_workspace_id = app.state.workspaces[0].id.clone();
+            app.state.mode = mode;
+            match mode {
+                Mode::NewLinkedWorktree => {
+                    app.state.worktree_create = Some(crate::app::state::WorktreeCreateState {
+                        source_workspace_id,
+                        source_checkout_path: "/repo/source".into(),
+                        source_existing_membership: None,
+                        source_repo_root: "/repo".into(),
+                        repo_key: "repo".into(),
+                        repo_name: "repo".into(),
+                        branch: "new".into(),
+                        checkout_path: "/repo/new".into(),
+                        error: None,
+                        creating: false,
+                    });
+                    app.state.request_submit_worktree_create = true;
+                }
+                Mode::OpenExistingWorktree => {
+                    app.state.worktree_open = Some(crate::app::state::WorktreeOpenState {
+                        source_workspace_id,
+                        source_existing_membership: None,
+                        source_checkout_path: "/repo/source".into(),
+                        source_repo_root: "/repo".into(),
+                        repo_key: "repo".into(),
+                        repo_name: "repo".into(),
+                        entries: Vec::new(),
+                        selected: 0,
+                        query: String::new(),
+                        search_focused: false,
+                        error: None,
+                    });
+                    app.state.request_submit_worktree_open = true;
+                }
+                Mode::ConfirmRemoveWorktree => {
+                    app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {
+                        workspace_id: source_workspace_id,
+                        repo_root: "/repo".into(),
+                        path: "/repo/source".into(),
+                        error: None,
+                        removing: false,
+                        force_confirmation: false,
+                    });
+                    app.state.request_submit_worktree_remove = true;
+                }
+                _ => unreachable!(),
+            }
+
+            move_between_workspaces(&mut app, 0, source, 1, target, false);
+
+            assert_eq!(app.state.mode, Mode::Terminal, "{mode:?}");
+            assert!(app.state.worktree_create.is_none(), "{mode:?}");
+            assert!(app.state.worktree_open.is_none(), "{mode:?}");
+            assert!(app.state.worktree_remove.is_none(), "{mode:?}");
+            assert!(!app.state.request_submit_worktree_create, "{mode:?}");
+            assert!(!app.state.request_submit_worktree_open, "{mode:?}");
+            assert!(!app.state.request_submit_worktree_remove, "{mode:?}");
+            app.state.assert_invariants_for_test();
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_workspace_move_preserves_owned_mouse_gesture_for_capture_and_no_capture() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        for capture in [true, false] {
+            let (mut app, source, sibling, target) = app_with_cross_workspace_move_source(true);
+            let sibling = sibling.unwrap();
+            app.state.mouse_capture = capture;
+            let mut source_rx =
+                install_global_reporting_runtime(&mut app, 0, source, b"\x1b[?1002h\x1b[?1006h", 8);
+            let mut sibling_rx = install_global_reporting_runtime(
+                &mut app,
+                0,
+                sibling,
+                b"\x1b[?1002h\x1b[?1006h",
+                8,
+            );
+            crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
+            let source_info = app.state.pane_info_by_id(source).unwrap().clone();
+            let column = source_info.inner_rect.x + 2;
+            let row = source_info.inner_rect.y + 3;
+
+            route_mouse(
+                &mut app,
+                capture,
+                7,
+                pane_mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+            );
+            assert_eq!(
+                source_rx.try_recv().unwrap(),
+                bytes::Bytes::from_static(b"\x1b[<0;3;4M"),
+                "capture={capture} down"
+            );
+
+            move_between_workspaces(&mut app, 0, source, 1, target, false);
+            crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
+            let source_runtime = app
+                .state
+                .runtime_for_pane(&app.terminal_runtimes, source)
+                .unwrap();
+            source_runtime.resize(2, 4, 0, 0);
+
+            for kind in [
+                MouseEventKind::Drag(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                route_mouse(
+                    &mut app,
+                    capture,
+                    9,
+                    pane_mouse(kind, column + 90, row + 90),
+                );
+            }
+            assert!(
+                sibling_rx.try_recv().is_err(),
+                "capture={capture}: foreign source received an unsolicited gesture"
+            );
+
+            route_mouse(
+                &mut app,
+                capture,
+                7,
+                pane_mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    column + 90,
+                    row + 90,
+                ),
+            );
+            route_mouse(
+                &mut app,
+                capture,
+                7,
+                pane_mouse(MouseEventKind::Up(MouseButton::Left), column + 90, row + 90),
+            );
+            assert_eq!(
+                source_rx.try_recv().unwrap(),
+                bytes::Bytes::from_static(b"\x1b[<32;4;2M"),
+                "capture={capture} clamped drag"
+            );
+            assert_eq!(
+                source_rx.try_recv().unwrap(),
+                bytes::Bytes::from_static(b"\x1b[<0;4;2m"),
+                "capture={capture} clamped release"
+            );
+            assert!(source_rx.try_recv().is_err(), "capture={capture}");
+            assert!(sibling_rx.try_recv().is_err(), "capture={capture}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_workspace_move_keeps_right_passthrough_owned_by_its_source() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(true);
+        app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
+        let mut source_rx =
+            install_global_reporting_runtime(&mut app, 0, source, b"\x1b[?1002h\x1b[?1006h", 8);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
+        let source_info = app.state.pane_info_by_id(source).unwrap().clone();
+        let column = source_info.inner_rect.x + 2;
+        let row = source_info.inner_rect.y + 3;
+        let with_control = |kind| MouseEvent {
+            modifiers: KeyModifiers::CONTROL,
+            ..pane_mouse(kind, column, row)
+        };
+
+        app.handle_mouse_from_input_source(
+            7,
+            with_control(MouseEventKind::Down(MouseButton::Right)),
+        );
+        assert_eq!(
+            source_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[<2;3;4M")
+        );
+        move_between_workspaces(&mut app, 0, source, 1, target, false);
+
+        app.handle_mouse_from_input_source(9, with_control(MouseEventKind::Up(MouseButton::Right)));
+        assert!(app.state.right_click_passthrough.is_some());
+        assert!(source_rx.try_recv().is_err());
+
+        app.handle_mouse_from_input_source(7, with_control(MouseEventKind::Up(MouseButton::Right)));
+        assert!(app.state.right_click_passthrough.is_none());
+        assert_eq!(
+            source_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[<2;3;4m")
+        );
+        assert!(source_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_mouse_gesture_clears_on_source_teardown_and_pane_removal() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let (mut app, source, sibling, _target) = app_with_cross_workspace_move_source(true);
+        let sibling = sibling.unwrap();
+        let mut source_rx =
+            install_global_reporting_runtime(&mut app, 0, source, b"\x1b[?1002h\x1b[?1006h", 8);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
+        let info = app.state.pane_info_by_id(source).unwrap().clone();
+        let down = pane_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.inner_rect.x + 1,
+            info.inner_rect.y + 1,
+        );
+        app.handle_mouse_from_input_source(7, down);
+        assert!(app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(7, MouseButton::Left)));
+        app.clear_input_source(7);
+        assert!(!app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(7, MouseButton::Left)));
+        app.handle_mouse_from_input_source(
+            7,
+            pane_mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                info.inner_rect.x + 1,
+                info.inner_rect.y + 1,
+            ),
+        );
+        assert_eq!(
+            source_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[<0;2;2M")
+        );
+        assert!(source_rx.try_recv().is_err());
+
+        app.handle_mouse_from_input_source(8, down);
+        assert!(app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(8, MouseButton::Left)));
+        app.state.confirm_close = false;
+        let response = app.handle_pane_close(
+            "close".into(),
+            PaneTarget {
+                pane_id: app.public_pane_id(0, source).unwrap(),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(sibling));
+        assert!(!app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(8, MouseButton::Left)));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
+    async fn moved_selection_cannot_consume_copy_shortcuts_or_copy_on_select_release() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
+            let (mut app, source, sibling, target) = app_with_cross_workspace_move_source(true);
+            let sibling = sibling.unwrap();
+            let mut sibling_rx = install_global_reporting_runtime(&mut app, 0, sibling, b"", 4);
+            let mut selection = crate::selection::Selection::range(source, 0, 0, 2, None);
+            selection.finish();
+            app.state.selection = Some(selection);
+            app.state.selection_autoscroll = Some(crate::app::state::SelectionAutoscroll {
+                direction: crate::app::state::SelectionAutoscrollDirection::Down,
+                last_mouse_screen_col: 1,
+                last_mouse_screen_row: 1,
+                inner_rect: ratatui::layout::Rect::new(0, 0, 10, 4),
+            });
+            app.selection_autoscroll_deadline = Some(std::time::Instant::now());
+            app.state.copy_on_select = false;
+
+            move_between_workspaces(&mut app, 0, source, 1, target, false);
+            let key = crate::input::TerminalKey::from(KeyEvent::new(KeyCode::Char('c'), modifiers));
+            app.handle_key(key).await;
+
+            assert!(app.state.selection.is_none(), "{modifiers:?}");
+            assert!(app.state.selection_autoscroll.is_none(), "{modifiers:?}");
+            assert!(app.selection_autoscroll_deadline.is_none(), "{modifiers:?}");
+            assert!(app.state.request_clipboard_write.is_none(), "{modifiers:?}");
+            assert!(
+                sibling_rx.try_recv().is_ok(),
+                "{modifiers:?} was consumed by the moved retained selection"
+            );
+        }
+
+        let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(true);
+        let mut selection = crate::selection::Selection::range(source, 0, 0, 2, None);
+        selection.finish();
+        app.state.selection = Some(selection);
+        app.state.copy_on_select = true;
+        move_between_workspaces(&mut app, 0, source, 1, target, false);
+        app.handle_mouse(pane_mouse(MouseEventKind::Up(MouseButton::Left), 1, 1));
+        assert!(app.state.selection.is_none());
+        assert!(app.state.request_clipboard_write.is_none());
+    }
+
+    #[test]
+    fn cross_workspace_move_cancels_each_shifted_chrome_gesture_class() {
+        for case in 0..4 {
+            let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(false);
+            match case {
+                0 => {
+                    app.state.workspace_presses.insert(
+                        7,
+                        crate::app::state::WorkspacePressState {
+                            ws_idx: 0,
+                            start_col: 1,
+                            start_row: 1,
+                        },
+                    );
+                }
+                1 => {
+                    app.state.tab_presses.insert(
+                        7,
+                        crate::app::state::TabPressState {
+                            ws_idx: 0,
+                            tab_idx: 0,
+                            start_col: 1,
+                            start_row: 1,
+                        },
+                    );
+                }
+                2 => {
+                    app.state.drag = Some(crate::app::state::DragState {
+                        target: crate::app::state::DragTarget::WorkspaceReorder {
+                            source_id: 7,
+                            source_ws_idx: 0,
+                            insert_idx: Some(1),
+                        },
+                    });
+                }
+                3 => {
+                    app.state.drag = Some(crate::app::state::DragState {
+                        target: crate::app::state::DragTarget::TabReorder {
+                            source_id: 7,
+                            ws_idx: 0,
+                            source_tab_idx: 0,
+                            insert_idx: Some(0),
+                        },
+                    });
+                }
+                _ => unreachable!(),
+            }
+
+            move_between_workspaces(&mut app, 0, source, 1, target, false);
+
+            assert!(app.state.workspace_presses.is_empty(), "case={case}");
+            assert!(app.state.tab_presses.is_empty(), "case={case}");
+            assert!(app.state.drag.is_none(), "case={case}");
+            app.state.assert_invariants_for_test();
+        }
+    }
+
+    #[test]
+    fn cross_workspace_move_cancels_each_shifted_context_menu_class() {
+        use crate::app::state::{ContextMenuKind, ContextMenuState, MenuListState};
+
+        for case in 0..3 {
+            let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(false);
+            let kind = match case {
+                0 => ContextMenuKind::Workspace { ws_idx: 0 },
+                1 => ContextMenuKind::GitWorkspace {
+                    ws_idx: 0,
+                    is_linked_worktree: false,
+                    has_worktree_children: false,
+                    collapsed: false,
+                },
+                2 => ContextMenuKind::Tab {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                },
+                _ => unreachable!(),
+            };
+            app.state.context_menu = Some(ContextMenuState {
+                kind,
+                x: 1,
+                y: 1,
+                list: MenuListState::new(0),
+            });
+            app.state.mode = Mode::ContextMenu;
+
+            move_between_workspaces(&mut app, 0, source, 1, target, false);
+
+            assert_eq!(app.state.mode, Mode::Terminal, "case={case}");
+            assert!(app.state.context_menu.is_none(), "case={case}");
+            app.state.assert_invariants_for_test();
+        }
+    }
+
+    #[test]
+    fn cross_workspace_move_preserves_live_stable_worktree_modal() {
+        let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(true);
+        let destination_id = app.state.workspaces[1].id.clone();
+        app.state.worktree_open = Some(crate::app::state::WorktreeOpenState {
+            source_workspace_id: destination_id.clone(),
+            source_existing_membership: None,
+            source_checkout_path: "/repo/destination".into(),
+            source_repo_root: "/repo".into(),
+            repo_key: "repo".into(),
+            repo_name: "repo".into(),
+            entries: Vec::new(),
+            selected: 0,
+            query: "keep".into(),
+            search_focused: true,
+            error: None,
+        });
+        app.state.request_submit_worktree_open = true;
+        app.state.mode = Mode::OpenExistingWorktree;
+
+        move_between_workspaces(&mut app, 0, source, 1, target, false);
+
+        let open = app.state.worktree_open.as_ref().unwrap();
+        assert_eq!(open.source_workspace_id, destination_id);
+        assert_eq!(open.query, "keep");
+        assert!(open.search_focused);
+        assert!(app.state.request_submit_worktree_open);
+        assert_eq!(app.state.mode, Mode::OpenExistingWorktree);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn focused_cross_workspace_move_preserves_live_stable_worktree_modal() {
+        let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(true);
+        let destination_id = app.state.workspaces[1].id.clone();
+        app.state.worktree_open = Some(crate::app::state::WorktreeOpenState {
+            source_workspace_id: destination_id,
+            source_existing_membership: None,
+            source_checkout_path: "/repo/destination".into(),
+            source_repo_root: "/repo".into(),
+            repo_key: "repo".into(),
+            repo_name: "repo".into(),
+            entries: Vec::new(),
+            selected: 0,
+            query: "keep".into(),
+            search_focused: true,
+            error: None,
+        });
+        app.state.request_submit_worktree_open = true;
+        app.state.mode = Mode::OpenExistingWorktree;
+
+        move_between_workspaces(&mut app, 0, source, 1, target, true);
+
+        assert_eq!(app.state.mode, Mode::OpenExistingWorktree);
+        assert_eq!(app.state.worktree_open.as_ref().unwrap().query, "keep");
+        assert!(app.state.request_submit_worktree_open);
+        app.state.assert_invariants_for_test();
+    }
+
+    fn install_focus_runtime(
+        app: &mut App,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> tokio::sync::mpsc::Receiver<bytes::Bytes> {
+        install_global_reporting_runtime(app, ws_idx, pane_id, b"\x1b[?1004h", 4)
+    }
+
+    #[tokio::test]
+    async fn cross_workspace_move_focus_events_follow_stable_pane_identity() {
+        for (focus, source_was_current) in [(false, true), (true, true), (true, false)] {
+            let (mut app, source, sibling, target) = app_with_cross_workspace_move_source(true);
+            let sibling = sibling.unwrap();
+            if source_was_current {
+                app.state.workspaces[0].tabs[0].layout.focus_pane(source);
+            } else {
+                app.state.workspaces[0].tabs[0].layout.focus_pane(sibling);
+            }
+            let mut source_rx = install_focus_runtime(&mut app, 0, source);
+            let mut sibling_rx = install_focus_runtime(&mut app, 0, sibling);
+            app.last_focus = Some((0, if source_was_current { source } else { sibling }));
+
+            move_between_workspaces(&mut app, 0, source, 1, target, focus);
+            app.sync_focus_events();
+
+            match (focus, source_was_current) {
+                (false, true) => {
+                    assert_eq!(
+                        source_rx.try_recv().unwrap(),
+                        bytes::Bytes::from_static(b"\x1b[O")
+                    );
+                    assert_eq!(
+                        sibling_rx.try_recv().unwrap(),
+                        bytes::Bytes::from_static(b"\x1b[I")
+                    );
+                }
+                (true, true) => {
+                    assert!(source_rx.try_recv().is_err());
+                    assert!(sibling_rx.try_recv().is_err());
+                    assert!(
+                        app.state.previous_pane_focus.is_none(),
+                        "moving the current pane must not create fake focus history"
+                    );
+                }
+                (true, false) => {
+                    assert_eq!(
+                        sibling_rx.try_recv().unwrap(),
+                        bytes::Bytes::from_static(b"\x1b[O")
+                    );
+                    assert_eq!(
+                        source_rx.try_recv().unwrap(),
+                        bytes::Bytes::from_static(b"\x1b[I")
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert!(source_rx.try_recv().is_err());
+            assert!(sibling_rx.try_recv().is_err());
+        }
+
+        let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(false);
+        let mut source_rx = install_focus_runtime(&mut app, 0, source);
+        let mut target_rx = install_focus_runtime(&mut app, 1, target);
+        app.last_focus = Some((0, source));
+
+        move_between_workspaces(&mut app, 0, source, 1, target, false);
+        assert_eq!(app.last_focus, Some((0, source)));
+        app.sync_focus_events();
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.last_focus, Some((0, target)));
+        assert_eq!(
+            source_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[O")
+        );
+        assert_eq!(
+            target_rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[I")
+        );
+        assert!(source_rx.try_recv().is_err());
+        assert!(target_rx.try_recv().is_err());
     }
 
     #[test]
@@ -2784,6 +4001,194 @@ mod tests {
             Some(&source_terminal)
         );
         assert_eq!(app.parse_pane_id("w1:p1"), Some((0, source)));
+    }
+
+    #[test]
+    fn failed_cross_workspace_insertion_preserves_transient_state() {
+        use crossterm::event::{KeyModifiers, MouseButton};
+
+        let (mut app, source, _sibling, target) = app_with_cross_workspace_move_source(false);
+        let source_workspace_id = app.state.workspaces[0].id.clone();
+        let source_public = app.public_pane_id(0, source).unwrap();
+        let target_tab_public = app.public_tab_id(1, 0).unwrap();
+        let target_public = app.public_pane_id(1, target).unwrap();
+        let source_info = app.state.workspaces[0].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(20, 2, 80, 20))[0]
+            .clone();
+
+        // Make the destination reject the moved pane after source extraction. The
+        // duplicate lives only in this deliberately malformed test layout.
+        assert!(app.state.workspaces[1].tabs[0].layout.insert_pane_near(
+            target,
+            source,
+            ratatui::layout::Direction::Horizontal,
+            0.5,
+            false,
+        ));
+
+        app.state.previous_pane_focus = Some(crate::app::state::PaneFocusTarget {
+            workspace_id: source_workspace_id.clone(),
+            pane_id: source,
+        });
+        app.last_focus = Some((0, source));
+        app.state.request_open_existing_worktree = Some(1);
+        app.state.copy_mode = Some(crate::app::state::CopyModeState {
+            pane_id: source,
+            cursor_row: 3,
+            cursor_col: 4,
+            entry_offset_from_bottom: 5,
+            selection: None,
+            search: Default::default(),
+        });
+        app.state.selection = Some(crate::selection::Selection::range(source, 1, 2, 5, None));
+        app.state.selection_autoscroll = Some(crate::app::state::SelectionAutoscroll {
+            direction: crate::app::state::SelectionAutoscrollDirection::Down,
+            last_mouse_screen_col: 7,
+            last_mouse_screen_row: 8,
+            inner_rect: source_info.inner_rect,
+        });
+        let selection_deadline = std::time::Instant::now();
+        app.selection_autoscroll_deadline = Some(selection_deadline);
+        app.state.context_menu = Some(crate::app::state::ContextMenuState {
+            kind: crate::app::state::ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 9,
+            y: 10,
+            list: crate::app::state::MenuListState::new(0),
+        });
+        app.state.workspace_presses.insert(
+            7,
+            crate::app::state::WorkspacePressState {
+                ws_idx: 0,
+                start_col: 11,
+                start_row: 12,
+            },
+        );
+        app.state.drag = Some(crate::app::state::DragState {
+            target: crate::app::state::DragTarget::PaneSplit {
+                path: vec![true],
+                direction: ratatui::layout::Direction::Horizontal,
+                area: ratatui::layout::Rect::new(1, 2, 3, 4),
+                grab_offset: 2,
+            },
+        });
+        app.state.terminal_mouse_gestures.insert(
+            (7, MouseButton::Left),
+            crate::app::state::TerminalMouseGesture {
+                pane_info: source_info.clone(),
+                modifiers_to_strip: KeyModifiers::ALT,
+            },
+        );
+        app.state.terminal_mouse_gestures.insert(
+            (7, MouseButton::Right),
+            crate::app::state::TerminalMouseGesture {
+                pane_info: source_info.clone(),
+                modifiers_to_strip: KeyModifiers::CONTROL,
+            },
+        );
+        app.state.right_click_passthrough = Some(crate::app::state::RightClickPassthroughGesture {
+            source_id: 7,
+            pane_info: source_info,
+        });
+        app.state.mode = Mode::Copy;
+        app.state.navigator.query = "keep query".into();
+        app.state.navigator.selected = 4;
+        app.state.navigator.scroll = 3;
+        app.state
+            .view
+            .tab_hit_areas
+            .push(ratatui::layout::Rect::new(5, 6, 7, 8));
+        let pane_click_at = std::time::Instant::now();
+        app.last_pane_click = Some(crate::app::PaneClickState {
+            pane_id: source,
+            viewport_row: 13,
+            col: 14,
+            at: pane_click_at,
+        });
+
+        let response = app.handle_pane_move(
+            "move".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::Tab {
+                    tab_id: target_tab_public,
+                    target_pane_id: Some(target_public),
+                    split: SplitDirection::Right,
+                    ratio: None,
+                },
+                focus: false,
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "pane_move_failed");
+        assert_eq!(app.state.workspaces[0].id, source_workspace_id);
+        assert_eq!(app.parse_pane_id("w1:p1"), Some((0, source)));
+        assert_eq!(
+            app.state.previous_pane_focus,
+            Some(crate::app::state::PaneFocusTarget {
+                workspace_id: source_workspace_id,
+                pane_id: source,
+            })
+        );
+        assert_eq!(app.last_focus, Some((0, source)));
+        assert_eq!(app.state.request_open_existing_worktree, Some(1));
+        assert_eq!(app.state.mode, Mode::Copy);
+        let copy = app.state.copy_mode.as_ref().unwrap();
+        assert_eq!(
+            (copy.pane_id, copy.cursor_row, copy.cursor_col),
+            (source, 3, 4)
+        );
+        assert_eq!(app.state.selection.as_ref().unwrap().pane_id, source);
+        let autoscroll = app.state.selection_autoscroll.as_ref().unwrap();
+        assert_eq!(
+            (
+                autoscroll.last_mouse_screen_col,
+                autoscroll.last_mouse_screen_row
+            ),
+            (7, 8)
+        );
+        assert_eq!(app.selection_autoscroll_deadline, Some(selection_deadline));
+        assert!(matches!(
+            app.state.context_menu.as_ref().map(|menu| &menu.kind),
+            Some(crate::app::state::ContextMenuKind::Workspace { ws_idx: 0 })
+        ));
+        assert_eq!(app.state.workspace_presses.get(&7).unwrap().ws_idx, 0);
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(crate::app::state::DragTarget::PaneSplit { path, .. }) if path == &[true]
+        ));
+        let gesture = app
+            .state
+            .terminal_mouse_gestures
+            .get(&(7, MouseButton::Left))
+            .unwrap();
+        assert_eq!(gesture.pane_info.id, source);
+        assert_eq!(gesture.modifiers_to_strip, KeyModifiers::ALT);
+        let gesture = app
+            .state
+            .terminal_mouse_gestures
+            .get(&(7, MouseButton::Right))
+            .unwrap();
+        assert_eq!(gesture.pane_info.id, source);
+        assert_eq!(gesture.modifiers_to_strip, KeyModifiers::CONTROL);
+        let right = app.state.right_click_passthrough.as_ref().unwrap();
+        assert_eq!((right.source_id, right.pane_info.id), (7, source));
+        assert_eq!(app.state.navigator.query, "keep query");
+        assert_eq!(
+            (app.state.navigator.selected, app.state.navigator.scroll),
+            (4, 3)
+        );
+        assert_eq!(
+            app.state.view.tab_hit_areas,
+            vec![ratatui::layout::Rect::new(5, 6, 7, 8)]
+        );
+        let click = app.last_pane_click.unwrap();
+        assert_eq!(
+            (click.pane_id, click.viewport_row, click.col),
+            (source, 13, 14)
+        );
+        assert_eq!(click.at, pane_click_at);
     }
 
     #[test]

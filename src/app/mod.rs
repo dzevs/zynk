@@ -625,6 +625,7 @@ impl App {
             copy_on_select: config.ui.copy_on_select,
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
             right_click_passthrough: None,
+            terminal_mouse_gestures: HashMap::new(),
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             confirm_close: config.ui.confirm_close,
@@ -1650,8 +1651,11 @@ impl App {
                     if self.state.mouse_capture {
                         self.handle_mouse_event_headless(source_id, mouse);
                     } else {
-                        self.state
-                            .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
+                        self.state.handle_pane_mouse_only(
+                            &self.terminal_runtimes,
+                            source_id,
+                            mouse,
+                        );
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
@@ -1789,6 +1793,17 @@ impl App {
         // the host focus before its mouse release arrives.
         self.pending_url_click_sources.remove(&source_id);
         self.state.clear_chrome_press(source_id);
+        self.state
+            .terminal_mouse_gestures
+            .retain(|(owner, _), _| *owner != source_id);
+        if self
+            .state
+            .right_click_passthrough
+            .as_ref()
+            .is_some_and(|gesture| gesture.source_id == source_id)
+        {
+            self.state.right_click_passthrough = None;
+        }
         if self.state.drag.as_ref().is_some_and(|drag| {
             matches!(
                 drag.target,
@@ -4264,6 +4279,164 @@ mod tests {
             assert_ne!(cwd, source, "stale Follow source was forwarded");
             assert!(cwd.is_dir(), "Follow fallback is not a directory: {cwd:?}");
             std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn named_workspace_follow_reresolves_after_prompt_delay() {
+        for move_source in [false, true] {
+            let root = unique_temp_path(if move_source {
+                "named-follow-moved"
+            } else {
+                "named-follow-deleted"
+            });
+            let reported = root.join("reported");
+            std::fs::create_dir_all(&reported).unwrap();
+
+            let mut app = test_app();
+            app.state.default_shell = exiting_test_command().into();
+            app.state.new_terminal_cwd = crate::config::NewTerminalCwdConfig::Follow;
+            app.state.prompt_new_workspace_name = true;
+            app.state.workspaces = vec![Workspace::test_new("follow-source")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            let source_pane = app.state.workspaces[0].tabs[0].root_pane;
+            let source_terminal = app.state.workspaces[0].tabs[0]
+                .terminal_id(source_pane)
+                .unwrap()
+                .clone();
+            let (runtime, _rx) = TerminalRuntime::test_with_channel(80, 24);
+            runtime.test_publish_reported_cwd(reported.clone());
+            app.terminal_runtimes.insert(source_terminal, runtime);
+
+            app.begin_tui_workspace_create("test.workspace.create.named");
+            assert_eq!(app.state.mode, Mode::RenameWorkspace);
+            assert!(app.state.pending_workspace_create_cwd.is_some());
+            let existing: std::collections::HashSet<_> =
+                app.state.terminals.keys().cloned().collect();
+
+            if move_source {
+                std::fs::rename(&reported, root.join("moved")).unwrap();
+            } else {
+                std::fs::remove_dir(&reported).unwrap();
+            }
+            app.state.name_input = "delayed".into();
+            app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+            let created: Vec<_> = app
+                .state
+                .terminals
+                .iter()
+                .filter(|(id, _)| !existing.contains(*id))
+                .map(|(_, terminal)| terminal.cwd.clone())
+                .collect();
+            assert_eq!(created.len(), 1, "named prompt did not create one terminal");
+            assert_ne!(
+                created[0], reported,
+                "named prompt forwarded stale Follow CWD"
+            );
+            assert!(
+                created[0].is_dir(),
+                "named prompt fallback is not a directory: {:?}",
+                created[0]
+            );
+
+            for (_, runtime) in app.terminal_runtimes.drain() {
+                runtime.shutdown();
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn named_workspace_follow_falls_back_when_source_workspace_disappears() {
+        let source = unique_temp_path("named-follow-removed-workspace");
+        std::fs::create_dir_all(&source).unwrap();
+
+        let mut app = test_app();
+        app.state.default_shell = exiting_test_command().into();
+        app.state.new_terminal_cwd = crate::config::NewTerminalCwdConfig::Follow;
+        app.state.prompt_new_workspace_name = true;
+        app.state.workspaces = vec![Workspace::test_new("follow-source")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let source_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let source_terminal = app.state.workspaces[0].tabs[0]
+            .terminal_id(source_pane)
+            .unwrap()
+            .clone();
+        let (runtime, _rx) = TerminalRuntime::test_with_channel(80, 24);
+        runtime.test_publish_reported_cwd(source.clone());
+        app.terminal_runtimes.insert(source_terminal, runtime);
+
+        app.begin_tui_workspace_create("test.workspace.create.removed-source");
+        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        app.state.workspaces.clear();
+        app.state.active = None;
+        app.state.selected = 0;
+        let existing: std::collections::HashSet<_> = app.state.terminals.keys().cloned().collect();
+
+        app.state.name_input = "fallback".into();
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        let created = app
+            .state
+            .terminals
+            .iter()
+            .filter(|(id, _)| !existing.contains(*id))
+            .map(|(_, terminal)| terminal.cwd.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(created.len(), 1, "prompt did not create one terminal");
+        assert_ne!(
+            created[0], source,
+            "removed workspace left a stale Follow CWD"
+        );
+        assert!(created[0].is_absolute());
+        assert!(
+            created[0].is_dir(),
+            "fallback is not a directory: {:?}",
+            created[0]
+        );
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        std::fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn new_terminal_cwd_follow_rejects_invalid_home_fallback() {
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
+        let root = unique_temp_path("follow-invalid-home");
+        let stale = root.join("stale");
+        let missing_home = root.join("missing-home");
+        let file_home = root.join("not-a-directory");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(&file_home, "file").unwrap();
+        std::fs::remove_dir(&stale).unwrap();
+
+        let original_home = std::env::var_os("HOME");
+        let outcomes = [&missing_home, &file_home].map(|invalid_home| {
+            std::env::set_var("HOME", invalid_home);
+            let cwd = creation::resolve_new_terminal_cwd(
+                &crate::config::NewTerminalCwdConfig::Follow,
+                Some(stale.clone()),
+            );
+            (invalid_home.clone(), cwd)
+        });
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+
+        for (invalid_home, cwd) in outcomes {
+            assert_ne!(cwd, invalid_home, "Follow selected an invalid HOME");
+            assert!(cwd.is_absolute());
+            assert!(cwd.is_dir(), "Follow fallback is not a directory: {cwd:?}");
         }
     }
 

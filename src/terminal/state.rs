@@ -26,6 +26,15 @@ pub(crate) struct ForegroundProcessObservation {
     pub observed_at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookReportAdmission {
+    Refuse,
+    Accept {
+        reset_sequence: bool,
+        sequence_to_store: Option<u64>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAuthority {
     pub source: String,
@@ -852,18 +861,7 @@ impl TerminalState {
         {
             return None;
         }
-        if !self.hook_report_survives_retirement(&source, &agent_label, &session_ref, None) {
-            return None;
-        }
-        if !self.accept_hook_report(&source, seq) {
-            return None;
-        }
-
-        let previous_agent_label = self.effective_agent_label().map(str::to_string);
-        let previous_known_agent = self.effective_known_agent();
-        let previous_state = self.state;
-        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
-        let previous_session = self.current_session_identity_for_persistence();
+        let retirement_session_ref = session_ref.clone();
         let session_ref = session_ref.map(|session_ref| {
             self.conflicting_same_owner_session_ref(&source, &agent_label, &session_ref, None)
                 .unwrap_or(session_ref)
@@ -875,6 +873,24 @@ impl TerminalState {
         ) {
             return None;
         }
+        let admission = self.plan_hook_report_admission(
+            &source,
+            &agent_label,
+            &retirement_session_ref,
+            None,
+            seq,
+            true,
+            false,
+        );
+        if admission == HookReportAdmission::Refuse {
+            return None;
+        }
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        let previous_session = self.current_session_identity_for_persistence();
+        self.commit_hook_report_admission(&source, admission);
         if session_ref.is_some() {
             self.retire_suppressed_session_after_accepting(
                 &source,
@@ -963,10 +979,16 @@ impl TerminalState {
         // process exit retires this owner until a genuinely NEW session or fresh
         // process evidence arrives. A higher sequence alone is not a new session, and
         // this shape carries no session-start reason, so it can never reclaim one.
-        if !self.hook_report_survives_retirement(&source, &agent_label, &session_ref, None) {
-            return None;
-        }
-        if !self.accept_hook_report(&source, seq) {
+        let admission = self.plan_hook_report_admission(
+            &source,
+            &agent_label,
+            &session_ref,
+            None,
+            seq,
+            true,
+            false,
+        );
+        if admission == HookReportAdmission::Refuse {
             return None;
         }
         // The same clamp the full-lifecycle path applies: a same-owner report that
@@ -976,6 +998,8 @@ impl TerminalState {
             self.conflicting_same_owner_session_ref(&source, &agent_label, &session_ref, None)
                 .unwrap_or(session_ref)
         });
+        let previous_session = self.current_session_identity_for_persistence();
+        self.commit_hook_report_admission(&source, admission);
         if session_ref.is_some() {
             self.retire_suppressed_session_after_accepting(
                 &source,
@@ -983,7 +1007,6 @@ impl TerminalState {
                 session_ref.as_ref(),
             );
         }
-        let previous_session = self.current_session_identity_for_persistence();
         let identity_changed = self
             .hook_identity
             .as_ref()
@@ -1411,7 +1434,7 @@ impl TerminalState {
             || crate::detect::session_identity_only_integration(source, agent_label)
     }
 
-    /// The retirement gate EVERY hook report passes, in both representations.
+    /// The pure retirement gate EVERY hook report passes, in both representations.
     ///
     /// `false` means this owner is still retired. A genuinely new session, or fresh
     /// process evidence, re-anchors the sequence instead of banning the owner.
@@ -1422,15 +1445,32 @@ impl TerminalState {
     /// the SAME session, which the Hermes resume command deliberately produces by
     /// reusing `session_ref.value`. Callers that carry no reason pass `None`, so an
     /// ordinary late callback is refused exactly as before.
+    #[cfg(test)]
     fn hook_report_survives_retirement(
-        &mut self,
+        &self,
         source: &str,
         agent_label: &str,
         session_ref: &Option<crate::agent_resume::AgentSessionRef>,
         session_start_source: Option<&str>,
     ) -> bool {
+        self.hook_report_sequence_reset_after_retirement(
+            source,
+            agent_label,
+            session_ref,
+            session_start_source,
+        )
+        .is_some()
+    }
+
+    fn hook_report_sequence_reset_after_retirement(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &Option<crate::agent_resume::AgentSessionRef>,
+        session_start_source: Option<&str>,
+    ) -> Option<bool> {
         if self.hook_report_is_suppressed(source, agent_label, session_ref) {
-            return false;
+            return None;
         }
         if self.hook_report_matches_stale_session(source, agent_label, session_ref) {
             if !self.explicit_session_start_reclaims_stale_session(
@@ -1439,26 +1479,18 @@ impl TerminalState {
                 session_ref,
                 session_start_source,
             ) {
-                return false;
+                return None;
             }
-            // A reclaim opens a new generation of the same session, so the sequence
-            // anchor is dropped the way it is for a brand-new session. The stale entry
-            // itself is only dropped once the report is ACCEPTED
-            // (`retire_suppressed_session_after_accepting`): a report this gate lets
-            // through but a later check refuses must leave the session retired.
-            self.hook_report_sequences.remove(source);
-            return true;
+            return Some(true);
         }
-        if self.hook_report_has_fresh_session_after_suppression(source, agent_label, session_ref)
-            || self.hook_report_has_fresh_session_after_stale_session(
-                source,
-                agent_label,
-                session_ref,
-            )
-        {
-            self.hook_report_sequences.remove(source);
-        }
-        true
+        Some(
+            self.hook_report_has_fresh_session_after_suppression(source, agent_label, session_ref)
+                || self.hook_report_has_fresh_session_after_stale_session(
+                    source,
+                    agent_label,
+                    session_ref,
+                ),
+        )
     }
 
     /// Consume this owner's retirement bookkeeping once a report carrying a session is
@@ -2137,11 +2169,23 @@ impl TerminalState {
     }
 
     fn current_session_owner_conflicts(&self, source: &str, agent_label: &str) -> bool {
-        self.current_session_identity_for_persistence().is_some_and(
-            |(current_source, current_agent, _, _)| {
-                current_source != source || current_agent != agent_label
-            },
-        )
+        let current_owner = self
+            .hook_authority
+            .as_ref()
+            .map(|owner| (owner.source.as_str(), owner.agent_label.as_str()))
+            .or_else(|| {
+                self.hook_identity
+                    .as_ref()
+                    .map(|owner| (owner.source.as_str(), owner.agent_label.as_str()))
+            })
+            .or_else(|| {
+                self.persisted_agent_session
+                    .as_ref()
+                    .map(|owner| (owner.source.as_str(), owner.agent.as_str()))
+            });
+        current_owner.is_some_and(|(current_source, current_agent)| {
+            current_source != source || current_agent != agent_label
+        })
     }
 
     fn conflicting_same_owner_session_ref(
@@ -2370,28 +2414,6 @@ impl TerminalState {
         {
             return None;
         }
-        // A session-identity-only owner reports its IDENTITY through this path too, so
-        // the same retirement gate applies here as on the state-report path.
-        if (owner_conflicts
-            || crate::detect::session_identity_only_integration(&source, &agent_label))
-            && !self.hook_report_survives_retirement(
-                &source,
-                &agent_label,
-                &Some(session_ref.clone()),
-                session_start_source.as_deref(),
-            )
-        {
-            return None;
-        }
-        let unsequenced_selection = Self::is_unsequenced_opencode_selection(
-            &source,
-            &agent_label,
-            session_start_source.as_deref(),
-            seq,
-        );
-        if !unsequenced_selection && !self.accept_hook_report(&source, seq) {
-            return None;
-        }
         if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
             return None;
         }
@@ -2449,12 +2471,35 @@ impl TerminalState {
         if replaced_hook_session.is_some() && !session_replacement_allowed {
             return None;
         }
+        let unsequenced_selection = Self::is_unsequenced_opencode_selection(
+            &source,
+            &agent_label,
+            session_start_source.as_deref(),
+            seq,
+        );
+        // A session-identity-only owner reports its IDENTITY through this path too, so
+        // the same retirement gate applies here as on the state-report path. Admission
+        // is pure until every ownership and replacement check above has succeeded.
+        let admission = self.plan_hook_report_admission(
+            &source,
+            &agent_label,
+            &Some(session_ref.clone()),
+            session_start_source.as_deref(),
+            seq,
+            owner_conflicts
+                || crate::detect::session_identity_only_integration(&source, &agent_label),
+            unsequenced_selection,
+        );
+        if admission == HookReportAdmission::Refuse {
+            return None;
+        }
 
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
+        self.commit_hook_report_admission(&source, admission);
         // A start source this owner may replace on RECLAIMS the session it names:
         // an earlier replacement may have retired it, and leaving it retired would
         // refuse every later report for the session that is now live again. Upstream
@@ -2541,14 +2586,52 @@ impl TerminalState {
         }
     }
 
-    fn accept_hook_report(&mut self, source: &str, seq: Option<u64>) -> bool {
-        if self.hook_report_is_stale(source, seq) {
-            return false;
+    fn plan_hook_report_admission(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &Option<crate::agent_resume::AgentSessionRef>,
+        session_start_source: Option<&str>,
+        seq: Option<u64>,
+        check_retirement: bool,
+        sequence_exempt: bool,
+    ) -> HookReportAdmission {
+        let reset_sequence = if check_retirement {
+            let Some(reset) = self.hook_report_sequence_reset_after_retirement(
+                source,
+                agent_label,
+                session_ref,
+                session_start_source,
+            ) else {
+                return HookReportAdmission::Refuse;
+            };
+            reset
+        } else {
+            false
+        };
+        if !sequence_exempt && !reset_sequence && self.hook_report_is_stale(source, seq) {
+            return HookReportAdmission::Refuse;
         }
-        if let Some(seq) = seq {
+        HookReportAdmission::Accept {
+            reset_sequence,
+            sequence_to_store: (!sequence_exempt).then_some(seq).flatten(),
+        }
+    }
+
+    fn commit_hook_report_admission(&mut self, source: &str, admission: HookReportAdmission) {
+        let HookReportAdmission::Accept {
+            reset_sequence,
+            sequence_to_store,
+        } = admission
+        else {
+            unreachable!("a refused hook report admission cannot be committed");
+        };
+        if reset_sequence {
+            self.hook_report_sequences.remove(source);
+        }
+        if let Some(seq) = sequence_to_store {
             self.hook_report_sequences.insert(source.to_string(), seq);
         }
-        true
     }
 
     #[cfg(test)]
@@ -2591,16 +2674,6 @@ impl TerminalState {
         {
             return None;
         }
-        for source in &sequence_sources {
-            self.accept_hook_report(source, seq);
-        }
-
-        let now = Instant::now();
-        let previous_agent_label = self.effective_agent_label().map(str::to_string);
-        let previous_known_agent = self.effective_known_agent();
-        let previous_state = self.state;
-        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
-        let previous_session = self.current_session_identity_for_persistence();
         let should_clear_authority = self
             .hook_authority
             .as_ref()
@@ -2614,6 +2687,20 @@ impl TerminalState {
         if !should_clear_authority && !should_clear_identity {
             return None;
         }
+        let admission = HookReportAdmission::Accept {
+            reset_sequence: false,
+            sequence_to_store: seq,
+        };
+        for source in &sequence_sources {
+            self.commit_hook_report_admission(source, admission);
+        }
+
+        let now = Instant::now();
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        let previous_session = self.current_session_identity_for_persistence();
         // Scope each suppression to the owner actually being cleared: an obsolete
         // identity's own clear must not suppress a DIFFERENT owner's live authority.
         if should_clear_authority {
@@ -2663,10 +2750,6 @@ impl TerminalState {
         agent_label: &str,
         seq: Option<u64>,
     ) -> Option<TerminalStateMutation> {
-        if !self.accept_hook_report(source, seq) {
-            return None;
-        }
-
         if self.hook_authority.as_ref().is_some_and(|authority| {
             authority.agent_label != agent_label || authority.source != source
         }) {
@@ -2700,6 +2783,11 @@ impl TerminalState {
             .persisted_agent_session
             .as_ref()
             .is_some_and(|session| session.source != source || session.agent != agent_label);
+        let admission =
+            self.plan_hook_report_admission(source, agent_label, &None, None, seq, false, false);
+        if admission == HookReportAdmission::Refuse {
+            return None;
+        }
 
         let now = Instant::now();
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
@@ -2707,6 +2795,7 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
+        self.commit_hook_report_admission(source, admission);
         self.suppress_hook_report(source, agent_label, HookSuppressionReason::HookClear, now);
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
@@ -2955,6 +3044,371 @@ mod tests {
         );
         assert_eq!(after.state, before.state);
         assert_eq!(after.revision, before.revision);
+    }
+
+    fn sessionless_authority(source: &str, label: &str, now: Instant) -> HookAuthority {
+        HookAuthority {
+            source: source.into(),
+            agent_label: label.into(),
+            state: AgentState::Idle,
+            message: None,
+            custom_status: None,
+            reported_at: now,
+            session_ref: None,
+            unconfirmed_since: None,
+        }
+    }
+
+    fn sessionless_identity(source: &str, label: &str, now: Instant) -> HookIdentity {
+        HookIdentity {
+            source: source.into(),
+            agent_label: label.into(),
+            reported_at: now,
+            unconfirmed_since: None,
+        }
+    }
+
+    #[test]
+    fn live_owner_precedence_over_identity_and_persisted_records_is_explicit() {
+        let now = Instant::now();
+
+        let mut authority_over_persisted = persisted_owner_at(now);
+        authority_over_persisted.hook_authority =
+            Some(sessionless_authority("zynk:claude", "claude", now));
+        let mut same_authority = authority_over_persisted.clone();
+        assert!(same_authority
+            .set_hook_authority_with_custom_status_at(
+                "zynk:claude".into(),
+                "claude".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some(2),
+                now + Duration::from_millis(1),
+            )
+            .is_some());
+        let mut lower_persisted = authority_over_persisted.clone();
+        lower_persisted.detected_agent = Some(Agent::Codex);
+        let before = lower_persisted.clone();
+        assert!(lower_persisted
+            .set_hook_authority_with_custom_status_at(
+                "zynk:codex".into(),
+                "codex".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("old-session"),
+                Some(21),
+                now + Duration::from_millis(1),
+            )
+            .is_none());
+        assert_rejected_owner_report_preserves_state(
+            &before,
+            &lower_persisted,
+            now + Duration::from_millis(1),
+        );
+
+        let mut identity_over_persisted = persisted_owner_at(now);
+        identity_over_persisted.hook_identity =
+            Some(sessionless_identity("zynk:hermes", "hermes", now));
+        let mut same_identity = identity_over_persisted.clone();
+        assert!(same_identity
+            .record_identity_only_hook_report_at(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                crate::agent_resume::AgentSessionRef::id("hermes-session"),
+                Some(2),
+                now + Duration::from_millis(1),
+            )
+            .is_some());
+        let mut lower_persisted = identity_over_persisted.clone();
+        lower_persisted.detected_agent = Some(Agent::Codex);
+        let before = lower_persisted.clone();
+        assert!(lower_persisted
+            .set_hook_authority_with_custom_status_at(
+                "zynk:codex".into(),
+                "codex".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("old-session"),
+                Some(21),
+                now + Duration::from_millis(1),
+            )
+            .is_none());
+        assert_rejected_owner_report_preserves_state(
+            &before,
+            &lower_persisted,
+            now + Duration::from_millis(1),
+        );
+
+        let mut authority_over_identity = test_terminal();
+        authority_over_identity.hook_authority =
+            Some(sessionless_authority("zynk:claude", "claude", now));
+        authority_over_identity.hook_identity =
+            Some(sessionless_identity("zynk:hermes", "hermes", now));
+        let mut same_authority = authority_over_identity.clone();
+        assert!(same_authority
+            .set_hook_authority_with_custom_status_at(
+                "zynk:claude".into(),
+                "claude".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some(2),
+                now + Duration::from_millis(1),
+            )
+            .is_some());
+        let mut lower_identity = authority_over_identity;
+        let before = lower_identity.clone();
+        assert!(lower_identity
+            .record_identity_only_hook_report_at(
+                "zynk:hermes".into(),
+                "hermes".into(),
+                None,
+                Some(21),
+                now + Duration::from_millis(1),
+            )
+            .is_none());
+        assert_rejected_owner_report_preserves_state(
+            &before,
+            &lower_identity,
+            now + Duration::from_millis(1),
+        );
+    }
+
+    #[test]
+    fn sessionless_live_owners_block_foreign_reports_until_real_retirement() {
+        let now = Instant::now();
+        for identity_only in [false, true] {
+            let (old_source, old_label) = if identity_only {
+                ("zynk:hermes", "hermes")
+            } else {
+                ("zynk:codex", "codex")
+            };
+            let mut terminal = test_terminal();
+            if identity_only {
+                terminal
+                    .record_identity_only_hook_report_at(
+                        old_source.into(),
+                        old_label.into(),
+                        None,
+                        Some(1),
+                        now,
+                    )
+                    .unwrap();
+            } else {
+                terminal
+                    .set_hook_authority_with_custom_status_at(
+                        old_source.into(),
+                        old_label.into(),
+                        AgentState::Idle,
+                        None,
+                        None,
+                        None,
+                        Some(1),
+                        now,
+                    )
+                    .unwrap();
+            }
+            terminal.detected_agent = Some(Agent::Claude);
+            let before = terminal.clone();
+            assert!(terminal
+                .set_hook_authority_with_custom_status_at(
+                    "zynk:claude".into(),
+                    "claude".into(),
+                    AgentState::Working,
+                    None,
+                    None,
+                    crate::agent_resume::AgentSessionRef::id("claude-session"),
+                    Some(21),
+                    now + Duration::from_millis(1),
+                )
+                .is_none());
+            assert_rejected_owner_report_preserves_state(
+                &before,
+                &terminal,
+                now + Duration::from_millis(1),
+            );
+
+            terminal
+                .release_agent_with_mutation(old_source, old_label, Some(2))
+                .expect("old live owner retires through its release path");
+            let observed_at = now + Duration::from_millis(2);
+            observe_at(&mut terminal, Some(Agent::Claude), false, observed_at);
+            assert!(terminal
+                .set_agent_session_ref_for_session_start_at(
+                    "zynk:claude".into(),
+                    "claude".into(),
+                    crate::agent_resume::AgentSessionRef::id("claude-session"),
+                    Some(21),
+                    Some("startup".into()),
+                    Some(ForegroundProcessObservation {
+                        agent: Some(Agent::Claude),
+                        observed_at,
+                    }),
+                    observed_at + Duration::from_millis(1),
+                )
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn rejected_session_start_detected_conflict_preserves_equal_sequence_retry() {
+        let now = Instant::now();
+        for shape in ["none", "full", "identity"] {
+            let (source, label, agent, reason) = if shape == "identity" {
+                ("zynk:hermes", "hermes", Agent::Hermes, "new")
+            } else {
+                ("zynk:claude", "claude", Agent::Claude, "resume")
+            };
+            let mut terminal = test_terminal();
+            let session_ref = crate::agent_resume::AgentSessionRef::id("same-session");
+            if shape == "full" {
+                terminal
+                    .set_hook_authority_with_custom_status_at(
+                        source.into(),
+                        label.into(),
+                        AgentState::Idle,
+                        None,
+                        None,
+                        session_ref.clone(),
+                        Some(1),
+                        now,
+                    )
+                    .unwrap();
+            } else if shape == "identity" {
+                terminal
+                    .record_identity_only_hook_report_at(
+                        source.into(),
+                        label.into(),
+                        session_ref.clone(),
+                        Some(1),
+                        now,
+                    )
+                    .unwrap();
+            }
+            terminal.detected_agent = Some(Agent::Pi);
+            let before = terminal.clone();
+            let rejected = terminal.set_agent_session_ref_for_session_start_at(
+                source.into(),
+                label.into(),
+                session_ref.clone(),
+                Some(21),
+                Some(reason.into()),
+                None,
+                now + Duration::from_millis(1),
+            );
+            assert!(rejected.is_none(), "{shape}");
+            assert_rejected_owner_report_preserves_state(
+                &before,
+                &terminal,
+                now + Duration::from_millis(1),
+            );
+
+            terminal.detected_agent = Some(agent);
+            assert!(
+                terminal
+                    .set_agent_session_ref_for_session_start_at(
+                        source.into(),
+                        label.into(),
+                        session_ref,
+                        Some(21),
+                        Some(reason.into()),
+                        None,
+                        now + Duration::from_millis(2),
+                    )
+                    .is_some(),
+                "{shape} equal-sequence retry was fenced"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_full_state_session_conflict_preserves_equal_sequence_retry() {
+        let now = Instant::now();
+        let first = crate::agent_resume::AgentSessionRef::path(test_session_path("first.jsonl"));
+        let second = crate::agent_resume::AgentSessionRef::path(test_session_path("second.jsonl"));
+        let mut terminal = test_terminal();
+        terminal.detected_agent = Some(Agent::Pi);
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Idle,
+                None,
+                None,
+                first,
+                Some(20),
+                now,
+            )
+            .unwrap();
+        let before = terminal.clone();
+        assert!(terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                second.clone(),
+                Some(21),
+                now + Duration::from_millis(1),
+            )
+            .is_none());
+        assert_rejected_owner_report_preserves_state(
+            &before,
+            &terminal,
+            now + Duration::from_millis(1),
+        );
+
+        terminal.hook_authority.as_mut().unwrap().session_ref = second.clone();
+        assert!(terminal
+            .set_hook_authority_with_custom_status_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                second,
+                Some(21),
+                now + Duration::from_millis(2),
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn rejected_foreign_release_preserves_state_and_equal_sequence_retry() {
+        let now = Instant::now();
+        for identity_only in [false, true] {
+            let mut terminal = test_terminal();
+            if identity_only {
+                terminal.hook_identity = Some(sessionless_identity("zynk:hermes", "hermes", now));
+            } else {
+                terminal.hook_authority = Some(sessionless_authority("zynk:codex", "codex", now));
+            }
+            let before = terminal.clone();
+            assert!(terminal
+                .release_agent_with_mutation("zynk:pi", "pi", Some(21))
+                .is_none());
+            assert_rejected_owner_report_preserves_state(
+                &before,
+                &terminal,
+                now + Duration::from_millis(1),
+            );
+
+            terminal.hook_authority = Some(sessionless_authority("zynk:pi", "pi", now));
+            terminal.hook_identity = None;
+            terminal.detected_agent = Some(Agent::Pi);
+            assert!(
+                terminal
+                    .release_agent_with_mutation("zynk:pi", "pi", Some(21))
+                    .is_some(),
+                "equal-sequence release retry was fenced"
+            );
+        }
     }
 
     #[test]
@@ -5954,8 +6408,9 @@ mod tests {
 
     #[test]
     fn identity_does_not_prevent_a_new_full_owner_from_releasing() {
-        // Owner coherence: accepting a full-lifecycle owner retires the identity-only
-        // identity, so the obsolete identity cannot veto the accepted owner's cleanup.
+        // A live identity now blocks a foreign full report. Once that identity retires
+        // through its real release path, it must not veto the replacement owner's
+        // acceptance or later cleanup.
         let mut terminal = test_terminal();
         terminal.set_hook_authority_with_session_ref(
             "zynk:hermes".into(),
@@ -5966,6 +6421,22 @@ mod tests {
             None,
             Some(1),
         );
+        let before = terminal.clone();
+        assert!(terminal
+            .set_hook_authority_with_session_ref(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("pi-new"),
+                Some(1),
+            )
+            .is_none());
+        assert_rejected_owner_report_preserves_state(&before, &terminal, Instant::now());
+        terminal
+            .release_agent_with_mutation("zynk:hermes", "hermes", Some(2))
+            .expect("the identity-only owner retires before replacement");
         terminal
             .set_hook_authority_with_session_ref(
                 "zynk:pi".into(),
@@ -7442,7 +7913,35 @@ mod tests {
             "the fence must name the full owner it was recorded for"
         );
 
-        // A DIFFERENT source reporting the same agent label takes the pane.
+        // The provisional owner is still live for mutation arbitration even though it
+        // cannot anchor a receipt. A different source cannot take over until that owner
+        // retires, and the refusal must not spend the incoming sequence.
+        let before = terminal.clone();
+        assert!(terminal
+            .set_hook_authority_with_custom_status_at(
+                "other:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some(1),
+                base + Duration::from_secs(3),
+            )
+            .is_none());
+        assert_rejected_owner_report_preserves_state(
+            &before,
+            &terminal,
+            base + Duration::from_secs(3),
+        );
+
+        // Retire it through the real release path before a different source reporting
+        // the same label may take the pane.
+        terminal
+            .release_agent_with_mutation("zynk:pi", "pi", Some(2))
+            .expect("the provisional first owner retires before replacement");
+
+        // A DIFFERENT source reporting the same agent label then takes the pane.
         terminal
             .set_hook_authority_with_custom_status_at(
                 "other:pi".into(),
@@ -8428,9 +8927,10 @@ mod tests {
 
     #[test]
     fn an_identity_only_clear_does_not_suppress_a_different_live_owner() {
-        // The two representations can coexist while the full owner holds no session.
-        // The identity owner's clear then scopes to its own identity and leaves the
-        // live authority — and that owner's later reports — alone.
+        // A normal report can no longer create this conflicting pair, but imported or
+        // legacy state can still contain both representations. The identity owner's
+        // clear scopes to its own identity and leaves the live authority — and that
+        // owner's later reports — alone.
         let mut terminal = test_terminal();
         terminal
             .set_hook_authority_with_session_ref(
@@ -8443,15 +8943,14 @@ mod tests {
                 Some(1),
             )
             .expect("the full-lifecycle owner takes authority");
-        terminal.set_hook_authority_with_session_ref(
-            "zynk:hermes".into(),
-            "hermes".into(),
-            AgentState::Idle,
-            None,
-            None,
-            None,
-            Some(1),
-        );
+        terminal.hook_identity = Some(sessionless_identity(
+            "zynk:hermes",
+            "hermes",
+            Instant::now(),
+        ));
+        terminal
+            .hook_report_sequences
+            .insert("zynk:hermes".into(), 1);
         assert!(terminal.hook_identity.is_some());
 
         terminal.clear_hook_authority_with_mutation(Some("zynk:hermes"), Some(2));
@@ -8493,15 +8992,19 @@ mod tests {
                 Some(1),
             )
             .expect("the full-lifecycle owner takes authority");
-        terminal.set_hook_authority_with_session_ref(
-            "zynk:hermes".into(),
-            "hermes".into(),
-            AgentState::Idle,
-            None,
-            None,
-            crate::agent_resume::AgentSessionRef::id("hermes-1"),
-            Some(1),
-        );
+        terminal.hook_identity = Some(sessionless_identity(
+            "zynk:hermes",
+            "hermes",
+            Instant::now(),
+        ));
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "zynk:hermes".into(),
+            agent: "hermes".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("hermes-1").unwrap(),
+        });
+        terminal
+            .hook_report_sequences
+            .insert("zynk:hermes".into(), 1);
 
         terminal.release_agent_with_mutation("zynk:pi", "pi", Some(2));
 
@@ -9631,6 +10134,8 @@ mod tests {
                 Some(20),
             )
             .expect("initial session should be accepted");
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let before = terminal.clone();
 
         let mutation = terminal.set_agent_session_ref(
             "zynk:claude".into(),
@@ -9640,7 +10145,11 @@ mod tests {
         );
 
         assert!(mutation.is_none());
-        assert_eq!(terminal.hook_report_sequences.get("zynk:claude"), Some(&21));
+        assert_eq!(
+            terminal.hook_report_sequences.get("zynk:claude"),
+            Some(&20),
+            "a rejected session report consumed its sequence"
+        );
         assert_eq!(
             terminal
                 .persisted_agent_session
@@ -9648,6 +10157,25 @@ mod tests {
                 .map(|session| session.session_ref.value.as_str()),
             Some("claude-session")
         );
+        assert_rejected_owner_report_preserves_state(&before, &terminal, Instant::now());
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            Instant::now(),
+        );
+        terminal
+            .set_agent_session_ref(
+                "zynk:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("nested-session"),
+                Some(21),
+            )
+            .expect("the same sequence is accepted after the current session clears");
     }
 
     #[test]
@@ -9961,6 +10489,64 @@ mod tests {
     }
 
     #[test]
+    fn rejected_foreign_clear_preserves_sequence_for_equal_retry() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "zynk:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(20),
+        );
+        let observed_at = Instant::now();
+        let before = terminal.clone();
+
+        assert!(terminal
+            .clear_hook_authority_with_mutation(Some("zynk:claude"), Some(7))
+            .is_none());
+        assert_rejected_owner_report_preserves_state(&before, &terminal, observed_at);
+
+        terminal
+            .release_agent_with_mutation("zynk:pi", "pi", Some(21))
+            .expect("the current owner retires before the foreign source retries");
+        assert!(terminal
+            .set_hook_authority(
+                "zynk:claude".into(),
+                "claude".into(),
+                AgentState::Idle,
+                None,
+                Some(7),
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn rejected_unsequenced_and_ownerless_clears_are_side_effect_free() {
+        let mut owned = test_terminal();
+        owned.set_hook_authority(
+            "zynk:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(20),
+        );
+        let observed_at = Instant::now();
+        let before = owned.clone();
+        assert!(owned
+            .clear_hook_authority_with_mutation(Some("zynk:claude"), None)
+            .is_none());
+        assert_rejected_owner_report_preserves_state(&before, &owned, observed_at);
+
+        let mut ownerless = test_terminal();
+        let observed_at = Instant::now();
+        let before = ownerless.clone();
+        assert!(ownerless
+            .clear_hook_authority_with_mutation(None, Some(7))
+            .is_none());
+        assert_rejected_owner_report_preserves_state(&before, &ownerless, observed_at);
+    }
+
+    #[test]
     fn same_sequence_from_different_sources_is_independent() {
         let mut terminal = test_terminal();
         terminal.set_hook_authority(
@@ -9970,6 +10556,20 @@ mod tests {
             None,
             Some(20),
         );
+        let before = terminal.clone();
+        assert!(terminal
+            .set_hook_authority(
+                "custom:pi".into(),
+                "pi".into(),
+                AgentState::Idle,
+                None,
+                Some(19),
+            )
+            .is_none());
+        assert_rejected_owner_report_preserves_state(&before, &terminal, Instant::now());
+        terminal
+            .release_agent_with_mutation("zynk:pi", "pi", Some(21))
+            .expect("the first owner retires before another source takes over");
 
         terminal.set_hook_authority(
             "custom:pi".into(),
