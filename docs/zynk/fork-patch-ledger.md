@@ -2501,3 +2501,19 @@ latter appends its touched files to the `NOTICE` §4(b) *Modified files* list.
 - No host negotiation, protocol19 change, new platform path or dependency.
   All three source files already carry modified-file notices and NOTICE entries.
 - **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.
+
+### M6-09: Associated Emoji Characterization (2026-09-11)
+
+- **Source:** `30232287361f753d071ecd6bca7b9dda276ec0f9`. Its field-split parser is
+  already superseded by M5-24 and its reviewed corrections. Retain the exact
+  single-codepoint emoji positive, augmented with payload and pane-encoder
+  byte assertions. No production parser hunk is imported.
+- Do not restore the source's key/text equality restriction or its two old
+  rejection vectors: unequal emoji and emoji plus variation-selector payloads
+  are now explicit positive controls for M5's multi-codepoint semantics.
+  The malformed-alternate scalar/count checks remain unchanged. The upstream
+  Windows-picker release note is not a claim of native Windows verification.
+- Test-only characterization, not a newly fixed production defect. Source
+  attribution remains in the existing parse.rs notice and NOTICE entry.
+  Protocol19, host-negotiation boundaries and all M5 deferrals are unchanged.
+- **IMPLEMENTED / PENDING VERIFICATION** by Gate2/Gate3, no deployment implied.

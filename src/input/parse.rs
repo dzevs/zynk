@@ -707,6 +707,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_kitty_sequence_with_associated_emoji_text() {
+        let key = parse_terminal_key_sequence("\x1b[128512;1;128512u").unwrap();
+        assert_eq!(key.code, KeyCode::Char('\u{1f600}'));
+        assert!(key.modifiers.is_empty());
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+        assert_eq!(key.generated_text.as_deref(), Some("\u{1f600}"));
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Legacy),
+            "\u{1f600}".as_bytes()
+        );
+    }
+
+    #[test]
+    fn associated_emoji_text_keeps_m5_multicodepoint_and_unequal_payloads() {
+        for (sequence, expected) in [
+            ("\x1b[128512;1;128513u", "\u{1f601}"),
+            ("\x1b[128512;1;128512:65039u", "\u{1f600}\u{fe0f}"),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).unwrap();
+            assert_eq!(key.code, KeyCode::Char('\u{1f600}'));
+            assert_eq!(key.generated_text.as_deref(), Some(expected));
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Legacy),
+                expected.as_bytes()
+            );
+        }
+    }
+
+    #[test]
     fn parse_kitty_sequence_with_multicodepoint_ime_text() {
         let key = parse_terminal_key_sequence("\x1b[32;;20320:22909u").unwrap();
 
