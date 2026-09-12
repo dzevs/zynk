@@ -3363,3 +3363,21 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   negatives. The live control was rebaselined green on the exact clean M7-10
   tree before this change; its timeout now reports layout-neutral "ptmx master
   fds" wording. Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-13: Clientless Headless Agent Resume (2026-09-12)
+
+- **Source:** `ac47b9e6` (post-relicense; `src/server/headless.rs` was already
+  marked and indexed in `NOTICE`; upstream `docs/next` remains excluded).
+  Headless scheduling no longer discards a pending agent-resume deadline merely
+  because no foreground client is attached. Geometry-dirty work still clears
+  the deadline so a resume never starts from stale pane dimensions.
+- The clientless virtual frame computes restored pane geometry first. A pending
+  resume then waits the existing bounded 750 ms for a host theme and launches
+  with an empty theme only when that deadline expires; it does not depend on a
+  spinner or animation timer. The converted headless control uses a real PTY,
+  checks its inner-rect size and pending-plan consumption, and explicitly shuts
+  down the runtime; unwind-time `PaneRuntime::drop` retains failure cleanup.
+- Existing geometry-dirty, host-theme, hidden/inactive-pane, runtime ownership,
+  live-handoff DB-worker, and authority controls remain in force. No protocol,
+  caller, persistence, worker-placement, or session-identity policy changes.
+  Exact-candidate Gate-2/Gate-3 verification remains required.

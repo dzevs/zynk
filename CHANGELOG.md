@@ -59,6 +59,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Headless servers resume restored agent sessions after a bounded host-theme
+  wait even when no foreground client has attached yet.
 - Host focus, resize, and handoff repaints preserve uploaded Kitty graphics
   instead of clearing the terminal surface before redrawing text.
 - Oversized bracketed text pastes are rejected with a client-local notification
