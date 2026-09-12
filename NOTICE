@@ -144,6 +144,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/raw_input.rs
 - src/render_signal.rs
 - src/selection.rs
+- src/server/autodetect.rs
 - src/server/client_transport.rs
 - src/server/clients.rs
 - src/server/headless.rs

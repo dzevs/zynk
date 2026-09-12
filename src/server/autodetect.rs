@@ -1,8 +1,10 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Auto-detect launch behavior for the `zynk` command.
 //!
 //! When the user runs `zynk` with no subcommand:
 //! 1. Check if a server is already listening on the client socket
-//! 2. If no server → spawn one as a background daemon → wait for socket readiness (up to 5s)
+//! 2. If no server → spawn one as a background daemon → wait for socket readiness (up to 15s)
 //! 3. Attach as a thin client to the server
 //!
 //! The `--no-session` flag bypasses server/client entirely and runs monolithically
@@ -21,7 +23,7 @@ use super::socket_paths::client_socket_path;
 
 /// Maximum time to wait for the server's client socket to become ready
 /// after spawning the server process.
-const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Poll interval when waiting for the server socket to appear.
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -205,9 +207,12 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         format!(
-            "server did not become ready within {}s (socket: {})",
+            "server did not become ready within {}s (socket: {}). The background server may still be starting; try `zynk` again, or check {}",
             timeout.as_secs(),
-            socket_path.display()
+            socket_path.display(),
+            crate::session::data_dir()
+                .join(crate::logging::LOG_FILE_SERVER)
+                .display()
         ),
     ))
 }
@@ -374,15 +379,27 @@ mod tests {
     }
 
     #[test]
+    fn server_ready_timeout_allows_slow_local_startup() {
+        assert_eq!(SERVER_READY_TIMEOUT, Duration::from_secs(15));
+    }
+
+    #[test]
     fn wait_for_server_socket_times_out() {
         let dir = unique_test_dir("wait-timeout");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.sock");
 
         // No listener — should time out.
-        let result = wait_for_server_socket(&path, Duration::from_millis(50));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        let error = wait_for_server_socket(&path, Duration::from_millis(50)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        let expected_log = crate::session::data_dir().join(crate::logging::LOG_FILE_SERVER);
+        assert!(
+            error
+                .to_string()
+                .contains(expected_log.to_string_lossy().as_ref()),
+            "timeout diagnostic should name {}: {error}",
+            expected_log.display()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -402,7 +419,7 @@ mod tests {
         });
 
         // Wait with a generous timeout — should succeed.
-        let result = wait_for_server_socket(&path, Duration::from_secs(2));
+        let result = wait_for_server_socket(&path, SERVER_READY_TIMEOUT);
         assert!(result.is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
