@@ -3619,3 +3619,47 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   reusing the M7 scalar query; do not recreate an aggregate snapshot read.
   Protocol remains 19, and exact-candidate Gate-2/Gate-3 verification remains
   required.
+
+### M7 Gate-3 Remediation: Final Stop Admission, Direct Input Authority, and Fragmented Paste Bounds (2026-09-12)
+
+- **Fork remediation on rejected candidate `be7d2e4`:** this successor closes
+  `G3-M7-STOP-001`, `G3-M7-CONTROL-INPUTEVENTS-001`, and
+  `G3-M7-FRAGMENTED-PASTE-001`. It assigns no additional upstream source and
+  does not change M7's ordered 21-source reconciliation: `b01fc37e` remains
+  excluded and `d76657f2` remains deferred. Protocol stays 19, and every
+  recorded M8 obligation remains unchanged.
+- M7-17's final linearization point for dequeued server/client and API work is
+  now the handler admission load of the shared stop atomic. A handler that
+  observes stop refuses before normal dispatch; a handler that observes no
+  stop owns that item even if stop is stored immediately afterward. All prior
+  loop and API-socket fences remain. Late `ClientConnected` work receives the
+  existing shutdown response, queued API work receives `server_unavailable`,
+  and other client work is dropped without App/runtime mutation. Production
+  Ping and the first `server.stop` retain their socket-layer behavior, internal
+  event forwarding is unchanged, and the `--no-session` monolithic scope
+  remains outside the shared-stop fence.
+- Direct `TerminalAttach` is a raw terminal-byte contract. The shipped client,
+  and any future mobile, remote, or third-party direct-control client, must use
+  `ClientMessage::Input`; App-oriented structured `InputEvents` are unsupported.
+  A structured batch therefore closes the direct stream before conversion or
+  App routing, with a stable diagnostic, and releases its terminal ownership
+  and resize lock. The accepted target-specific paths remain raw `Input`,
+  clipboard-image paste, resize, and attach-scroll. App structured input,
+  observer refusal, and missing-client refusal retain their existing policy.
+- M7-09's 1 MiB bound now applies to one logical bracketed-paste envelope across
+  `Input` frames, before either App parsing or direct-terminal forwarding. The
+  transport holds at most one start prefix or at-limit incomplete envelope;
+  non-input messages do not reset it. An exact complete UTF-8 max+1 envelope
+  produces one recoverable `ClientPasteRejected` and resets the guard, while
+  cumulative incomplete, malformed, mixed, trailing, or multiple-envelope
+  oversize disconnects. Exact-limit input is forwarded once and byte-identical;
+  ordinary input keeps a contiguous fast path. A definitive lone Escape stays
+  forwarded, but a later attempt to extend it retroactively into a paste
+  introducer fails closed.
+- Red-first controls at the rejected parent cover both post-dequeue races, all
+  six structured input variants through fresh direct-control instances, exact
+  and max+1 fragmented envelopes, every start/end delimiter split, non-input
+  interleaving, cumulative unterminated and malformed cases, and both App and
+  direct-terminal consumers. This successor is **IMPLEMENTED / PENDING
+  VERIFICATION** until exact-SHA Gate-2 and a fresh whole-M7 Gate-3 verdict; no
+  merge, push, install, tag, publish, or release follows from this entry.

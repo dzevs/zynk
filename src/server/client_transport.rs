@@ -44,6 +44,269 @@ const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
 /// Maximum structured input events accepted in one client message.
 const MAX_INPUT_EVENT_BATCH: usize = 4096;
 
+#[derive(Debug)]
+enum RawPasteEnvelopeState {
+    Idle,
+    StartPrefix { bytes: Vec<u8>, mixed_prefix: bool },
+    Paste { bytes: Vec<u8>, mixed_prefix: bool },
+    ForwardedEscape { continuation: Vec<u8> },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RawPasteEnvelopeOutcome {
+    Forward(Vec<u8>),
+    Hold,
+    RejectPaste { size: usize },
+    Disconnect { size: usize, reason: &'static str },
+}
+
+#[derive(Debug)]
+struct RawPasteEnvelopeGuard {
+    state: RawPasteEnvelopeState,
+}
+
+impl Default for RawPasteEnvelopeGuard {
+    fn default() -> Self {
+        Self {
+            state: RawPasteEnvelopeState::Idle,
+        }
+    }
+}
+
+impl RawPasteEnvelopeGuard {
+    fn push(&mut self, data: Vec<u8>) -> Vec<RawPasteEnvelopeOutcome> {
+        let state = std::mem::replace(&mut self.state, RawPasteEnvelopeState::Idle);
+
+        if data.len() > MAX_INPUT_PAYLOAD {
+            return match state {
+                RawPasteEnvelopeState::Idle
+                    if crate::raw_input::is_complete_text_bracketed_paste(&data) =>
+                {
+                    vec![RawPasteEnvelopeOutcome::RejectPaste { size: data.len() }]
+                }
+                RawPasteEnvelopeState::Idle => vec![RawPasteEnvelopeOutcome::Disconnect {
+                    size: data.len(),
+                    reason: "oversized input is not one complete UTF-8 bracketed paste",
+                }],
+                _ => vec![RawPasteEnvelopeOutcome::Disconnect {
+                    size: data.len(),
+                    reason: "oversized input arrived while a bracketed paste was pending",
+                }],
+            };
+        }
+
+        match state {
+            RawPasteEnvelopeState::Idle => self.scan_idle(data, true, false),
+            RawPasteEnvelopeState::StartPrefix {
+                mut bytes,
+                mixed_prefix,
+            } => {
+                let size = match bytes.len().checked_add(data.len()) {
+                    Some(size) => size,
+                    None => {
+                        return vec![RawPasteEnvelopeOutcome::Disconnect {
+                            size: usize::MAX,
+                            reason: "bracketed-paste prefix length overflow",
+                        }];
+                    }
+                };
+                bytes.extend_from_slice(&data);
+                let compared = bytes
+                    .len()
+                    .min(crate::raw_input::BRACKETED_PASTE_START.len());
+                if bytes[..compared] != crate::raw_input::BRACKETED_PASTE_START[..compared] {
+                    self.scan_idle(bytes, false, mixed_prefix)
+                } else if bytes.len() < crate::raw_input::BRACKETED_PASTE_START.len() {
+                    self.state = RawPasteEnvelopeState::StartPrefix {
+                        bytes,
+                        mixed_prefix,
+                    };
+                    vec![RawPasteEnvelopeOutcome::Hold]
+                } else {
+                    debug_assert_eq!(size, bytes.len());
+                    self.resolve_paste(bytes, mixed_prefix)
+                }
+            }
+            RawPasteEnvelopeState::Paste {
+                mut bytes,
+                mixed_prefix,
+            } => {
+                if bytes.len().checked_add(data.len()).is_none() {
+                    return vec![RawPasteEnvelopeOutcome::Disconnect {
+                        size: usize::MAX,
+                        reason: "bracketed-paste envelope length overflow",
+                    }];
+                }
+                bytes.extend_from_slice(&data);
+                self.resolve_paste(bytes, mixed_prefix)
+            }
+            RawPasteEnvelopeState::ForwardedEscape { mut continuation } => {
+                if continuation.len().checked_add(data.len()).is_none() {
+                    return vec![RawPasteEnvelopeOutcome::Disconnect {
+                        size: usize::MAX,
+                        reason: "split paste introducer length overflow",
+                    }];
+                }
+                continuation.extend_from_slice(&data);
+                let expected = &crate::raw_input::BRACKETED_PASTE_START[1..];
+                let compared = continuation.len().min(expected.len());
+                if continuation[..compared] != expected[..compared] {
+                    self.scan_idle(continuation, false, false)
+                } else if continuation.len() < expected.len() {
+                    self.state = RawPasteEnvelopeState::ForwardedEscape { continuation };
+                    vec![RawPasteEnvelopeOutcome::Hold]
+                } else {
+                    vec![RawPasteEnvelopeOutcome::Disconnect {
+                        size: continuation.len().saturating_add(1),
+                        reason: "input tried to extend a forwarded Escape into a bracketed paste",
+                    }]
+                }
+            }
+        }
+    }
+
+    fn scan_idle(
+        &mut self,
+        data: Vec<u8>,
+        definitive_lone_escape: bool,
+        prior_mixed_prefix: bool,
+    ) -> Vec<RawPasteEnvelopeOutcome> {
+        if data.is_empty() {
+            return forward_raw_input(data);
+        }
+
+        if definitive_lone_escape && data.as_slice() == b"\x1b" {
+            self.state = RawPasteEnvelopeState::ForwardedEscape {
+                continuation: Vec::new(),
+            };
+            return vec![RawPasteEnvelopeOutcome::Forward(data)];
+        }
+
+        if let Some(start) = incomplete_bracketed_paste_start(&data) {
+            let mut outcomes = Vec::with_capacity(2);
+            if start > 0 {
+                outcomes.extend(forward_raw_input(data[..start].to_vec()));
+            }
+            self.state = RawPasteEnvelopeState::Paste {
+                bytes: data[start..].to_vec(),
+                mixed_prefix: prior_mixed_prefix || start > 0,
+            };
+            outcomes.push(RawPasteEnvelopeOutcome::Hold);
+            return outcomes;
+        }
+
+        if let Some(prefix_len) = trailing_bracketed_paste_start_prefix(&data) {
+            let start = data.len() - prefix_len;
+            let mut outcomes = Vec::with_capacity(2);
+            if start > 0 {
+                outcomes.extend(forward_raw_input(data[..start].to_vec()));
+            }
+            self.state = RawPasteEnvelopeState::StartPrefix {
+                bytes: data[start..].to_vec(),
+                mixed_prefix: prior_mixed_prefix || start > 0,
+            };
+            outcomes.push(RawPasteEnvelopeOutcome::Hold);
+            return outcomes;
+        }
+
+        forward_raw_input(data)
+    }
+
+    fn resolve_paste(
+        &mut self,
+        bytes: Vec<u8>,
+        mixed_prefix: bool,
+    ) -> Vec<RawPasteEnvelopeOutcome> {
+        debug_assert!(bytes.starts_with(crate::raw_input::BRACKETED_PASTE_START));
+        let content_start = crate::raw_input::BRACKETED_PASTE_START.len();
+        let Some(relative_end) = find_bytes(
+            &bytes[content_start..],
+            crate::raw_input::BRACKETED_PASTE_END,
+        ) else {
+            if bytes.len() > MAX_INPUT_PAYLOAD {
+                return vec![RawPasteEnvelopeOutcome::Disconnect {
+                    size: bytes.len(),
+                    reason: "unterminated bracketed paste exceeded the input limit",
+                }];
+            }
+            self.state = RawPasteEnvelopeState::Paste {
+                bytes,
+                mixed_prefix,
+            };
+            return vec![RawPasteEnvelopeOutcome::Hold];
+        };
+
+        let end = content_start + relative_end;
+        let envelope_len = end + crate::raw_input::BRACKETED_PASTE_END.len();
+        if envelope_len > MAX_INPUT_PAYLOAD {
+            let is_exact = !mixed_prefix
+                && envelope_len == bytes.len()
+                && std::str::from_utf8(&bytes[content_start..end]).is_ok();
+            return if is_exact {
+                vec![RawPasteEnvelopeOutcome::RejectPaste { size: envelope_len }]
+            } else {
+                vec![RawPasteEnvelopeOutcome::Disconnect {
+                    size: bytes.len(),
+                    reason: "oversized bracketed paste was mixed, trailing, or invalid UTF-8",
+                }]
+            };
+        }
+
+        if envelope_len == bytes.len() {
+            return vec![RawPasteEnvelopeOutcome::Forward(bytes)];
+        }
+
+        let mut outcomes = vec![RawPasteEnvelopeOutcome::Forward(
+            bytes[..envelope_len].to_vec(),
+        )];
+        outcomes.extend(self.scan_idle(bytes[envelope_len..].to_vec(), false, false));
+        outcomes
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn forward_raw_input(mut data: Vec<u8>) -> Vec<RawPasteEnvelopeOutcome> {
+    if data.len() <= MAX_INPUT_PAYLOAD {
+        return vec![RawPasteEnvelopeOutcome::Forward(data)];
+    }
+
+    let trailing = data.split_off(MAX_INPUT_PAYLOAD);
+    vec![
+        RawPasteEnvelopeOutcome::Forward(data),
+        RawPasteEnvelopeOutcome::Forward(trailing),
+    ]
+}
+
+fn incomplete_bracketed_paste_start(data: &[u8]) -> Option<usize> {
+    let mut search_from = 0;
+    while let Some(relative_start) = find_bytes(
+        &data[search_from..],
+        crate::raw_input::BRACKETED_PASTE_START,
+    ) {
+        let start = search_from + relative_start;
+        let content_start = start + crate::raw_input::BRACKETED_PASTE_START.len();
+        let Some(relative_end) = find_bytes(
+            &data[content_start..],
+            crate::raw_input::BRACKETED_PASTE_END,
+        ) else {
+            return Some(start);
+        };
+        search_from = content_start + relative_end + crate::raw_input::BRACKETED_PASTE_END.len();
+    }
+    None
+}
+
+fn trailing_bracketed_paste_start_prefix(data: &[u8]) -> Option<usize> {
+    (1..crate::raw_input::BRACKETED_PASTE_START.len())
+        .rev()
+        .find(|&len| data.ends_with(&crate::raw_input::BRACKETED_PASTE_START[..len]))
+}
+
 /// Channels owned by the server side of a client writer thread.
 #[derive(Clone, Debug)]
 pub(crate) struct ClientWriter {
@@ -708,7 +971,8 @@ fn client_read_loop(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
 ) -> io::Result<()> {
-    while !should_quit.load(Ordering::Acquire) {
+    let mut raw_paste_guard = RawPasteEnvelopeGuard::default();
+    'read_loop: while !should_quit.load(Ordering::Acquire) {
         let msg: ClientMessage = match protocol::read_message(&mut stream, MAX_GRAPHICS_FRAME_SIZE)
         {
             Ok(msg) => msg,
@@ -745,36 +1009,48 @@ fn client_read_loop(
             }
         };
 
-        let event = match msg {
+        let msg = match msg {
             ClientMessage::Input { data } => {
-                // Validate input size.
-                if data.len() > MAX_INPUT_PAYLOAD {
-                    if crate::raw_input::is_complete_text_bracketed_paste(&data) {
-                        warn!(
-                            client_id,
-                            size = data.len(),
-                            max = MAX_INPUT_PAYLOAD,
-                            "oversized bracketed paste from client, rejecting"
-                        );
-                        ServerEvent::ClientPasteRejected {
-                            client_id,
-                            size: data.len(),
-                            max: MAX_INPUT_PAYLOAD,
+                for outcome in raw_paste_guard.push(data) {
+                    let event = match outcome {
+                        RawPasteEnvelopeOutcome::Forward(data) => {
+                            ServerEvent::ClientInput { client_id, data }
                         }
-                    } else {
-                        warn!(
-                            client_id,
-                            size = data.len(),
-                            "oversized input from client, closing"
-                        );
-                        let _ = server_event_tx
-                            .blocking_send(ServerEvent::ClientDisconnected { client_id });
-                        break;
+                        RawPasteEnvelopeOutcome::Hold => continue,
+                        RawPasteEnvelopeOutcome::RejectPaste { size } => {
+                            warn!(
+                                client_id,
+                                size,
+                                max = MAX_INPUT_PAYLOAD,
+                                "oversized bracketed paste from client, rejecting"
+                            );
+                            ServerEvent::ClientPasteRejected {
+                                client_id,
+                                size,
+                                max: MAX_INPUT_PAYLOAD,
+                            }
+                        }
+                        RawPasteEnvelopeOutcome::Disconnect { size, reason } => {
+                            warn!(
+                                client_id,
+                                size, reason, "invalid raw input from client, closing"
+                            );
+                            let _ = server_event_tx
+                                .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                            break 'read_loop;
+                        }
+                    };
+                    if server_event_tx.blocking_send(event).is_err() {
+                        break 'read_loop;
                     }
-                } else {
-                    ServerEvent::ClientInput { client_id, data }
                 }
+                continue;
             }
+            msg => msg,
+        };
+
+        let event = match msg {
+            ClientMessage::Input { .. } => unreachable!("raw input handled before dispatch"),
             ClientMessage::InputEvents { events } => match input_event_limit(&events) {
                 InputEventLimit::WithinLimits => {
                     ServerEvent::ClientInputEvents { client_id, events }
@@ -959,6 +1235,42 @@ mod tests {
         data.resize(total_len - b"\x1b[201~".len(), b'x');
         data.extend_from_slice(b"\x1b[201~");
         data
+    }
+
+    fn split_bracketed_paste(total_len: usize, first_len: usize) -> (Vec<u8>, Vec<u8>) {
+        let mut second = bracketed_paste_with_total_len(total_len);
+        let first = second.drain(..first_len).collect();
+        (first, second)
+    }
+
+    fn write_input_message(stream: &mut LocalStream, data: Vec<u8>) {
+        protocol::write_message(stream, &ClientMessage::Input { data }).expect("write input frame");
+    }
+
+    fn write_resize_marker(stream: &mut LocalStream, cols: u16) {
+        protocol::write_message(
+            stream,
+            &ClientMessage::Resize {
+                cols,
+                rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
+            },
+        )
+        .expect("write resize marker");
+    }
+
+    fn assert_resize_marker(event: ServerEvent, expected_cols: u16) {
+        match event {
+            ServerEvent::ClientResize {
+                client_id: 7,
+                cols,
+                rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
+            } => assert_eq!(cols, expected_cols),
+            other => panic!("expected resize marker, got {other:?}"),
+        }
     }
 
     fn assert_client_message_disconnects(name: &str, message: ClientMessage) {
@@ -1580,6 +1892,397 @@ new_tab = "ctrl+notakey"
             .join()
             .expect("read thread join")
             .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_holds_fragmented_at_limit_paste_until_complete() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("fragmented-at-limit");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+        let (first, second) = split_bracketed_paste(MAX_INPUT_PAYLOAD, (MAX_INPUT_PAYLOAD / 2) + 1);
+        let mut expected = first.clone();
+        expected.extend_from_slice(&second);
+
+        write_input_message(&mut client_stream, first);
+        write_resize_marker(&mut client_stream, 91);
+        assert_resize_marker(
+            recv_server_event(&mut server_event_rx, "marker after held fragment"),
+            91,
+        );
+
+        write_input_message(&mut client_stream, second);
+        match recv_server_event(&mut server_event_rx, "completed at-limit paste") {
+            ServerEvent::ClientInput { client_id, data } => {
+                assert_eq!(client_id, 7);
+                assert_eq!(data, expected);
+                let mut app_framer = crate::raw_input::RawInputFramer::default();
+                let events = app_framer.push(&data);
+                assert_eq!(events.len(), 1);
+                let crate::raw_input::RawInputEvent::Paste(text) = &events[0] else {
+                    panic!("expected one semantic paste event");
+                };
+                assert_eq!(
+                    text.len(),
+                    MAX_INPUT_PAYLOAD
+                        - crate::raw_input::BRACKETED_PASTE_START.len()
+                        - crate::raw_input::BRACKETED_PASTE_END.len()
+                );
+            }
+            other => panic!("expected one reassembled ClientInput, got {other:?}"),
+        }
+
+        write_input_message(&mut client_stream, b"after exact limit".to_vec());
+        match recv_server_event(&mut server_event_rx, "input after at-limit paste") {
+            ServerEvent::ClientInput { client_id, data } => {
+                assert_eq!(client_id, 7);
+                assert_eq!(data, b"after exact limit");
+            }
+            other => panic!("expected ClientInput after at-limit paste, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_rejects_fragmented_max_plus_one_paste_and_recovers() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("fragmented-max-plus-one");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+        let (first, second) =
+            split_bracketed_paste(MAX_INPUT_PAYLOAD + 1, (MAX_INPUT_PAYLOAD / 2) + 1);
+
+        write_input_message(&mut client_stream, first);
+        write_resize_marker(&mut client_stream, 92);
+        assert_resize_marker(
+            recv_server_event(&mut server_event_rx, "marker after held oversized fragment"),
+            92,
+        );
+
+        write_input_message(&mut client_stream, second);
+        match recv_server_event(&mut server_event_rx, "fragmented paste rejection") {
+            ServerEvent::ClientPasteRejected {
+                client_id,
+                size,
+                max,
+            } => {
+                assert_eq!(client_id, 7);
+                assert_eq!(size, MAX_INPUT_PAYLOAD + 1);
+                assert_eq!(max, MAX_INPUT_PAYLOAD);
+            }
+            other => panic!("expected recoverable ClientPasteRejected, got {other:?}"),
+        }
+
+        write_input_message(&mut client_stream, b"still connected".to_vec());
+        match recv_server_event(&mut server_event_rx, "input after fragmented rejection") {
+            ServerEvent::ClientInput { client_id, data } => {
+                assert_eq!(client_id, 7);
+                assert_eq!(data, b"still connected");
+            }
+            other => panic!("expected ClientInput after rejection, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_disconnects_cumulative_unterminated_paste() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("fragmented-unterminated");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+        let mut first = b"\x1b[200~".to_vec();
+        first.resize((MAX_INPUT_PAYLOAD / 2) + 1, b'x');
+        let second = vec![b'x'; MAX_INPUT_PAYLOAD + 1 - first.len()];
+
+        write_input_message(&mut client_stream, first);
+        write_resize_marker(&mut client_stream, 93);
+        assert_resize_marker(
+            recv_server_event(&mut server_event_rx, "marker after unterminated fragment"),
+            93,
+        );
+        write_input_message(&mut client_stream, second);
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "unterminated paste disconnect"),
+            ServerEvent::ClientDisconnected { client_id: 7 }
+        ));
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_handles_every_fragmented_paste_start_boundary() {
+        const START: &[u8] = b"\x1b[200~";
+        for split in 1..START.len() {
+            let (mut client_stream, server_stream, _path) =
+                local_stream_pair("fragmented-start-boundary");
+            let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+            let should_quit = Arc::new(AtomicBool::new(false));
+            let read_quit = should_quit.clone();
+            let handle = std::thread::spawn(move || {
+                client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+            });
+            let paste = bracketed_paste_with_total_len(MAX_INPUT_PAYLOAD + 1);
+
+            write_input_message(&mut client_stream, paste[..split].to_vec());
+            if split == 1 {
+                match recv_server_event(&mut server_event_rx, "definitive lone escape") {
+                    ServerEvent::ClientInput { client_id, data } => {
+                        assert_eq!(client_id, 7);
+                        assert_eq!(data, b"\x1b");
+                    }
+                    other => panic!("expected definitive lone Escape, got {other:?}"),
+                }
+            } else {
+                write_resize_marker(&mut client_stream, 94);
+                assert_resize_marker(
+                    recv_server_event(&mut server_event_rx, "marker after split start"),
+                    94,
+                );
+            }
+
+            write_input_message(&mut client_stream, paste[split..].to_vec());
+            let outcome = recv_server_event(&mut server_event_rx, "split-start outcome");
+            if split == 1 {
+                assert!(matches!(
+                    outcome,
+                    ServerEvent::ClientDisconnected { client_id: 7 }
+                ));
+            } else {
+                assert!(matches!(
+                    outcome,
+                    ServerEvent::ClientPasteRejected {
+                        client_id: 7,
+                        size,
+                        max: MAX_INPUT_PAYLOAD,
+                    } if size == MAX_INPUT_PAYLOAD + 1
+                ));
+            }
+
+            drop(client_stream);
+            should_quit.store(true, Ordering::Release);
+            handle
+                .join()
+                .expect("read thread join")
+                .expect("read thread result");
+        }
+    }
+
+    #[test]
+    fn client_read_loop_disconnects_fragmented_invalid_trailing_and_multiple_pastes() {
+        let mut invalid = bracketed_paste_with_total_len(MAX_INPUT_PAYLOAD + 1);
+        invalid[b"\x1b[200~".len()] = 0xff;
+        let mut trailing = bracketed_paste_with_total_len(MAX_INPUT_PAYLOAD + 1);
+        trailing.push(b'x');
+        let mut multiple = bracketed_paste_with_total_len(MAX_INPUT_PAYLOAD + 1);
+        multiple.extend_from_slice(b"\x1b[200~two\x1b[201~");
+
+        for (name, bytes) in [
+            ("fragmented-invalid", invalid),
+            ("fragmented-trailing", trailing),
+            ("fragmented-multiple", multiple),
+        ] {
+            let (mut client_stream, server_stream, _path) = local_stream_pair(name);
+            let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+            let should_quit = Arc::new(AtomicBool::new(false));
+            let read_quit = should_quit.clone();
+            let handle = std::thread::spawn(move || {
+                client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+            });
+            let first_len = (MAX_INPUT_PAYLOAD / 2) + 1;
+
+            write_input_message(&mut client_stream, bytes[..first_len].to_vec());
+            write_resize_marker(&mut client_stream, 95);
+            assert_resize_marker(
+                recv_server_event(&mut server_event_rx, "marker after malformed fragment"),
+                95,
+            );
+            write_input_message(&mut client_stream, bytes[first_len..].to_vec());
+            assert!(matches!(
+                recv_server_event(&mut server_event_rx, "malformed fragmented disconnect"),
+                ServerEvent::ClientDisconnected { client_id: 7 }
+            ));
+
+            drop(client_stream);
+            should_quit.store(true, Ordering::Release);
+            handle
+                .join()
+                .expect("read thread join")
+                .expect("read thread result");
+        }
+    }
+
+    #[tokio::test]
+    async fn client_read_loop_guards_fragmented_paste_before_direct_terminal_consumer() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("fragmented-direct-terminal");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(12);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 4,
+            );
+
+        let (first, second) = split_bracketed_paste(MAX_INPUT_PAYLOAD, (MAX_INPUT_PAYLOAD / 2) + 1);
+        write_input_message(&mut client_stream, first);
+        write_resize_marker(&mut client_stream, 96);
+        assert_resize_marker(
+            recv_server_event(&mut server_event_rx, "direct marker after held paste"),
+            96,
+        );
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        write_input_message(&mut client_stream, second);
+        let ServerEvent::ClientInput { client_id: 7, data } =
+            recv_server_event(&mut server_event_rx, "direct completed paste")
+        else {
+            panic!("expected completed paste for direct consumer");
+        };
+        runtime
+            .try_send_bytes(bytes::Bytes::from(data))
+            .expect("deliver guarded paste to direct terminal");
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("direct terminal receives completed paste")
+                .len(),
+            MAX_INPUT_PAYLOAD
+        );
+
+        let (first, second) =
+            split_bracketed_paste(MAX_INPUT_PAYLOAD + 1, (MAX_INPUT_PAYLOAD / 2) + 1);
+        write_input_message(&mut client_stream, first);
+        write_resize_marker(&mut client_stream, 97);
+        assert_resize_marker(
+            recv_server_event(
+                &mut server_event_rx,
+                "direct marker after held oversized paste",
+            ),
+            97,
+        );
+        write_input_message(&mut client_stream, second);
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "direct oversized paste rejection"),
+            ServerEvent::ClientPasteRejected {
+                client_id: 7,
+                size,
+                max: MAX_INPUT_PAYLOAD,
+            } if size == MAX_INPUT_PAYLOAD + 1
+        ));
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        write_input_message(&mut client_stream, b"direct after rejection".to_vec());
+        let ServerEvent::ClientInput { client_id: 7, data } =
+            recv_server_event(&mut server_event_rx, "direct input after rejection")
+        else {
+            panic!("expected direct input after rejection");
+        };
+        runtime
+            .try_send_bytes(bytes::Bytes::from(data))
+            .expect("deliver follow-up input to direct terminal");
+        assert_eq!(
+            input_rx.try_recv().expect("direct follow-up input"),
+            bytes::Bytes::from_static(b"direct after rejection")
+        );
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read thread result");
+    }
+
+    #[test]
+    fn raw_paste_guard_releases_false_start_prefix_without_oversized_forward() {
+        let mut guard = RawPasteEnvelopeGuard::default();
+        assert_eq!(
+            guard.push(b"\x1b[2".to_vec()),
+            vec![RawPasteEnvelopeOutcome::Hold]
+        );
+
+        let mut continuation = vec![b'x'; MAX_INPUT_PAYLOAD];
+        continuation[0] = b'x';
+        let outcomes = guard.push(continuation);
+        let chunks = outcomes
+            .into_iter()
+            .map(|outcome| match outcome {
+                RawPasteEnvelopeOutcome::Forward(data) => data,
+                other => panic!("expected only released input, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= MAX_INPUT_PAYLOAD));
+        assert_eq!(
+            chunks.iter().map(Vec::len).sum::<usize>(),
+            MAX_INPUT_PAYLOAD + 3
+        );
+        assert_eq!(&chunks[0][..4], b"\x1b[2x");
+        assert!(chunks.iter().flatten().skip(4).all(|byte| *byte == b'x'));
+        assert!(matches!(guard.state, RawPasteEnvelopeState::Idle));
+    }
+
+    #[test]
+    fn raw_paste_guard_handles_every_fragmented_paste_end_boundary() {
+        let mut paste_prefix = crate::raw_input::BRACKETED_PASTE_START.to_vec();
+        paste_prefix.extend_from_slice(b"end-boundary");
+
+        for split in 1..crate::raw_input::BRACKETED_PASTE_END.len() {
+            let mut guard = RawPasteEnvelopeGuard::default();
+            let mut first = paste_prefix.clone();
+            first.extend_from_slice(&crate::raw_input::BRACKETED_PASTE_END[..split]);
+            assert_eq!(
+                guard.push(first),
+                vec![RawPasteEnvelopeOutcome::Hold],
+                "end split {split} must remain pending"
+            );
+
+            let outcomes = guard.push(crate::raw_input::BRACKETED_PASTE_END[split..].to_vec());
+            let [RawPasteEnvelopeOutcome::Forward(completed)] = outcomes.as_slice() else {
+                panic!("end split {split} did not produce one completed paste: {outcomes:?}");
+            };
+            let mut expected = paste_prefix.clone();
+            expected.extend_from_slice(crate::raw_input::BRACKETED_PASTE_END);
+            assert_eq!(completed, &expected, "end split {split} changed bytes");
+            assert!(matches!(guard.state, RawPasteEnvelopeState::Idle));
+        }
     }
 
     #[test]

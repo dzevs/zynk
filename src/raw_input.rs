@@ -104,8 +104,8 @@ use crate::terminal_theme::{
 const ESC: u8 = 0x1b;
 pub(crate) const GHOSTTY_COLOR_SCHEME_DARK_REPORT: &[u8] = b"\x1b[?997;1n";
 pub(crate) const GHOSTTY_COLOR_SCHEME_LIGHT_REPORT: &[u8] = b"\x1b[?997;2n";
-const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
-const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+pub(crate) const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+pub(crate) const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
 /// Returns whether `data` is exactly one complete bracketed-paste sequence.
 ///

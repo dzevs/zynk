@@ -69,6 +69,9 @@ use crate::server::client_transport::ClientWriter;
 #[cfg(test)]
 use std::fs;
 
+const DIRECT_STRUCTURED_INPUT_UNSUPPORTED: &str =
+    "direct terminal control accepts raw Input; structured InputEvents are unsupported";
+
 fn sound_notify_message(sound: crate::sound::Sound) -> &'static str {
     match sound {
         crate::sound::Sound::Done => "agent done",
@@ -1469,13 +1472,7 @@ impl HeadlessServer {
     async fn reject_late_client_connections(&mut self) {
         self.server_event_rx.close();
         while let Some(event) = self.server_event_rx.recv().await {
-            if let ServerEvent::ClientConnected { writer, .. } = event {
-                if let Ok(message) = Self::frame_server_message(&ServerMessage::ServerShutdown {
-                    reason: Some("server is shutting down".to_owned()),
-                }) {
-                    let _ = writer.control.send(message);
-                }
-            }
+            self.settle_server_event_at_stop_boundary(event);
         }
     }
 
@@ -1484,14 +1481,18 @@ impl HeadlessServer {
             LoopEvent::Internal(event) => {
                 self.handle_internal_event_with_forwarding(event);
             }
-            LoopEvent::ServerEvent(ServerEvent::ClientConnected { writer, .. }) => {
-                if let Ok(message) = Self::frame_server_message(&ServerMessage::ServerShutdown {
-                    reason: Some("server is shutting down".to_owned()),
-                }) {
-                    let _ = writer.control.send(message);
-                }
-            }
+            LoopEvent::ServerEvent(event) => self.settle_server_event_at_stop_boundary(event),
             _ => {}
+        }
+    }
+
+    fn settle_server_event_at_stop_boundary(&mut self, event: ServerEvent) {
+        if let ServerEvent::ClientConnected { writer, .. } = event {
+            if let Ok(message) = Self::frame_server_message(&ServerMessage::ServerShutdown {
+                reason: Some("server is shutting down".to_owned()),
+            }) {
+                let _ = writer.control.send(message);
+            }
         }
     }
 
@@ -2577,6 +2578,13 @@ impl HeadlessServer {
     }
 
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
+        // This load is the final admission point for work already removed from
+        // the queue. A later stop store belongs to the next admission.
+        if self.should_quit.load(Ordering::Acquire) {
+            self.settle_server_event_at_stop_boundary(ev);
+            return false;
+        }
+
         if self.handoff_in_progress && Self::ignore_client_event_during_handoff(&ev) {
             return false;
         }
@@ -2725,12 +2733,19 @@ impl HeadlessServer {
                     len = events.len(),
                     "client input events received"
                 );
-                if !self
-                    .clients
-                    .get(&client_id)
-                    .is_some_and(|client| client.mode.allows_write_messages())
-                {
-                    return false;
+                match self.clients.get(&client_id).map(|client| &client.mode) {
+                    Some(ClientConnectionMode::App) => {}
+                    Some(ClientConnectionMode::TerminalAttach { .. }) => {
+                        self.send_to_client(
+                            client_id,
+                            ServerMessage::ServerShutdown {
+                                reason: Some(DIRECT_STRUCTURED_INPUT_UNSUPPORTED.to_owned()),
+                            },
+                        );
+                        self.remove_client_and_resize_if_needed(client_id);
+                        return false;
+                    }
+                    Some(ClientConnectionMode::TerminalObserve { .. }) | None => return false,
                 }
                 let events = events
                     .iter()
@@ -2921,7 +2936,9 @@ impl HeadlessServer {
         msg: api::ApiRequestMessage,
         skip_default_workspace_for_request: bool,
     ) -> bool {
-        if self.shutting_down {
+        // Socket-side stop preflights do not cover an item already dequeued by
+        // this loop, so the shared atomic is part of this final admission.
+        if self.shutting_down || self.should_quit.load(Ordering::Acquire) {
             // During shutdown, respond with server_unavailable.
             let response = serde_json::to_string(&api::schema::ErrorResponse {
                 id: msg.request.id,
@@ -4758,6 +4775,86 @@ mod tests {
     }
 
     #[test]
+    fn atomic_stop_after_server_event_dequeue_refuses_dispatch() {
+        let mut server = test_headless_server();
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server
+            .server_event_tx
+            .try_send(ServerEvent::ClientConnected {
+                client_id: 94,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::SemanticFrame,
+                keybindings: None,
+                direct_attach_requested: false,
+                writer,
+            })
+            .expect("queue client event");
+
+        assert!(!server.should_quit.load(Ordering::Acquire));
+        let event = server.server_event_rx.try_recv().expect("dequeue event");
+        server.should_quit.store(true, Ordering::Release);
+
+        assert!(!server.handle_server_event(event));
+        assert!(!server.clients.contains_key(&94));
+        assert_eq!(server.clients.len(), 1);
+        assert_eq!(server.foreground_client_id, Some(1));
+        assert_eq!(server.app.state.outer_terminal_focus, Some(true));
+        let reason = read_server_shutdown_reason(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("selected client receives shutdown"),
+        );
+        assert_eq!(reason.as_deref(), Some("server is shutting down"));
+    }
+
+    #[test]
+    fn atomic_stop_after_api_dequeue_returns_server_unavailable() {
+        let (mut server, api_tx) = test_headless_server_with_api_sender();
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Zynk;
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        api_tx
+            .send(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "post-dequeue-stop".into(),
+                    method: api::schema::Method::NotificationShow(
+                        api::schema::NotificationShowParams {
+                            title: "must not dispatch".into(),
+                            body: None,
+                            position: None,
+                            sound: api::schema::NotificationShowSound::None,
+                        },
+                    ),
+                },
+                respond_to,
+                caller: api::ApiCaller::default(),
+            })
+            .expect("queue API request");
+
+        assert!(!server.should_quit.load(Ordering::Acquire));
+        let request = server.app.api_rx.try_recv().expect("dequeue request");
+        server.should_quit.store(true, Ordering::Release);
+
+        assert!(!server.handle_api_request_with_shutdown_check(request));
+        let response: serde_json::Value = serde_json::from_str(
+            &response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("post-stop request receives a response"),
+        )
+        .expect("valid JSON response");
+        assert_eq!(response["id"], "post-dequeue-stop");
+        assert_eq!(response["error"]["code"], "server_unavailable");
+        assert!(server.app.state.toast.is_none());
+        assert!(server.app.toast_deadline.is_none());
+        assert!(server.app.state.workspaces.is_empty());
+    }
+
+    #[test]
     fn shutdown_rejects_the_api_requests_already_queued() {
         let (mut server, api_tx) = test_headless_server_with_api_sender();
         let mut responses = Vec::new();
@@ -6000,6 +6097,127 @@ next_tab = ""
                     .contains(&terminal_id));
             },
         );
+    }
+
+    fn structured_input_event_variants() -> Vec<(&'static str, crate::protocol::ClientInputEvent)> {
+        vec![
+            (
+                "key",
+                crate::protocol::ClientInputEvent::Key {
+                    code: crate::protocol::ClientKeyCode::Char('x'),
+                    modifiers: 0,
+                    kind: crate::protocol::ClientKeyKind::Press,
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
+                },
+            ),
+            (
+                "text",
+                crate::protocol::ClientInputEvent::TextCommit("direct-structured".to_owned()),
+            ),
+            (
+                "mouse",
+                crate::protocol::ClientInputEvent::Mouse {
+                    kind: crate::protocol::ClientMouseKind::Down(
+                        crate::protocol::ClientMouseButton::Left,
+                    ),
+                    column: 1,
+                    row: 1,
+                    modifiers: 0,
+                },
+            ),
+            (
+                "paste",
+                crate::protocol::ClientInputEvent::Paste {
+                    text: "direct-paste".to_owned(),
+                },
+            ),
+            (
+                "focus-gained",
+                crate::protocol::ClientInputEvent::FocusGained,
+            ),
+            ("focus-lost", crate::protocol::ClientInputEvent::FocusLost),
+        ]
+    }
+
+    #[test]
+    fn direct_controller_rejects_every_structured_input_variant_before_app_routing() {
+        let mut failures = Vec::new();
+
+        for (name, event) in structured_input_event_variants() {
+            with_terminal_session_test_server(
+                |server, terminal_id, terminal_id_string, _public_pane_id| {
+                    let (runtime, mut input_rx) =
+                        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                            80, 24, 0, b"", 8,
+                        );
+                    server
+                        .app
+                        .terminal_runtimes
+                        .insert(terminal_id.clone(), runtime);
+                    server.clients.insert(1, test_app_client(Some(true), 1));
+                    server.foreground_client_id = Some(1);
+                    server.sync_foreground_client_state();
+
+                    let control_rx = connect_pending_terminal_client_with_control_rx(server, 7);
+                    assert!(
+                        server.handle_server_event(ServerEvent::ClientControlTerminal {
+                            client_id: 7,
+                            target: terminal_id_string.clone(),
+                            takeover: false,
+                        })
+                    );
+                    let before_mode = server.app.state.mode;
+                    let before_active = server.app.state.active;
+                    let before_selected = server.app.state.selected;
+
+                    let changed = server.handle_server_event(ServerEvent::ClientInputEvents {
+                        client_id: 7,
+                        events: vec![event],
+                    });
+                    let shutdown_reason = control_rx
+                        .recv_timeout(Duration::from_millis(20))
+                        .ok()
+                        .and_then(read_server_shutdown_reason);
+                    let target_is_quiet = matches!(
+                        input_rx.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    );
+                    let accepted = !changed
+                        && server.foreground_client_id == Some(1)
+                        && server.app.state.mode == before_mode
+                        && server.app.state.active == before_active
+                        && server.app.state.selected == before_selected
+                        && target_is_quiet
+                        && !server.clients.contains_key(&7)
+                        && !server
+                            .terminal_attach_owners
+                            .contains_key(&terminal_id_string)
+                        && !server
+                            .app
+                            .state
+                            .direct_attach_resize_locks
+                            .contains(&terminal_id)
+                        && shutdown_reason.as_deref() == Some(DIRECT_STRUCTURED_INPUT_UNSUPPORTED);
+                    if !accepted {
+                        failures.push(format!(
+                            "{name}: changed={changed}, foreground={:?}, target_is_quiet={target_is_quiet}, client_present={}, owner_present={}, resize_lock={}, shutdown={shutdown_reason:?}",
+                            server.foreground_client_id,
+                            server.clients.contains_key(&7),
+                            server.terminal_attach_owners.contains_key(&terminal_id_string),
+                            server
+                                .app
+                                .state
+                                .direct_attach_resize_locks
+                                .contains(&terminal_id),
+                        ));
+                    }
+                },
+            );
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
@@ -7868,15 +8086,21 @@ next_tab = ""
         server.foreground_client_id = Some(1);
         server.sync_foreground_client_state();
 
-        for client_id in [2, 3] {
-            assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
-                client_id,
-                events: vec![crate::protocol::ClientInputEvent::FocusGained],
-            }));
-            assert_eq!(server.foreground_client_id, Some(1));
-            assert_eq!(server.app.state.outer_terminal_focus, Some(true));
-            assert_eq!(server.clients[&client_id].outer_terminal_focus, Some(false));
-        }
+        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 2,
+            events: vec![crate::protocol::ClientInputEvent::FocusGained],
+        }));
+        assert_eq!(server.foreground_client_id, Some(1));
+        assert_eq!(server.app.state.outer_terminal_focus, Some(true));
+        assert!(!server.clients.contains_key(&2));
+
+        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 3,
+            events: vec![crate::protocol::ClientInputEvent::FocusGained],
+        }));
+        assert_eq!(server.foreground_client_id, Some(1));
+        assert_eq!(server.app.state.outer_terminal_focus, Some(true));
+        assert_eq!(server.clients[&3].outer_terminal_focus, Some(false));
         assert!(matches!(
             input_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
