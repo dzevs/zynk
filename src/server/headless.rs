@@ -623,16 +623,7 @@ impl HeadlessServer {
 
         if self.app.state.request_new_workspace {
             self.app.state.request_new_workspace = false;
-            let response = self.dispatch_headless_runtime_mutation(
-                "headless.workspace.create",
-                crate::api::schema::Method::WorkspaceCreate(
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: None,
-                        focus: true,
-                        label: None,
-                    },
-                ),
-            );
+            let response = self.headless_workspace_create("headless.workspace.create", None, None);
             if let Err(error) = response {
                 error!(
                     code = %error.code,
@@ -647,15 +638,7 @@ impl HeadlessServer {
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
             let label = self.app.state.requested_new_tab_name.take();
-            let response = self.dispatch_headless_runtime_mutation(
-                "headless.tab.create",
-                crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
-                    workspace_id: None,
-                    cwd: None,
-                    focus: true,
-                    label,
-                }),
-            );
+            let response = self.headless_tab_create("headless.tab.create", label);
             if let Err(error) = response {
                 error!(
                     code = %error.code,
@@ -680,15 +663,10 @@ impl HeadlessServer {
         }
 
         if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
-            let response = self.dispatch_headless_runtime_mutation(
+            let response = self.headless_workspace_create(
                 "headless.workspace.create_cwd",
-                crate::api::schema::Method::WorkspaceCreate(
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: Some(cwd.display().to_string()),
-                        focus: true,
-                        label: None,
-                    },
-                ),
+                Some(cwd.display().to_string()),
+                None,
             );
             if let Err(error) = response {
                 error!(
@@ -737,6 +715,38 @@ impl HeadlessServer {
         }
 
         needs_render
+    }
+
+    fn headless_workspace_create(
+        &mut self,
+        id: &'static str,
+        cwd: Option<String>,
+        label: Option<String>,
+    ) -> Result<(), api::schema::ErrorBody> {
+        self.dispatch_headless_runtime_mutation(
+            id,
+            api::schema::Method::WorkspaceCreate(api::schema::WorkspaceCreateParams {
+                cwd,
+                focus: true,
+                label,
+            }),
+        )
+    }
+
+    fn headless_tab_create(
+        &mut self,
+        id: &'static str,
+        label: Option<String>,
+    ) -> Result<(), api::schema::ErrorBody> {
+        self.dispatch_headless_runtime_mutation(
+            id,
+            api::schema::Method::TabCreate(api::schema::TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: true,
+                label,
+            }),
+        )
     }
 
     /// Run one server-initiated mutation through the same API dispatch the socket clients use,
@@ -4633,6 +4643,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_workspace_create_helper_preserves_cwd_and_label() {
+        let mut server = test_headless_server();
+        let cwd = std::env::temp_dir();
+
+        server
+            .headless_workspace_create(
+                "headless.workspace.helper_test",
+                Some(cwd.display().to_string()),
+                Some("ops".into()),
+            )
+            .unwrap();
+
+        assert_eq!(server.app.state.workspaces.len(), 1);
+        let workspace = &server.app.state.workspaces[0];
+        assert_eq!(workspace.identity_cwd, cwd);
+        assert_eq!(workspace.custom_name.as_deref(), Some("ops"));
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[tokio::test]
     async fn headless_deferred_named_tab_create_uses_runtime_events() {
         let event_hub = api::EventHub::default();
         let mut server = test_headless_server_with_event_hub(event_hub.clone());
@@ -4667,6 +4697,33 @@ mod tests {
             })
             .expect("tab created event");
         assert_eq!(tab_created.label, "ops");
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[tokio::test]
+    async fn headless_tab_create_helper_propagates_failure_and_label() {
+        let mut server = test_headless_server();
+
+        let error = server
+            .headless_tab_create("headless.tab.helper_failure", Some("ops".into()))
+            .unwrap_err();
+        assert_eq!(error.code, "workspace_not_found");
+        assert!(server.app.state.workspaces.is_empty());
+
+        server
+            .app
+            .create_workspace_with_options(std::env::temp_dir(), true)
+            .unwrap();
+        server
+            .headless_tab_create("headless.tab.helper_success", Some("ops".into()))
+            .unwrap();
+
+        let workspace = &server.app.state.workspaces[0];
+        assert_eq!(workspace.tabs.len(), 2);
+        assert_eq!(
+            workspace.active_tab().unwrap().custom_name.as_deref(),
+            Some("ops")
+        );
         shutdown_test_runtimes(&mut server);
     }
 

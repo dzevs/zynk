@@ -3247,3 +3247,17 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   pre-existing guard kills the overlap control. `src/server/headless.rs` was
   already present in the post-relicense `NOTICE` index; the index is unchanged.
   Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-04: Headless Deferred-Create Runtime Helpers (2026-09-12)
+
+- **Source:** `04682e57` (post-relicense; `src/server/headless.rs` is already
+  listed in `NOTICE`). Deferred default-workspace, named-tab, and explicit-CWD
+  workspace requests now call narrow helpers over the existing
+  `dispatch_headless_runtime_mutation` path.
+- The helpers preserve focus, label, CWD, API error propagation, event emission,
+  and the failed-create rule that must not seed an unrequested default
+  workspace. They use the fork's current workspace/tab schema and do not add
+  upstream-only `env` fields. Receipt/embedding worker placement, runtime
+  ownership, protocol 19, and delivery authority are unchanged.
+- Direct helper controls and the existing deferred-request controls are
+  implemented. Exact-candidate Gate-2/Gate-3 verification remains required.
