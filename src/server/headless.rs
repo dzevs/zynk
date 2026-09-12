@@ -48,7 +48,7 @@ use crate::protocol::{
 use crate::server::client_accept::{
     accept_pending_client_connections, reject_pending_client_connections,
 };
-use crate::server::client_transport::ServerEvent;
+use crate::server::client_transport::{PasteRejectionOrigin, ServerEvent};
 use crate::server::clients::{
     events_include_interaction, latest_app_client, render_targets, terminal_stream_client_ids,
     ClientConnection, ClientConnectionMode,
@@ -2577,6 +2577,23 @@ impl HeadlessServer {
         }
     }
 
+    fn admit_structured_client_input(&mut self, client_id: u64) -> bool {
+        match self.clients.get(&client_id).map(|client| &client.mode) {
+            Some(ClientConnectionMode::App) => true,
+            Some(ClientConnectionMode::TerminalAttach { .. }) => {
+                self.send_to_client(
+                    client_id,
+                    ServerMessage::ServerShutdown {
+                        reason: Some(DIRECT_STRUCTURED_INPUT_UNSUPPORTED.to_owned()),
+                    },
+                );
+                self.remove_client_and_resize_if_needed(client_id);
+                false
+            }
+            Some(ClientConnectionMode::TerminalObserve { .. }) | None => false,
+        }
+    }
+
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
         // This load is the final admission point for work already removed from
         // the queue. A later stop store belongs to the next admission.
@@ -2733,19 +2750,8 @@ impl HeadlessServer {
                     len = events.len(),
                     "client input events received"
                 );
-                match self.clients.get(&client_id).map(|client| &client.mode) {
-                    Some(ClientConnectionMode::App) => {}
-                    Some(ClientConnectionMode::TerminalAttach { .. }) => {
-                        self.send_to_client(
-                            client_id,
-                            ServerMessage::ServerShutdown {
-                                reason: Some(DIRECT_STRUCTURED_INPUT_UNSUPPORTED.to_owned()),
-                            },
-                        );
-                        self.remove_client_and_resize_if_needed(client_id);
-                        return false;
-                    }
-                    Some(ClientConnectionMode::TerminalObserve { .. }) | None => return false,
+                if !self.admit_structured_client_input(client_id) {
+                    return false;
                 }
                 let events = events
                     .iter()
@@ -2755,9 +2761,18 @@ impl HeadlessServer {
             }
             ServerEvent::ClientPasteRejected {
                 client_id,
+                origin,
                 size,
                 max,
             } => {
+                match origin {
+                    PasteRejectionOrigin::RawInput => {}
+                    PasteRejectionOrigin::StructuredInputEvents => {
+                        if !self.admit_structured_client_input(client_id) {
+                            return false;
+                        }
+                    }
+                }
                 self.send_to_client(
                     client_id,
                     ServerMessage::Notify {
@@ -5986,6 +6001,498 @@ next_tab = ""
 
     fn connect_pending_terminal_client(server: &mut HeadlessServer, client_id: u64) {
         let _control_rx = connect_pending_terminal_client_with_control_rx(server, client_id);
+    }
+
+    fn recv_socket_test_event(server: &mut HeadlessServer) -> ServerEvent {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match server.server_event_rx.try_recv() {
+                Ok(event) => return event,
+                Err(mpsc::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(err) => panic!("socket event deadline: {err}"),
+            }
+        }
+    }
+
+    fn with_socket_test_client(
+        server: &mut HeadlessServer,
+        launch_mode: crate::protocol::ClientLaunchMode,
+        test: impl FnOnce(&mut HeadlessServer, &mut crate::ipc::LocalStream),
+    ) {
+        use interprocess::local_socket::traits::Stream as _;
+
+        let client = crate::ipc::connect_local_stream(&server.client_socket_path)
+            .expect("connect client socket");
+        client
+            .set_recv_timeout(Some(Duration::from_secs(3)))
+            .expect("bound client reads");
+        let accepted = server.client_listener.accept().expect("accept test client");
+        let events = server.server_event_tx.clone();
+        let quit = server.should_quit.clone();
+        std::thread::scope(|scope| {
+            let transport = scope.spawn(move || {
+                crate::server::client_transport::handle_client_handshake(
+                    accepted, 7, &events, &quit,
+                )
+            });
+            let mut client = client;
+            protocol::write_message(
+                &mut client,
+                &crate::protocol::ClientMessage::Hello {
+                    version: protocol::PROTOCOL_VERSION,
+                    cols: 100,
+                    rows: 30,
+                    cell_width_px: 0,
+                    cell_height_px: 0,
+                    requested_encoding: RenderEncoding::TerminalAnsi,
+                    keybindings: protocol::ClientKeybindings::Server,
+                    launch_mode,
+                },
+            )
+            .expect("write hello");
+            assert!(matches!(
+                protocol::read_message::<_, ServerMessage>(&mut client, MAX_FRAME_SIZE)
+                    .expect("read welcome"),
+                ServerMessage::Welcome { error: None, .. }
+            ));
+            let connected = recv_socket_test_event(server);
+            assert!(matches!(
+                connected,
+                ServerEvent::ClientConnected { client_id: 7, .. }
+            ));
+            server.handle_server_event(connected);
+            test(server, &mut client);
+            drop(client);
+            transport
+                .join()
+                .expect("join transport")
+                .expect("transport result");
+        });
+        server.remove_client_and_resize_if_needed(7);
+    }
+
+    fn acquire_socket_test_terminal(
+        server: &mut HeadlessServer,
+        client: &mut crate::ipc::LocalStream,
+        terminal_id: &str,
+        control: bool,
+    ) {
+        let request = if control {
+            protocol::ClientMessage::ControlTerminal {
+                target: terminal_id.to_owned(),
+                takeover: false,
+            }
+        } else {
+            protocol::ClientMessage::AttachTerminal {
+                terminal_id: terminal_id.to_owned(),
+                takeover: false,
+            }
+        };
+        protocol::write_message(client, &request).expect("write terminal acquisition");
+        let event = recv_socket_test_event(server);
+        assert!(matches!(
+            event,
+            ServerEvent::ClientControlTerminal { client_id: 7, .. }
+                | ServerEvent::ClientAttachTerminal { client_id: 7, .. }
+        ));
+        assert!(server.handle_server_event(event));
+        assert_eq!(server.terminal_attach_owners.get(terminal_id), Some(&7));
+    }
+
+    fn assert_socket_test_no_extra_response(client: &mut crate::ipc::LocalStream) {
+        use interprocess::local_socket::traits::Stream as _;
+        client
+            .set_recv_timeout(Some(Duration::from_millis(50)))
+            .expect("bound extra response read");
+        assert!(
+            protocol::read_message::<_, ServerMessage>(client, MAX_FRAME_SIZE).is_err(),
+            "unexpected duplicate or additional control response"
+        );
+        client
+            .set_recv_timeout(Some(Duration::from_secs(3)))
+            .expect("restore client deadline");
+    }
+
+    #[test]
+    fn socket_direct_oversized_structured_paste_closes_owner_before_routing() {
+        assert_socket_oversized_structured_paste_closes_owner(false);
+    }
+
+    #[test]
+    fn socket_control_oversized_structured_paste_closes_owner_before_routing() {
+        assert_socket_oversized_structured_paste_closes_owner(true);
+    }
+
+    fn assert_socket_oversized_structured_paste_closes_owner(control: bool) {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80, 24, 0, b"", 8,
+                );
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
+            server.clients.insert(1, test_app_client(Some(true), 1));
+            server.foreground_client_id = Some(1);
+            server.sync_foreground_client_state();
+            with_socket_test_client(
+                server,
+                protocol::ClientLaunchMode::TerminalAttach,
+                |server, client| {
+                    acquire_socket_test_terminal(server, client, &terminal_id_string, control);
+                    assert!(server
+                        .app
+                        .state
+                        .direct_attach_resize_locks
+                        .contains(&terminal_id));
+                    let before = (
+                        server.app.state.mode,
+                        server.app.state.active,
+                        server.app.state.selected,
+                    );
+                    protocol::write_message(
+                        client,
+                        &protocol::ClientMessage::InputEvents {
+                            events: vec![protocol::ClientInputEvent::Paste {
+                                text: "x".repeat(1_048_577),
+                            }],
+                        },
+                    )
+                    .expect("write oversized structured paste");
+                    let event = recv_socket_test_event(server);
+                    assert!(matches!(
+                        event,
+                        ServerEvent::ClientPasteRejected { client_id: 7, .. }
+                    ));
+                    assert!(!server.handle_server_event(event));
+                    let response =
+                        protocol::read_message::<_, ServerMessage>(client, MAX_FRAME_SIZE)
+                            .expect("read paste disposition");
+                    assert!(matches!(&response, ServerMessage::ServerShutdown { reason }
+                        if reason.as_deref() == Some(DIRECT_STRUCTURED_INPUT_UNSUPPORTED)),
+                        "oversized structured paste must close direct client; control={control}, response={response:?}");
+                    assert!(!server.clients.contains_key(&7));
+                    assert!(!server
+                        .terminal_attach_owners
+                        .contains_key(&terminal_id_string));
+                    assert!(!server
+                        .app
+                        .state
+                        .direct_attach_resize_locks
+                        .contains(&terminal_id));
+                    assert_eq!(server.foreground_client_id, Some(1));
+                    assert_eq!(
+                        (
+                            server.app.state.mode,
+                            server.app.state.active,
+                            server.app.state.selected
+                        ),
+                        before
+                    );
+                    assert!(input_rx.try_recv().is_err());
+                    assert!(server.app.state.toast.is_none());
+                    assert_socket_test_no_extra_response(client);
+                },
+            );
+        });
+    }
+
+    fn dispatch_socket_input_through_marker(
+        server: &mut HeadlessServer,
+        client: &mut crate::ipc::LocalStream,
+        data: Vec<u8>,
+    ) {
+        protocol::write_message(client, &protocol::ClientMessage::Input { data })
+            .expect("write raw input");
+        protocol::write_message(
+            client,
+            &protocol::ClientMessage::Resize {
+                cols: 100,
+                rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+            },
+        )
+        .expect("write ordered marker");
+        loop {
+            let event = recv_socket_test_event(server);
+            let marker = matches!(event, ServerEvent::ClientResize { client_id: 7, .. });
+            server.handle_server_event(event);
+            if marker {
+                break;
+            }
+        }
+    }
+
+    fn socket_test_paste(total: usize) -> Vec<u8> {
+        let mut bytes = crate::raw_input::BRACKETED_PASTE_START.to_vec();
+        bytes.resize(total - crate::raw_input::BRACKETED_PASTE_END.len(), b'x');
+        bytes.extend_from_slice(crate::raw_input::BRACKETED_PASTE_END);
+        bytes
+    }
+
+    #[test]
+    fn socket_direct_fragmented_exact_limit_paste_reaches_only_target_on_completion() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80, 24, 0, b"", 8,
+                );
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
+            server.clients.insert(1, test_app_client(Some(true), 1));
+            server.foreground_client_id = Some(1);
+            server.sync_foreground_client_state();
+            with_socket_test_client(
+                server,
+                protocol::ClientLaunchMode::TerminalAttach,
+                |server, client| {
+                    acquire_socket_test_terminal(server, client, &terminal_id_string, true);
+                    let before = (
+                        server.app.state.mode,
+                        server.app.state.active,
+                        server.app.state.selected,
+                    );
+                    let paste = socket_test_paste(1_048_576);
+                    dispatch_socket_input_through_marker(server, client, paste[..524_289].to_vec());
+                    assert!(
+                        input_rx.try_recv().is_err(),
+                        "recognized paste fragment reached target before completion"
+                    );
+                    dispatch_socket_input_through_marker(server, client, paste[524_289..].to_vec());
+                    assert_eq!(
+                        input_rx
+                            .try_recv()
+                            .expect("completed target paste")
+                            .as_ref(),
+                        paste
+                    );
+                    assert!(
+                        input_rx.try_recv().is_err(),
+                        "paste must reach target exactly once"
+                    );
+                    assert!(server.clients.contains_key(&7));
+                    assert_eq!(
+                        server.terminal_attach_owners.get(&terminal_id_string),
+                        Some(&7)
+                    );
+                    assert!(server
+                        .app
+                        .state
+                        .direct_attach_resize_locks
+                        .contains(&terminal_id));
+                    assert_eq!(server.foreground_client_id, Some(1));
+                    assert_eq!(
+                        (
+                            server.app.state.mode,
+                            server.app.state.active,
+                            server.app.state.selected
+                        ),
+                        before
+                    );
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn socket_direct_fragmented_raw_max_plus_one_recovers_with_owner_intact() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80, 24, 0, b"", 8,
+                );
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
+            with_socket_test_client(
+                server,
+                protocol::ClientLaunchMode::TerminalAttach,
+                |server, client| {
+                    acquire_socket_test_terminal(server, client, &terminal_id_string, true);
+                    let paste = socket_test_paste(1_048_577);
+                    dispatch_socket_input_through_marker(server, client, paste[..524_289].to_vec());
+                    assert!(
+                        input_rx.try_recv().is_err(),
+                        "oversized first fragment reached target"
+                    );
+                    dispatch_socket_input_through_marker(server, client, paste[524_289..].to_vec());
+                    assert!(
+                        input_rx.try_recv().is_err(),
+                        "oversized raw paste reached target"
+                    );
+                    let response: ServerMessage =
+                        protocol::read_message(client, MAX_FRAME_SIZE).expect("raw rejection");
+                    assert!(
+                        matches!(response, ServerMessage::Notify { ref message, .. } if message == "Paste rejected"),
+                        "raw paste must remain recoverable: {response:?}"
+                    );
+                    assert!(server.clients.contains_key(&7));
+                    assert_eq!(
+                        server.terminal_attach_owners.get(&terminal_id_string),
+                        Some(&7)
+                    );
+                    assert!(server
+                        .app
+                        .state
+                        .direct_attach_resize_locks
+                        .contains(&terminal_id));
+                    dispatch_socket_input_through_marker(
+                        server,
+                        client,
+                        b"after raw rejection".to_vec(),
+                    );
+                    assert_eq!(
+                        input_rx.try_recv().expect("follow-up raw input").as_ref(),
+                        b"after raw rejection"
+                    );
+                    assert!(input_rx.try_recv().is_err());
+                    assert!(server.app.state.toast.is_none());
+                    assert_socket_test_no_extra_response(client);
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn socket_app_oversized_structured_paste_recovers_without_routing() {
+        with_terminal_session_test_server(|server, _, _, _| {
+            let mut input_rx = install_focused_test_runtime(server, b"");
+            with_socket_test_client(server, protocol::ClientLaunchMode::App, |server, client| {
+                protocol::write_message(
+                    client,
+                    &protocol::ClientMessage::InputEvents {
+                        events: vec![protocol::ClientInputEvent::Paste {
+                            text: "x".repeat(1_048_577),
+                        }],
+                    },
+                )
+                .expect("write oversized App paste");
+                let event = recv_socket_test_event(server);
+                assert!(matches!(
+                    event,
+                    ServerEvent::ClientPasteRejected { client_id: 7, .. }
+                ));
+                assert!(!server.handle_server_event(event));
+                let response: ServerMessage =
+                    protocol::read_message(client, MAX_FRAME_SIZE).expect("App rejection");
+                assert!(
+                    matches!(response, ServerMessage::Notify { ref message, .. } if message == "Paste rejected")
+                );
+                assert!(matches!(
+                    server.clients.get(&7).map(|c| &c.mode),
+                    Some(ClientConnectionMode::App)
+                ));
+                assert!(input_rx.try_recv().is_err());
+                assert!(server.app.state.toast.is_none());
+                dispatch_socket_input_through_marker(server, client, b"z".to_vec());
+                assert_eq!(
+                    input_rx.try_recv().expect("App follow-up input").as_ref(),
+                    b"z"
+                );
+                assert_eq!(server.foreground_client_id, Some(7));
+            });
+        });
+    }
+
+    #[test]
+    fn structured_paste_rejection_refuses_observer_and_missing_without_notification() {
+        let mut server = test_headless_server();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        let mut observer = test_observer_client(1);
+        observer.writer = Some(writer);
+        server.clients.insert(7, observer);
+        for client_id in [7, 99] {
+            assert!(
+                !server.handle_server_event(ServerEvent::ClientPasteRejected {
+                    client_id,
+                    origin: PasteRejectionOrigin::StructuredInputEvents,
+                    size: 1_048_577,
+                    max: 1_048_576,
+                })
+            );
+            assert!(control_rx.try_recv().is_err());
+            assert!(matches!(
+                server.clients.get(&7).map(|c| &c.mode),
+                Some(ClientConnectionMode::TerminalObserve { .. })
+            ));
+            assert!(!server.clients.contains_key(&99));
+            assert_eq!(server.foreground_client_id, None);
+            assert!(server.app.state.toast.is_none());
+        }
+    }
+
+    #[test]
+    fn socket_direct_mixed_prefix_oversized_fragmented_paste_disconnects_without_paste_bytes() {
+        for start_split in [2, crate::raw_input::BRACKETED_PASTE_START.len()] {
+            with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+                let (runtime, mut input_rx) =
+                    crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                        80, 24, 0, b"", 8,
+                    );
+                server
+                    .app
+                    .terminal_runtimes
+                    .insert(terminal_id.clone(), runtime);
+                with_socket_test_client(
+                    server,
+                    protocol::ClientLaunchMode::TerminalAttach,
+                    |server, client| {
+                        acquire_socket_test_terminal(server, client, &terminal_id_string, true);
+                        let paste = socket_test_paste(1_048_577);
+                        let mut first = b"ordinary".to_vec();
+                        first.extend_from_slice(&paste[..start_split]);
+                        dispatch_socket_input_through_marker(server, client, first);
+                        assert_eq!(
+                            input_rx.try_recv().expect("ordinary prefix").as_ref(),
+                            b"ordinary"
+                        );
+                        assert!(input_rx.try_recv().is_err());
+                        dispatch_socket_input_through_marker(
+                            server,
+                            client,
+                            paste[start_split..524_289].to_vec(),
+                        );
+                        assert!(
+                            input_rx.try_recv().is_err(),
+                            "mixed paste fragment reached target"
+                        );
+                        protocol::write_message(
+                            client,
+                            &protocol::ClientMessage::Input {
+                                data: paste[524_289..].to_vec(),
+                            },
+                        )
+                        .expect("complete oversized mixed paste");
+                        let event = recv_socket_test_event(server);
+                        assert!(
+                            matches!(event, ServerEvent::ClientDisconnected { client_id: 7 }),
+                            "mixed-prefix oversized paste must disconnect: {event:?}"
+                        );
+                        server.handle_server_event(event);
+                        assert!(!server.clients.contains_key(&7));
+                        assert!(!server
+                            .terminal_attach_owners
+                            .contains_key(&terminal_id_string));
+                        assert!(!server
+                            .app
+                            .state
+                            .direct_attach_resize_locks
+                            .contains(&terminal_id));
+                        assert!(
+                            input_rx.try_recv().is_err(),
+                            "mixed oversized paste reached target"
+                        );
+                    },
+                );
+            });
+        }
     }
 
     fn connect_pending_terminal_client_with_control_rx(
@@ -10385,6 +10892,7 @@ next_tab = ""
         assert!(
             !server.handle_server_event(ServerEvent::ClientPasteRejected {
                 client_id: 1,
+                origin: PasteRejectionOrigin::RawInput,
                 size: 5_000_012,
                 max: 1_048_576,
             })

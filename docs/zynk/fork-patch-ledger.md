@@ -3682,3 +3682,51 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   that strengthened fixture was not the one captured in the initial parent
   run. This append corrects evidence provenance only; it changes no finding,
   implementation, source assignment, protocol version, or M8 obligation.
+
+### M7 Gate-3 Remediation 2: Paste Origin and Incremental Search (2026-09-13)
+
+- **Fork remediation on rejected `f2135e65`:** Gate-3 found
+  `G3-M7-CONTROL-INPUTEVENTS-002` and `G3-M7-FRAGMENTED-PASTE-CPU-001`.
+  A source-less paste-rejection event let oversized structured input bypass
+  direct-mode admission; a retained raw envelope was repeatedly rescanned on
+  each empty or small continuation. The earlier candidate's whole-check,
+  gate, release, and Zig passes remain historical and do not transfer.
+- The complete production `ClientPasteRejected` producer population is two:
+  raw `RawPasteEnvelopeOutcome::RejectPaste` and structured
+  `InputEventLimit::PasteTooLarge`. Both now carry `PasteRejectionOrigin`.
+  The sibling `TooManyEvents` and `InputPayloadTooLarge` outcomes already
+  disconnect through `ClientDisconnected` and
+  `remove_client_and_resize_if_needed`; they need no rejection origin or
+  additional diagnostic change in this successor.
+- Ordinary structured batches and structured paste rejection use one
+  exhaustive mode classifier. App keeps sender-local recovery; direct
+  `TerminalAttach`, including `ControlTerminal`, receives the stable
+  unsupported-structured-input shutdown and loses client, owner, and resize
+  lock before routing. Observe and missing clients are refused. Existing
+  handoff suppression remains before ordinary structured admission.
+  Raw max+1 UTF-8 paste remains recoverable, preserving direct ownership and
+  subsequent raw input. Origin is carried from transport, never inferred
+  from payload size or connection mode.
+- Pending raw paste search keeps an absolute next-search index and the
+  end delimiter's five-byte overlap. Initial frame scans and completed
+  start-prefix transitions initialize that index according to which bytes
+  have already been inspected. Pending empty input leaves retained payload
+  storage unchanged and performs no delimiter search. Checked size bounds,
+  mixed-prefix state, and exact-versus-malformed outcomes remain intact.
+- Test-only work accumulation counts the search's inspected candidate starts,
+  including partial suffix positions. Empty continuations add zero work;
+  small continuations have work bounded by newly supplied bytes plus fixed
+  overlap. These deterministic controls were added with instrumentation and
+  are not rejected-parent red-first evidence; one-site mutations pin them.
+  Socket-to-HeadlessServer controls cover direct exact-limit byte delivery,
+  raw max+1 recovery, both structured acquisition paths, App recovery, and
+  mixed-prefix disconnection without paste delivery.
+- Both direct structured socket controls failed against the rejected parent
+  at the expected Notify-versus-shutdown assertion before production edits.
+  A preceding generic-argument compile error was fixture calibration only.
+  The App recovery fixture later needed the existing focused-runtime setup;
+  that setup correction is not a production behavior change.
+- This successor is **IMPLEMENTED / PENDING VERIFICATION** until its exact-SHA
+  Gate-2 and fresh whole-M7 Gate-3 verdicts. No upstream source is added:
+  M7 authority stays 21, all M8 obligations stand, protocol stays 19, and
+  ADR-0014 and the accepted stop-admission linearization are unchanged.
