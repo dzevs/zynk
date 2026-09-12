@@ -4480,7 +4480,8 @@ mod tests {
     use super::*;
 
     use crate::app::AppState;
-    use crate::protocol::CursorState;
+    use crate::protocol::{CellData, CursorState};
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn retained_render_plan_covers_each_render_path() {
@@ -5072,6 +5073,16 @@ mod tests {
         for (idx, (actual_cell, expected_cell)) in
             actual.cells.iter().zip(expected.cells.iter()).enumerate()
         {
+            if cells_equivalent_for_frame_compare(
+                &actual.cells,
+                &expected.cells,
+                usize::from(actual.width),
+                idx,
+                actual_cell,
+                expected_cell,
+            ) {
+                continue;
+            }
             assert_eq!(
                 actual_cell,
                 expected_cell,
@@ -5080,6 +5091,149 @@ mod tests {
                 idx / usize::from(actual.width),
             );
         }
+    }
+
+    fn cells_equivalent_for_frame_compare(
+        actual_cells: &[CellData],
+        expected_cells: &[CellData],
+        width: usize,
+        idx: usize,
+        actual: &CellData,
+        expected: &CellData,
+    ) -> bool {
+        if actual == expected {
+            return true;
+        }
+        if !cell_style_without_symbol_eq(actual, expected) {
+            return false;
+        }
+        if !matches!(
+            (actual.symbol.as_str(), expected.symbol.as_str()),
+            ("", " ") | (" ", "")
+        ) {
+            return false;
+        }
+        covered_by_previous_wide_cell(actual_cells, width, idx)
+            || covered_by_previous_wide_cell(expected_cells, width, idx)
+    }
+
+    fn cell_style_without_symbol_eq(a: &CellData, b: &CellData) -> bool {
+        a.fg == b.fg
+            && a.bg == b.bg
+            && a.modifier == b.modifier
+            && a.skip == b.skip
+            && a.hyperlink == b.hyperlink
+    }
+
+    fn covered_by_previous_wide_cell(cells: &[CellData], width: usize, idx: usize) -> bool {
+        if width == 0 || idx == 0 || idx.is_multiple_of(width) {
+            return false;
+        }
+        frame_cell_display_width(&cells[idx - 1]) > 1
+    }
+
+    fn frame_cell_display_width(cell: &CellData) -> usize {
+        if is_halfwidth_katakana_voiced_grapheme(&cell.symbol) {
+            return 2;
+        }
+        cell.symbol.width()
+    }
+
+    fn is_halfwidth_katakana_voiced_grapheme(symbol: &str) -> bool {
+        let mut chars = symbol.chars();
+        let Some(base) = chars.next() else {
+            return false;
+        };
+        let Some(mark) = chars.next() else {
+            return false;
+        };
+        chars.next().is_none()
+            && ('\u{ff66}'..='\u{ff9d}').contains(&base)
+            && matches!(mark, '\u{ff9e}' | '\u{ff9f}')
+    }
+
+    fn frame_compare_cell(symbol: &str) -> CellData {
+        CellData {
+            symbol: symbol.into(),
+            fg: 1,
+            bg: 2,
+            modifier: 3,
+            skip: false,
+            hyperlink: Some(4),
+        }
+    }
+
+    #[test]
+    fn frame_compare_halfwidth_katakana_classifier_has_exact_boundaries() {
+        for symbol in ["ｦ\u{ff9e}", "ﾝ\u{ff9f}"] {
+            assert!(is_halfwidth_katakana_voiced_grapheme(symbol), "{symbol:?}");
+        }
+        for symbol in ["", "ﾝ", "･\u{ff9e}", "ﾞ\u{ff9e}", "ﾝx", "ﾝ\u{ff9e}x"] {
+            assert!(
+                !is_halfwidth_katakana_voiced_grapheme(symbol),
+                "{symbol:?} must not use the halfwidth voiced-kana exception"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_compare_empty_tail_equivalence_requires_style_and_same_row_wide_cell() {
+        let empty = frame_compare_cell("");
+        let space = frame_compare_cell(" ");
+        let halfwidth = frame_compare_cell("ｶ\u{ff9e}");
+        let emoji = frame_compare_cell("💡");
+
+        assert!(cells_equivalent_for_frame_compare(
+            &[halfwidth.clone(), empty.clone()],
+            &[halfwidth.clone(), space.clone()],
+            2,
+            1,
+            &empty,
+            &space,
+        ));
+        assert!(cells_equivalent_for_frame_compare(
+            &[emoji.clone(), space.clone()],
+            &[emoji, empty.clone()],
+            2,
+            1,
+            &space,
+            &empty,
+        ));
+
+        let mut different_style = space.clone();
+        different_style.fg = 99;
+        assert!(!cells_equivalent_for_frame_compare(
+            &[halfwidth.clone(), empty.clone()],
+            &[halfwidth.clone(), different_style.clone()],
+            2,
+            1,
+            &empty,
+            &different_style,
+        ));
+        assert!(!cells_equivalent_for_frame_compare(
+            &[frame_compare_cell("A"), empty.clone()],
+            &[frame_compare_cell("A"), space.clone()],
+            2,
+            1,
+            &empty,
+            &space,
+        ));
+        assert!(!cells_equivalent_for_frame_compare(
+            &[halfwidth.clone(), empty.clone()],
+            &[halfwidth, space.clone()],
+            1,
+            1,
+            &empty,
+            &space,
+        ));
+        assert!(!cells_equivalent_for_frame_compare(
+            &[frame_compare_cell("･\u{ff9e}"), empty.clone()],
+            &[frame_compare_cell("･\u{ff9e}"), space.clone()],
+            2,
+            1,
+            &empty,
+            &space,
+        ));
     }
 
     #[test]

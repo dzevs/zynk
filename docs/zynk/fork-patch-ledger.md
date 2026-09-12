@@ -3428,3 +3428,26 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   assertions. Client ordering, effective-size policy, rendering output,
   protocol 19, caller authority, and delivery events are unchanged.
   Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-16: Halfwidth Katakana Voiced-Mark Rendering (2026-09-12)
+
+- **Source:** `be1891ec` (post-relicense; `src/pane/terminal.rs`,
+  `src/protocol/render_ansi.rs`, and `src/server/headless.rs` were already
+  marked and indexed in `NOTICE`; upstream `docs/next` remains excluded).
+  A two-scalar grapheme whose base is U+FF66 through U+FF9D and whose second
+  scalar is U+FF9E or U+FF9F follows Ghostty's wide-cell metadata even though
+  the host Unicode-width table reports one column. Neighboring characters,
+  missing or extra scalars, and unrelated combining sequences receive no
+  exception.
+- Full and dirty pane frames retain the voiced grapheme in the leading cell
+  and an empty spacer tail. ANSI full redraw treats the grapheme as two cells;
+  a diff redraw reveals a cell previously covered by that width. The upstream
+  full-redraw fixture marked its tail cell `skip`, which would pass without
+  exercising width calculation on this fork; the adapted control uses an
+  ordinary tail cell and was red before the width fix.
+- Retained-versus-full frame comparison treats empty and space tails as
+  equivalent only when style is identical and a wide leading cell immediately
+  precedes them in the same row. Exact-range, style, ordinary-width, row-boundary,
+  full/diff, and buffer-normalization mutations pin those boundaries. Protocol
+  19, wire shape, cursor state, hyperlinks, and graphics behavior are unchanged.
+  Exact-candidate Gate-2/Gate-3 verification remains required.

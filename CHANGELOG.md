@@ -59,6 +59,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Halfwidth Katakana with voiced or semi-voiced marks renders as one wide
+  grapheme without overwriting its trailing cell in full or incremental frames.
 - Background client rendering no longer resets the foreground client's
   workspace, agent-panel, tab, or mobile-switcher scroll position.
 - Headless servers resume restored agent sessions after a bounded host-theme
