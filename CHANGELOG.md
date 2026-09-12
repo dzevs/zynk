@@ -10,6 +10,10 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- `zynk terminal session observe <target>` streams read-only terminal frames as
+  NDJSON, while `terminal session control` adds an explicit single-controller
+  stream with input, resize, scroll, release, and takeover commands. Observers
+  never inherit write ownership when a controller disconnects.
 - Agent-panel ordering: `ui.agent_panel_sort = "spaces"` (default) or `"priority"`. Priority keeps Zynk's
   blocked > working > done ranking.
 - Optional host light/dark theme switching: `theme.auto_switch = true` (default **off**) with

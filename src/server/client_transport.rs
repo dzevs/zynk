@@ -314,6 +314,14 @@ pub(crate) enum ServerEvent {
         terminal_id: String,
         takeover: bool,
     },
+    /// A client requested read-only observation of one terminal.
+    ClientObserveTerminal { client_id: u64, target: String },
+    /// A client requested writable control of one terminal.
+    ClientControlTerminal {
+        client_id: u64,
+        target: String,
+        takeover: bool,
+    },
     /// A direct terminal attach client requested scrollback movement.
     ClientAttachScroll {
         client_id: u64,
@@ -660,6 +668,16 @@ fn client_read_loop(
                     server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
                 break;
             }
+            Err(protocol::FramingError::Bincode(err)) => {
+                warn!(
+                    client_id,
+                    err = %err,
+                    "client protocol decode failed, closing"
+                );
+                let _ =
+                    server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
+                break;
+            }
             Err(err) => {
                 debug!(client_id, err = %err, "client read error, closing");
                 let _ =
@@ -698,6 +716,16 @@ fn client_read_loop(
                     break;
                 } else {
                     ServerEvent::ClientInputEvents { client_id, events }
+                }
+            }
+            ClientMessage::ObserveTerminal { target } => {
+                ServerEvent::ClientObserveTerminal { client_id, target }
+            }
+            ClientMessage::ControlTerminal { target, takeover } => {
+                ServerEvent::ClientControlTerminal {
+                    client_id,
+                    target,
+                    takeover,
                 }
             }
             ClientMessage::ClipboardImage { extension, data } => {
@@ -1197,6 +1225,39 @@ new_tab = "ctrl+notakey"
             },
         )
         .expect("write oversized input");
+
+        match server_event_rx
+            .blocking_recv()
+            .expect("client disconnected event")
+        {
+            ServerEvent::ClientDisconnected { client_id } => assert_eq!(client_id, 7),
+            other => panic!("expected ClientDisconnected, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_rejects_unknown_client_tag_fail_closed() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-read-unknown-tag");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+
+        client_stream
+            .write_all(&1_u32.to_le_bytes())
+            .expect("write frame length");
+        client_stream.write_all(&[10]).expect("write unknown tag");
+        client_stream.flush().expect("flush unknown tag");
 
         match server_event_rx
             .blocking_recv()

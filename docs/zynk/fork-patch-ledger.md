@@ -3192,3 +3192,35 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   after a51's Gate-3 rejection still require fresh exact-successor execution.
   **IMPLEMENTED / PENDING exact-successor Gate2/Gate3 verification**; a51 gains
   no approval from this append.
+
+### M7-01: Terminal Observe and Control Streams (2026-09-12)
+
+- **Sources:** `bffc4a82` and `0fa6440d` (both pre-relicense; no new `NOTICE`
+  provenance entries). The pair adds `zynk terminal session observe` and
+  `control` as binary-client terminal modes, stable `ClientMessage` tags 8 and
+  9, target resolution by terminal/public pane/agent identity, read-only
+  observer projection, and one writable controller using the existing direct
+  attach ownership/takeover path. It adds no JSON API method, DB write,
+  delivery event, receipt authority, or agent identity path.
+- **Authority boundaries:** observers can render and choose their own projection
+  size but cannot send terminal input, structured input, clipboard images,
+  scroll commands, or PTY resize. They never become foreground or writable,
+  including after the sole controller releases, reaches EOF, or disconnects.
+  Multiple observers can coexist with one controller. Repeated mode changes
+  fail closed and remove only the requesting connection.
+- **Protocol-19 skew:** protocol 19 now names both the pre-M7 eight-message set
+  and this ten-message set. A pre-M7 server accepts the version handshake but
+  rejects tags 8/9 during decode, logs the protocol decode failure, and closes
+  the connection. A post-M7 streaming client maps an initial EOF to an explicit
+  restart/upgrade diagnostic; it never retries as App or falls back to writable
+  attach. M8's `6f311498` bump to protocol 20 must absorb this distinction.
+- **D-M7-1 forward warning:** the fork continues converting wire cells inline;
+  unlike upstream it does not carry `CellData::from_ratatui_cell`. The whole
+  retained-spinner source `b01fc37e` remains excluded under M5-21. Ports past
+  v0.8.2 must reconcile this context divergence before applying consumers
+  `4ab8bb53` or `207be3c7`; no no-op helper is introduced in M7.
+- **Verification status:** protocol tag/round-trip and legacy-decoder controls,
+  CLI option parsing, control NDJSON mapping, target/ownership/takeover,
+  observe/control coexistence, detach shutdown, unknown-tag fail-closed, and
+  no observer promotion are implemented. This row records author work only;
+  exact-candidate Gate-2/Gate-3 verification remains required.

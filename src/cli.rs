@@ -20,6 +20,11 @@ mod status;
 mod tab;
 mod workspace;
 mod worktree;
+
+const TERMINAL_SESSION_OBSERVE_USAGE: &str =
+    "usage: zynk terminal session observe <target> [--cols N] [--rows N]";
+const TERMINAL_SESSION_CONTROL_USAGE: &str =
+    "usage: zynk terminal session control <target> [--takeover] [--cols N] [--rows N]";
 mod zynk;
 
 pub enum CommandOutcome {
@@ -373,6 +378,7 @@ fn run_terminal_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "attach" => terminal_attach(&args[1..]),
+        "session" => terminal_session(&args[1..]),
         "help" | "--help" | "-h" => {
             print_terminal_help();
             Ok(0)
@@ -534,6 +540,143 @@ fn terminal_attach(args: &[String]) -> std::io::Result<i32> {
     };
     crate::client::run_terminal_attach(terminal_id, takeover)?;
     Ok(0)
+}
+
+fn terminal_session(args: &[String]) -> std::io::Result<i32> {
+    match args.first().map(String::as_str) {
+        Some("control") => terminal_session_control(&args[1..]),
+        Some("observe") => terminal_session_observe(&args[1..]),
+        Some("help" | "--help" | "-h") => {
+            eprintln!("{TERMINAL_SESSION_CONTROL_USAGE}");
+            eprintln!("{TERMINAL_SESSION_OBSERVE_USAGE}");
+            Ok(0)
+        }
+        _ => {
+            eprintln!("{TERMINAL_SESSION_CONTROL_USAGE}");
+            eprintln!("{TERMINAL_SESSION_OBSERVE_USAGE}");
+            Ok(2)
+        }
+    }
+}
+
+fn terminal_session_control(args: &[String]) -> std::io::Result<i32> {
+    let options = match parse_terminal_session_options(
+        args,
+        TERMINAL_SESSION_CONTROL_USAGE,
+        "control",
+        true,
+    )? {
+        Ok(options) => options,
+        Err(code) => return Ok(code),
+    };
+
+    crate::client::run_terminal_session_control(
+        options.target,
+        options.takeover,
+        options.cols,
+        options.rows,
+    )?;
+    Ok(0)
+}
+
+fn terminal_session_observe(args: &[String]) -> std::io::Result<i32> {
+    let options = match parse_terminal_session_options(
+        args,
+        TERMINAL_SESSION_OBSERVE_USAGE,
+        "observe",
+        false,
+    )? {
+        Ok(options) => options,
+        Err(code) => return Ok(code),
+    };
+
+    crate::client::run_terminal_session_observe(options.target, options.cols, options.rows)?;
+    Ok(0)
+}
+
+struct TerminalSessionOptions {
+    target: String,
+    cols: u16,
+    rows: u16,
+    takeover: bool,
+}
+
+fn parse_terminal_session_options(
+    args: &[String],
+    usage: &str,
+    command: &str,
+    allow_takeover: bool,
+) -> std::io::Result<Result<TerminalSessionOptions, i32>> {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("help" | "--help" | "-h")
+    ) {
+        eprintln!("{usage}");
+        return Ok(Err(0));
+    }
+    let Some(target) = args.first() else {
+        eprintln!("{usage}");
+        return Ok(Err(2));
+    };
+
+    let mut cols = 120;
+    let mut rows = 40;
+    let mut takeover = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--takeover" if allow_takeover => {
+                takeover = true;
+                index += 1;
+            }
+            "--cols" | "--rows" => {
+                let flag = args[index].as_str();
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("{usage}");
+                    return Ok(Err(2));
+                };
+                let dimension = parse_terminal_dimension(value, flag)?;
+                if flag == "--cols" {
+                    cols = dimension;
+                } else {
+                    rows = dimension;
+                }
+                index += 2;
+            }
+            "help" | "--help" | "-h" => {
+                eprintln!("{usage}");
+                return Ok(Err(0));
+            }
+            other => {
+                eprintln!("unknown terminal session {command} option: {other}");
+                eprintln!("{usage}");
+                return Ok(Err(2));
+            }
+        }
+    }
+
+    Ok(Ok(TerminalSessionOptions {
+        target: target.clone(),
+        cols,
+        rows,
+        takeover,
+    }))
+}
+
+fn parse_terminal_dimension(raw: &str, flag: &str) -> std::io::Result<u16> {
+    let parsed = raw.parse::<u16>().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{flag} must be an integer between 1 and {}", u16::MAX),
+        )
+    })?;
+    if parsed == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{flag} must be greater than 0"),
+        ));
+    }
+    Ok(parsed)
 }
 
 pub(super) fn parse_attach_target(args: &[String], usage: &str) -> Result<(String, bool), i32> {
@@ -939,6 +1082,8 @@ fn print_config_help() {
 fn print_terminal_help() {
     eprintln!("zynk terminal commands:");
     eprintln!("  zynk terminal attach <terminal_id> [--takeover]");
+    eprintln!("  zynk terminal session control <target> [--takeover] [--cols N] [--rows N]");
+    eprintln!("  zynk terminal session observe <target> [--cols N] [--rows N]");
     eprintln!("  detach from direct attach with ctrl+b q; send literal ctrl+b with ctrl+b ctrl+b");
 }
 
@@ -965,6 +1110,50 @@ fn _print_json<T: Serialize>(value: &T) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_session_options_default_and_override_dimensions() {
+        let defaults =
+            super::parse_terminal_session_options(&["w1:p1".to_owned()], "usage", "observe", false)
+                .expect("parse")
+                .expect("options");
+        assert_eq!(defaults.target, "w1:p1");
+        assert_eq!((defaults.cols, defaults.rows), (120, 40));
+        assert!(!defaults.takeover);
+
+        let control = super::parse_terminal_session_options(
+            &[
+                "agent:codex".to_owned(),
+                "--takeover".to_owned(),
+                "--cols".to_owned(),
+                "200".to_owned(),
+                "--rows".to_owned(),
+                "60".to_owned(),
+            ],
+            "usage",
+            "control",
+            true,
+        )
+        .expect("parse")
+        .expect("options");
+        assert_eq!(control.target, "agent:codex");
+        assert_eq!((control.cols, control.rows), (200, 60));
+        assert!(control.takeover);
+    }
+
+    #[test]
+    fn terminal_session_observer_rejects_takeover_and_zero_dimensions() {
+        let takeover = super::parse_terminal_session_options(
+            &["w1:p1".to_owned(), "--takeover".to_owned()],
+            "usage",
+            "observe",
+            false,
+        )
+        .expect("parse");
+        assert!(matches!(takeover, Err(2)));
+        assert!(super::parse_terminal_dimension("0", "--cols").is_err());
+        assert!(super::parse_terminal_dimension("65536", "--rows").is_err());
+    }
+
     #[test]
     fn parses_channel_set_argument() {
         assert_eq!(
