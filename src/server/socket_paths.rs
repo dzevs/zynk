@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -63,14 +65,6 @@ pub(crate) fn derive_client_socket_from_api_socket(api_socket_path: &Path) -> Pa
         .and_then(|s| s.to_str())
         .unwrap_or("zynk");
     let parent = api_socket_path.parent().unwrap_or_else(|| Path::new(""));
-
-    if api_socket_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext == "sock")
-    {
-        return parent.join(format!("{stem}-client.sock"));
-    }
 
     parent.join(format!("{stem}-client.sock"))
 }

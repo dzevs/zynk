@@ -149,6 +149,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/server/headless.rs
 - src/server/notifications.rs
 - src/server/render_stream.rs
+- src/server/socket_paths.rs
 - src/terminal/id.rs
 - src/terminal/runtime.rs
 - src/terminal/state.rs

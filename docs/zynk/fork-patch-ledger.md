@@ -3394,3 +3394,16 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   provenance; this appended note preserves the earlier mistaken classification
   and its correction without reintroducing the false marker or changing M7-02
   production behavior.
+
+### M7-14: Unified Client Socket Path Derivation (2026-09-12)
+
+- **Source:** `885c9a6b` (post-relicense; `src/server/socket_paths.rs` now
+  carries the modification notice and is indexed in `NOTICE`).
+  `derive_client_socket_from_api_socket` removes an extension-specific branch
+  whose body was byte-for-byte the same as the fallthrough expression.
+- API socket paths with a `.sock` extension and paths without that extension
+  retain their existing `-client.sock` results. Override precedence, explicit
+  session selection, socket namespaces, preparation, and permissions are
+  unchanged. Both output controls were green on the clean pre-change tree and
+  remain the behavioral acceptance boundary. Exact-candidate Gate-2/Gate-3
+  verification remains required.
