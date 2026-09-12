@@ -1,3 +1,6 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
+
 mod support;
 
 use std::fs;
@@ -448,6 +451,10 @@ fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> Strin
     );
 }
 
+fn is_ptmx_master_path(path: &Path) -> bool {
+    path == Path::new("/dev/ptmx") || path == Path::new("/dev/pts/ptmx")
+}
+
 fn server_ptmx_fd_count(pid: u32) -> usize {
     let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
         return 0;
@@ -455,8 +462,17 @@ fn server_ptmx_fd_count(pid: u32) -> usize {
     entries
         .filter_map(Result::ok)
         .filter_map(|entry| fs::read_link(entry.path()).ok())
-        .filter(|target| target == Path::new("/dev/ptmx"))
+        .filter(|target| is_ptmx_master_path(target))
         .count()
+}
+
+#[test]
+fn ptmx_master_path_matches_common_layouts_without_matching_slaves() {
+    assert!(is_ptmx_master_path(Path::new("/dev/ptmx")));
+    assert!(is_ptmx_master_path(Path::new("/dev/pts/ptmx")));
+    assert!(!is_ptmx_master_path(Path::new("/dev/pts/0")));
+    assert!(!is_ptmx_master_path(Path::new("/dev/pts/42")));
+    assert!(!is_ptmx_master_path(Path::new("/dev/tty")));
 }
 
 fn wait_for_server_ptmx_fd_count(pid: u32, expected: usize, timeout: Duration) {
@@ -469,7 +485,7 @@ fn wait_for_server_ptmx_fd_count(pid: u32, expected: usize, timeout: Duration) {
         }
         thread::sleep(Duration::from_millis(25));
     }
-    panic!("server pid {pid} had {last_count} /dev/ptmx fds; expected {expected}");
+    panic!("server pid {pid} had {last_count} ptmx master fds; expected {expected}");
 }
 
 fn wait_for_replacement_server_pid(runtime_dir: &Path, old_pid: u32, timeout: Duration) -> u32 {

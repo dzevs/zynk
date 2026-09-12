@@ -3351,3 +3351,15 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   `src/server/headless/pane_graphics.rs` call site. Protocol remains 19; no API,
   schema, dependency, delivery authority, or graphics upload policy changes.
   Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-12: Linux PTY Master FD Test Portability (2026-09-12)
+
+- **Source:** `a0a6e13f` (post-relicense; `tests/live_handoff.rs` now carries
+  the modification notice and is indexed in `NOTICE`). Production bytes are
+  unchanged. The one-master-per-pane integration control recognizes both
+  `/dev/ptmx` and the devpts `/dev/pts/ptmx` master node while continuing to
+  reject numbered `/dev/pts/<n>` slave paths.
+- A pure path-classification control pins both accepted layouts and the slave
+  negatives. The live control was rebaselined green on the exact clean M7-10
+  tree before this change; its timeout now reports layout-neutral "ptmx master
+  fds" wording. Exact-candidate Gate-2/Gate-3 verification remains required.

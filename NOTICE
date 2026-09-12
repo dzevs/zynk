@@ -177,6 +177,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - tests/client_mode.rs
 - tests/cross_area.rs
 - tests/fixtures/keyboard_protocol_corpus.tsv
+- tests/live_handoff.rs
 - tests/zynk_receipt.rs
 <!-- apache-modified-files: end -->
 
