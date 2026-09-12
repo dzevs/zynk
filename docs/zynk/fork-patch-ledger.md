@@ -3227,9 +3227,9 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
 
 ### M7-02: Bounded Local Server Startup Wait (2026-09-12)
 
-- **Source:** `3459798b` (post-relicense; `src/server/autodetect.rs` is added to
-  the `NOTICE` modified-file index). Local server startup now waits at most 15
-  seconds instead of 5 while retaining the existing 50 ms polling interval.
+- **Source:** `3459798b` (pre-relicense; `NOTICE` unchanged). Local server
+  startup now waits at most 15 seconds instead of 5 while retaining the
+  existing 50 ms polling interval.
 - A timeout names the requested socket and the active session's real
   `crate::logging::LOG_FILE_SERVER` path, then tells the user to retry `zynk`.
   No socket selection, daemon ownership, protocol, runtime, or live-session
