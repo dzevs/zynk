@@ -3663,3 +3663,22 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   direct-terminal consumers. This successor is **IMPLEMENTED / PENDING
   VERIFICATION** until exact-SHA Gate-2 and a fresh whole-M7 Gate-3 verdict; no
   merge, push, install, tag, publish, or release follows from this entry.
+
+### M7 Gate-3 Remediation Evidence-Scope Correction (2026-09-12)
+
+- The preceding row overstates what the first rejected-parent run exercised.
+  That run selected nine tests: eight new controls failed as intended, while
+  one unrelated existing test matched the broad filter and passed. It covered
+  both initial stop-race controls, the six-variant direct-controller table,
+  fragmented exact/max+1/start-boundary/cumulative/malformed behavior, and
+  used the then-current API fixture.
+- The false-prefix, every-end-boundary, and direct-terminal-consumer controls
+  were added during implementation, not before it. Their evidence is the
+  focused green runs and the independent one-site mutation matrix; they must
+  not be described as rejected-parent red-first evidence. The API race control
+  was also strengthened from a read-only workspace-list request to a
+  `NotificationShow` request whose admission would mutate toast state. The
+  final API control is pinned by removing only its atomic admission check, but
+  that strengthened fixture was not the one captured in the initial parent
+  run. This append corrects evidence provenance only; it changes no finding,
+  implementation, source assignment, protocol version, or M8 obligation.
