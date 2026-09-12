@@ -3271,3 +3271,15 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
 - This is synchronization of an existing observable resize contract, not a
   new resize policy or timing guarantee. Exact-candidate Gate-2/Gate-3
   verification remains required.
+
+### M7-06: Cursor Hide Inside Synchronized Output (2026-09-12)
+
+- **Source:** `2b99ced8` (pre-relicense; `NOTICE` unchanged). ANSI full and
+  diff frames now begin synchronized output before hiding the hardware cursor;
+  the hide still precedes every cell write and final cursor restoration stays
+  in its established position.
+- Full, diff, generic synchronization, and repeated-visible-cursor controls pin
+  the byte order. The full `protocol::render_ansi` test module remains green,
+  including underline, hyperlink, wide-cell, IME-anchor, cursor-shape, and
+  visibility behavior. Exact-candidate Gate-2/Gate-3 verification remains
+  required.
