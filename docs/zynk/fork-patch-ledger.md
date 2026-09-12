@@ -3307,3 +3307,25 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
 - This synchronizes the assertion with asynchronous resize propagation; it does
   not alter effective-size policy or introduce a production timing guarantee.
   Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-09: Recoverable Oversized Bracketed Paste (2026-09-12)
+
+- **Source:** `6382bd43` (pre-relicense; upstream `docs/next` is excluded and
+  `NOTICE` unchanged). Raw `ClientMessage::Input` is recoverable only when it
+  is exactly one complete bracketed-paste envelope with valid UTF-8 and its
+  total bytes exceed the existing 1 MiB limit. The server notifies only that
+  client and leaves the connection usable. Partial, trailing, multiple,
+  invalid-UTF-8, and ordinary oversized raw input still disconnect fail closed.
+- Structured batches retain the M6 aggregate event/payload policy. A batch at
+  the byte limit is accepted; paste-only bytes mixed with focus/mouse events
+  may receive the recoverable rejection, atomically. Too many expanded events,
+  or any over-limit generated text, text commit, VT source bytes, or mixed
+  paste plus non-paste payload disconnects. VT bytes are multiplied by grouped
+  repeat count, matching the bytes the pane encoder can emit; this is a fork
+  adaptation of the pre-existing M6 limit rather than an upstream policy
+  relaxation.
+- `ClientPasteRejected` carries only sender, observed size, and limit. Headless
+  handling sends a client-local `Paste rejected` notification, creates no app
+  toast, changes no foreground client, and emits no delivery event. Protocol
+  tags/version, input authority, and clipboard-image limits are unchanged.
+  Exact-candidate Gate-2/Gate-3 verification remains required.

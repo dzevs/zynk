@@ -59,6 +59,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Oversized bracketed text pastes are rejected with a client-local notification
+  without disconnecting the client; malformed or non-paste oversized input
+  remains a fail-closed protocol violation.
 - A handled URL click retains ownership across host focus loss and cannot consume another
   client's mouse gesture. Disconnect clears only that client's pending click and held keys.
 - Remote VS Code terminals prefer OSC 52 clipboard writes. When graphics are enabled and the
