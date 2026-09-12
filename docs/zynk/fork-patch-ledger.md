@@ -3515,3 +3515,30 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   sets `should_quit`, and no separate post-stop `server_unavailable` fence is
   applied. This append qualifies the historical row; it does not widen the
   M7-17 implementation or change protocol 19, message tags, or authorization.
+
+### M7-18: Compact Full ANSI Redraws (2026-09-12)
+
+- **Source:** `36074530` (post-relicense; `src/protocol/render_ansi.rs` and
+  `src/server/headless.rs` were already marked and indexed in `NOTICE`;
+  upstream `docs/next` remains excluded). Full redraws reuse unchanged SGR
+  state and omit a CUP only when the preceding cell was actually written as
+  one ASCII column at the immediately adjacent position. A skipped cell never
+  inherits that inline position; row boundaries reset it, and non-ASCII or
+  wide cells prevent the following cell from assuming a cursor position.
+  Hyperlink transitions, wide/skip handling, graphics-before-sync-end, cursor
+  hide/order, underline styles, and the post-sync IME anchor remain intact.
+- Cursor positions use the named zero-based `(column, row)` convention, while
+  emitted CUP bytes remain row-before-column. An asymmetric row 3 / column 17
+  control pins `\x1b[4;18H`. Independent controls pin SGR reuse and inline CUP
+  elision, and a 710x202 full frame stays within the normal transport cap so
+  its subsequent frame is delivered.
+- **FORWARD ADAPTATION from M8 source `02a6e874`:** M7 consumes only that
+  commit's private `write_cell` signature hunk, accepting an optional cursor
+  position, and adapts the existing diff caller to `Some((col, row))`. Diff
+  redraw bytes remain unchanged. M8 must account for this hunk as already
+  landed rather than re-apply it; `02a6e874`'s diff batching, client repaint
+  trigger, and associated tests remain outstanding. M7-18 adds no production
+  `run_server`, handoff, DB-preflight, receipt-worker, or embedding-worker
+  change, so D-M7-3's accepted placement and authority invariants remain
+  unchanged. Protocol 19 and all message tags remain unchanged.
+  Exact-candidate Gate-2/Gate-3 verification remains required.

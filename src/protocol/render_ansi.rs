@@ -512,11 +512,14 @@ fn is_halfwidth_katakana_voiced_grapheme(symbol: &str) -> bool {
 
 #[derive(Clone, Copy)]
 struct HostCursorState {
-    position: (u16, u16),
+    position: CursorPosition,
     visible: bool,
     /// DECSCUSR parameter (0–6). 0 means terminal default.
     shape: u8,
 }
+
+/// Zero-based `(column, row)` cursor coordinates.
+type CursorPosition = (u16, u16);
 
 fn resolve_host_cursor_state(
     frame: &FrameData,
@@ -573,7 +576,7 @@ fn clamp_cursor_position(frame: &FrameData, x: u16, y: u16) -> (u16, u16) {
     )
 }
 
-fn write_cursor_position(writer: &mut impl Write, (x, y): (u16, u16)) {
+fn write_cursor_position(writer: &mut impl Write, (x, y): CursorPosition) {
     // CUP: move cursor to (row+1, col+1) — 1-based.
     let _ = write!(writer, "\x1b[{};{}H", y + 1, x + 1);
 }
@@ -602,9 +605,11 @@ fn write_ime_anchor_cursor_state(writer: &mut impl Write, cursor: HostCursorStat
 }
 
 fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
+    let mut last_sgr = String::new();
     let mut active_hyperlink = None;
     for row in 0..frame.height {
         let mut to_skip = 0usize;
+        let mut next_inline_col = None;
         for col in 0..frame.width {
             if to_skip > 0 {
                 to_skip -= 1;
@@ -615,25 +620,25 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
             let cell = &frame.cells[idx];
 
             if cell.skip {
+                next_inline_col = None;
                 continue;
             }
 
-            // Move cursor to position (1-based).
-            let _ = write!(writer, "\x1b[{};{}H", row + 1, col + 1);
-
-            // Set style.
-            let sgr = build_sgr(cell.fg, cell.bg, cell.modifier);
-            let _ = writer.write_all(sgr.as_bytes());
-
-            write_hyperlink_if_changed(
+            let cursor_position = (next_inline_col != Some(col)).then_some((col, row));
+            write_cell(
                 writer,
+                cursor_position,
+                cell,
+                &mut last_sgr,
                 &mut active_hyperlink,
-                cell_hyperlink_uri(frame, cell),
+                frame,
             );
-
-            // Write the symbol.
-            let _ = writer.write_all(cell.symbol.as_bytes());
-            to_skip = cell_width(cell).saturating_sub(1);
+            let width = cell_width(cell);
+            // Only a cell that was actually written as one ASCII column makes
+            // the next terminal cursor position predictable.
+            next_inline_col =
+                (cell.symbol.is_ascii() && width == 1).then_some(col.saturating_add(1));
+            to_skip = width.saturating_sub(1);
         }
     }
 
@@ -699,8 +704,7 @@ fn close_hyperlink(writer: &mut impl Write, active: &mut Option<String>) {
 
 fn write_cell(
     writer: &mut impl Write,
-    row: u16,
-    col: u16,
+    cursor_position: Option<CursorPosition>,
     cell: &CellData,
     last_sgr: &mut String,
     active_hyperlink: &mut Option<String>,
@@ -710,7 +714,9 @@ fn write_cell(
         return;
     }
 
-    let _ = write!(writer, "\x1b[{};{}H", row + 1, col + 1);
+    if let Some(position) = cursor_position {
+        write_cursor_position(writer, position);
+    }
 
     let sgr = build_sgr(cell.fg, cell.bg, cell.modifier);
     if sgr != *last_sgr {
@@ -764,8 +770,7 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
             {
                 write_cell(
                     writer,
-                    row,
-                    col,
+                    Some((col, row)),
                     cell,
                     &mut last_sgr,
                     &mut active_hyperlink,
@@ -1328,6 +1333,83 @@ mod tests {
     }
 
     #[test]
+    fn full_redraw_reuses_sgr_across_cells_that_require_cursor_moves() {
+        let frame = make_frame(
+            3,
+            1,
+            vec![
+                make_cell("é", 0x00_00_00_02, 0x00_00_00_01, 1),
+                make_cell("ø", 0x00_00_00_02, 0x00_00_00_01, 1),
+                make_cell("ñ", 0x00_00_00_02, 0x00_00_00_01, 1),
+            ],
+        );
+        let expected_sgr = build_sgr(0x00_00_00_02, 0x00_00_00_01, 1);
+        let mut output = Vec::new();
+
+        write_all_cells(&mut output, &frame);
+
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(
+            output.matches(expected_sgr.as_str()).count(),
+            1,
+            "identical styles should share one SGR even when each cell needs an explicit CUP"
+        );
+        for cup in ["\x1b[1;1H", "\x1b[1;2H", "\x1b[1;3H"] {
+            assert!(output.contains(cup), "missing required cursor move {cup:?}");
+        }
+    }
+
+    #[test]
+    fn full_redraw_inlines_only_after_written_ascii_width_one_cells() {
+        let mut skipped = make_cell("X", 0, 0, 0);
+        skipped.skip = true;
+        let frame = make_frame(
+            6,
+            2,
+            vec![
+                make_cell("A", 0, 0, 0),
+                make_cell("B", 0, 0, 0),
+                skipped,
+                make_cell("C", 0, 0, 0),
+                make_cell("é", 0, 0, 0),
+                make_cell("D", 0, 0, 0),
+                make_cell("E", 0, 0, 0),
+                make_cell(WIDE_GRAPHEME, 0, 0, 0),
+                make_cell(" ", 0, 0, 0),
+                make_cell("F", 0, 0, 0),
+                make_cell("G", 0, 0, 0),
+                make_cell("H", 0, 0, 0),
+            ],
+        );
+        let mut output = Vec::new();
+
+        write_all_cells(&mut output, &frame);
+
+        let output = String::from_utf8(output).unwrap();
+        for cup in [
+            "\x1b[1;1H",
+            "\x1b[1;4H",
+            "\x1b[1;6H",
+            "\x1b[2;1H",
+            "\x1b[2;4H",
+        ] {
+            assert!(output.contains(cup), "missing required cursor move {cup:?}");
+        }
+        for cup in [
+            "\x1b[1;2H",
+            "\x1b[1;5H",
+            "\x1b[2;2H",
+            "\x1b[2;5H",
+            "\x1b[2;6H",
+        ] {
+            assert!(
+                !output.contains(cup),
+                "safe adjacent cell should advance inline instead of emitting {cup:?}"
+            );
+        }
+    }
+
+    #[test]
     fn blit_frame_diff_only_writes_changed_cells() {
         let prev = make_frame(
             2,
@@ -1363,6 +1445,28 @@ mod tests {
         );
         // Should contain the changed cell content.
         assert!(output_str.contains('X'), "should contain changed cell 'X'");
+    }
+
+    #[test]
+    fn diff_redraw_preserves_asymmetric_cursor_position_bytes() {
+        const WIDTH: u16 = 18;
+        const HEIGHT: u16 = 4;
+        let prev = make_frame(
+            WIDTH,
+            HEIGHT,
+            vec![make_cell("A", 0, 0, 0); usize::from(WIDTH) * usize::from(HEIGHT)],
+        );
+        let mut curr = prev.clone();
+        curr.cells[3 * usize::from(WIDTH) + 17] = make_cell("B", 0, 0, 0);
+        let mut output = Vec::new();
+
+        write_changed_cells(&mut output, &curr, &prev);
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("\x1b[4;18H{}B\x1b[0m", build_sgr(0, 0, 0)),
+            "cursor tuples are (column, row), while CUP bytes encode row before column"
+        );
     }
 
     #[test]

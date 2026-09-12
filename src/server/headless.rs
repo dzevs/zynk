@@ -8657,6 +8657,86 @@ next_tab = ""
     }
 
     #[test]
+    fn render_and_stream_sends_large_terminal_frame_for_terminal_ansi_client() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        let (client_tx, _client_control_rx, client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (278, 85),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        server.render_and_stream();
+        match read_server_message(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial terminal frame"),
+        ) {
+            ServerMessage::Terminal(frame) => {
+                assert_eq!(frame.seq, 1);
+                assert_eq!((frame.width, frame.height), (278, 85));
+                assert!(frame.full);
+            }
+            other => panic!("expected terminal frame, got {other:?}"),
+        }
+
+        assert!(server.handle_server_event(ServerEvent::ClientResize {
+            client_id: 1,
+            cols: 710,
+            rows: 202,
+            cell_width_px: 0,
+            cell_height_px: 0,
+        }));
+        server.render_and_stream();
+
+        match read_server_message(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("large terminal frame"),
+        ) {
+            ServerMessage::Terminal(frame) => {
+                assert_eq!(frame.seq, 2);
+                assert_eq!((frame.width, frame.height), (710, 202));
+                assert!(frame.full);
+                assert!(!frame.bytes.is_empty());
+                let framed =
+                    HeadlessServer::frame_server_message(&ServerMessage::Terminal(frame.clone()))
+                        .expect("large frame should remain within the normal transport cap");
+                assert!(framed.len().saturating_sub(4) <= MAX_FRAME_SIZE);
+            }
+            other => panic!("expected terminal frame, got {other:?}"),
+        }
+
+        server.app.state.mode = crate::app::Mode::Navigate;
+        server.render_and_stream();
+        match read_server_message(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("follow-up terminal frame"),
+        ) {
+            ServerMessage::Terminal(frame) => assert_eq!(frame.seq, 3),
+            other => panic!("expected terminal frame, got {other:?}"),
+        }
+
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[test]
     fn terminal_ansi_input_does_not_reset_blit_baseline() {
         let mut server = test_headless_server();
         let (client_tx, _client_control_rx, client_rx) = test_client_writer();
