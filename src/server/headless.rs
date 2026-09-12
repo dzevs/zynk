@@ -71,6 +71,8 @@ use std::fs;
 
 const DIRECT_STRUCTURED_INPUT_UNSUPPORTED: &str =
     "direct terminal control accepts raw Input; structured InputEvents are unsupported";
+const DIRECT_TARGET_REQUIRED: &str =
+    "terminal target must be acquired before sending data-plane messages";
 
 fn sound_notify_message(sound: crate::sound::Sound) -> &'static str {
     match sound {
@@ -1615,7 +1617,6 @@ impl HeadlessServer {
         client.mode = ClientConnectionMode::TerminalObserve {
             terminal_id: terminal_id.clone(),
         };
-        client.pending_terminal_attach = false;
         client.render_state.reset_baseline();
         client.last_activity = stamp;
         let was_foreground = self.foreground_client_id == Some(client_id);
@@ -2468,7 +2469,6 @@ impl HeadlessServer {
         client.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: terminal_id.clone(),
         };
-        client.pending_terminal_attach = false;
         client.render_state.reset_baseline();
         client.last_activity = stamp;
         let was_foreground = self.foreground_client_id == Some(client_id);
@@ -2492,9 +2492,9 @@ impl HeadlessServer {
     }
 
     fn client_is_pending_terminal_mode(&self, client_id: u64) -> bool {
-        self.clients.get(&client_id).is_some_and(|client| {
-            client.pending_terminal_attach && matches!(client.mode, ClientConnectionMode::App)
-        })
+        self.clients
+            .get(&client_id)
+            .is_some_and(|client| matches!(client.mode, ClientConnectionMode::TerminalPending))
     }
 
     /// Handles a server event. Returns true if the event requires a re-render.
@@ -2580,6 +2580,7 @@ impl HeadlessServer {
     fn admit_structured_client_input(&mut self, client_id: u64) -> bool {
         match self.clients.get(&client_id).map(|client| &client.mode) {
             Some(ClientConnectionMode::App) => true,
+            Some(ClientConnectionMode::TerminalPending) => false,
             Some(ClientConnectionMode::TerminalAttach { .. }) => {
                 self.send_to_client(
                     client_id,
@@ -2594,11 +2595,47 @@ impl HeadlessServer {
         }
     }
 
+    fn admit_pending_terminal_event(&mut self, event: &ServerEvent) -> bool {
+        let client_id = match event {
+            ServerEvent::ClientInput { client_id, .. }
+            | ServerEvent::ClientRawInputPending { client_id }
+            | ServerEvent::ClientInputEvents { client_id, .. }
+            | ServerEvent::ClientPasteRejected { client_id, .. }
+            | ServerEvent::ClientClipboardImage { client_id, .. }
+            | ServerEvent::ClientResize { client_id, .. } => *client_id,
+            ServerEvent::ClientConnected { .. }
+            | ServerEvent::ClientAttachTerminal { .. }
+            | ServerEvent::ClientObserveTerminal { .. }
+            | ServerEvent::ClientControlTerminal { .. }
+            | ServerEvent::ClientAttachScroll { .. }
+            | ServerEvent::ClientDetach { .. }
+            | ServerEvent::ClientDisconnected { .. }
+            | ServerEvent::ClientWriterDrained { .. }
+            | ServerEvent::QuitSignal => return true,
+        };
+
+        if !self.client_is_pending_terminal_mode(client_id) {
+            return true;
+        }
+        self.send_to_client(
+            client_id,
+            ServerMessage::ServerShutdown {
+                reason: Some(DIRECT_TARGET_REQUIRED.to_owned()),
+            },
+        );
+        self.remove_client_and_resize_if_needed(client_id);
+        false
+    }
+
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
         // This load is the final admission point for work already removed from
         // the queue. A later stop store belongs to the next admission.
         if self.should_quit.load(Ordering::Acquire) {
             self.settle_server_event_at_stop_boundary(ev);
+            return false;
+        }
+
+        if !self.admit_pending_terminal_event(&ev) {
             return false;
         }
 
@@ -2645,7 +2682,11 @@ impl HeadlessServer {
                 self.clients.insert(
                     client_id,
                     ClientConnection::new_with_mode(
-                        ClientConnectionMode::App,
+                        if direct_attach_requested {
+                            ClientConnectionMode::TerminalPending
+                        } else {
+                            ClientConnectionMode::App
+                        },
                         keybindings,
                         (cols, rows),
                         crate::kitty_graphics::HostCellSize {
@@ -2656,7 +2697,6 @@ impl HeadlessServer {
                         None,
                         last_activity,
                         render_encoding,
-                        direct_attach_requested,
                         Some(writer),
                     ),
                 );
@@ -2736,6 +2776,7 @@ impl HeadlessServer {
                 };
                 self.handle_client_input_events(client_id, events)
             }
+            ServerEvent::ClientRawInputPending { .. } => false,
             ServerEvent::ClientInputEvents { client_id, events } => {
                 if self.handoff_in_progress {
                     debug!(
@@ -3327,7 +3368,7 @@ impl HeadlessServer {
                 | ClientConnectionMode::TerminalObserve { terminal_id } => {
                     direct_terminal_targets.insert(terminal_id.as_str());
                 }
-                ClientConnectionMode::App => {}
+                ClientConnectionMode::App | ClientConnectionMode::TerminalPending => {}
             }
         }
         (has_app_target, direct_terminal_targets)
@@ -3636,6 +3677,7 @@ impl HeadlessServer {
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut frame = match mode {
+                ClientConnectionMode::TerminalPending => continue,
                 ClientConnectionMode::App => {
                     let render_started = crate::render_prof::timer();
                     let preserved_scroll = (!is_foreground).then_some((
@@ -6234,6 +6276,263 @@ next_tab = ""
         bytes
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum PendingDirectDataPlaneCase {
+        RawInput,
+        StructuredInput,
+        RawPasteRejection,
+        StructuredPasteRejection,
+        ClipboardImage,
+        Resize,
+    }
+
+    impl PendingDirectDataPlaneCase {
+        const ALL: [Self; 6] = [
+            Self::RawInput,
+            Self::StructuredInput,
+            Self::RawPasteRejection,
+            Self::StructuredPasteRejection,
+            Self::ClipboardImage,
+            Self::Resize,
+        ];
+
+        fn send(self, client: &mut crate::ipc::LocalStream) {
+            let message = match self {
+                Self::RawInput => protocol::ClientMessage::Input {
+                    data: b"pending raw input".to_vec(),
+                },
+                Self::StructuredInput => protocol::ClientMessage::InputEvents {
+                    events: vec![protocol::ClientInputEvent::TextCommit(
+                        "pending structured input".to_owned(),
+                    )],
+                },
+                Self::RawPasteRejection => protocol::ClientMessage::Input {
+                    data: socket_test_paste(1_048_577),
+                },
+                Self::StructuredPasteRejection => protocol::ClientMessage::InputEvents {
+                    events: vec![protocol::ClientInputEvent::Paste {
+                        text: "x".repeat(1_048_577),
+                    }],
+                },
+                Self::ClipboardImage => protocol::ClientMessage::ClipboardImage {
+                    extension: "png".to_owned(),
+                    data: vec![1, 2, 3],
+                },
+                Self::Resize => protocol::ClientMessage::Resize {
+                    cols: 101,
+                    rows: 31,
+                    cell_width_px: 7,
+                    cell_height_px: 14,
+                },
+            };
+            protocol::write_message(client, &message).expect("write pending data-plane message");
+        }
+    }
+
+    #[test]
+    fn pending_direct_data_plane_closes_before_target_acquisition() {
+        const EXPECTED_REASON: &str =
+            "terminal target must be acquired before sending data-plane messages";
+        let mut failures = Vec::new();
+
+        for case in PendingDirectDataPlaneCase::ALL {
+            with_terminal_session_test_server(|server, _, _, _| {
+                let mut app_input_rx = install_focused_test_runtime(server, b"");
+                server.clients.insert(1, test_app_client(Some(true), 1));
+                server.foreground_client_id = Some(1);
+                server.sync_foreground_client_state();
+
+                with_socket_test_client(
+                    server,
+                    protocol::ClientLaunchMode::TerminalAttach,
+                    |server, client| {
+                        let workspace = &server.app.state.workspaces[0];
+                        let tab = &workspace.tabs[workspace.active_tab];
+                        let pane_id = tab.root_pane;
+                        let before_app = (
+                            server.app.state.mode,
+                            server.app.state.active,
+                            server.app.state.selected,
+                            server.app.state.toast.clone(),
+                        );
+                        let before_layout = (
+                            server.app.state.workspaces.len(),
+                            workspace.id.clone(),
+                            workspace.tabs.len(),
+                            workspace.active_tab,
+                            tab.root_pane,
+                            tab.layout.focused(),
+                            tab.layout.pane_count(),
+                            tab.panes.len(),
+                        );
+                        let before_geometry = (
+                            server.effective_size,
+                            workspace.test_runtimes[&pane_id].current_size(),
+                        );
+                        assert!(matches!(
+                            server.app.event_rx.try_recv(),
+                            Err(mpsc::error::TryRecvError::Empty)
+                        ));
+                        let staged_before =
+                            crate::server::clipboard_image::staged_paths_for_client(7);
+
+                        case.send(client);
+                        let event = recv_socket_test_event(server);
+                        let changed = server.handle_server_event(event);
+                        let client_present = server.clients.contains_key(&7);
+                        let shutdown_reason = if client_present {
+                            None
+                        } else {
+                            protocol::read_message::<_, ServerMessage>(client, MAX_FRAME_SIZE)
+                                .ok()
+                                .and_then(|message| match message {
+                                    ServerMessage::ServerShutdown { reason } => reason,
+                                    _ => None,
+                                })
+                        };
+                        let staged_after =
+                            crate::server::clipboard_image::staged_paths_for_client(7);
+                        let target_is_quiet = matches!(
+                            app_input_rx.try_recv(),
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                        );
+                        let workspace = &server.app.state.workspaces[0];
+                        let tab = &workspace.tabs[workspace.active_tab];
+                        let layout_unchanged = (
+                            server.app.state.workspaces.len(),
+                            workspace.id.clone(),
+                            workspace.tabs.len(),
+                            workspace.active_tab,
+                            tab.root_pane,
+                            tab.layout.focused(),
+                            tab.layout.pane_count(),
+                            tab.panes.len(),
+                        ) == before_layout;
+                        let geometry_unchanged = (
+                            server.effective_size,
+                            workspace.test_runtimes[&pane_id].current_size(),
+                        ) == before_geometry;
+                        let app_events_quiet = matches!(
+                            server.app.event_rx.try_recv(),
+                            Err(mpsc::error::TryRecvError::Empty)
+                        );
+                        let unchanged = !changed
+                            && !client_present
+                            && server.foreground_client_id == Some(1)
+                            && (
+                                server.app.state.mode,
+                                server.app.state.active,
+                                server.app.state.selected,
+                                server.app.state.toast.clone(),
+                            ) == before_app
+                            && layout_unchanged
+                            && geometry_unchanged
+                            && app_events_quiet
+                            && server.terminal_attach_owners.is_empty()
+                            && server.app.state.direct_attach_resize_locks.is_empty()
+                            && staged_after == staged_before
+                            && target_is_quiet
+                            && shutdown_reason.as_deref() == Some(EXPECTED_REASON);
+                        if !unchanged {
+                            failures.push(format!(
+                                "{case:?}: changed={changed}, client_present={client_present}, foreground={:?}, app={:?}, layout_unchanged={layout_unchanged}, geometry_unchanged={geometry_unchanged}, app_events_quiet={app_events_quiet}, owners={:?}, resize_locks={:?}, staged_before={staged_before:?}, staged_after={staged_after:?}, target_is_quiet={target_is_quiet}, shutdown={shutdown_reason:?}",
+                                server.foreground_client_id,
+                                (
+                                    server.app.state.mode,
+                                    server.app.state.active,
+                                    server.app.state.selected,
+                                    server.app.state.toast.clone(),
+                                ),
+                                server.terminal_attach_owners,
+                                server.app.state.direct_attach_resize_locks,
+                            ));
+                        }
+                    },
+                );
+            });
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn pending_direct_held_raw_input_cannot_cross_terminal_acquisition() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80, 24, 0, b"", 8,
+                );
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
+            server.clients.insert(1, test_app_client(Some(true), 1));
+            server.foreground_client_id = Some(1);
+            server.sync_foreground_client_state();
+
+            with_socket_test_client(
+                server,
+                protocol::ClientLaunchMode::TerminalAttach,
+                |server, client| {
+                    protocol::write_message(
+                        client,
+                        &protocol::ClientMessage::Input {
+                            data: crate::raw_input::BRACKETED_PASTE_START.to_vec(),
+                        },
+                    )
+                    .expect("write held paste start before acquisition");
+                    protocol::write_message(
+                        client,
+                        &protocol::ClientMessage::ControlTerminal {
+                            target: terminal_id_string.clone(),
+                            takeover: false,
+                        },
+                    )
+                    .expect("write terminal acquisition after held input");
+                    protocol::write_message(
+                        client,
+                        &protocol::ClientMessage::Input {
+                            data: b"held before acquisition\x1b[201~".to_vec(),
+                        },
+                    )
+                    .expect("complete held paste after acquisition request");
+
+                    let event = recv_socket_test_event(server);
+                    assert!(matches!(
+                        event,
+                        ServerEvent::ClientRawInputPending { client_id: 7 }
+                    ));
+                    let changed = server.handle_server_event(event);
+                    assert!(!changed, "held input must close before target acquisition");
+                    assert!(!server.clients.contains_key(&7));
+                    assert_eq!(server.foreground_client_id, Some(1));
+                    assert!(!server
+                        .terminal_attach_owners
+                        .contains_key(&terminal_id_string));
+                    assert!(!server
+                        .app
+                        .state
+                        .direct_attach_resize_locks
+                        .contains(&terminal_id));
+                    assert!(matches!(
+                        input_rx.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ));
+                    let response =
+                        protocol::read_message::<_, ServerMessage>(client, MAX_FRAME_SIZE)
+                            .expect("read pre-acquisition held-input shutdown");
+                    assert!(matches!(
+                        response,
+                        ServerMessage::ServerShutdown { ref reason }
+                            if reason.as_deref() == Some(
+                                "terminal target must be acquired before sending data-plane messages"
+                            )
+                    ));
+                },
+            );
+        });
+    }
+
     #[test]
     fn socket_direct_fragmented_exact_limit_paste_reaches_only_target_on_completion() {
         with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
@@ -6511,7 +6810,55 @@ next_tab = ""
             direct_attach_requested: true,
             writer,
         }));
+        assert!(matches!(
+            server.clients.get(&client_id).map(|client| &client.mode),
+            Some(ClientConnectionMode::TerminalPending)
+        ));
+        assert_ne!(server.foreground_client_id, Some(client_id));
+        assert!(
+            !render_targets(&server.clients, server.foreground_client_id)
+                .iter()
+                .any(|(candidate, ..)| *candidate == client_id)
+        );
         control_rx
+    }
+
+    #[test]
+    fn pending_terminal_attach_scroll_is_inert_until_target_acquisition() {
+        let mut server = test_headless_server();
+        connect_pending_terminal_client(&mut server, 7);
+        let before = (
+            server.foreground_client_id,
+            server.app.state.active,
+            server.app.state.selected,
+        );
+
+        assert!(
+            !server.handle_server_event(ServerEvent::ClientAttachScroll {
+                client_id: 7,
+                source: protocol::AttachScrollSource::Wheel,
+                direction: protocol::AttachScrollDirection::Up,
+                lines: 3,
+                column: Some(4),
+                row: Some(5),
+                modifiers: 0,
+            })
+        );
+
+        assert!(matches!(
+            server.clients.get(&7).map(|client| &client.mode),
+            Some(ClientConnectionMode::TerminalPending)
+        ));
+        assert_eq!(
+            (
+                server.foreground_client_id,
+                server.app.state.active,
+                server.app.state.selected,
+            ),
+            before
+        );
+        assert!(server.terminal_attach_owners.is_empty());
+        assert!(server.app.state.direct_attach_resize_locks.is_empty());
     }
 
     #[test]
@@ -8577,54 +8924,70 @@ next_tab = ""
         );
     }
 
-    #[tokio::test]
-    async fn structured_non_app_focus_is_ignored_without_suppressing_keys() {
-        let mut server = test_headless_server();
-        let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1004h");
-        server.clients.insert(1, test_app_client(Some(true), 1));
-        let mut attached = test_app_client(Some(false), 2);
-        attached.mode = ClientConnectionMode::TerminalAttach {
-            terminal_id: "attached".to_owned(),
-        };
-        server.clients.insert(2, attached);
-        let mut pending = test_app_client(Some(false), 3);
-        pending.pending_terminal_attach = true;
-        server.clients.insert(3, pending);
-        server.foreground_client_id = Some(1);
-        server.sync_foreground_client_state();
+    #[test]
+    fn structured_direct_focus_cannot_promote_the_app_client() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80,
+                    24,
+                    0,
+                    b"\x1b[?1004h",
+                    4,
+                );
+            server.app.terminal_runtimes.insert(terminal_id, runtime);
+            server.clients.insert(1, test_app_client(Some(true), 1));
+            let mut attached = test_app_client(Some(false), 2);
+            attached.mode = ClientConnectionMode::TerminalAttach {
+                terminal_id: terminal_id_string.clone(),
+            };
+            server.clients.insert(2, attached);
+            let mut pending = test_app_client(Some(false), 3);
+            pending.mode = ClientConnectionMode::TerminalPending;
+            server.clients.insert(3, pending);
+            server.foreground_client_id = Some(1);
+            server.sync_foreground_client_state();
 
-        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
-            client_id: 2,
-            events: vec![crate::protocol::ClientInputEvent::FocusGained],
-        }));
-        assert_eq!(server.foreground_client_id, Some(1));
-        assert_eq!(server.app.state.outer_terminal_focus, Some(true));
-        assert!(!server.clients.contains_key(&2));
+            assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
+                client_id: 2,
+                events: vec![crate::protocol::ClientInputEvent::FocusGained],
+            }));
+            assert_eq!(server.foreground_client_id, Some(1));
+            assert_eq!(server.app.state.outer_terminal_focus, Some(true));
+            assert!(!server.clients.contains_key(&2));
 
-        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
-            client_id: 3,
-            events: vec![crate::protocol::ClientInputEvent::FocusGained],
-        }));
-        assert_eq!(server.foreground_client_id, Some(1));
-        assert_eq!(server.app.state.outer_terminal_focus, Some(true));
-        assert_eq!(server.clients[&3].outer_terminal_focus, Some(false));
-        assert!(matches!(
-            input_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
+            assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
+                client_id: 3,
+                events: vec![crate::protocol::ClientInputEvent::FocusGained],
+            }));
+            assert_eq!(server.foreground_client_id, Some(1));
+            assert_eq!(server.app.state.outer_terminal_focus, Some(true));
+            assert!(!server.clients.contains_key(&3));
+            assert!(matches!(
+                input_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
 
-        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
-            client_id: 3,
-            events: vec![crate::protocol::ClientInputEvent::Key {
-                code: crate::protocol::ClientKeyCode::Char('x'),
-                modifiers: 0,
-                kind: crate::protocol::ClientKeyKind::Release,
-                repeat_count: 1,
-                generated_text: None,
-                source: crate::protocol::ClientKeySource::Synthesized,
-            }],
-        }));
-        assert_eq!(server.foreground_client_id, Some(3));
+            connect_pending_terminal_client(server, 4);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientControlTerminal {
+                    client_id: 4,
+                    target: terminal_id_string,
+                    takeover: false,
+                })
+            );
+            assert!(server.handle_server_event(ServerEvent::ClientInput {
+                client_id: 4,
+                data: b"post-acquisition raw input".to_vec(),
+            }));
+            assert_eq!(
+                input_rx
+                    .try_recv()
+                    .expect("post-acquisition terminal input"),
+                bytes::Bytes::from_static(b"post-acquisition raw input")
+            );
+            assert_eq!(server.foreground_client_id, Some(1));
+        });
     }
 
     #[tokio::test]
@@ -9985,11 +10348,11 @@ next_tab = ""
         assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([focused])));
         let unknown = crate::layout::PaneId::from_raw(u32::MAX);
         assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([unknown])));
-        server.clients.get_mut(&1).unwrap().pending_terminal_attach = true;
+        server.clients.get_mut(&1).unwrap().mode = ClientConnectionMode::TerminalPending;
         assert!(
             !server.pty_sources_visible_to_any_render_target(&HashSet::from([focused, unknown]))
         );
-        server.clients.get_mut(&1).unwrap().pending_terminal_attach = false;
+        server.clients.get_mut(&1).unwrap().mode = ClientConnectionMode::App;
         server.clients.get_mut(&1).unwrap().writer = None;
         assert!(
             !server.pty_sources_visible_to_any_render_target(&HashSet::from([focused, unknown]))
@@ -10122,7 +10485,6 @@ next_tab = ""
                 None,
                 1,
                 RenderEncoding::SemanticFrame,
-                false,
                 Some(client_tx),
             ),
         );
@@ -10160,7 +10522,6 @@ next_tab = ""
                 None,
                 2,
                 RenderEncoding::SemanticFrame,
-                false,
                 Some(client_tx),
             ),
         );

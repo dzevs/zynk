@@ -70,6 +70,63 @@ enum RawPasteEnvelopeOutcome {
     Disconnect { size: usize, reason: &'static str },
 }
 
+#[derive(Clone, Copy, Debug)]
+struct BorrowedPasteCandidate<'a> {
+    retained: &'a [u8],
+    incoming: &'a [u8],
+    len: usize,
+}
+
+impl<'a> BorrowedPasteCandidate<'a> {
+    fn new(retained: &'a [u8], incoming: &'a [u8]) -> Option<Self> {
+        Some(Self {
+            retained,
+            incoming,
+            len: retained.len().checked_add(incoming.len())?,
+        })
+    }
+
+    fn byte(self, index: usize) -> Option<u8> {
+        if index < self.retained.len() {
+            self.retained.get(index).copied()
+        } else {
+            self.incoming
+                .get(index.checked_sub(self.retained.len())?)
+                .copied()
+        }
+    }
+
+    fn starts_with(self, needle: &[u8]) -> bool {
+        needle
+            .iter()
+            .enumerate()
+            .all(|(index, expected)| self.byte(index) == Some(*expected))
+    }
+
+    fn starts_with_at(self, start: usize, needle: &[u8]) -> bool {
+        needle.iter().enumerate().all(|(offset, expected)| {
+            start.checked_add(offset).and_then(|index| self.byte(index)) == Some(*expected)
+        })
+    }
+
+    fn payload_slices(self, start: usize, end: usize) -> (&'a [u8], &'a [u8]) {
+        debug_assert!(start <= end && end <= self.len);
+        if end <= self.retained.len() {
+            (&self.retained[start..end], &[])
+        } else if start >= self.retained.len() {
+            (
+                &[],
+                &self.incoming[start - self.retained.len()..end - self.retained.len()],
+            )
+        } else {
+            (
+                &self.retained[start..],
+                &self.incoming[..end - self.retained.len()],
+            )
+        }
+    }
+}
+
 #[derive(Debug)]
 struct RawPasteEnvelopeGuard {
     state: RawPasteEnvelopeState,
@@ -89,6 +146,8 @@ impl Default for RawPasteEnvelopeGuard {
 
 impl RawPasteEnvelopeGuard {
     fn push(&mut self, data: Vec<u8>) -> Vec<RawPasteEnvelopeOutcome> {
+        // Every state appends only a checked total at or below the input limit
+        // with fallible reserve; larger candidates are classified by borrowing.
         let state = std::mem::replace(&mut self.state, RawPasteEnvelopeState::Idle);
 
         if data.is_empty() && !matches!(state, RawPasteEnvelopeState::Idle) {
@@ -96,32 +155,27 @@ impl RawPasteEnvelopeGuard {
             return vec![RawPasteEnvelopeOutcome::Hold];
         }
 
-        if data.len() > MAX_INPUT_PAYLOAD {
-            return match state {
-                RawPasteEnvelopeState::Idle
-                    if crate::raw_input::is_complete_text_bracketed_paste(&data) =>
-                {
-                    vec![RawPasteEnvelopeOutcome::RejectPaste { size: data.len() }]
-                }
-                RawPasteEnvelopeState::Idle => vec![RawPasteEnvelopeOutcome::Disconnect {
-                    size: data.len(),
-                    reason: "oversized input is not one complete UTF-8 bracketed paste",
-                }],
-                _ => vec![RawPasteEnvelopeOutcome::Disconnect {
-                    size: data.len(),
-                    reason: "oversized input arrived while a bracketed paste was pending",
-                }],
-            };
-        }
-
         match state {
-            RawPasteEnvelopeState::Idle => self.scan_idle(data, true, false),
+            RawPasteEnvelopeState::Idle => {
+                if data.len() > MAX_INPUT_PAYLOAD {
+                    if crate::raw_input::is_complete_text_bracketed_paste(&data) {
+                        vec![RawPasteEnvelopeOutcome::RejectPaste { size: data.len() }]
+                    } else {
+                        vec![RawPasteEnvelopeOutcome::Disconnect {
+                            size: data.len(),
+                            reason: "oversized input is not one complete UTF-8 bracketed paste",
+                        }]
+                    }
+                } else {
+                    self.scan_idle(data, true, false)
+                }
+            }
             RawPasteEnvelopeState::StartPrefix {
                 mut bytes,
                 mixed_prefix,
             } => {
-                let size = match bytes.len().checked_add(data.len()) {
-                    Some(size) => size,
+                let candidate = match BorrowedPasteCandidate::new(&bytes, &data) {
+                    Some(candidate) => candidate,
                     None => {
                         return vec![RawPasteEnvelopeOutcome::Disconnect {
                             size: usize::MAX,
@@ -129,20 +183,39 @@ impl RawPasteEnvelopeGuard {
                         }];
                     }
                 };
-                bytes.extend_from_slice(&data);
-                let compared = bytes
-                    .len()
+                let candidate_len = candidate.len;
+                let compared = candidate
+                    .len
                     .min(crate::raw_input::BRACKETED_PASTE_START.len());
-                if bytes[..compared] != crate::raw_input::BRACKETED_PASTE_START[..compared] {
-                    self.scan_idle(bytes, false, mixed_prefix)
-                } else if bytes.len() < crate::raw_input::BRACKETED_PASTE_START.len() {
+                if !candidate.starts_with(&crate::raw_input::BRACKETED_PASTE_START[..compared]) {
+                    self.release_false_start_prefix(bytes, data, mixed_prefix)
+                } else if candidate_len < crate::raw_input::BRACKETED_PASTE_START.len() {
+                    if bytes.try_reserve(data.len()).is_err() {
+                        return vec![RawPasteEnvelopeOutcome::Disconnect {
+                            size: candidate_len,
+                            reason: "unable to reserve bracketed-paste prefix storage",
+                        }];
+                    }
+                    bytes.extend_from_slice(&data);
                     self.state = RawPasteEnvelopeState::StartPrefix {
                         bytes,
                         mixed_prefix,
                     };
                     vec![RawPasteEnvelopeOutcome::Hold]
+                } else if candidate_len > MAX_INPUT_PAYLOAD {
+                    self.resolve_oversized_paste(
+                        candidate,
+                        mixed_prefix,
+                        crate::raw_input::BRACKETED_PASTE_START.len(),
+                    )
                 } else {
-                    debug_assert_eq!(size, bytes.len());
+                    if bytes.try_reserve(data.len()).is_err() {
+                        return vec![RawPasteEnvelopeOutcome::Disconnect {
+                            size: candidate_len,
+                            reason: "unable to reserve bracketed-paste envelope storage",
+                        }];
+                    }
+                    bytes.extend_from_slice(&data);
                     self.resolve_paste(
                         bytes,
                         mixed_prefix,
@@ -155,38 +228,132 @@ impl RawPasteEnvelopeGuard {
                 mixed_prefix,
                 next_end_search,
             } => {
-                if bytes.len().checked_add(data.len()).is_none() {
-                    return vec![RawPasteEnvelopeOutcome::Disconnect {
-                        size: usize::MAX,
-                        reason: "bracketed-paste envelope length overflow",
-                    }];
+                let candidate = match BorrowedPasteCandidate::new(&bytes, &data) {
+                    Some(candidate) => candidate,
+                    None => {
+                        return vec![RawPasteEnvelopeOutcome::Disconnect {
+                            size: usize::MAX,
+                            reason: "bracketed-paste envelope length overflow",
+                        }];
+                    }
+                };
+                let candidate_len = candidate.len;
+                if candidate_len > MAX_INPUT_PAYLOAD {
+                    self.resolve_oversized_paste(candidate, mixed_prefix, next_end_search)
+                } else {
+                    if bytes.try_reserve(data.len()).is_err() {
+                        return vec![RawPasteEnvelopeOutcome::Disconnect {
+                            size: candidate_len,
+                            reason: "unable to reserve bracketed-paste envelope storage",
+                        }];
+                    }
+                    bytes.extend_from_slice(&data);
+                    self.resolve_paste(bytes, mixed_prefix, next_end_search)
                 }
-                bytes.extend_from_slice(&data);
-                self.resolve_paste(bytes, mixed_prefix, next_end_search)
             }
             RawPasteEnvelopeState::ForwardedEscape { mut continuation } => {
-                if continuation.len().checked_add(data.len()).is_none() {
+                if data.len() > MAX_INPUT_PAYLOAD {
                     return vec![RawPasteEnvelopeOutcome::Disconnect {
-                        size: usize::MAX,
-                        reason: "split paste introducer length overflow",
+                        size: data.len().saturating_add(1),
+                        reason: "oversized input followed a forwarded Escape",
                     }];
                 }
-                continuation.extend_from_slice(&data);
                 let expected = &crate::raw_input::BRACKETED_PASTE_START[1..];
-                let compared = continuation.len().min(expected.len());
-                if continuation[..compared] != expected[..compared] {
-                    self.scan_idle(continuation, false, false)
-                } else if continuation.len() < expected.len() {
+                let candidate = match BorrowedPasteCandidate::new(&continuation, &data) {
+                    Some(candidate) => candidate,
+                    None => {
+                        return vec![RawPasteEnvelopeOutcome::Disconnect {
+                            size: usize::MAX,
+                            reason: "split paste introducer length overflow",
+                        }];
+                    }
+                };
+                let candidate_len = candidate.len;
+                let compared = candidate_len.min(expected.len());
+                if !candidate.starts_with(&expected[..compared]) {
+                    self.release_speculative_prefix(
+                        continuation,
+                        data,
+                        false,
+                        1,
+                        "oversized input followed a forwarded Escape",
+                    )
+                } else if candidate_len < expected.len() {
+                    if continuation.try_reserve(data.len()).is_err() {
+                        return vec![RawPasteEnvelopeOutcome::Disconnect {
+                            size: candidate_len.saturating_add(1),
+                            reason: "unable to reserve split paste introducer storage",
+                        }];
+                    }
+                    continuation.extend_from_slice(&data);
                     self.state = RawPasteEnvelopeState::ForwardedEscape { continuation };
                     vec![RawPasteEnvelopeOutcome::Hold]
                 } else {
                     vec![RawPasteEnvelopeOutcome::Disconnect {
-                        size: continuation.len().saturating_add(1),
+                        size: candidate_len.saturating_add(1),
                         reason: "input tried to extend a forwarded Escape into a bracketed paste",
                     }]
                 }
             }
         }
+    }
+
+    fn release_false_start_prefix(
+        &mut self,
+        prefix: Vec<u8>,
+        data: Vec<u8>,
+        mixed_prefix: bool,
+    ) -> Vec<RawPasteEnvelopeOutcome> {
+        // Speculative prefix retention must not let an oversized ordinary
+        // frame bypass the same policy it would receive while idle.
+        self.release_speculative_prefix(
+            prefix,
+            data,
+            mixed_prefix,
+            0,
+            "oversized input did not complete a pending bracketed-paste prefix",
+        )
+    }
+
+    fn release_speculative_prefix(
+        &mut self,
+        mut prefix: Vec<u8>,
+        data: Vec<u8>,
+        mixed_prefix: bool,
+        reported_size_offset: usize,
+        oversized_reason: &'static str,
+    ) -> Vec<RawPasteEnvelopeOutcome> {
+        let reported_size = prefix
+            .len()
+            .checked_add(data.len())
+            .and_then(|size| size.checked_add(reported_size_offset))
+            .unwrap_or(usize::MAX);
+        if data.len() > MAX_INPUT_PAYLOAD {
+            return vec![RawPasteEnvelopeOutcome::Disconnect {
+                size: reported_size,
+                reason: oversized_reason,
+            }];
+        }
+
+        let Some(available) = MAX_INPUT_PAYLOAD.checked_sub(prefix.len()) else {
+            return vec![RawPasteEnvelopeOutcome::Disconnect {
+                size: reported_size,
+                reason: "retained speculative input exceeded the input limit",
+            }];
+        };
+        let first_data_len = data.len().min(available);
+        if prefix.try_reserve(first_data_len).is_err() {
+            return vec![RawPasteEnvelopeOutcome::Disconnect {
+                size: reported_size,
+                reason: "unable to reserve speculative-prefix release storage",
+            }];
+        }
+        prefix.extend_from_slice(&data[..first_data_len]);
+        let mut outcomes = self.scan_idle(prefix, false, mixed_prefix);
+        if first_data_len < data.len() {
+            outcomes.extend(self.push(data[first_data_len..].to_vec()));
+        }
+        outcomes
     }
 
     fn scan_idle(
@@ -249,6 +416,7 @@ impl RawPasteEnvelopeGuard {
         next_end_search: usize,
     ) -> Vec<RawPasteEnvelopeOutcome> {
         debug_assert!(bytes.starts_with(crate::raw_input::BRACKETED_PASTE_START));
+        debug_assert!(bytes.len() <= MAX_INPUT_PAYLOAD);
         let content_start = crate::raw_input::BRACKETED_PASTE_START.len();
         debug_assert!((content_start..=bytes.len()).contains(&next_end_search));
         let (end, _checked) = find_paste_end(&bytes, next_end_search);
@@ -272,20 +440,6 @@ impl RawPasteEnvelopeGuard {
         };
 
         let envelope_len = end + crate::raw_input::BRACKETED_PASTE_END.len();
-        if envelope_len > MAX_INPUT_PAYLOAD {
-            let is_exact = !mixed_prefix
-                && envelope_len == bytes.len()
-                && std::str::from_utf8(&bytes[content_start..end]).is_ok();
-            return if is_exact {
-                vec![RawPasteEnvelopeOutcome::RejectPaste { size: envelope_len }]
-            } else {
-                vec![RawPasteEnvelopeOutcome::Disconnect {
-                    size: bytes.len(),
-                    reason: "oversized bracketed paste was mixed, trailing, or invalid UTF-8",
-                }]
-            };
-        }
-
         if envelope_len == bytes.len() {
             return vec![RawPasteEnvelopeOutcome::Forward(bytes)];
         }
@@ -295,6 +449,45 @@ impl RawPasteEnvelopeGuard {
         )];
         outcomes.extend(self.scan_idle(bytes[envelope_len..].to_vec(), false, false));
         outcomes
+    }
+
+    fn resolve_oversized_paste(
+        &mut self,
+        candidate: BorrowedPasteCandidate<'_>,
+        mixed_prefix: bool,
+        next_end_search: usize,
+    ) -> Vec<RawPasteEnvelopeOutcome> {
+        debug_assert!(candidate.len > MAX_INPUT_PAYLOAD);
+        debug_assert!(candidate.starts_with(crate::raw_input::BRACKETED_PASTE_START));
+        let content_start = crate::raw_input::BRACKETED_PASTE_START.len();
+        debug_assert!((content_start..=candidate.len).contains(&next_end_search));
+        let (end, _checked) = find_paste_end_in_candidate(candidate, next_end_search);
+        #[cfg(test)]
+        {
+            self.end_candidates_checked += _checked;
+        }
+        let Some(end) = end else {
+            return vec![RawPasteEnvelopeOutcome::Disconnect {
+                size: candidate.len,
+                reason: "unterminated bracketed paste exceeded the input limit",
+            }];
+        };
+
+        let envelope_len = end + crate::raw_input::BRACKETED_PASTE_END.len();
+        let (retained_payload, incoming_payload) = candidate.payload_slices(content_start, end);
+        let is_exact = !mixed_prefix
+            && envelope_len == candidate.len
+            && split_utf8_is_valid(retained_payload, incoming_payload);
+        if is_exact {
+            vec![RawPasteEnvelopeOutcome::RejectPaste {
+                size: candidate.len,
+            }]
+        } else {
+            vec![RawPasteEnvelopeOutcome::Disconnect {
+                size: candidate.len,
+                reason: "oversized bracketed paste was mixed, trailing, or invalid UTF-8",
+            }]
+        }
     }
 }
 
@@ -321,6 +514,47 @@ fn find_paste_end(bytes: &[u8], from: usize) -> (Option<usize>, usize) {
         }
     }
     (None, checked)
+}
+
+fn find_paste_end_in_candidate(
+    candidate: BorrowedPasteCandidate<'_>,
+    from: usize,
+) -> (Option<usize>, usize) {
+    let mut checked = 0;
+    for start in from..candidate.len {
+        checked += 1;
+        if candidate.starts_with_at(start, crate::raw_input::BRACKETED_PASTE_END) {
+            return (Some(start), checked);
+        }
+    }
+    (None, checked)
+}
+
+fn split_utf8_is_valid(retained: &[u8], incoming: &[u8]) -> bool {
+    match std::str::from_utf8(retained) {
+        Ok(_) => std::str::from_utf8(incoming).is_ok(),
+        Err(error) if error.error_len().is_some() => false,
+        Err(error) => {
+            let incomplete = &retained[error.valid_up_to()..];
+            debug_assert!((1..=3).contains(&incomplete.len()));
+            if incoming.is_empty() {
+                return false;
+            }
+
+            let mut boundary = [0_u8; 4];
+            boundary[..incomplete.len()].copy_from_slice(incomplete);
+            let available = incoming.len().min(4 - incomplete.len());
+            for consumed in 1..=available {
+                boundary[incomplete.len() + consumed - 1] = incoming[consumed - 1];
+                match std::str::from_utf8(&boundary[..incomplete.len() + consumed]) {
+                    Ok(_) => return std::str::from_utf8(&incoming[consumed..]).is_ok(),
+                    Err(error) if error.error_len().is_some() => return false,
+                    Err(_) => {}
+                }
+            }
+            false
+        }
+    }
 }
 
 fn forward_raw_input(mut data: Vec<u8>) -> Vec<RawPasteEnvelopeOutcome> {
@@ -620,6 +854,8 @@ pub(crate) enum ServerEvent {
     },
     /// A client sent an input message.
     ClientInput { client_id: u64, data: Vec<u8> },
+    /// A client transport retained raw input before reading later messages.
+    ClientRawInputPending { client_id: u64 },
     /// A client sent structured input events.
     ClientInputEvents {
         client_id: u64,
@@ -1072,10 +1308,14 @@ fn client_read_loop(
 
         let msg = match msg {
             ClientMessage::Input { data } => {
+                let was_idle = matches!(raw_paste_guard.state, RawPasteEnvelopeState::Idle);
                 for outcome in raw_paste_guard.push(data) {
                     let event = match outcome {
                         RawPasteEnvelopeOutcome::Forward(data) => {
                             ServerEvent::ClientInput { client_id, data }
+                        }
+                        RawPasteEnvelopeOutcome::Hold if was_idle => {
+                            ServerEvent::ClientRawInputPending { client_id }
                         }
                         RawPasteEnvelopeOutcome::Hold => continue,
                         RawPasteEnvelopeOutcome::RejectPaste { size } => {
@@ -1306,6 +1546,41 @@ mod tests {
         (first, second)
     }
 
+    fn oversized_paste_split_across_utf8_boundary(
+        retained_scalar: &[u8],
+        incoming_scalar: &[u8],
+    ) -> (Vec<u8>, Vec<u8>, usize) {
+        let total = MAX_INPUT_PAYLOAD + 32;
+        let mut retained = crate::raw_input::BRACKETED_PASTE_START.to_vec();
+        retained.extend_from_slice(retained_scalar);
+        let mut incoming = incoming_scalar.to_vec();
+        incoming.resize(
+            total - retained.len() - crate::raw_input::BRACKETED_PASTE_END.len(),
+            b'x',
+        );
+        incoming.extend_from_slice(crate::raw_input::BRACKETED_PASTE_END);
+        (retained, incoming, total)
+    }
+
+    fn assert_oversized_continuation_disconnects(
+        guard: &mut RawPasteEnvelopeGuard,
+        continuation: Vec<u8>,
+        context: &str,
+    ) {
+        let outcomes = guard.push(continuation);
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [RawPasteEnvelopeOutcome::Disconnect { .. }]
+            ),
+            "{context}: expected one disconnect, got {outcomes:?}"
+        );
+        assert!(
+            matches!(guard.state, RawPasteEnvelopeState::Idle),
+            "{context}: disconnect retained paste state"
+        );
+    }
+
     fn write_input_message(stream: &mut LocalStream, data: Vec<u8>) {
         protocol::write_message(stream, &ClientMessage::Input { data }).expect("write input frame");
     }
@@ -1334,6 +1609,13 @@ mod tests {
             } => assert_eq!(cols, expected_cols),
             other => panic!("expected resize marker, got {other:?}"),
         }
+    }
+
+    fn assert_raw_input_pending(event: ServerEvent) {
+        assert!(
+            matches!(event, ServerEvent::ClientRawInputPending { client_id: 7 }),
+            "expected raw-input pending marker, got {event:?}"
+        );
     }
 
     fn assert_client_message_disconnects(name: &str, message: ClientMessage) {
@@ -1972,6 +2254,10 @@ new_tab = "ctrl+notakey"
         expected.extend_from_slice(&second);
 
         write_input_message(&mut client_stream, first);
+        assert_raw_input_pending(recv_server_event(
+            &mut server_event_rx,
+            "pending marker before at-limit paste",
+        ));
         write_resize_marker(&mut client_stream, 91);
         assert_resize_marker(
             recv_server_event(&mut server_event_rx, "marker after held fragment"),
@@ -2030,6 +2316,10 @@ new_tab = "ctrl+notakey"
             split_bracketed_paste(MAX_INPUT_PAYLOAD + 1, (MAX_INPUT_PAYLOAD / 2) + 1);
 
         write_input_message(&mut client_stream, first);
+        assert_raw_input_pending(recv_server_event(
+            &mut server_event_rx,
+            "pending marker before fragmented rejection",
+        ));
         write_resize_marker(&mut client_stream, 92);
         assert_resize_marker(
             recv_server_event(&mut server_event_rx, "marker after held oversized fragment"),
@@ -2069,6 +2359,228 @@ new_tab = "ctrl+notakey"
     }
 
     #[test]
+    fn client_read_loop_rejects_large_completing_fragment_and_recovers() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("fragmented-large-completion");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+        let (first, second) = split_bracketed_paste(
+            MAX_INPUT_PAYLOAD + crate::raw_input::BRACKETED_PASTE_END.len() + 1,
+            crate::raw_input::BRACKETED_PASTE_START.len(),
+        );
+        assert_eq!(first, crate::raw_input::BRACKETED_PASTE_START);
+        assert_eq!(second.len(), MAX_INPUT_PAYLOAD + 1);
+
+        write_input_message(&mut client_stream, first);
+        assert_raw_input_pending(recv_server_event(
+            &mut server_event_rx,
+            "pending marker before large completion",
+        ));
+        write_input_message(&mut client_stream, second);
+        match recv_server_event(&mut server_event_rx, "large completing fragment") {
+            ServerEvent::ClientPasteRejected {
+                client_id,
+                origin: PasteRejectionOrigin::RawInput,
+                size,
+                max,
+            } => {
+                assert_eq!(client_id, 7);
+                assert_eq!(
+                    size,
+                    MAX_INPUT_PAYLOAD + crate::raw_input::BRACKETED_PASTE_END.len() + 1
+                );
+                assert_eq!(max, MAX_INPUT_PAYLOAD);
+            }
+            other => panic!("expected recoverable ClientPasteRejected, got {other:?}"),
+        }
+
+        write_input_message(&mut client_stream, b"still connected".to_vec());
+        match recv_server_event(&mut server_event_rx, "input after large completion") {
+            ServerEvent::ClientInput { client_id, data } => {
+                assert_eq!(client_id, 7);
+                assert_eq!(data, b"still connected");
+            }
+            other => panic!("expected ClientInput after rejection, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read thread result");
+    }
+
+    #[test]
+    fn raw_paste_guard_rejects_large_completion_from_every_retained_start_boundary() {
+        let total = MAX_INPUT_PAYLOAD + crate::raw_input::BRACKETED_PASTE_END.len() + 1;
+        for split in 2..=crate::raw_input::BRACKETED_PASTE_START.len() {
+            let (first, second) = split_bracketed_paste(total, split);
+            assert!(second.len() > MAX_INPUT_PAYLOAD);
+            let mut guard = RawPasteEnvelopeGuard::default();
+            assert_eq!(
+                guard.push(first),
+                vec![RawPasteEnvelopeOutcome::Hold],
+                "start split {split} did not retain the candidate"
+            );
+            assert_eq!(
+                guard.push(second),
+                vec![RawPasteEnvelopeOutcome::RejectPaste { size: total }],
+                "start split {split} changed the logical-envelope outcome"
+            );
+            assert!(matches!(guard.state, RawPasteEnvelopeState::Idle));
+        }
+
+        let (first, second) = split_bracketed_paste(total, 1);
+        let mut guard = RawPasteEnvelopeGuard::default();
+        assert_eq!(
+            guard.push(first),
+            vec![RawPasteEnvelopeOutcome::Forward(b"\x1b".to_vec())]
+        );
+        assert_oversized_continuation_disconnects(&mut guard, second, "forwarded lone Escape");
+    }
+
+    #[test]
+    fn raw_paste_guard_disconnects_every_malformed_large_completion() {
+        let mut cases = Vec::new();
+
+        let unresolved = vec![b'x'; MAX_INPUT_PAYLOAD + 1];
+        cases.push((
+            "unresolved",
+            crate::raw_input::BRACKETED_PASTE_START.to_vec(),
+            unresolved,
+        ));
+
+        let mut invalid = bracketed_paste_with_total_len(
+            MAX_INPUT_PAYLOAD + crate::raw_input::BRACKETED_PASTE_END.len() + 1,
+        );
+        invalid[crate::raw_input::BRACKETED_PASTE_START.len()] = 0xff;
+        let invalid_continuation = invalid.split_off(crate::raw_input::BRACKETED_PASTE_START.len());
+        cases.push(("invalid UTF-8", invalid, invalid_continuation));
+
+        let mut trailing = bracketed_paste_with_total_len(
+            MAX_INPUT_PAYLOAD + crate::raw_input::BRACKETED_PASTE_END.len() + 1,
+        );
+        trailing.push(b'x');
+        let trailing_continuation =
+            trailing.split_off(crate::raw_input::BRACKETED_PASTE_START.len());
+        cases.push(("trailing byte", trailing, trailing_continuation));
+
+        let mut multiple = crate::raw_input::BRACKETED_PASTE_START.to_vec();
+        multiple.extend_from_slice(b"one");
+        multiple.extend_from_slice(crate::raw_input::BRACKETED_PASTE_END);
+        multiple.extend_from_slice(crate::raw_input::BRACKETED_PASTE_START);
+        multiple.resize(
+            MAX_INPUT_PAYLOAD + crate::raw_input::BRACKETED_PASTE_END.len(),
+            b'x',
+        );
+        multiple.extend_from_slice(crate::raw_input::BRACKETED_PASTE_END);
+        let multiple_continuation =
+            multiple.split_off(crate::raw_input::BRACKETED_PASTE_START.len());
+        cases.push(("two envelopes", multiple, multiple_continuation));
+
+        let mut completed_prefix = crate::raw_input::BRACKETED_PASTE_START[..5].to_vec();
+        let mut completed_prefix_continuation = vec![b'~'];
+        completed_prefix_continuation.resize(MAX_INPUT_PAYLOAD + 1, b'x');
+        cases.push((
+            "completed prefix without an end delimiter",
+            std::mem::take(&mut completed_prefix),
+            completed_prefix_continuation,
+        ));
+
+        for (context, first, continuation) in cases {
+            assert!(continuation.len() > MAX_INPUT_PAYLOAD, "{context}");
+            let mut guard = RawPasteEnvelopeGuard::default();
+            assert_eq!(
+                guard.push(first),
+                vec![RawPasteEnvelopeOutcome::Hold],
+                "{context}: initial candidate was not retained"
+            );
+            assert_oversized_continuation_disconnects(&mut guard, continuation, context);
+        }
+
+        let mut guard = RawPasteEnvelopeGuard::default();
+        assert_eq!(
+            guard.push(b"lead\x1b[200~".to_vec()),
+            vec![
+                RawPasteEnvelopeOutcome::Forward(b"lead".to_vec()),
+                RawPasteEnvelopeOutcome::Hold,
+            ]
+        );
+        let (_, continuation) = split_bracketed_paste(
+            MAX_INPUT_PAYLOAD + crate::raw_input::BRACKETED_PASTE_END.len() + 1,
+            crate::raw_input::BRACKETED_PASTE_START.len(),
+        );
+        assert_oversized_continuation_disconnects(
+            &mut guard,
+            continuation,
+            "mixed ordinary prefix",
+        );
+    }
+
+    #[test]
+    fn raw_paste_guard_uses_total_candidate_size_for_trailing_data() {
+        let mut guard = RawPasteEnvelopeGuard::default();
+        assert_eq!(
+            guard.push(crate::raw_input::BRACKETED_PASTE_START.to_vec()),
+            vec![RawPasteEnvelopeOutcome::Hold]
+        );
+        let mut continuation = b"small".to_vec();
+        continuation.extend_from_slice(crate::raw_input::BRACKETED_PASTE_END);
+        continuation.resize(MAX_INPUT_PAYLOAD + 1, b'x');
+        assert_oversized_continuation_disconnects(
+            &mut guard,
+            continuation,
+            "small first envelope with oversized trailing input",
+        );
+    }
+
+    #[test]
+    fn raw_paste_guard_validates_utf8_across_the_two_slice_boundary() {
+        let valid_splits: &[(&[u8], &[u8])] = &[
+            (&[0xc3], &[0xa9]),
+            (&[0xe2], &[0x82, 0xac]),
+            (&[0xe2, 0x82], &[0xac]),
+            (&[0xf0], &[0x9f, 0x98, 0x80]),
+            (&[0xf0, 0x9f], &[0x98, 0x80]),
+            (&[0xf0, 0x9f, 0x98], &[0x80]),
+        ];
+        for (retained_scalar, incoming_scalar) in valid_splits {
+            let (retained, incoming, total) =
+                oversized_paste_split_across_utf8_boundary(retained_scalar, incoming_scalar);
+            assert!(incoming.len() > MAX_INPUT_PAYLOAD);
+            let mut guard = RawPasteEnvelopeGuard::default();
+            assert_eq!(guard.push(retained), vec![RawPasteEnvelopeOutcome::Hold]);
+            assert_eq!(
+                guard.push(incoming),
+                vec![RawPasteEnvelopeOutcome::RejectPaste { size: total }],
+                "valid UTF-8 split {retained_scalar:x?} | {incoming_scalar:x?} was rejected"
+            );
+        }
+
+        for (context, retained, incoming) in [
+            ("bad continuation", &[0xe2][..], &[0x28][..]),
+            ("overlong scalar", &[0xc0][..], &[0x80][..]),
+            ("surrogate", &[0xed][..], &[0xa0, 0x80][..]),
+            ("out of range", &[0xf4][..], &[0x90, 0x80, 0x80][..]),
+        ] {
+            let (retained, incoming, _) =
+                oversized_paste_split_across_utf8_boundary(retained, incoming);
+            let mut guard = RawPasteEnvelopeGuard::default();
+            assert_eq!(guard.push(retained), vec![RawPasteEnvelopeOutcome::Hold]);
+            assert_oversized_continuation_disconnects(&mut guard, incoming, context);
+        }
+
+        assert!(!split_utf8_is_valid(b"valid", &[0xe2]));
+        assert!(!split_utf8_is_valid(&[0xe2], &[]));
+        assert!(!split_utf8_is_valid(&[0xff], b"valid"));
+    }
+
+    #[test]
     fn client_read_loop_disconnects_cumulative_unterminated_paste() {
         let (mut client_stream, server_stream, _path) =
             local_stream_pair("fragmented-unterminated");
@@ -2083,6 +2595,10 @@ new_tab = "ctrl+notakey"
         let second = vec![b'x'; MAX_INPUT_PAYLOAD + 1 - first.len()];
 
         write_input_message(&mut client_stream, first);
+        assert_raw_input_pending(recv_server_event(
+            &mut server_event_rx,
+            "pending marker before unterminated continuation",
+        ));
         write_resize_marker(&mut client_stream, 93);
         assert_resize_marker(
             recv_server_event(&mut server_event_rx, "marker after unterminated fragment"),
@@ -2126,6 +2642,10 @@ new_tab = "ctrl+notakey"
                     other => panic!("expected definitive lone Escape, got {other:?}"),
                 }
             } else {
+                assert_raw_input_pending(recv_server_event(
+                    &mut server_event_rx,
+                    "pending marker after split start",
+                ));
                 write_resize_marker(&mut client_stream, 94);
                 assert_resize_marker(
                     recv_server_event(&mut server_event_rx, "marker after split start"),
@@ -2185,6 +2705,10 @@ new_tab = "ctrl+notakey"
             let first_len = (MAX_INPUT_PAYLOAD / 2) + 1;
 
             write_input_message(&mut client_stream, bytes[..first_len].to_vec());
+            assert_raw_input_pending(recv_server_event(
+                &mut server_event_rx,
+                "pending marker before malformed continuation",
+            ));
             write_resize_marker(&mut client_stream, 95);
             assert_resize_marker(
                 recv_server_event(&mut server_event_rx, "marker after malformed fragment"),
@@ -2222,6 +2746,10 @@ new_tab = "ctrl+notakey"
 
         let (first, second) = split_bracketed_paste(MAX_INPUT_PAYLOAD, (MAX_INPUT_PAYLOAD / 2) + 1);
         write_input_message(&mut client_stream, first);
+        assert_raw_input_pending(recv_server_event(
+            &mut server_event_rx,
+            "direct pending marker before exact paste",
+        ));
         write_resize_marker(&mut client_stream, 96);
         assert_resize_marker(
             recv_server_event(&mut server_event_rx, "direct marker after held paste"),
@@ -2252,6 +2780,10 @@ new_tab = "ctrl+notakey"
         let (first, second) =
             split_bracketed_paste(MAX_INPUT_PAYLOAD + 1, (MAX_INPUT_PAYLOAD / 2) + 1);
         write_input_message(&mut client_stream, first);
+        assert_raw_input_pending(recv_server_event(
+            &mut server_event_rx,
+            "direct pending marker before oversized paste",
+        ));
         write_resize_marker(&mut client_stream, 97);
         assert_resize_marker(
             recv_server_event(
@@ -2322,6 +2854,102 @@ new_tab = "ctrl+notakey"
             MAX_INPUT_PAYLOAD + 3
         );
         assert_eq!(&chunks[0][..4], b"\x1b[2x");
+        assert!(chunks.iter().flatten().skip(4).all(|byte| *byte == b'x'));
+        assert!(matches!(guard.state, RawPasteEnvelopeState::Idle));
+    }
+
+    #[test]
+    fn raw_paste_guard_does_not_launder_oversized_input_through_a_false_prefix() {
+        let mut guard = RawPasteEnvelopeGuard::default();
+        assert_eq!(
+            guard.push(b"\x1b[2".to_vec()),
+            vec![RawPasteEnvelopeOutcome::Hold]
+        );
+
+        let oversized = vec![b'x'; MAX_INPUT_PAYLOAD + 1];
+        assert_eq!(
+            guard.push(oversized),
+            vec![RawPasteEnvelopeOutcome::Disconnect {
+                size: MAX_INPUT_PAYLOAD + 4,
+                reason: "oversized input did not complete a pending bracketed-paste prefix",
+            }]
+        );
+        assert!(matches!(guard.state, RawPasteEnvelopeState::Idle));
+    }
+
+    #[test]
+    fn raw_paste_guard_releases_a_false_prefix_before_retaining_a_new_one() {
+        let mut guard = RawPasteEnvelopeGuard::default();
+        assert_eq!(
+            guard.push(b"\x1b[2".to_vec()),
+            vec![RawPasteEnvelopeOutcome::Hold]
+        );
+
+        let outcomes = guard.push(b"xordinary\x1b[20".to_vec());
+        assert_eq!(
+            outcomes,
+            vec![
+                RawPasteEnvelopeOutcome::Forward(b"\x1b[2xordinary".to_vec()),
+                RawPasteEnvelopeOutcome::Hold,
+            ]
+        );
+        assert!(matches!(
+            guard.state,
+            RawPasteEnvelopeState::StartPrefix { ref bytes, mixed_prefix: true }
+                if bytes == b"\x1b[20"
+        ));
+    }
+
+    #[test]
+    fn raw_paste_guard_retains_only_a_proper_forwarded_escape_continuation() {
+        let mut guard = RawPasteEnvelopeGuard::default();
+        assert_eq!(
+            guard.push(b"\x1b".to_vec()),
+            vec![RawPasteEnvelopeOutcome::Forward(b"\x1b".to_vec())]
+        );
+        assert_eq!(
+            guard.push(b"[".to_vec()),
+            vec![RawPasteEnvelopeOutcome::Hold]
+        );
+        assert!(matches!(
+            guard.state,
+            RawPasteEnvelopeState::ForwardedEscape { ref continuation }
+                if continuation == b"["
+        ));
+        assert_eq!(
+            guard.push(b"20".to_vec()),
+            vec![RawPasteEnvelopeOutcome::Hold]
+        );
+        assert!(matches!(
+            guard.state,
+            RawPasteEnvelopeState::ForwardedEscape { ref continuation }
+                if continuation == b"[20"
+        ));
+    }
+
+    #[test]
+    fn raw_paste_guard_releases_forwarded_escape_mismatch_in_bounded_chunks() {
+        let mut guard = RawPasteEnvelopeGuard {
+            state: RawPasteEnvelopeState::ForwardedEscape {
+                continuation: b"[20".to_vec(),
+            },
+            end_candidates_checked: 0,
+        };
+        let outcomes = guard.push(vec![b'x'; MAX_INPUT_PAYLOAD]);
+        let chunks = outcomes
+            .into_iter()
+            .map(|outcome| match outcome {
+                RawPasteEnvelopeOutcome::Forward(data) => data,
+                other => panic!("expected only released input, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= MAX_INPUT_PAYLOAD));
+        assert_eq!(
+            chunks.iter().map(Vec::len).sum::<usize>(),
+            MAX_INPUT_PAYLOAD + 3
+        );
+        assert_eq!(&chunks[0][..4], b"[20x");
         assert!(chunks.iter().flatten().skip(4).all(|byte| *byte == b'x'));
         assert!(matches!(guard.state, RawPasteEnvelopeState::Idle));
     }

@@ -10,6 +10,7 @@ use crate::server::render_stream::ClientRenderState;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClientConnectionMode {
     App,
+    TerminalPending,
     TerminalAttach { terminal_id: String },
     TerminalObserve { terminal_id: String },
 }
@@ -18,7 +19,7 @@ impl ClientConnectionMode {
     pub(crate) fn allows_write_messages(&self) -> bool {
         match self {
             Self::App | Self::TerminalAttach { .. } => true,
-            Self::TerminalObserve { .. } => false,
+            Self::TerminalPending | Self::TerminalObserve { .. } => false,
         }
     }
 }
@@ -33,10 +34,8 @@ pub(crate) type RenderTarget = (
 
 /// A connected client tracked by the server.
 pub(crate) struct ClientConnection {
-    /// Whether this connection is the full app client or a direct terminal attach.
+    /// The authority and render surface currently held by this connection.
     pub(crate) mode: ClientConnectionMode,
-    /// True after the handshake for clients that will switch into direct terminal attach mode.
-    pub(crate) pending_terminal_attach: bool,
     /// Client-local app keybindings. None means use the server's keybindings.
     pub(crate) keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
     /// The client's terminal size after clamping.
@@ -91,7 +90,6 @@ impl ClientConnection {
             outer_terminal_focus,
             last_activity,
             render_encoding,
-            false,
             writer,
         )
     }
@@ -105,12 +103,10 @@ impl ClientConnection {
         outer_terminal_focus: Option<bool>,
         last_activity: u64,
         render_encoding: RenderEncoding,
-        pending_terminal_attach: bool,
         writer: Option<ClientWriter>,
     ) -> Self {
         Self {
             mode,
-            pending_terminal_attach,
             keybindings,
             terminal_size,
             cell_size,
@@ -137,7 +133,7 @@ impl ClientConnection {
     }
 
     pub(crate) fn is_full_app_client(&self) -> bool {
-        matches!(self.mode, ClientConnectionMode::App) && !self.pending_terminal_attach
+        matches!(self.mode, ClientConnectionMode::App)
     }
 
     pub(crate) fn request_semantic_redraw_after_input(&mut self) {
@@ -250,7 +246,10 @@ pub(crate) fn terminal_stream_client_ids(
             | ClientConnectionMode::TerminalObserve {
                 terminal_id: attached,
             } if attached == terminal_id => Some(client_id),
-            _ => None,
+            ClientConnectionMode::App
+            | ClientConnectionMode::TerminalPending
+            | ClientConnectionMode::TerminalAttach { .. }
+            | ClientConnectionMode::TerminalObserve { .. } => None,
         })
         .collect()
 }
@@ -292,6 +291,7 @@ mod tests {
     #[test]
     fn client_write_message_authority_is_explicit_for_every_mode() {
         assert!(ClientConnectionMode::App.allows_write_messages());
+        assert!(!ClientConnectionMode::TerminalPending.allows_write_messages());
         assert!(ClientConnectionMode::TerminalAttach {
             terminal_id: "attached".to_owned(),
         }

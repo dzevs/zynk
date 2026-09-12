@@ -3730,3 +3730,137 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   Gate-2 and fresh whole-M7 Gate-3 verdicts. No upstream source is added:
   M7 authority stays 21, all M8 obligations stand, protocol stays 19, and
   ADR-0014 and the accepted stop-admission linearization are unchanged.
+
+### M7 Gate-3 Remediation 3 Gate-1 Artifact Provenance Correction (2026-09-13)
+
+- The initial 411-line `M7-GATE3-REMEDIATION-3-DESIGN.md`, SHA-256
+  `071c1915b98005764353a20d1282ed0acbc72a3407b929728e49513b6ddfcdf8`,
+  received Gate-1 `REQUEST_CHANGES` in `msg_4257ce016b9b4c30` and was then
+  revised in place instead of first being preserved as a `-v1` artifact. An
+  exhaustive search of the author worktree and retained evidence roots found
+  no byte-identical copy. The object named by that review is therefore not
+  retrievable and must not be reconstructed or treated as preserved evidence.
+- The substantively approved replacement remains the 469-line artifact at
+  SHA-256
+  `c0902f3ca8736e675824ee8f514665dd5c32e8590cfa25e46e5fb76833ecf852`,
+  reviewed in `msg_dab9d93487ed03c3`. This append records the process defect
+  without rewriting either audited verdict; it does not change the two
+  remediation findings, M7 source authority, protocol version, or M8
+  obligations.
+
+### M7 Gate-3 Remediation 3 Gate-1 False-Prefix Clarification (2026-09-13)
+
+- The approved remediation-3 design overgeneralized the `StartPrefix`
+  mismatch boundary by saying that any over-limit prefix-plus-frame sum must
+  disconnect. That literal rule contradicted the existing false-prefix
+  control: a speculative prefix plus an individually legal frame is ordinary
+  input, not a paste candidate, and the speculative hold must not change the
+  frame's outcome relative to what it would have received on its own.
+- The binding clarification preserves exact-byte release when a mismatching
+  frame is itself at or below `MAX_INPUT_PAYLOAD`, even when the retained
+  prefix makes the sum exceed the limit. Release uses chunks individually
+  bounded by the limit, constructs no combined full-size buffer, retains no
+  state, and leaves the existing control unchanged. A mismatching frame that
+  is itself oversized remains fatal, so a speculative prefix cannot launder a
+  physical oversized non-paste frame into chunked forwarding.
+- A frame that completes the introducer remains a logical-paste candidate and
+  follows the reviewed two-slice classifier: exactly one complete valid UTF-8
+  envelope is recoverable, while unresolved, mixed, invalid, trailing, or
+  multiple-envelope candidates disconnect. `ForwardedEscape` remains
+  fail-closed. This append records Claude's correction in
+  `msg_c40800374ce3fc36` and boundary confirmation in
+  `msg_ef949ae1a89b594b`; it narrows only the superseded Gate-1 sentence and
+  changes no finding, source assignment, protocol version, or M8 obligation.
+- A second companion clarification preserves the first companion at its
+  reviewed hash and narrows “retains no state” to “retains no state from the
+  disproved prefix.” Ordinary idle scanning may retain a different trailing
+  proper introducer while forwarding the preceding exact bytes; suppressing
+  that new prefix would itself make speculative retention change the frame's
+  outcome. The all-`x` false-prefix control still correctly ends in `Idle`, and
+  a distinct control pins exact release plus fresh trailing-prefix retention.
+  Claude confirmed this interpretation in `msg_4e29b844a1df60b3`.
+- Freeze-time structural review also found that `ForwardedEscape` still used
+  one infallible append after checking only the physical frame. At most five
+  retained bytes plus one legal 1 MiB frame could materialize just over 1 MiB
+  while the decoded frame remained live, for a peak near 2 MiB, not the 65 MiB
+  completing-frame risk. The guard-wide rule now applies once to every state:
+  no append above `MAX_INPUT_PAYLOAD`, borrowed two-slice decisions for every
+  over-limit candidate, and fallible reservation everywhere. Retroactive
+  completion remains fatal; proper prefixes remain bounded; mismatch release
+  remains chunked and may retain a fresh trailing introducer. Claude confirmed
+  this as existing F1 scope in `msg_673686a68eb3c76c`.
+
+### M7 Gate-3 Remediation 3: Pending Capability and Logical Paste Completion (2026-09-13)
+
+- **Fork remediation on rejected `ed3e171`:** whole-M7 Gate-3 confirmed
+  `ED3-INPUT-ORDER-001` and
+  `G3-M7-PASTE-FRAGMENT-CHUNK-LIMIT-003`. A direct-session handshake was
+  represented as an App client plus a pending boolean, so data-plane events
+  could take App routes before target acquisition. Separately, a valid exact
+  UTF-8 oversized paste was recoverable in one frame but disconnected when a
+  retained introducer was followed by a completing frame that was itself over
+  1 MiB. Prior whole-check, gate, release, and Zig passes remain evidence for
+  rejected objects and do not transfer.
+- `ClientConnectionMode::TerminalPending` replaces the App-plus-boolean
+  representation. It is neither an App client nor a writable or render/PTY
+  target, cannot become foreground, and owns no terminal or resize lock.
+  Successful `AttachTerminal`, `ControlTerminal`, and `ObserveTerminal`
+  acquisition replace it with the existing acquired mode. Target failure
+  closes through the existing session-resolution path.
+- The pending disposition population is exhaustive over every `ServerEvent`.
+  Raw input, a retained-raw marker, structured input, either paste-rejection
+  origin, clipboard image, and resize receive one stable target-required
+  shutdown and client removal before App/runtime mutation. Connected,
+  attach/control/observe acquisition, attach-scroll, detach/disconnect,
+  writer-drained, and quit events retain their lifecycle behavior;
+  attach-scroll is inert until an acquired target exists. Transport-level
+  malformed/over-limit paths that already emit `ClientDisconnected` keep that
+  fail-closed cleanup rather than adding a second diagnostic.
+- A payload-free `ClientRawInputPending` marker is emitted only when a raw
+  guard transitions from idle into retained `StartPrefix` or `Paste` state.
+  Per-connection sender FIFO puts it before any later target acquisition, so
+  bytes held before acquisition cannot cross the capability transition. It is
+  a no-op for App and acquired clients and is not emitted repeatedly for
+  continuations of an already pending envelope.
+- Oversized `StartPrefix` and `Paste` completion now use a private borrowed
+  two-slice candidate. Checked total length, fixed-delimiter comparisons,
+  incremental end search, exact-envelope shape, and cross-boundary UTF-8 are
+  decided without joining retained and incoming buffers. UTF-8 validation
+  delegates invalidity to `std::str::from_utf8` and uses only a four-byte stack
+  bridge for one incomplete boundary scalar. Only a candidate at or below the
+  1 MiB limit may append, after fallible reserve; every oversized candidate
+  either yields one exact recoverable paste rejection or disconnects without
+  retained state.
+- The remediation-1 rule that recovery required an idle guard was wrong and
+  caused the chunk-dependent result. It is superseded append-only: an
+  oversized completing physical frame is classified with retained bytes as
+  one logical envelope. Exact valid completion recovers; unresolved, mixed,
+  invalid, trailing, multiple-envelope, and forwarded-Escape retroactive forms
+  remain fatal. A false start prefix follows ordinary-input equivalence:
+  individually legal frames release in bounded chunks, individually
+  oversized frames remain fatal, and idle scanning may retain a distinct new
+  trailing introducer.
+- Freeze-time F1 review extended the same guard-wide append invariant to
+  `ForwardedEscape`. Its at-most-five-byte continuation is compared with the
+  incoming frame as borrowed slices before mutation. Proper prefixes reserve
+  fallibly, retroactive completion remains fatal, and mismatch release uses
+  bounded chunks. This closes a roughly 2 MiB peak-copy path without
+  overstating it as the separate 65 MiB completing-frame risk.
+- P7 conversion inventory is explicit. The legacy structured non-App focus
+  test formerly required pending structured keys to route through App and
+  promote the pending client; that behavior is now forbidden. Its converted
+  control retains the unrelated attached-client focus refusal, App focus and
+  PTY-byte assertions, proves pending structured refusal and removal, then
+  proves the sanctioned post-acquisition raw path reaches only its terminal.
+  Existing fragmented-paste transport controls only consume the new ordering
+  marker before asserting their unchanged downstream outcomes; the PTY
+  visibility fixture represents readiness with `TerminalPending`/`App`
+  instead of the removed boolean. No pre-existing test is deleted, and
+  one-site mutation evidence must show the converted admission control remains
+  load-bearing.
+- This is fork remediation with no additional upstream source: M7 authority
+  remains 21, `PROTOCOL_VERSION` remains 19, ADR-0014 caller handling and the
+  accepted stop-admission linearization are unchanged, and every recorded M8
+  obligation remains intact. The successor is **IMPLEMENTED / PENDING
+  VERIFICATION** until exact-SHA Gate-2 and fresh whole-M7 Gate-3 approval. No
+  merge, push, install, tag, publish, or release is authorized by this entry.
