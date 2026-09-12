@@ -76,6 +76,21 @@ fn staging_dir() -> PathBuf {
     std::env::temp_dir().join(format!("zynk-clipboard-images-{user_id}"))
 }
 
+#[cfg(test)]
+pub(crate) fn staged_paths_for_client(client_id: u64) -> Vec<PathBuf> {
+    let prefix = format!("client-{client_id}-clipboard-");
+    let Ok(entries) = fs::read_dir(staging_dir()) else {
+        return Vec::new();
+    };
+    let mut paths = entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
 fn ensure_staging_dir() -> io::Result<PathBuf> {
     let dir = staging_dir();
     fs::create_dir_all(&dir)?;

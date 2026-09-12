@@ -14,6 +14,15 @@ pub(crate) enum ClientConnectionMode {
     TerminalObserve { terminal_id: String },
 }
 
+impl ClientConnectionMode {
+    pub(crate) fn allows_write_messages(&self) -> bool {
+        match self {
+            Self::App | Self::TerminalAttach { .. } => true,
+            Self::TerminalObserve { .. } => false,
+        }
+    }
+}
+
 pub(crate) type RenderTarget = (
     u64,
     (u16, u16),
@@ -274,4 +283,22 @@ pub(crate) fn render_targets(
 
     targets.sort_by_key(|(client_id, _, _, is_foreground, _)| (*is_foreground, *client_id));
     targets
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_write_message_authority_is_explicit_for_every_mode() {
+        assert!(ClientConnectionMode::App.allows_write_messages());
+        assert!(ClientConnectionMode::TerminalAttach {
+            terminal_id: "attached".to_owned(),
+        }
+        .allows_write_messages());
+        assert!(!ClientConnectionMode::TerminalObserve {
+            terminal_id: "observed".to_owned(),
+        }
+        .allows_write_messages());
+    }
 }

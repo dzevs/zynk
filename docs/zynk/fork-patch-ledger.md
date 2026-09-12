@@ -3451,3 +3451,22 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   full/diff, and buffer-normalization mutations pin those boundaries. Protocol
   19, wire shape, cursor state, hyperlinks, and graphics behavior are unchanged.
   Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-R2: Client Write-Mode Allowlist Hardening (2026-09-12)
+
+- **Fork hardening:** this standalone change is not an upstream source slice
+  and does not alter the 21-source M7 accounting. `ClientConnectionMode`
+  exhaustively classifies `App` and `TerminalAttach` as accepting write
+  messages and `TerminalObserve` as read-only. A future mode cannot compile
+  until that authority decision is made explicitly.
+- Raw `Input`, structured `InputEvents`, and `ClipboardImage` dispatch now
+  require a registered write-capable client. Previously, a structured event
+  arriving after client removal could still reach app routing, while a
+  clipboard image for a missing client was written without an owner cleanup
+  list and leaked its staged file. Missing raw input was already inert but now
+  shares the same structural admission boundary.
+- Per-handler observer/missing-client controls and one-site mutations pin all
+  three guards. The existing direct-attach raw-input fast path and App/attach
+  write behavior are preserved. Observer-local resize, attach/observe mode
+  transitions, scroll authority, protocol 19, and message tags are unchanged.
+  Exact-candidate Gate-2/Gate-3 verification remains required.

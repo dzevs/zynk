@@ -2643,10 +2643,11 @@ impl HeadlessServer {
                     }
                     return true;
                 }
-                if matches!(
-                    self.clients.get(&client_id).map(|client| &client.mode),
-                    Some(ClientConnectionMode::TerminalObserve { .. })
-                ) {
+                if !self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.mode.allows_write_messages())
+                {
                     return false;
                 }
                 let events = if let Some(client) = self.clients.get_mut(&client_id) {
@@ -2675,10 +2676,11 @@ impl HeadlessServer {
                     len = events.len(),
                     "client input events received"
                 );
-                if matches!(
-                    self.clients.get(&client_id).map(|client| &client.mode),
-                    Some(ClientConnectionMode::TerminalObserve { .. })
-                ) {
+                if !self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.mode.allows_write_messages())
+                {
                     return false;
                 }
                 let events = events
@@ -2715,10 +2717,11 @@ impl HeadlessServer {
                     extension = %extension,
                     "client clipboard image received"
                 );
-                if matches!(
-                    self.clients.get(&client_id).map(|client| &client.mode),
-                    Some(ClientConnectionMode::TerminalObserve { .. })
-                ) {
+                if !self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.mode.allows_write_messages())
+                {
                     return false;
                 }
                 match self.write_client_clipboard_image(client_id, &extension, &data) {
@@ -7713,6 +7716,102 @@ next_tab = ""
             RenderEncoding::SemanticFrame,
             None,
         )
+    }
+
+    fn test_observer_client(last_activity: u64) -> ClientConnection {
+        let mut client = test_app_client(Some(true), last_activity);
+        client.mode = ClientConnectionMode::TerminalObserve {
+            terminal_id: "observed".to_owned(),
+        };
+        client
+    }
+
+    #[tokio::test]
+    async fn client_input_write_allowlist_rejects_observer_and_missing_client() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        server.clients.insert(7, test_observer_client(1));
+
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 7,
+            data: b"observer".to_vec(),
+        }));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 99,
+            data: b"missing".to_vec(),
+        }));
+        assert_eq!(server.foreground_client_id, None);
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_input_events_write_allowlist_rejects_observer_and_missing_client() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        server.clients.insert(7, test_observer_client(1));
+
+        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 7,
+            events: vec![crate::protocol::ClientInputEvent::TextCommit(
+                "observer".to_owned(),
+            )],
+        }));
+        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 99,
+            events: vec![crate::protocol::ClientInputEvent::TextCommit(
+                "missing".to_owned(),
+            )],
+        }));
+        assert_eq!(server.foreground_client_id, None);
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_clipboard_image_write_allowlist_rejects_without_staging() {
+        const OBSERVER_ID: u64 = u64::MAX - 1;
+        const MISSING_ID: u64 = u64::MAX;
+
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        server.clients.insert(OBSERVER_ID, test_observer_client(1));
+        let before_observer = crate::server::clipboard_image::staged_paths_for_client(OBSERVER_ID);
+        let before_missing = crate::server::clipboard_image::staged_paths_for_client(MISSING_ID);
+
+        let observer_changed = server.handle_server_event(ServerEvent::ClientClipboardImage {
+            client_id: OBSERVER_ID,
+            extension: "png".to_owned(),
+            data: b"observer".to_vec(),
+        });
+        let missing_changed = server.handle_server_event(ServerEvent::ClientClipboardImage {
+            client_id: MISSING_ID,
+            extension: "png".to_owned(),
+            data: b"missing".to_vec(),
+        });
+
+        let after_observer = crate::server::clipboard_image::staged_paths_for_client(OBSERVER_ID);
+        let after_missing = crate::server::clipboard_image::staged_paths_for_client(MISSING_ID);
+        let created = after_observer
+            .iter()
+            .chain(&after_missing)
+            .filter(|path| !before_observer.contains(path) && !before_missing.contains(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::server::clipboard_image::remove_files(created.clone());
+
+        assert!(!observer_changed);
+        assert!(!missing_changed);
+        assert!(created.is_empty(), "rejected writes staged {created:?}");
+        assert_eq!(server.foreground_client_id, None);
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
