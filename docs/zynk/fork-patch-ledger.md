@@ -3381,3 +3381,16 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   live-handoff DB-worker, and authority controls remain in force. No protocol,
   caller, persistence, worker-placement, or session-identity policy changes.
   Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-02 Provenance Correction History (2026-09-12)
+
+- Commit `a566ca5` initially recorded upstream source `3459798b` as
+  post-relicense and consequently added the modification notice to
+  `src/server/autodetect.rs` and indexed that path in `NOTICE`. That source
+  actually predates the upstream Apache relicense boundary at `36de78dd`.
+- Commit `8cb75fc` correctly removed the surplus file notice and `NOTICE`
+  entry, but also replaced the M7-02 ledger wording instead of appending this
+  correction history. The M7-02 row above now states the accurate final
+  provenance; this appended note preserves the earlier mistaken classification
+  and its correction without reintroducing the false marker or changing M7-02
+  production behavior.
