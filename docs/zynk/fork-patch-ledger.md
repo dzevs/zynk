@@ -3261,3 +3261,13 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   ownership, protocol 19, and delivery authority are unchanged.
 - Direct helper controls and the existing deferred-request controls are
   implemented. Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-05: Multi-Client Resize Test Synchronization (2026-09-12)
+
+- **Source:** `faee0676` (pre-relicense; `NOTICE` unchanged). Production bytes
+  are unchanged. The existing disconnect regression now drains stale frames
+  before the smallest client detaches and waits for the surviving client's
+  resized-up frame before reading the PTY dimensions.
+- This is synchronization of an existing observable resize contract, not a
+  new resize policy or timing guarantee. Exact-candidate Gate-2/Gate-3
+  verification remains required.
