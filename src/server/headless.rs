@@ -831,7 +831,7 @@ impl HeadlessServer {
         // rendering semantics. Force one fresh frame to every remaining client
         // even if the next rendered buffer compares equal to its cached frame.
         for client in self.clients.values_mut() {
-            client.request_full_redraw();
+            client.request_repaint();
         }
         if !start_pending_agent_resumes {
             self.app.pending_agent_resume_deadline = None;
@@ -844,7 +844,7 @@ impl HeadlessServer {
             .start_pending_agent_resumes(self.app.pending_agent_resume_due(now))
         {
             for client in self.clients.values_mut() {
-                client.request_full_redraw();
+                client.request_repaint();
             }
         }
     }
@@ -2466,7 +2466,7 @@ impl HeadlessServer {
             events_are_render_neutral_mouse_motion(&events, self.app.state.mode);
         if let Some(client) = self.clients.get_mut(&client_id) {
             if host_surface_redraw {
-                client.request_full_redraw();
+                client.request_repaint();
                 client.render_pending = true;
             } else if !render_neutral_mouse_motion {
                 // Ensure semantic clients receive one post-input frame even if the
@@ -2753,7 +2753,7 @@ impl HeadlessServer {
                         width_px: cell_width_px,
                         height_px: cell_height_px,
                     };
-                    render_state.reset_baseline();
+                    render_state.request_repaint();
                     Some(terminal_id.clone())
                 } else {
                     None
@@ -2777,7 +2777,7 @@ impl HeadlessServer {
                         width_px: cell_width_px,
                         height_px: cell_height_px,
                     };
-                    render_state.reset_baseline();
+                    render_state.request_repaint();
                     return true;
                 }
                 if let Some(client) = self.clients.get_mut(&client_id) {
@@ -7935,7 +7935,7 @@ next_tab = ""
     }
 
     #[test]
-    fn outer_focus_gained_forces_terminal_ansi_full_redraw() {
+    fn outer_focus_gained_repaints_terminal_ansi_without_clearing() {
         let mut server = test_headless_server();
         let (client_tx, _client_control_rx, client_rx) = test_client_writer();
 
@@ -7968,9 +7968,149 @@ next_tab = ""
             ServerMessage::Terminal(frame) => {
                 assert_eq!(frame.seq, 2);
                 assert!(frame.full);
+                assert!(!frame.bytes.windows(4).any(|bytes| bytes == b"\x1b[2J"));
             }
             other => panic!("expected terminal frame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn outer_focus_gained_repaints_an_unchanged_semantic_frame() {
+        let mut server = test_headless_server();
+        let (client_tx, _client_control_rx, client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        server.render_and_stream();
+        let initial = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial semantic frame"),
+        );
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        }));
+        server.render_and_stream();
+
+        let repaint = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("semantic focus repaint"),
+        );
+        assert_frame_data_eq(&repaint, &initial);
+    }
+
+    #[test]
+    fn terminal_ansi_repaint_survives_a_full_render_queue_without_clearing() {
+        let mut server = test_headless_server();
+        let (client_tx, _client_control_rx, client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial terminal frame");
+
+        let queued = HeadlessServer::frame_server_message(&ServerMessage::ReloadSoundConfig)
+            .expect("serialize dummy message");
+        server
+            .clients
+            .get(&1)
+            .unwrap()
+            .writer
+            .as_ref()
+            .unwrap()
+            .render
+            .try_send(queued)
+            .expect("pre-fill render queue");
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        }));
+
+        server.render_and_stream();
+        assert!(server.clients.get(&1).unwrap().render_pending);
+        assert!(matches!(
+            read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
+            ServerMessage::ReloadSoundConfig
+        ));
+
+        assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 1 }));
+        server.render_and_stream();
+        match read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()) {
+            ServerMessage::Terminal(frame) => {
+                assert_eq!(frame.seq, 2);
+                assert!(frame.full);
+                assert!(!frame.bytes.windows(4).any(|bytes| bytes == b"\x1b[2J"));
+            }
+            other => panic!("expected terminal repaint frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn focus_and_shared_resize_repaints_preserve_uploaded_graphics_cache() {
+        fn marked_client(writer: ClientWriter) -> ClientConnection {
+            let mut client = ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize {
+                    width_px: 10,
+                    height_px: 20,
+                },
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            );
+            client.graphics_cache.test_mark_non_empty();
+            client
+        }
+
+        let mut focus_server = test_headless_server();
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        focus_server.clients.insert(1, marked_client(writer));
+        focus_server.foreground_client_id = Some(1);
+        assert!(focus_server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        }));
+        let focus_client = focus_server.clients.get(&1).unwrap();
+        assert!(!focus_client.graphics_surface_reset_pending);
+        assert!(!focus_client.graphics_cache.is_empty());
+
+        let mut resize_server = test_headless_server();
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        resize_server.clients.insert(1, marked_client(writer));
+        resize_server.foreground_client_id = Some(1);
+        resize_server.resize_shared_runtime_to_effective_size();
+        let resize_client = resize_server.clients.get(&1).unwrap();
+        assert!(!resize_client.graphics_surface_reset_pending);
+        assert!(!resize_client.graphics_cache.is_empty());
     }
 
     #[tokio::test]

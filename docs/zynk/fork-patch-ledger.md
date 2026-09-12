@@ -3329,3 +3329,25 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   toast, changes no foreground client, and emits no delivery event. Protocol
   tags/version, input authority, and clipboard-image limits are unchanged.
   Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-10: Host Repaint Preserves Kitty Graphics (2026-09-12)
+
+- **Source:** `36de78dd` (post-relicense). Every applicable source file changed
+  here already carries the prominent modification notice and is indexed in
+  `NOTICE`; no new indexed path is introduced. Local, thin-client, and
+  headless focus repaints now rewrite the complete text surface without an
+  erase-display command or a host Kitty-cache reset. Initial frames still
+  clear, ordinary diffs remain incremental, and resize/handoff repaint requests
+  retain uploaded graphics state while forcing one frame delivery.
+- `BlitEncoder` distinguishes a first-frame clear from a full-cell repaint over
+  an existing baseline. Repaint state remains pending until the prepared frame
+  is committed, so a full render queue cannot consume it. Thin-client and
+  server-side graphics bytes are inserted before the final synchronized-output
+  terminator. Thin-client graphics retain their save/restore cursor wrapper;
+  cursor visibility/shape, IME anchor, hyperlink, underline, and frame sequence
+  behavior remain unchanged.
+- This imports no retained-graphics planning/cadence work carried by `D-M5-2`
+  to M8 `88370e15` and does not create or consume the absent
+  `src/server/headless/pane_graphics.rs` call site. Protocol remains 19; no API,
+  schema, dependency, delivery authority, or graphics upload policy changes.
+  Exact-candidate Gate-2/Gate-3 verification remains required.

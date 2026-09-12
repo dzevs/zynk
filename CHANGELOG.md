@@ -59,6 +59,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Host focus, resize, and handoff repaints preserve uploaded Kitty graphics
+  instead of clearing the terminal surface before redrawing text.
 - Oversized bracketed text pastes are rejected with a client-local notification
   without disconnecting the client; malformed or non-paste oversized input
   remains a fail-closed protocol violation.

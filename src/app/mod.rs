@@ -850,7 +850,7 @@ impl App {
         self.terminal_runtimes.assume_handoff_ownership();
     }
 
-    fn request_full_redraw(&mut self) {
+    fn request_repaint(&mut self) {
         self.full_redraw_pending = true;
     }
 
@@ -983,10 +983,10 @@ impl App {
                 let _sync_output = SyncOutputGuard::begin()?;
                 let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
                 if self.full_redraw_pending {
-                    if kitty_graphics_enabled {
-                        crate::kitty_graphics::clear_all_host_graphics()?;
+                    for cell in &mut terminal.current_buffer_mut().content {
+                        cell.set_skip(true);
                     }
-                    terminal.clear()?;
+                    terminal.swap_buffers();
                     self.full_redraw_pending = false;
                 }
                 let mut cell_size = crate::kitty_graphics::HostCellSize::default();

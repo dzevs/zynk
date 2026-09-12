@@ -77,6 +77,8 @@ struct ClientState {
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     /// Whether outer focus gain should force a full host-terminal redraw.
     redraw_on_focus_gained: bool,
+    /// Whether the next semantic frame must repaint every cell without clearing the surface.
+    repaint_pending: bool,
 }
 
 #[derive(Debug, Default)]
@@ -200,8 +202,8 @@ fn attach_scroll_action(
 }
 
 impl ClientState {
-    fn request_full_redraw(&mut self) {
-        self.blit_encoder = render_ansi::BlitEncoder::new();
+    fn request_repaint(&mut self) {
+        self.repaint_pending = true;
     }
 }
 
@@ -1048,6 +1050,7 @@ async fn run_client_loop(
         mouse_scroll_lines: config.mouse_scroll_lines,
         remote_image_paste_key: config.remote_image_paste_key,
         redraw_on_focus_gained: config.redraw_on_focus_gained,
+        repaint_pending: false,
     };
     debug!(?negotiated_encoding, "client render encoding active");
     // Width and height share one observation across the input and resize threads.
@@ -1170,7 +1173,7 @@ async fn run_client_loop(
                         &events,
                         state.redraw_on_focus_gained,
                     ) {
-                        state.request_full_redraw();
+                        state.request_repaint();
                     }
                     if crate::raw_input::events_require_host_terminal_appearance_query(&events) {
                         query_host_terminal_appearance();
@@ -1230,7 +1233,9 @@ async fn run_client_loop(
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
                 ServerMessage::Frame(frame_data) => {
-                    let encoded = state.blit_encoder.encode(&frame_data, false);
+                    let encoded = state
+                        .blit_encoder
+                        .encode(&frame_data, state.repaint_pending);
                     let mut stdout = io::stdout();
                     let graphics = if state.kitty_graphics_enabled {
                         frame_data.graphics.as_slice()
@@ -1241,6 +1246,7 @@ async fn run_client_loop(
                         write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
                     let _ = stdout.flush();
                     state.blit_encoder.commit(frame_data, encoded);
+                    state.repaint_pending = false;
                 }
                 ServerMessage::Terminal(frame) => {
                     if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
@@ -1550,15 +1556,18 @@ fn write_encoded_frame_with_graphics(
     encoded: &[u8],
     graphics: &[u8],
 ) -> io::Result<()> {
-    writer.write_all(encoded)?;
     if graphics.is_empty() {
-        return Ok(());
+        return writer.write_all(encoded);
     }
 
+    let insertion = render_ansi::final_sync_output_end(encoded).unwrap_or(encoded.len());
+
+    writer.write_all(&encoded[..insertion])?;
     record_received_kitty_graphics(graphics);
     writer.write_all(b"\x1b7")?;
     writer.write_all(graphics)?;
-    writer.write_all(b"\x1b8")
+    writer.write_all(b"\x1b8")?;
+    writer.write_all(&encoded[insertion..])
 }
 
 fn contains_kitty_graphics_bytes(bytes: &[u8]) -> bool {
@@ -1863,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn graphics_bytes_are_written_after_blit_with_saved_cursor() {
+    fn graphics_bytes_are_written_inside_synchronized_blit_with_saved_cursor() {
         let mut output = Vec::new();
         write_encoded_frame_with_graphics(
             &mut output,
@@ -1874,7 +1883,19 @@ mod tests {
 
         assert_eq!(
             output,
-            b"\x1b[?2026htext\x1b[?2026lcursor\x1b7graphics\x1b8"
+            b"\x1b[?2026htext\x1b7graphics\x1b8\x1b[?2026lcursor"
+        );
+
+        output.clear();
+        write_encoded_frame_with_graphics(
+            &mut output,
+            b"first\x1b[?2026lmiddle\x1b[?2026ltail",
+            b"graphics",
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            b"first\x1b[?2026lmiddle\x1b7graphics\x1b8\x1b[?2026ltail"
         );
     }
 
