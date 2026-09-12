@@ -3502,3 +3502,16 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   remain unchanged; `server.stop` creates no delivery event. Protocol 19 and
   all message tags are unchanged. Exact-candidate Gate-2/Gate-3 verification
   remains required.
+
+### M7-17 Shutdown Scope Qualification (2026-09-12)
+
+- The preceding M7-17 statement that Ping remains available while every other
+  post-stop request fails closed with `server_unavailable` applies to the
+  session/headless server paths started with a shared stop control. It does not
+  describe the `--no-session` monolithic escape hatch.
+- Monolithic mode starts the API server without a separate server stop control
+  because the App and API server share one process lifecycle. It deliberately
+  retains the pre-M7-17 dispatch behavior: `server.stop` reaches the App and
+  sets `should_quit`, and no separate post-stop `server_unavailable` fence is
+  applied. This append qualifies the historical row; it does not widen the
+  M7-17 implementation or change protocol 19, message tags, or authorization.
