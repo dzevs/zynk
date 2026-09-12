@@ -3283,3 +3283,17 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   including underline, hyperlink, wide-cell, IME-anchor, cursor-shape, and
   visibility behavior. Exact-candidate Gate-2/Gate-3 verification remains
   required.
+
+### M7-07: Explicit-Session Socket Selection Across Live Handoff (2026-09-12)
+
+- **Source:** `9c453427` (pre-relicense; `NOTICE` unchanged). When the current
+  server was selected through an explicit `--session`, its handoff import child
+  removes inherited API/client socket overrides so the inherited
+  `ZYNK_SESSION` selects that session's own paths. The child has no copy of the
+  original CLI argument, so retaining those overrides would mask the session.
+- Unnamed/default sessions keep explicit client-only overrides. Named and
+  default servers coexist through replacement. `HANDOFF_VERSION` remains 2;
+  caller capture, DB preflight and worker quiesce/install ordering, pane/runtime
+  transfer, rollback, and committed-only takeover are unchanged. The complete
+  live-handoff integration suite remains green. Exact-candidate Gate-2/Gate-3
+  verification remains required.
