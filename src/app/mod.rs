@@ -976,6 +976,8 @@ impl App {
             }
 
             let now = Instant::now();
+            self.render_dirty
+                .set_immediate_pty_sources(self.state.app_surface_pane_ids());
             self.sync_host_mouse_capture(&mut host_mouse_capture_active)?;
 
             if needs_render && self.can_render_now(now) {
@@ -1671,11 +1673,7 @@ impl App {
                                         focused,
                                     ) {
                                         let _ = runtime.try_send_bytes(bytes::Bytes::from(
-                                            if runtime
-                                                .input_state()
-                                                .map(|s| s.bracketed_paste)
-                                                .unwrap_or(false)
-                                            {
+                                            if runtime.bracketed_paste_enabled() {
                                                 format!("\x1b[200~{text}\x1b[201~")
                                             } else {
                                                 text

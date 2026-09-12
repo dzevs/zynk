@@ -138,13 +138,13 @@ impl App {
         // application cursor mode while they own special keys.
         // Modified page keys are pane shortcuts, and release events should not
         // produce a second host-scroll action.
-        // Only intercept when we know the pane state; if input_state is unknown,
-        // fail-open and forward the key to the pane.
+        // Only intercept when we know the pane state; if the narrow query is
+        // unavailable, fail-open and forward the key to the pane.
         if matches!(key_event.code, KeyCode::PageUp | KeyCode::PageDown)
             && key_event.modifiers.is_empty()
         {
-            if let Some(input_state) = rt.input_state() {
-                if input_state.plain_page_keys_use_host_scrollback() {
+            if let Some(host_scroll) = rt.plain_page_keys_use_host_scrollback() {
+                if host_scroll {
                     if key_event.kind == crossterm::event::KeyEventKind::Release {
                         return None;
                     }

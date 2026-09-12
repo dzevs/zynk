@@ -1688,6 +1688,21 @@ impl AppState {
         section == SettingsSection::Integrations && self.integration_updates_available()
     }
 
+    pub(crate) fn app_surface_pane_ids(&self) -> std::collections::HashSet<PaneId> {
+        let Some(tab) = self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .and_then(crate::workspace::Workspace::active_tab)
+        else {
+            return std::collections::HashSet::new();
+        };
+        if tab.zoomed {
+            std::collections::HashSet::from([tab.layout.focused()])
+        } else {
+            tab.panes.keys().copied().collect()
+        }
+    }
+
     pub(crate) fn focused_pane_requests_mouse_capture_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
@@ -1696,8 +1711,7 @@ impl AppState {
             && self
                 .active
                 .and_then(|idx| self.focused_runtime_in_workspace(terminal_runtimes, idx))
-                .and_then(crate::terminal::TerminalRuntime::input_state)
-                .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
+                .is_some_and(crate::terminal::TerminalRuntime::mouse_reporting_enabled)
     }
 
     pub(crate) fn should_capture_host_mouse_from(
@@ -2352,6 +2366,33 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn app_surface_pane_ids_include_the_active_tab_and_respect_zoom() {
+        let mut state = AppState::test_new();
+        let mut active = crate::workspace::Workspace::test_new("active");
+        let original = active.tabs[0].root_pane;
+        let focused = active.test_split(ratatui::layout::Direction::Horizontal);
+        let inactive = crate::workspace::Workspace::test_new("inactive");
+        let inactive_pane = inactive.tabs[0].root_pane;
+        state.workspaces = vec![active, inactive];
+        state.active = Some(0);
+
+        assert_eq!(
+            state.app_surface_pane_ids(),
+            std::collections::HashSet::from([original, focused])
+        );
+        assert!(!state.app_surface_pane_ids().contains(&inactive_pane));
+
+        state.workspaces[0].tabs[0].zoomed = true;
+        assert_eq!(
+            state.app_surface_pane_ids(),
+            std::collections::HashSet::from([focused])
+        );
+
+        state.active = None;
+        assert!(state.app_surface_pane_ids().is_empty());
+    }
 
     #[test]
     fn agent_terminal_keeps_final_child_cursor_exposed() {

@@ -285,6 +285,7 @@ pub enum MouseProtocolMode {
 }
 
 impl MouseProtocolMode {
+    #[cfg(test)]
     pub fn reporting_enabled(self) -> bool {
         self != Self::None
     }

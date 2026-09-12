@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 pub(super) fn tab_attention_priority(state: crate::detect::AgentState, seen: bool) -> u8 {
     match (state, seen) {
         (crate::detect::AgentState::Blocked, _) => 4,
@@ -23,10 +25,7 @@ fn normalize_api_key_alias(key: &str) -> &str {
 }
 
 pub(super) fn encode_api_text(runtime: &crate::terminal::TerminalRuntime, text: &str) -> Vec<u8> {
-    let bracketed = runtime
-        .input_state()
-        .map(|state| state.bracketed_paste)
-        .unwrap_or(false);
+    let bracketed = runtime.bracketed_paste_enabled();
     if bracketed {
         format!("\x1b[200~{text}\x1b[201~").into_bytes()
     } else {

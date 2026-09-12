@@ -1560,11 +1560,7 @@ impl PaneRuntime {
     }
 
     pub fn handoff_history_ansi(&self) -> Option<String> {
-        if self
-            .terminal
-            .input_state()
-            .is_some_and(|input_state| input_state.alternate_screen)
-        {
+        if self.terminal.alternate_screen_active() {
             return None;
         }
         self.snapshot_history().map(|history| {
@@ -2579,6 +2575,22 @@ impl PaneRuntime {
         self.terminal.input_state()
     }
 
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.terminal.bracketed_paste_enabled()
+    }
+
+    pub fn focus_reporting_enabled(&self) -> bool {
+        self.terminal.focus_reporting_enabled()
+    }
+
+    pub fn mouse_reporting_enabled(&self) -> bool {
+        self.terminal.mouse_reporting_enabled()
+    }
+
+    pub fn plain_page_keys_use_host_scrollback(&self) -> Option<bool> {
+        self.terminal.plain_page_keys_use_host_scrollback()
+    }
+
     pub fn alternate_screen_active(&self) -> bool {
         self.terminal.alternate_screen_active()
     }
@@ -2700,10 +2712,7 @@ impl PaneRuntime {
     }
 
     pub async fn send_paste(&self, text: String) -> Result<(), mpsc::error::SendError<Bytes>> {
-        let bracketed = self
-            .input_state()
-            .map(|state| state.bracketed_paste)
-            .unwrap_or(false);
+        let bracketed = self.bracketed_paste_enabled();
         let payload = if bracketed {
             format!("\x1b[200~{text}\x1b[201~")
         } else {
@@ -2713,11 +2722,7 @@ impl PaneRuntime {
     }
 
     pub fn try_send_focus_event(&self, event: crate::ghostty::FocusEvent) -> bool {
-        if !self
-            .input_state()
-            .map(|state| state.focus_reporting)
-            .unwrap_or(false)
-        {
+        if !self.focus_reporting_enabled() {
             return false;
         }
 
@@ -2741,7 +2746,7 @@ impl PaneRuntime {
         row: u16,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
-        if !self.input_state()?.mouse_protocol_mode.reporting_enabled() {
+        if !self.mouse_reporting_enabled() {
             return None;
         }
         self.terminal
@@ -2777,7 +2782,6 @@ impl PaneRuntime {
         &self,
         kind: crossterm::event::MouseEventKind,
     ) -> Option<Vec<u8>> {
-        self.input_state()?;
         if self.wheel_routing()? != WheelRouting::AlternateScroll {
             return None;
         }

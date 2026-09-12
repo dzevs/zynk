@@ -52,6 +52,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - Cargo.toml
 - justfile
 - scripts/test_hermes_integration_asset.py
+- scripts/test_ui_hot_path_architecture.py
 - src/agent_resume.rs
 - src/api/mod.rs
 - src/api/schema/integrations.rs
@@ -60,6 +61,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/agent_resume.rs
 - src/app/agents.rs
 - src/app/api.rs
+- src/app/api_helpers.rs
 - src/app/api/layouts.rs
 - src/app/api/panes.rs
 - src/app/api/plugins/panes.rs
@@ -153,6 +155,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/server/notifications.rs
 - src/server/render_stream.rs
 - src/server/socket_paths.rs
+- src/server/terminal_attach.rs
 - src/terminal/id.rs
 - src/terminal/runtime.rs
 - src/terminal/state.rs

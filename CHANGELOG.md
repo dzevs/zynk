@@ -59,6 +59,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- High-rate output from hidden panes now coalesces redundant wakeups, while a
+  pane visible to the app or a direct terminal stream still wakes pending work.
+  Terminal input-mode checks also avoid formatting scrollback for scalar state.
 - Large terminal ANSI redraws now stay below the normal transport limit by
   reusing style state and safe contiguous cursor advances.
 - Server stop requests bypass API and pane backlogs, reject new client work,

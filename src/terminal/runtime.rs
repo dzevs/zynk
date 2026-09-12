@@ -317,11 +317,23 @@ impl TerminalRuntime {
 
     /// Collects the complete terminal input-mode snapshot.
     ///
-    /// This performs multiple terminal queries and may format keyboard state.
-    /// Keep it out of render/layout and pane-scaled loops; add a narrow accessor
-    /// when only one terminal fact is needed.
+    /// This performs multiple terminal queries. Keep it out of render/layout
+    /// and pane-scaled loops; add a narrow accessor when one fact is needed.
+    #[cfg(test)]
     pub fn input_state(&self) -> Option<crate::pane::InputState> {
         self.0.input_state()
+    }
+
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.0.bracketed_paste_enabled()
+    }
+
+    pub fn mouse_reporting_enabled(&self) -> bool {
+        self.0.mouse_reporting_enabled()
+    }
+
+    pub fn plain_page_keys_use_host_scrollback(&self) -> Option<bool> {
+        self.0.plain_page_keys_use_host_scrollback()
     }
 
     /// Reads only whether the alternate screen is active.

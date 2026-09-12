@@ -125,6 +125,7 @@ pub struct InputState {
     pub color_scheme_reporting: bool,
 }
 
+#[cfg(test)]
 impl InputState {
     pub fn mouse_reporting_enabled(self) -> bool {
         self.mouse_protocol_mode.reporting_enabled()
@@ -372,6 +373,22 @@ impl PaneTerminal {
 
     pub fn input_state(&self) -> Option<InputState> {
         self.ghostty.input_state()
+    }
+
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.ghostty.bracketed_paste_enabled()
+    }
+
+    pub fn focus_reporting_enabled(&self) -> bool {
+        self.ghostty.focus_reporting_enabled()
+    }
+
+    pub fn mouse_reporting_enabled(&self) -> bool {
+        self.ghostty.mouse_reporting_enabled()
+    }
+
+    pub fn plain_page_keys_use_host_scrollback(&self) -> Option<bool> {
+        self.ghostty.plain_page_keys_use_host_scrollback()
     }
 
     pub fn alternate_screen_active(&self) -> bool {
@@ -1566,14 +1583,50 @@ impl GhosttyPaneTerminal {
         core.kitty_keyboard.replay_ansi()
     }
 
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.mode_enabled(crate::ghostty::MODE_BRACKETED_PASTE)
+    }
+
+    pub fn focus_reporting_enabled(&self) -> bool {
+        self.mode_enabled(crate::ghostty::MODE_FOCUS_EVENT)
+    }
+
+    pub fn mouse_reporting_enabled(&self) -> bool {
+        self.core
+            .lock()
+            .is_ok_and(|core| core.terminal.mouse_tracking_enabled().unwrap_or(false))
+    }
+
+    fn mode_enabled(&self, mode: u16) -> bool {
+        self.core
+            .lock()
+            .is_ok_and(|core| core.terminal.mode_get(mode).unwrap_or(false))
+    }
+
+    pub fn plain_page_keys_use_host_scrollback(&self) -> Option<bool> {
+        let core = self.core.lock().ok()?;
+        let alternate_screen =
+            core.terminal.active_screen().ok()? == crate::ghostty::ActiveScreen::Alternate;
+        let mouse_reporting = core.terminal.mouse_tracking_enabled().ok()?;
+        let application_cursor = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_APPLICATION_CURSOR_KEYS)
+            .ok()?;
+        let bracketed_paste = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_BRACKETED_PASTE)
+            .ok()?;
+        Some(!alternate_screen && !mouse_reporting && (!application_cursor || bracketed_paste))
+    }
+
     pub fn alternate_screen_active(&self) -> bool {
         self.core.lock().is_ok_and(|core| {
             core.terminal.active_screen().ok() == Some(crate::ghostty::ActiveScreen::Alternate)
         })
     }
 
-    // This aggregate snapshot performs multiple terminal queries and may format
-    // keyboard state. Pane-scaled callers should add a narrow accessor instead.
+    // This aggregate snapshot performs multiple terminal queries. Pane-scaled
+    // callers should add a narrow accessor instead.
     pub fn input_state(&self) -> Option<InputState> {
         let Ok(core) = self.core.lock() else {
             return None;
@@ -1630,11 +1683,7 @@ impl GhosttyPaneTerminal {
             mouse_protocol_mode,
             mouse_protocol_encoding,
             mouse_alternate_scroll,
-            modify_other_keys: core
-                .terminal
-                .keyboard_state_ansi()
-                .ok()
-                .is_some_and(|ansi| !ansi.is_empty()),
+            modify_other_keys: core.terminal.modify_other_keys_enabled().ok()?,
             color_scheme_reporting: core
                 .terminal
                 .mode_get(crate::ghostty::MODE_COLOR_SCHEME_REPORT)
@@ -4082,6 +4131,36 @@ mod tests {
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
         let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
         assert_eq!(encoded, b"\x1b[27;2;13~");
+    }
+
+    #[test]
+    fn narrow_input_mode_queries_match_the_terminal_snapshot() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        assert!(!pane.bracketed_paste_enabled());
+        assert!(!pane.focus_reporting_enabled());
+        assert!(!pane.mouse_reporting_enabled());
+        assert_eq!(pane.plain_page_keys_use_host_scrollback(), Some(true));
+
+        pane.process_pty_bytes(
+            pane_id,
+            0,
+            b"\x1b[?2004h\x1b[?1004h\x1b[?1000h\x1b[>4;2m",
+            &tx,
+        );
+
+        assert!(pane.bracketed_paste_enabled());
+        assert!(pane.focus_reporting_enabled());
+        assert!(pane.mouse_reporting_enabled());
+        assert_eq!(pane.plain_page_keys_use_host_scrollback(), Some(false));
+        let snapshot = pane.input_state().expect("input snapshot");
+        assert!(snapshot.bracketed_paste);
+        assert!(snapshot.focus_reporting);
+        assert!(snapshot.mouse_reporting_enabled());
+        assert!(snapshot.modify_other_keys);
     }
 
     #[test]

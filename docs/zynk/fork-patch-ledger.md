@@ -3569,3 +3569,53 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   `wait-output` command that this fork does not expose under that name.
   Protocol remains 19; exact-candidate Gate-2/Gate-3 verification remains
   required for this disposition and the complete M7 source reconciliation.
+
+### M7-20: Bounded Terminal Wake Work and Scalar Input Queries (2026-09-12)
+
+- **Source:** `a5c69bea` (post-relicense), assigned with an **EVALUATE/SPLIT**
+  disposition among M7's unchanged 21-source authority. Newly modified
+  `scripts/test_ui_hot_path_architecture.py`, `src/app/api_helpers.rs`, and
+  `src/server/terminal_attach.rs` now carry the modification notice and are
+  indexed in `NOTICE`; the other applicable Rust files were already marked.
+  Upstream `AGENTS.md`, `docs/next`, release-performance scripts, benchmark
+  recipe, and irrelevant cross-platform cfg reshaping remain excluded.
+- Vendored libghostty-vt terminal-data value 33 exposes xterm
+  `modifyOtherKeys` mode 2 as a scalar boolean through the C ABI and Rust
+  wrapper. Patch `0002-expose-modify-other-keys-mode.patch`, its metadata,
+  ABI constant, Zig query, and reset/toggle controls travel together. The
+  retained handoff `InputState` snapshot consumes the scalar directly instead
+  of formatting keyboard state and terminal scrollback.
+- Narrow bracketed-paste, focus-reporting, mouse-reporting, and page-key
+  scroll-routing queries replace every production aggregate `input_state` or
+  formatted keyboard-state read under `src/app/**` and `src/server/**`.
+  The architecture checker now scans that full production population while
+  masking comments, literals, and test modules. Upstream's SGR-pixel accessor
+  is not imported: this fork has no host pixel-mouse handoff at this boundary
+  and already downgrades terminal SGR-pixel reports to cell coordinates, so the
+  accessor would be dead.
+- `RenderSignalState` owns both the coalesced request and the current immediate
+  PTY-source set. Hidden-only sources produce one wake per pending batch; a
+  newly joined app-visible or directly observed/controlled source wakes the
+  pending work. The app surface contains every pane in the active tab, or only
+  its focused pane while zoomed. No popup, terminal-title, or host report-all
+  source is claimed in M7.
+- **M8 popup obligation (`2c7c8beb`):** the approved M7 plan's popup promise
+  contradicted its own popup non-goal and is corrected here. When the creator
+  lands, account for the complete two-site `a5c69bea` population: add the popup
+  pane ID to `AppState::app_surface_pane_ids`, and add a directly targeted
+  popup to `HeadlessServer::sync_immediate_pty_sources`. Prove pending hidden
+  work wakes when that popup becomes visible; two sites are the exhaustive
+  upstream set.
+- **M8 title obligation (`350f0013`):** upstream assumes the pre-M7
+  `RenderSignal { request: Mutex<RenderRequest> }` shape and adds terminal-title
+  sources to that request. M7 instead has
+  `RenderSignal { state: Mutex<RenderSignalState> }`, whose state combines the
+  request with `immediate_pty_sources`. Integrate title sources into this
+  M7-shaped state and `has_immediate_work` while preserving immediate PTY wake;
+  do not restore the old mutex shape. This is an additional shared-arrival
+  obligation beside `D-M5-9`'s deferred title wake APIs.
+- **M8 host-report-all obligation (`e7fc85bf` / `d57cefb8`):** add the deferred
+  `keyboard_report_all_requested` forwarding and host negotiation chain while
+  reusing the M7 scalar query; do not recreate an aggregate snapshot read.
+  Protocol remains 19, and exact-candidate Gate-2/Gate-3 verification remains
+  required.

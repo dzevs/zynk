@@ -272,8 +272,8 @@ fn apply_terminal_attach_scroll(
     };
     if let AttachScrollSource::PageKey { input } = source {
         let host_scroll = runtime
-            .input_state()
-            .is_some_and(crate::pane::InputState::plain_page_keys_use_host_scrollback);
+            .plain_page_keys_use_host_scrollback()
+            .unwrap_or(false);
         if host_scroll {
             match direction {
                 AttachScrollDirection::Up => runtime.scroll_up(lines.max(1) as usize),
@@ -492,6 +492,7 @@ impl HeadlessServer {
             }
 
             self.drain_client_config_reload_request();
+            self.sync_immediate_pty_sources();
             self.stream_host_mouse_capture_mode();
 
             // Hidden-only work has its own cadence; a visible source can join it
@@ -3254,20 +3255,28 @@ impl HeadlessServer {
     }
 
     fn has_pending_presentation_work(&self, needs_full_render: bool) -> bool {
-        if needs_full_render || self.app.render_dirty.has_generic() {
-            return true;
-        }
+        needs_full_render || self.app.render_dirty.has_immediate_work()
+    }
+
+    fn sync_immediate_pty_sources(&self) {
         let (has_app_target, direct_terminal_targets) = self.pty_render_targets();
-        if !has_app_target && direct_terminal_targets.is_empty() {
-            return false;
+        let mut pane_ids = if has_app_target {
+            self.app.state.app_surface_pane_ids()
+        } else {
+            HashSet::new()
+        };
+        if !direct_terminal_targets.is_empty() {
+            for workspace in &self.app.state.workspaces {
+                for tab in &workspace.tabs {
+                    pane_ids.extend(tab.panes.iter().filter_map(|(&pane_id, pane)| {
+                        direct_terminal_targets
+                            .contains(pane.attached_terminal_id.as_str())
+                            .then_some(pane_id)
+                    }));
+                }
+            }
         }
-        self.app.render_dirty.has_pty_source_matching(|pane_id| {
-            self.pty_source_visible_to_render_targets(
-                pane_id,
-                has_app_target,
-                &direct_terminal_targets,
-            )
-        })
+        self.app.render_dirty.set_immediate_pty_sources(pane_ids);
     }
 
     fn pty_render_targets(&self) -> (bool, HashSet<&str>) {
@@ -9272,6 +9281,7 @@ next_tab = ""
     fn visible_source_wakes_pending_hidden_work() {
         let (server, background_pane) = hidden_pty_visibility_test_server(&[(120, 40)]);
         let visible_pane = server.app.state.workspaces[0].tabs[0].root_pane;
+        server.sync_immediate_pty_sources();
 
         assert!(server.app.render_dirty.request_pty(background_pane));
         assert!(!server.has_pending_presentation_work(false));
@@ -9386,11 +9396,49 @@ next_tab = ""
             ),
         );
 
-        assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([background_pane])));
         let other_pane = server.app.state.workspaces[0].tabs[0].root_pane;
+        server.sync_immediate_pty_sources();
+        assert!(server.app.render_dirty.request_pty(other_pane));
+        assert!(!server.has_pending_presentation_work(false));
+        assert!(server.app.render_dirty.request_pty(background_pane));
+        assert!(server.has_pending_presentation_work(false));
+        assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([background_pane])));
         assert!(!server.pty_sources_visible_to_any_render_target(&HashSet::from([other_pane])));
         server.clients.get_mut(&1).unwrap().writer = None;
         assert!(!server.pty_sources_visible_to_any_render_target(&HashSet::from([background_pane])));
+    }
+
+    #[test]
+    fn direct_terminal_observer_wakes_its_hidden_source_with_an_app_client() {
+        let (mut server, background_pane) = hidden_pty_visibility_test_server(&[(120, 40)]);
+        let hidden_tab = server.app.state.workspaces[0].test_add_tab(Some("hidden"));
+        let hidden_pane = server.app.state.workspaces[0].tabs[hidden_tab].root_pane;
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(background_pane)
+            .expect("background terminal id")
+            .to_string();
+        let (client_tx, _client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            2,
+            ClientConnection::new_with_mode(
+                ClientConnectionMode::TerminalObserve { terminal_id },
+                None,
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                false,
+                Some(client_tx),
+            ),
+        );
+
+        server.sync_immediate_pty_sources();
+        assert!(server.app.render_dirty.request_pty(hidden_pane));
+        assert!(!server.has_pending_presentation_work(false));
+        assert!(server.app.render_dirty.request_pty(background_pane));
+        assert!(server.has_pending_presentation_work(false));
     }
 
     #[tokio::test]
