@@ -59,6 +59,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Background client rendering no longer resets the foreground client's
+  workspace, agent-panel, tab, or mobile-switcher scroll position.
 - Headless servers resume restored agent sessions after a bounded host-theme
   wait even when no foreground client has attached yet.
 - Host focus, resize, and handoff repaints preserve uploaded Kitty graphics

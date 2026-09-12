@@ -3534,6 +3534,12 @@ impl HeadlessServer {
             let mut frame = match mode {
                 ClientConnectionMode::App => {
                     let render_started = crate::render_prof::timer();
+                    let preserved_scroll = (!is_foreground).then_some((
+                        self.app.state.workspace_scroll,
+                        self.app.state.agent_panel_scroll,
+                        self.app.state.tab_scroll,
+                        self.app.state.mobile_switcher_scroll,
+                    ));
                     let (buffer, cursor) =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
                             crate::server::render_stream::render_virtual_with_runtime_registry(
@@ -3552,6 +3558,12 @@ impl HeadlessServer {
                                 crate::kitty_graphics::HostCellSize::default(),
                             )
                         };
+                    if let Some((workspace, agent_panel, tab, mobile_switcher)) = preserved_scroll {
+                        self.app.state.workspace_scroll = workspace;
+                        self.app.state.agent_panel_scroll = agent_panel;
+                        self.app.state.tab_scroll = tab;
+                        self.app.state.mobile_switcher_scroll = mobile_switcher;
+                    }
                     crate::render_prof::duration_since(
                         "full_render.render_virtual",
                         render_started,
@@ -4795,6 +4807,182 @@ mod tests {
             control_rx,
             render_rx,
         )
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SharedScrollProjection {
+        Workspace,
+        AgentPanel,
+        Tab,
+        MobileSwitcher,
+    }
+
+    impl SharedScrollProjection {
+        fn seed(self, server: &mut HeadlessServer) {
+            match self {
+                Self::Workspace | Self::AgentPanel | Self::MobileSwitcher => {
+                    server.app.state.workspaces = (0..24)
+                        .map(|index| {
+                            crate::workspace::Workspace::test_new(&format!("workspace-{index:02}"))
+                        })
+                        .collect();
+                }
+                Self::Tab => {
+                    let mut workspace = crate::workspace::Workspace::test_new("tabs");
+                    for index in 1..24 {
+                        let label = format!("tab-{index:02}");
+                        workspace.test_add_tab(Some(&label));
+                    }
+                    server.app.state.workspaces = vec![workspace];
+                    server.app.state.tab_scroll_follow_active = false;
+                }
+            }
+            server.app.state.active = Some(0);
+            server.app.state.selected = 0;
+            server.app.state.ensure_test_terminals();
+
+            if matches!(self, Self::AgentPanel) {
+                let pane_ids = server
+                    .app
+                    .state
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.tabs[0].root_pane)
+                    .collect::<Vec<_>>();
+                for (index, pane_id) in pane_ids.into_iter().enumerate() {
+                    assert!(server.handle_internal_event_with_forwarding(
+                        AppEvent::HookStateReported {
+                            pane_id,
+                            source: format!("internal:m7-scroll-{index:02}"),
+                            agent_label: "pi".into(),
+                            state: crate::detect::AgentState::Idle,
+                            message: None,
+                            custom_status: None,
+                            seq: Some(1),
+                            session_ref: None,
+                        }
+                    ));
+                }
+            }
+        }
+
+        fn set(self, state: &mut AppState, value: usize) {
+            match self {
+                Self::Workspace => state.workspace_scroll = value,
+                Self::AgentPanel => state.agent_panel_scroll = value,
+                Self::Tab => state.tab_scroll = value,
+                Self::MobileSwitcher => state.mobile_switcher_scroll = value,
+            }
+        }
+
+        fn get(self, state: &AppState) -> usize {
+            match self {
+                Self::Workspace => state.workspace_scroll,
+                Self::AgentPanel => state.agent_panel_scroll,
+                Self::Tab => state.tab_scroll,
+                Self::MobileSwitcher => state.mobile_switcher_scroll,
+            }
+        }
+    }
+
+    fn projected_scroll_value(
+        projection: SharedScrollProjection,
+        terminal_size: (u16, u16),
+        is_foreground: bool,
+        initial_scroll: usize,
+    ) -> usize {
+        let mut server = test_headless_server();
+        server.app.state.mode = app::Mode::Navigate;
+        server.app.state.sidebar_collapsed = false;
+        projection.seed(&mut server);
+        projection.set(&mut server.app.state, initial_scroll);
+
+        let (client_tx, _client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                terminal_size,
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = is_foreground.then_some(1);
+
+        server.render_and_stream();
+        projection.get(&server.app.state)
+    }
+
+    fn assert_background_projection_preserves_scroll(
+        projection: SharedScrollProjection,
+        foreground_size: (u16, u16),
+        background_size: (u16, u16),
+    ) {
+        let foreground_scroll =
+            projected_scroll_value(projection, foreground_size, true, usize::MAX);
+        assert!(
+            foreground_scroll > 0 && foreground_scroll < usize::MAX,
+            "foreground projection must normalize {projection:?} to a usable nonzero offset, got {foreground_scroll}"
+        );
+        assert_eq!(
+            projected_scroll_value(projection, background_size, false, foreground_scroll),
+            foreground_scroll,
+            "background projection must preserve foreground-owned {projection:?}"
+        );
+    }
+
+    #[test]
+    fn background_client_projection_preserves_workspace_scroll() {
+        assert_eq!(
+            projected_scroll_value(
+                SharedScrollProjection::Workspace,
+                (120, 40),
+                false,
+                usize::MAX,
+            ),
+            usize::MAX,
+            "background desktop projection must not normalize foreground-owned workspace scroll"
+        );
+        let foreground_scroll = projected_scroll_value(
+            SharedScrollProjection::Workspace,
+            (120, 40),
+            true,
+            usize::MAX,
+        );
+        assert!(
+            foreground_scroll > 0 && foreground_scroll < usize::MAX,
+            "foreground desktop projection must normalize workspace scroll, got {foreground_scroll}"
+        );
+    }
+
+    #[test]
+    fn background_client_projection_preserves_agent_panel_scroll() {
+        assert_background_projection_preserves_scroll(
+            SharedScrollProjection::AgentPanel,
+            (120, 20),
+            (120, 64),
+        );
+    }
+
+    #[test]
+    fn background_client_projection_preserves_tab_scroll() {
+        assert_background_projection_preserves_scroll(
+            SharedScrollProjection::Tab,
+            (80, 24),
+            (240, 24),
+        );
+    }
+
+    #[test]
+    fn background_client_projection_preserves_mobile_switcher_scroll() {
+        assert_background_projection_preserves_scroll(
+            SharedScrollProjection::MobileSwitcher,
+            (40, 10),
+            (40, 48),
+        );
     }
 
     fn retained_test_server(

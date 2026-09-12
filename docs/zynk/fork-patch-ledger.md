@@ -3407,3 +3407,24 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   unchanged. Both output controls were green on the clean pre-change tree and
   remain the behavioral acceptance boundary. Exact-candidate Gate-2/Gate-3
   verification remains required.
+
+### M7-15: Background Client Projection Preserves Shared Scroll (2026-09-12)
+
+- **Source:** `e6fa5289` (post-relicense; `src/server/headless.rs` was already
+  marked and indexed in `NOTICE`; upstream `docs/next` remains excluded).
+  Rendering a non-foreground App client snapshots and restores the shared
+  `workspace_scroll`, `agent_panel_scroll`, `tab_scroll`, and
+  `mobile_switcher_scroll` fields. Foreground rendering still normalizes each
+  field for its own viewport.
+- Four production-path controls exercise the fields independently. Workspace
+  scroll covers a background desktop projection while the foreground-owned
+  state is not desktop-normalized. Agent-panel, tab, and mobile-switcher rows
+  first derive a valid nonzero offset from a constrained foreground viewport,
+  then prove a larger background viewport cannot clamp it. The agent fixture
+  enters through accepted internal `HookStateReported` events; the upstream
+  direct unauthenticated `pane.report_agent` setup is not imported.
+- Removing any one restore assignment fails only its corresponding row, while
+  restoring foreground scroll as well fails all four foreground-normalization
+  assertions. Client ordering, effective-size policy, rendering output,
+  protocol 19, caller authority, and delivery events are unchanged.
+  Exact-candidate Gate-2/Gate-3 verification remains required.
