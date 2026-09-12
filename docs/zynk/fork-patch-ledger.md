@@ -3542,3 +3542,30 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   change, so D-M7-3's accepted placement and authority invariants remain
   unchanged. Protocol 19 and all message tags remain unchanged.
   Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### D-M7-4 / M7-19: Defer Alternate-Screen History Read Optimization (2026-09-12)
+
+- **Source:** `d76657f2` remains assigned to M7-19 with a **DEFER**
+  disposition, so it remains part of the reconciled 21-source M7 authority
+  even though none of its executable hunks land in M7. The target is M8, in
+  the same arrival row as `bc1c052d`, ordered creator first and optimization
+  second.
+- **Blocker:** `d76657f2`'s seqlock and traversal changes operate on
+  `src/server/alt_screen_read.rs`, `src/terminal/history_read.rs`,
+  `PendingAltScreenRead`, `AltScreenReadSpec`, `pending_alt_screen_reads`, and
+  `screen_text_snapshot_with_seq`, all created by `bc1c052d`. The classifier
+  assigns that creator to M8, while the approved M7-19 boundary forbids
+  consuming it early. Importing only a sequence field or helper would be
+  unused and would not exercise the absent read path.
+- The M8 arrival must keep the alternate-screen content sequence distinct
+  from the existing agent-detection sequence, then account for the complete
+  creator-and-optimization behavior: odd/even seqlock publication, bounded
+  retry and quiet/deadline handling, synchronized traversal, viewport
+  restoration, fallback, logical-line/truncation semantics, and zero delivery
+  events for reads.
+- The fork-owned `zynk pane read` output-contract control moves with that M8
+  arrival because `bc1c052d` creates the CLI/read surface that changes. M7
+  claims no pane-read behavior or CLI-output change, and does not claim a
+  `wait-output` command that this fork does not expose under that name.
+  Protocol remains 19; exact-candidate Gate-2/Gate-3 verification remains
+  required for this disposition and the complete M7 source reconciliation.
