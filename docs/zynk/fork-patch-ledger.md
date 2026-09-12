@@ -3297,3 +3297,13 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   transfer, rollback, and committed-only takeover are unchanged. The complete
   live-handoff integration suite remains green. Exact-candidate Gate-2/Gate-3
   verification remains required.
+
+### M7-08: Multi-Client PTY Resize Test Synchronization (2026-09-12)
+
+- **Source:** `7767f3ed` (pre-relicense; `NOTICE` unchanged). Production bytes
+  are unchanged. The smaller-client regression now polls the actual pane PTY
+  dimensions until both axes shrink or the existing bounded deadline expires,
+  retaining the last observation in its diagnostic.
+- This synchronizes the assertion with asynchronous resize propagation; it does
+  not alter effective-size policy or introduce a production timing guarantee.
+  Exact-candidate Gate-2/Gate-3 verification remains required.
