@@ -53,7 +53,9 @@ directions — every listed file carries the notice, and no unlisted file does.
 - justfile
 - scripts/test_hermes_integration_asset.py
 - src/agent_resume.rs
+- src/api/mod.rs
 - src/api/schema/integrations.rs
+- src/api/server.rs
 - src/app/actions.rs
 - src/app/agent_resume.rs
 - src/app/agents.rs
@@ -144,6 +146,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/raw_input.rs
 - src/render_signal.rs
 - src/selection.rs
+- src/server/client_accept.rs
 - src/server/client_transport.rs
 - src/server/clients.rs
 - src/server/headless.rs

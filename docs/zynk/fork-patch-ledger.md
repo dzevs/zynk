@@ -3470,3 +3470,35 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   write behavior are preserved. Observer-local resize, attach/observe mode
   transitions, scroll authority, protocol 19, and message tags are unchanged.
   Exact-candidate Gate-2/Gate-3 verification remains required.
+
+### M7-17: Priority Server Shutdown (2026-09-12)
+
+- **Source:** `7e4ab7b0` (post-relicense; `src/api/mod.rs`,
+  `src/api/server.rs`, and `src/server/client_accept.rs` now carry the
+  modification notice and are indexed in `NOTICE`; the other changed Rust
+  files were already marked and indexed; upstream `docs/next` remains
+  excluded). A shared atomic stop lets `server.stop` return its normal success
+  envelope without entering the App queue. Ping remains available during
+  shutdown; every other post-stop request fails closed with
+  `server_unavailable`.
+- The fork adds an outer stop preflight after request-start logging and before
+  `handle_connection_with_stop` branches into event subscriptions or
+  pane-output waits,
+  while retaining upstream's inner ordinary-request fence. This additive
+  divergence prevents the fork's two pre-dispatch branches from starting work
+  after stop and preserves the same request completion/failure logging shape.
+  ADR 0014 remains structurally separate: kernel caller identity is captured
+  once at socket accept, and pane-bound authorization is enforced later at the
+  socket-to-state boundary against `pane_bound_target`, so these branches do
+  not need caller threading and the stop preflight is not an authorization
+  check.
+- Client admission now checks stop before accept, before handshake input,
+  after Hello, and before registration. A client that reaches the final race
+  or cannot register receives `ServerShutdown` without being admitted. The
+  headless loop stops draining API/client backlogs once stop is visible,
+  rejects queued API work and late connections during cleanup, and forwards at
+  most one bounded internal-event batch before teardown. Native DB preflight,
+  receipt/embedding worker placement and handoff quiesce/commit/rollback order
+  remain unchanged; `server.stop` creates no delivery event. Protocol 19 and
+  all message tags are unchanged. Exact-candidate Gate-2/Gate-3 verification
+  remains required.

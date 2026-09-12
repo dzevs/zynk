@@ -1743,6 +1743,26 @@ fn sqlite_exec(db: &Path, sql: &str) {
     });
 }
 
+fn delivery_events_count(db: &Path) -> i64 {
+    use sqlx::{Connection, Row};
+    sqlite_block_on(async {
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .create_if_missing(false),
+        )
+        .await
+        .unwrap();
+        let count = sqlx::query("SELECT COUNT(*) AS count FROM delivery_events")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap()
+            .get::<i64, _>("count");
+        conn.close().await.unwrap();
+        count
+    })
+}
+
 fn delivery_events_of(db: &Path, message_id: &str) -> Vec<String> {
     use sqlx::{Connection, Row};
     sqlite_block_on(async {
@@ -2645,6 +2665,8 @@ fn server_stop_command_shuts_down_running_server() {
     let mut zynk = spawn_zynk(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));
     wait_for_socket(&client_socket, Duration::from_secs(5));
+    let db = config_home.join("sqlite").join("zynk.db");
+    let delivery_events_before = delivery_events_count(&db);
 
     let stopped = run_cli(&socket_path, &["server", "stop"]);
     assert!(
@@ -2659,9 +2681,24 @@ fn server_stop_command_shuts_down_running_server() {
     );
 
     let pid = zynk.child.process_id();
-    let exit_status = zynk.child.wait().unwrap();
+    let started = Instant::now();
+    let exit_status = loop {
+        if let Some(status) = zynk.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "server.stop returned success but the server did not exit"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
     unregister_spawned_zynk_pid(pid);
     assert!(exit_status.success(), "server stop should exit cleanly");
+    assert_eq!(
+        delivery_events_count(&db),
+        delivery_events_before,
+        "server.stop must not create a zynk delivery event"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline && (socket_path.exists() || client_socket.exists()) {

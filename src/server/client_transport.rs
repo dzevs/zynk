@@ -458,11 +458,33 @@ fn set_client_recv_timeout(
 /// Reads the `Hello` message, validates the version, sends `Welcome`,
 /// and then enters a read loop forwarding messages to the server event channel.
 pub(crate) fn handle_client_handshake(
-    mut stream: LocalStream,
+    stream: LocalStream,
     client_id: u64,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
 ) -> io::Result<()> {
+    handle_client_handshake_inner(stream, client_id, server_event_tx, should_quit, |_| {})
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HandshakeStopCheckpoint {
+    BeforeRead,
+    AfterHelloRead,
+    BeforeRegistration,
+}
+
+fn handle_client_handshake_inner(
+    mut stream: LocalStream,
+    client_id: u64,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+    should_quit: &Arc<AtomicBool>,
+    mut checkpoint: impl FnMut(HandshakeStopCheckpoint),
+) -> io::Result<()> {
+    checkpoint(HandshakeStopCheckpoint::BeforeRead);
+    if should_quit.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
     // Reset to blocking mode — the accept loop sets nonblocking but
     // the handshake thread needs blocking I/O for read_message/write_message.
     stream.set_nonblocking(false)?;
@@ -563,6 +585,11 @@ pub(crate) fn handle_client_handshake(
         }
     };
 
+    checkpoint(HandshakeStopCheckpoint::AfterHelloRead);
+    if should_quit.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
     // Send Welcome.
     let welcome = ServerMessage::Welcome {
         version: PROTOCOL_VERSION,
@@ -592,8 +619,14 @@ pub(crate) fn handle_client_handshake(
         client_writer_loop(write_stream, client_id, writer_queue, writer_event_tx);
     });
 
+    checkpoint(HandshakeStopCheckpoint::BeforeRegistration);
+    if should_quit.load(Ordering::Acquire) {
+        send_shutdown_to_unregistered_client(&writer);
+        return Ok(());
+    }
+
     // Notify the main loop about the new client.
-    let _ = server_event_tx.blocking_send(ServerEvent::ClientConnected {
+    let connected = ServerEvent::ClientConnected {
         client_id,
         cols: client_cols,
         rows: client_rows,
@@ -603,10 +636,30 @@ pub(crate) fn handle_client_handshake(
         keybindings,
         direct_attach_requested,
         writer,
-    });
+    };
+    if let Err(err) = server_event_tx.blocking_send(connected) {
+        if let ServerEvent::ClientConnected { writer, .. } = err.0 {
+            send_shutdown_to_unregistered_client(&writer);
+        }
+        return Ok(());
+    }
 
     // Enter read loop — read client messages and forward to main loop.
     client_read_loop(stream, client_id, server_event_tx, should_quit)
+}
+
+fn send_shutdown_to_unregistered_client(writer: &ClientWriter) {
+    let mut framed = Vec::new();
+    if protocol::write_message(
+        &mut framed,
+        &ServerMessage::ServerShutdown {
+            reason: Some("server is shutting down".to_owned()),
+        },
+    )
+    .is_ok()
+    {
+        let _ = writer.control.send(framed);
+    }
 }
 
 /// The client writer loop — prioritizes control messages over render frames.
@@ -866,6 +919,23 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, TestSocketPath(path))
+    }
+
+    fn write_valid_hello(stream: &mut LocalStream) {
+        protocol::write_message(
+            stream,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                requested_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: ClientKeybindings::Server,
+                launch_mode: ClientLaunchMode::App,
+            },
+        )
+        .expect("write hello");
     }
 
     fn recv_server_event(receiver: &mut mpsc::Receiver<ServerEvent>, context: &str) -> ServerEvent {
@@ -1148,6 +1218,156 @@ new_tab = "ctrl+notakey"
             .bindings
             .iter()
             .any(|binding| binding.label == "prefix+n"));
+    }
+
+    #[test]
+    fn handshake_stop_before_read_avoids_every_later_checkpoint() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-handshake-stop-before-read");
+        write_valid_hello(&mut client_stream);
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let mut seen = Vec::new();
+
+        handle_client_handshake_inner(
+            server_stream,
+            42,
+            &server_event_tx,
+            &should_quit,
+            |checkpoint| {
+                seen.push(checkpoint);
+                if checkpoint == HandshakeStopCheckpoint::BeforeRead {
+                    should_quit.store(true, Ordering::Release);
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(seen, [HandshakeStopCheckpoint::BeforeRead]);
+        assert!(server_event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn handshake_stop_after_hello_avoids_welcome_and_registration() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-handshake-stop-after-hello");
+        write_valid_hello(&mut client_stream);
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let mut seen = Vec::new();
+
+        handle_client_handshake_inner(
+            server_stream,
+            42,
+            &server_event_tx,
+            &should_quit,
+            |checkpoint| {
+                seen.push(checkpoint);
+                if checkpoint == HandshakeStopCheckpoint::AfterHelloRead {
+                    should_quit.store(true, Ordering::Release);
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            seen,
+            [
+                HandshakeStopCheckpoint::BeforeRead,
+                HandshakeStopCheckpoint::AfterHelloRead,
+            ]
+        );
+        assert!(server_event_rx.try_recv().is_err());
+        assert!(matches!(
+            protocol::read_message::<_, ServerMessage>(&mut client_stream, MAX_FRAME_SIZE),
+            Err(protocol::FramingError::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn handshake_stop_before_registration_sends_shutdown_without_connecting() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-handshake-stop-before-registration");
+        write_valid_hello(&mut client_stream);
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let mut seen = Vec::new();
+
+        handle_client_handshake_inner(
+            server_stream,
+            42,
+            &server_event_tx,
+            &should_quit,
+            |checkpoint| {
+                seen.push(checkpoint);
+                if checkpoint == HandshakeStopCheckpoint::BeforeRegistration {
+                    should_quit.store(true, Ordering::Release);
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            seen,
+            [
+                HandshakeStopCheckpoint::BeforeRead,
+                HandshakeStopCheckpoint::AfterHelloRead,
+                HandshakeStopCheckpoint::BeforeRegistration,
+            ]
+        );
+        assert!(server_event_rx.try_recv().is_err());
+        assert!(matches!(
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).unwrap(),
+            ServerMessage::Welcome { error: None, .. }
+        ));
+        assert!(matches!(
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).unwrap(),
+            ServerMessage::ServerShutdown { reason: Some(reason) }
+                if reason == "server is shutting down"
+        ));
+    }
+
+    #[test]
+    fn handshake_registration_failure_sends_shutdown_to_unregistered_client() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-handshake-registration-closed");
+        client_stream
+            .set_recv_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        let (server_event_tx, server_event_rx) = mpsc::channel(1);
+        drop(server_event_rx);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let result =
+                handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit);
+            done_tx.send(result).unwrap();
+        });
+
+        write_valid_hello(&mut client_stream);
+        assert!(matches!(
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).unwrap(),
+            ServerMessage::Welcome { error: None, .. }
+        ));
+        assert!(matches!(
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).unwrap(),
+            ServerMessage::ServerShutdown { reason: Some(reason) }
+                if reason == "server is shutting down"
+        ));
+
+        let result = match done_rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(result) => result,
+            Err(err) => {
+                should_quit.store(true, Ordering::Release);
+                drop(client_stream);
+                handle.join().unwrap();
+                panic!("unregistered handshake did not exit after shutdown: {err}");
+            }
+        };
+        result.unwrap();
+        handle.join().unwrap();
+        assert!(!should_quit.load(Ordering::Acquire));
     }
 
     #[test]

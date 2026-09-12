@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 pub mod client;
 mod event_hub;
 pub mod schema;
@@ -7,7 +9,8 @@ mod subscriptions;
 mod wait;
 
 pub use event_hub::EventHub;
-pub use server::{start_server, start_server_with_capabilities, ServerHandle};
+pub(crate) use server::start_server_with_stop_control;
+pub use server::{start_server_with_capabilities, ServerHandle};
 pub use status::{read_runtime_status_at, RuntimeStatus};
 
 use std::path::PathBuf;

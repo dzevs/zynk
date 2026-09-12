@@ -342,6 +342,7 @@ impl HeadlessServer {
         config_diagnostics: &[String],
         api_tx: Option<api::ApiRequestSender>,
         api_server: Option<api::ServerHandle>,
+        should_quit: Arc<AtomicBool>,
     ) -> io::Result<Self> {
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
@@ -353,8 +354,6 @@ impl HeadlessServer {
 
         // Non-blocking so we can poll it from the event loop.
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
-
-        let should_quit = Arc::new(AtomicBool::new(false));
 
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
@@ -420,13 +419,12 @@ impl HeadlessServer {
 
             // If shutdown has been initiated, complete it and exit.
             if self.shutting_down {
-                self.complete_shutdown()?;
+                self.complete_shutdown().await?;
                 break;
             }
 
             // Check if we should start shutting down.
-            if self.app.state.should_quit || self.should_quit.load(Ordering::Acquire) {
-                self.initiate_shutdown();
+            if self.begin_shutdown_if_requested() {
                 continue;
             }
 
@@ -443,12 +441,18 @@ impl HeadlessServer {
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.internal_events");
             }
+            if self.should_quit.load(Ordering::Acquire) {
+                continue;
+            }
 
             // 3. Drain API requests.
             if self.drain_api_requests_with_shutdown_check() {
                 needs_render = true;
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.api_requests");
+            }
+            if self.should_quit.load(Ordering::Acquire) {
+                continue;
             }
 
             self.app.sync_focus_events();
@@ -462,6 +466,9 @@ impl HeadlessServer {
                 needs_render = true;
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.server_events");
+            }
+            if self.should_quit.load(Ordering::Acquire) {
+                continue;
             }
 
             // 6. Handle scheduled tasks.
@@ -573,6 +580,11 @@ impl HeadlessServer {
                     _ = self.app.render_notify.notified() => LoopEvent::RenderRequested,
                 }
             };
+
+            if self.should_quit.load(Ordering::Acquire) {
+                self.settle_event_selected_at_stop_boundary(event);
+                continue;
+            }
 
             match event {
                 LoopEvent::Timer => {}
@@ -1153,7 +1165,11 @@ impl HeadlessServer {
             .api_tx
             .clone()
             .ok_or_else(|| io::Error::other("cannot restore api socket without api sender"))?;
-        let api_server = api::start_server(api_tx, self.app.event_hub.clone())?;
+        let api_server = api::start_server_with_stop_control(
+            api_tx,
+            self.app.event_hub.clone(),
+            self.should_quit.clone(),
+        )?;
 
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
@@ -1440,10 +1456,42 @@ impl HeadlessServer {
     /// Returns true if any input was processed (requiring a re-render).
     fn drain_server_events(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(ev) = self.server_event_rx.try_recv() {
+        while !self.should_quit.load(Ordering::Acquire) {
+            let Ok(ev) = self.server_event_rx.try_recv() else {
+                break;
+            };
             changed |= self.handle_server_event(ev);
         }
         changed
+    }
+
+    async fn reject_late_client_connections(&mut self) {
+        self.server_event_rx.close();
+        while let Some(event) = self.server_event_rx.recv().await {
+            if let ServerEvent::ClientConnected { writer, .. } = event {
+                if let Ok(message) = Self::frame_server_message(&ServerMessage::ServerShutdown {
+                    reason: Some("server is shutting down".to_owned()),
+                }) {
+                    let _ = writer.control.send(message);
+                }
+            }
+        }
+    }
+
+    fn settle_event_selected_at_stop_boundary(&mut self, event: LoopEvent) {
+        match event {
+            LoopEvent::Internal(event) => {
+                self.handle_internal_event_with_forwarding(event);
+            }
+            LoopEvent::ServerEvent(ServerEvent::ClientConnected { writer, .. }) => {
+                if let Ok(message) = Self::frame_server_message(&ServerMessage::ServerShutdown {
+                    reason: Some("server is shutting down".to_owned()),
+                }) {
+                    let _ = writer.control.send(message);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn terminal_id_by_string(&self, terminal_id: &str) -> Option<crate::terminal::TerminalId> {
@@ -2186,7 +2234,7 @@ impl HeadlessServer {
             let (had_event, batch_changed) =
                 self.drain_internal_events_with_forwarding_up_to(crate::app::APP_EVENT_DRAIN_LIMIT);
             changed |= batch_changed;
-            if !had_event {
+            if !had_event || self.should_quit.load(Ordering::Acquire) {
                 break;
             }
         }
@@ -2839,10 +2887,22 @@ impl HeadlessServer {
     /// During shutdown, remaining requests get a `server_unavailable` error.
     fn drain_api_requests_with_shutdown_check(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(msg) = self.app.api_rx.try_recv() {
+        while !self.should_quit.load(Ordering::Acquire) {
+            let Ok(msg) = self.app.api_rx.try_recv() else {
+                break;
+            };
             changed |= self.handle_api_request_with_shutdown_check(msg);
         }
         changed
+    }
+
+    fn reject_queued_api_requests_for_shutdown(&mut self) {
+        for _ in 0..self.app.api_rx.len() {
+            let Ok(msg) = self.app.api_rx.try_recv() else {
+                break;
+            };
+            self.handle_api_request_with_shutdown_check(msg);
+        }
     }
 
     /// Handles a single API request with shutdown awareness.
@@ -3922,6 +3982,17 @@ impl HeadlessServer {
         changed
     }
 
+    /// Starts shutdown after forwarding one bounded batch of pending internal events.
+    fn begin_shutdown_if_requested(&mut self) -> bool {
+        if !self.app.state.should_quit && !self.should_quit.load(Ordering::Acquire) {
+            return false;
+        }
+
+        self.drain_internal_events_with_forwarding_up_to(crate::app::APP_EVENT_CHANNEL_CAPACITY);
+        self.initiate_shutdown();
+        true
+    }
+
     /// Initiates graceful shutdown.
     fn initiate_shutdown(&mut self) {
         if self.shutting_down {
@@ -3949,8 +4020,9 @@ impl HeadlessServer {
 
     /// Completes the shutdown sequence: send ServerShutdown to clients,
     /// close client connections, remove socket files, and clean up.
-    fn complete_shutdown(&mut self) -> io::Result<()> {
+    async fn complete_shutdown(&mut self) -> io::Result<()> {
         info!("completing server shutdown");
+        self.reject_late_client_connections().await;
 
         // Send ServerShutdown to all remaining clients.
         if !self.clients.is_empty() {
@@ -3964,8 +4036,8 @@ impl HeadlessServer {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        // Drain remaining API requests with server_unavailable.
-        self.drain_api_requests_with_shutdown_check();
+        // Reject only the requests already queued when shutdown reached cleanup.
+        self.reject_queued_api_requests_for_shutdown();
 
         // Close all client connections.
         let staged_files = self
@@ -4175,9 +4247,14 @@ pub fn run_server() -> io::Result<()> {
     }
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
+    let should_quit = Arc::new(AtomicBool::new(false));
 
     // Start the JSON API socket server.
-    let _api_server = match api::start_server(api_tx.clone(), event_hub.clone()) {
+    let _api_server = match api::start_server_with_stop_control(
+        api_tx.clone(),
+        event_hub.clone(),
+        should_quit.clone(),
+    ) {
         Ok(server) => server,
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
             eprintln!("error: zynk server is already running");
@@ -4219,6 +4296,7 @@ pub fn run_server() -> io::Result<()> {
             &loaded_config.diagnostics,
             Some(api_tx.clone()),
             Some(_api_server),
+            should_quit,
         ) {
             Ok(server) => server,
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
@@ -4371,6 +4449,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
+    let should_quit = Arc::new(AtomicBool::new(false));
 
     let mut imports = HashMap::new();
     for (pane, fd) in received.manifest.panes.into_iter().zip(received.fds) {
@@ -4408,12 +4487,17 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         }
         wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
 
-        let api_server = api::start_server(api_tx.clone(), event_hub.clone())?;
+        let api_server = api::start_server_with_stop_control(
+            api_tx.clone(),
+            event_hub.clone(),
+            should_quit.clone(),
+        )?;
         let mut server = HeadlessServer::new(
             app,
             &loaded_config.diagnostics,
             Some(api_tx.clone()),
             Some(api_server),
+            should_quit,
         )?;
         crate::server::handoff::report_ready(&mut received.stream)?;
         crate::server::handoff::wait_committed(&mut received.stream)?;
@@ -4523,8 +4607,18 @@ mod tests {
     }
 
     fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServer {
+        test_headless_server_with_event_hub_and_api_sender(event_hub).0
+    }
+
+    fn test_headless_server_with_api_sender() -> (HeadlessServer, api::ApiRequestSender) {
+        test_headless_server_with_event_hub_and_api_sender(api::EventHub::default())
+    }
+
+    fn test_headless_server_with_event_hub_and_api_sender(
+        event_hub: api::EventHub,
+    ) -> (HeadlessServer, api::ApiRequestSender) {
         let config = crate::config::Config::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(&config, true, None, api_rx, event_hub);
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
@@ -4549,7 +4643,7 @@ mod tests {
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
         let server_keybindings = app_keybindings(&app);
 
-        HeadlessServer {
+        let server = HeadlessServer {
             app,
             api_tx: None,
             api_server: None,
@@ -4571,7 +4665,8 @@ mod tests {
             should_quit: Arc::new(AtomicBool::new(false)),
             server_event_rx,
             server_event_tx,
-        }
+        };
+        (server, api_tx)
     }
 
     fn shutdown_test_runtimes(server: &mut HeadlessServer) {
@@ -4610,6 +4705,230 @@ mod tests {
             ServerMessage::ServerShutdown { reason } => reason,
             other => panic!("expected shutdown, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn server_stop_interrupts_server_event_backlog() {
+        let mut server = test_headless_server();
+        for client_id in 1..=64 {
+            server
+                .server_event_tx
+                .try_send(ServerEvent::ClientDisconnected { client_id })
+                .unwrap();
+        }
+
+        server.should_quit.store(true, Ordering::Release);
+
+        assert!(!server.drain_server_events());
+        assert!(server.server_event_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn server_stop_interrupts_api_request_backlog() {
+        let (mut server, api_tx) = test_headless_server_with_api_sender();
+        for index in 0..3 {
+            let (respond_to, _response_rx) = std::sync::mpsc::channel();
+            api_tx
+                .send(api::ApiRequestMessage {
+                    request: api::schema::Request {
+                        id: format!("queued-{index}"),
+                        method: api::schema::Method::WorkspaceList(
+                            api::schema::EmptyParams::default(),
+                        ),
+                    },
+                    respond_to,
+                    caller: api::ApiCaller::default(),
+                })
+                .unwrap();
+        }
+        assert_eq!(server.app.api_rx.len(), 3);
+        server.should_quit.store(true, Ordering::Release);
+
+        assert!(!server.drain_api_requests_with_shutdown_check());
+        assert_eq!(server.app.api_rx.len(), 3);
+    }
+
+    #[test]
+    fn shutdown_rejects_the_api_requests_already_queued() {
+        let (mut server, api_tx) = test_headless_server_with_api_sender();
+        let mut responses = Vec::new();
+        for index in 0..3 {
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            api_tx
+                .send(api::ApiRequestMessage {
+                    request: api::schema::Request {
+                        id: format!("shutdown-{index}"),
+                        method: api::schema::Method::WorkspaceList(
+                            api::schema::EmptyParams::default(),
+                        ),
+                    },
+                    respond_to,
+                    caller: api::ApiCaller::default(),
+                })
+                .unwrap();
+            responses.push(response_rx);
+        }
+        server.shutting_down = true;
+
+        server.reject_queued_api_requests_for_shutdown();
+
+        assert!(server.app.api_rx.is_empty());
+        for response in responses {
+            let response: serde_json::Value = serde_json::from_str(
+                &response
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("queued request receives shutdown response"),
+            )
+            .unwrap();
+            assert_eq!(response["error"]["code"], "server_unavailable");
+        }
+    }
+
+    #[test]
+    fn requested_shutdown_forwards_pending_internal_events_before_cleanup() {
+        let mut server = test_headless_server();
+        for index in 0..crate::app::APP_EVENT_CHANNEL_CAPACITY {
+            server
+                .app
+                .event_tx
+                .try_send(AppEvent::UpdateReady {
+                    version: format!("7.17.{index}"),
+                    install_command: "zynk install".into(),
+                })
+                .unwrap();
+        }
+        server.should_quit.store(true, Ordering::Release);
+
+        assert!(server.begin_shutdown_if_requested());
+
+        assert!(server.shutting_down);
+        let expected = format!("7.17.{}", crate::app::APP_EVENT_CHANNEL_CAPACITY - 1);
+        assert_eq!(
+            server.app.state.update_available.as_deref(),
+            Some(expected.as_str())
+        );
+        assert!(server.app.event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_queued_late_client_connections() {
+        let mut server = test_headless_server();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server
+            .server_event_tx
+            .try_send(ServerEvent::ClientConnected {
+                client_id: 91,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::SemanticFrame,
+                keybindings: None,
+                direct_attach_requested: false,
+                writer,
+            })
+            .unwrap();
+
+        server.reject_late_client_connections().await;
+
+        let reason = read_server_shutdown_reason(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("late client receives shutdown"),
+        );
+        assert_eq!(reason.as_deref(), Some("server is shutting down"));
+        assert!(server.server_event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn shutdown_forwards_internal_event_selected_at_stop_boundary() {
+        let mut server = test_headless_server();
+
+        server.settle_event_selected_at_stop_boundary(LoopEvent::Internal(AppEvent::UpdateReady {
+            version: "7.17.selected".into(),
+            install_command: "zynk install".into(),
+        }));
+
+        assert_eq!(
+            server.app.state.update_available.as_deref(),
+            Some("7.17.selected")
+        );
+    }
+
+    #[test]
+    fn shutdown_rejects_client_selected_at_stop_boundary() {
+        let mut server = test_headless_server();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+
+        server.settle_event_selected_at_stop_boundary(LoopEvent::ServerEvent(
+            ServerEvent::ClientConnected {
+                client_id: 93,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::SemanticFrame,
+                keybindings: None,
+                direct_attach_requested: false,
+                writer,
+            },
+        ));
+
+        let reason = read_server_shutdown_reason(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("selected late client receives shutdown"),
+        );
+        assert_eq!(reason.as_deref(), Some("server is shutting down"));
+        assert!(!server.clients.contains_key(&93));
+    }
+
+    #[tokio::test]
+    async fn complete_shutdown_rejects_queued_api_and_late_client_connections() {
+        let (mut server, api_tx) = test_headless_server_with_api_sender();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        api_tx
+            .send(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "cleanup-api".into(),
+                    method: api::schema::Method::WorkspaceList(api::schema::EmptyParams::default()),
+                },
+                respond_to,
+                caller: api::ApiCaller::default(),
+            })
+            .unwrap();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server
+            .server_event_tx
+            .try_send(ServerEvent::ClientConnected {
+                client_id: 92,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::SemanticFrame,
+                keybindings: None,
+                direct_attach_requested: false,
+                writer,
+            })
+            .unwrap();
+        server.shutting_down = true;
+
+        server.complete_shutdown().await.unwrap();
+
+        let response: serde_json::Value = serde_json::from_str(
+            &response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("cleanup rejects queued API request"),
+        )
+        .unwrap();
+        assert_eq!(response["error"]["code"], "server_unavailable");
+        let reason = read_server_shutdown_reason(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("cleanup rejects queued late client"),
+        );
+        assert_eq!(reason.as_deref(), Some("server is shutting down"));
     }
 
     #[test]

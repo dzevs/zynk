@@ -59,6 +59,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Server stop requests bypass API and pane backlogs, reject new client work,
+  and complete bounded shutdown cleanup without creating delivery events.
 - Read-only terminal observers and already-disconnected clients can no longer
   route input or stage orphaned clipboard-image files through the server.
 - Halfwidth Katakana with voiced or semi-voiced marks renders as one wide

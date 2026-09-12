@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,23 +57,33 @@ impl ServerHandle {
     }
 }
 
-pub fn start_server(
+pub(crate) fn start_server_with_stop_control(
     api_tx: ApiRequestSender,
     event_hub: EventHub,
+    server_stop: Arc<AtomicBool>,
 ) -> std::io::Result<ServerHandle> {
-    start_server_with_capabilities(
-        api_tx,
-        event_hub,
-        Some(ServerCapabilities {
-            live_handoff: crate::platform::capabilities().live_handoff,
-        }),
-    )
+    start_server_inner(api_tx, event_hub, default_capabilities(), Some(server_stop))
 }
 
 pub fn start_server_with_capabilities(
     api_tx: ApiRequestSender,
     event_hub: EventHub,
     capabilities: Option<ServerCapabilities>,
+) -> std::io::Result<ServerHandle> {
+    start_server_inner(api_tx, event_hub, capabilities, None)
+}
+
+fn default_capabilities() -> Option<ServerCapabilities> {
+    Some(ServerCapabilities {
+        live_handoff: crate::platform::capabilities().live_handoff,
+    })
+}
+
+fn start_server_inner(
+    api_tx: ApiRequestSender,
+    event_hub: EventHub,
+    capabilities: Option<ServerCapabilities>,
+    server_stop: Option<Arc<AtomicBool>>,
 ) -> std::io::Result<ServerHandle> {
     let path = socket_path();
     prepare_socket_path(&path)?;
@@ -90,14 +102,16 @@ pub fn start_server_with_capabilities(
                     let api_tx = api_tx.clone();
                     let event_hub = event_hub.clone();
                     let capabilities = capabilities.clone();
+                    let server_stop = server_stop.clone();
                     let connection_running = Arc::clone(&listener_running);
                     std::thread::spawn(move || {
-                        if let Err(err) = handle_connection(
+                        if let Err(err) = handle_connection_with_stop(
                             stream,
                             &api_tx,
                             &event_hub,
                             &connection_running,
                             capabilities,
+                            server_stop.as_ref(),
                         ) {
                             warn!(err = %err, "api connection failed");
                         }
@@ -133,12 +147,24 @@ fn restrict_socket_permissions(path: &Path) -> std::io::Result<()> {
     crate::ipc::restrict_socket_permissions(path, SOCKET_PERMISSION_MODE)
 }
 
+#[cfg(test)]
 fn handle_connection(
+    stream: LocalStream,
+    api_tx: &ApiRequestSender,
+    event_hub: &EventHub,
+    running: &Arc<AtomicBool>,
+    capabilities: Option<ServerCapabilities>,
+) -> std::io::Result<()> {
+    handle_connection_with_stop(stream, api_tx, event_hub, running, capabilities, None)
+}
+
+fn handle_connection_with_stop(
     mut stream: LocalStream,
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
     running: &Arc<AtomicBool>,
     capabilities: Option<ServerCapabilities>,
+    server_stop: Option<&Arc<AtomicBool>>,
 ) -> std::io::Result<()> {
     if let Err(err) = stream.set_send_timeout(Some(STREAM_WRITE_TIMEOUT)) {
         debug!(err = %err, "api connection write timeout unavailable");
@@ -178,6 +204,22 @@ fn handle_connection(
     let method = api_method_name(&request.method);
     let changes_ui = request_changes_ui(&request);
     crate::logging::api_request_started(&request_id, method, changes_ui);
+
+    // Fork adaptation: subscriptions and output waits branch before
+    // `handle_request`, so they need the same stop preflight here.
+    if let Some(response) = priority_stop_response(&request, server_stop) {
+        let result = write_text_line_allow_disconnect(&mut stream, &response);
+        match &result {
+            Ok(()) => crate::logging::api_request_completed(
+                &request_id,
+                method,
+                api_response_outcome(&response),
+                changes_ui,
+            ),
+            Err(err) => crate::logging::api_request_failed(&request_id, method, &err.to_string()),
+        }
+        return result;
+    }
 
     match request.method {
         Method::EventsSubscribe(params) => {
@@ -237,6 +279,7 @@ fn handle_connection(
                 api_tx,
                 capabilities,
                 caller,
+                server_stop,
             );
             let result = write_text_line_allow_disconnect(&mut stream, &response);
             match &result {
@@ -260,9 +303,10 @@ fn handle_request(
     api_tx: &ApiRequestSender,
     capabilities: Option<ServerCapabilities>,
     caller: ApiCaller,
+    server_stop: Option<&Arc<AtomicBool>>,
 ) -> String {
-    match request.method {
-        Method::Ping(_) => serde_json::to_string(&SuccessResponse {
+    if matches!(&request.method, Method::Ping(_)) {
+        return serde_json::to_string(&SuccessResponse {
             id: request.id,
             result: ResponseResult::Pong {
                 version: crate::build_info::version(),
@@ -273,9 +317,47 @@ fn handle_request(
         .unwrap_or_else(|_| {
             r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
                 .to_string()
-        }),
-        _ => dispatch_to_app(request, api_tx, caller),
+        });
     }
+
+    // Keep this upstream-shaped inner fence even though production socket
+    // requests also pass the outer preflight in `handle_connection_with_stop`.
+    if let Some(response) = priority_stop_response(&request, server_stop) {
+        return response;
+    }
+
+    dispatch_to_app(request, api_tx, caller)
+}
+
+fn priority_stop_response(
+    request: &Request,
+    server_stop: Option<&Arc<AtomicBool>>,
+) -> Option<String> {
+    if matches!(&request.method, Method::Ping(_)) {
+        return None;
+    }
+
+    if matches!(&request.method, Method::ServerStop(_)) {
+        let server_stop = server_stop?;
+        server_stop.store(true, Ordering::Release);
+        return Some(
+            serde_json::to_string(&SuccessResponse {
+                id: request.id.clone(),
+                result: ResponseResult::Ok {},
+            })
+            .unwrap_or_else(|_| "{}".to_string()),
+        );
+    }
+
+    server_stop
+        .is_some_and(|stop| stop.load(Ordering::Acquire))
+        .then(|| {
+            error_response_json(
+                request.id.clone(),
+                "server_unavailable",
+                "server is shutting down".into(),
+            )
+        })
 }
 
 fn api_method_name(method: &Method) -> &'static str {
@@ -655,6 +737,22 @@ mod tests {
         line
     }
 
+    fn recv_api_request_for(
+        receiver: &mut mpsc::UnboundedReceiver<ApiRequestMessage>,
+        timeout: Duration,
+    ) -> Option<ApiRequestMessage> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match receiver.try_recv() {
+                Ok(message) => return Some(message),
+                Err(mpsc::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
     fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, PathBuf) {
         let path = unique_test_path(name);
         let listener = crate::ipc::bind_local_listener(&path).unwrap();
@@ -757,11 +855,164 @@ mod tests {
             &tx,
             Some(ServerCapabilities { live_handoff: true }),
             ApiCaller::default(),
+            None,
         );
 
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_1");
         assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
+    }
+
+    #[test]
+    fn server_stop_control_bypasses_app_channel_and_preserves_ping() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let thread = std::thread::spawn(move || {
+            handle_request(
+                Request {
+                    id: "priority_stop".into(),
+                    method: Method::ServerStop(crate::api::schema::EmptyParams::default()),
+                },
+                &tx,
+                None,
+                ApiCaller::default(),
+                Some(&thread_stop),
+            )
+        });
+
+        let routed = recv_api_request_for(&mut rx, Duration::from_millis(100));
+        if let Some(message) = &routed {
+            message
+                .respond_to
+                .send(
+                    serde_json::to_string(&SuccessResponse {
+                        id: message.request.id.clone(),
+                        result: ResponseResult::Ok {},
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let response: serde_json::Value = serde_json::from_str(&thread.join().unwrap()).unwrap();
+
+        assert!(routed.is_none(), "server.stop reached the App queue");
+        assert_eq!(response["id"], "priority_stop");
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(stop.load(Ordering::Acquire));
+
+        let rejected = handle_request(
+            Request {
+                id: "after_stop".into(),
+                method: Method::WorkspaceList(crate::api::schema::EmptyParams::default()),
+            },
+            &mpsc::unbounded_channel().0,
+            None,
+            ApiCaller::default(),
+            Some(&stop),
+        );
+        let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
+        assert_eq!(rejected["error"]["code"], "server_unavailable");
+
+        let ping = handle_request(
+            Request {
+                id: "ping_after_stop".into(),
+                method: Method::Ping(crate::api::schema::PingParams::default()),
+            },
+            &mpsc::unbounded_channel().0,
+            None,
+            ApiCaller::default(),
+            Some(&stop),
+        );
+        let ping: SuccessResponse = serde_json::from_str(&ping).unwrap();
+        assert!(matches!(ping.result, ResponseResult::Pong { .. }));
+    }
+
+    #[test]
+    fn post_stop_events_subscribe_is_rejected_before_stream_setup() {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, _path) = local_stream_pair("api-sub-post-stop");
+        client
+            .write_all(
+                br#"{"id":"sub_stopped","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.created"}]}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = running.clone();
+        let stop = Arc::new(AtomicBool::new(true));
+        let server_stop = stop.clone();
+        let event_hub = EventHub::default();
+        let server_thread = std::thread::spawn(move || {
+            handle_connection_with_stop(
+                server,
+                &api_tx,
+                &event_hub,
+                &server_running,
+                None,
+                Some(&server_stop),
+            )
+        });
+
+        let response: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        running.store(false, Ordering::Relaxed);
+        drop(client);
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(response["id"], "sub_stopped");
+        assert_eq!(response["error"]["code"], "server_unavailable");
+        assert!(api_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn post_stop_wait_for_output_is_rejected_before_wait_setup() {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, _path) = local_stream_pair("api-wait-post-stop");
+        client
+            .write_all(br#"{"id":"wait_stopped","method":"pane.wait_for_output","params":{"pane_id":"pane_1","source":"recent","match":{"type":"substring","value":"never"},"timeout_ms":0}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = running.clone();
+        let stop = Arc::new(AtomicBool::new(true));
+        let server_stop = stop.clone();
+        let event_hub = EventHub::default();
+        let server_thread = std::thread::spawn(move || {
+            handle_connection_with_stop(
+                server,
+                &api_tx,
+                &event_hub,
+                &server_running,
+                None,
+                Some(&server_stop),
+            )
+        });
+
+        let dispatched = recv_api_request_for(&mut api_rx, Duration::from_millis(100));
+        if let Some(message) = &dispatched {
+            message
+                .respond_to
+                .send(error_response_json(
+                    message.request.id.clone(),
+                    "unexpected_dispatch",
+                    "wait setup reached the App queue".into(),
+                ))
+                .unwrap();
+        }
+        let response: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        drop(client);
+        server_thread.join().unwrap().unwrap();
+
+        assert!(
+            dispatched.is_none(),
+            "post-stop wait dispatched a pane read"
+        );
+        assert_eq!(response["id"], "wait_stopped");
+        assert_eq!(response["error"]["code"], "server_unavailable");
     }
 
     #[test]
@@ -774,7 +1025,7 @@ mod tests {
 
         let request_for_thread = request.clone();
         let thread = std::thread::spawn(move || {
-            handle_request(request_for_thread, &tx, None, ApiCaller::default())
+            handle_request(request_for_thread, &tx, None, ApiCaller::default(), None)
         });
 
         let msg = rx.blocking_recv().unwrap();
