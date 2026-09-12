@@ -8423,6 +8423,39 @@ next_tab = ""
     }
 
     #[tokio::test]
+    async fn retained_pty_update_resumes_after_copy_feedback_expires() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.app.state.copy_feedback = Some(crate::app::state::CopyFeedback {
+            message: "copied to clipboard".to_owned(),
+        });
+        server.app.copy_feedback_deadline = Some(Instant::now());
+        server.render_and_stream();
+        let _initial = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial frame"),
+        );
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+
+        assert!(!server.render_retained_pty_update_and_stream());
+        assert!(server.handle_scheduled_tasks_headless(Instant::now(), false));
+        assert!(server.app.state.copy_feedback.is_none());
+        assert!(server.render_retained_pty_update_and_stream());
+        let resumed = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("retained frame after copy feedback expiry"),
+        );
+        assert!(resumed.cells.iter().any(|cell| cell.symbol == "Z"));
+    }
+
+    #[tokio::test]
     async fn retained_pty_update_declines_while_config_diagnostic_is_visible() {
         let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
         server.app.state.config_diagnostic = Some("config warning".to_owned());

@@ -3235,3 +3235,15 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   No socket selection, daemon ownership, protocol, runtime, or live-session
   behavior changes. Exact-candidate Gate-2/Gate-3 verification remains
   required.
+
+### M7-03: Copy Feedback Retained-Render Priority (2026-09-12)
+
+- **Source:** `84855451`, **BASE-SATISFIED** at the closed M6 base
+  `cc5a8e26`: `retained_pty_update_allowed_by_app_state` already refuses the
+  fast path while `copy_feedback` is visible, and the named overlap regression
+  already pins that guard. No production hunk is reapplied or duplicated.
+- M7 adds only a positive expiry control: scheduled expiry clears the feedback
+  and retained PTY updates resume. A one-site author mutation removing the
+  pre-existing guard kills the overlap control. `src/server/headless.rs` was
+  already present in the post-relicense `NOTICE` index; the index is unchanged.
+  Exact-candidate Gate-2/Gate-3 verification remains required.
