@@ -2059,6 +2059,440 @@ mod tests {
         let _ = std::fs::remove_dir_all(repo);
     }
 
+    fn remove_focus_app() -> (App, crate::api::EventHub) {
+        let hub = crate::api::EventHub::default();
+        let mut app = test_app_with_event_hub(hub.clone());
+        // Same labels/root, different keys; the real parent follows the child.
+        for (key, checkout, linked) in [
+            ("other-key", "/repo/root", false),
+            ("repo-key", "/repo/child", true),
+            ("repo-key", "/repo/sibling", true),
+            ("repo-key", "/repo/root", false),
+        ] {
+            let mut ws = Workspace::test_new("same-label");
+            ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+                key: key.into(),
+                label: "same-label".into(),
+                repo_root: "/repo/root".into(),
+                checkout_path: checkout.into(),
+                is_linked_worktree: linked,
+            });
+            app.state.workspaces.push(ws);
+        }
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        (app, hub)
+    }
+
+    fn prepare_focus_remove(
+        app: &mut App,
+        child_idx: usize,
+        api: bool,
+    ) -> (WorktreeRemoveResult, std::sync::mpsc::Receiver<String>) {
+        app.open_remove_linked_worktree_confirmation(child_idx);
+        let remove = app.state.worktree_remove.as_mut().unwrap();
+        remove.removing = true;
+        let child_id = remove.workspace_id.clone();
+        let path = remove.path.clone();
+        let checkout_key = crate::worktree::canonical_or_original(&path);
+        let (respond_to, response_rx) = response_channel();
+        if api {
+            app.pending_api_worktree_removes
+                .insert(child_id.clone(), 71);
+            app.pending_api_worktree_remove_paths
+                .insert(checkout_key.clone(), 71);
+        }
+        (
+            WorktreeRemoveResult {
+                workspace_id: child_id,
+                path,
+                workspace: api.then(|| Box::new(app.workspace_info(child_idx))),
+                forced: true,
+                api_request: api.then_some(ApiWorktreeRemoveRequest {
+                    id: "remove-focus".into(),
+                    operation_id: 71,
+                    checkout_key,
+                    respond_to,
+                }),
+                result: Ok(()),
+            },
+            response_rx,
+        )
+    }
+
+    #[test]
+    fn worktree_remove_api_focus_uses_surviving_nonlinked_parent() {
+        let (mut app, hub) = remove_focus_app();
+        let ids: Vec<_> = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.id.clone())
+            .collect();
+        let (result, response_rx) = prepare_focus_remove(&mut app, 1, true);
+
+        app.handle_worktree_remove_finished(result);
+
+        assert_eq!(app.state.active, Some(2));
+        assert_eq!(app.state.selected, 2);
+        assert_eq!(app.state.workspaces[2].id, ids[3]);
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|ws| &ws.id)
+                .collect::<Vec<_>>(),
+            vec![&ids[0], &ids[2], &ids[3]]
+        );
+        assert!(app.pending_api_worktree_removes.is_empty());
+        assert!(app.pending_api_worktree_remove_paths.is_empty());
+        assert!(app.state.terminal_runtime_shutdowns.is_empty());
+        assert!(app.state.worktree_remove.is_none());
+        assert_eq!(app.state.mode, crate::app::Mode::Terminal);
+        let response = response_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let response: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(response.id, "remove-focus");
+        assert!(matches!(response.result, ResponseResult::WorktreeRemoved {
+            workspace_id, path, forced
+        } if workspace_id == ids[1] && path == "/repo/child" && forced));
+        assert_eq!(
+            hub.events_after(0)
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect::<Vec<_>>(),
+            vec![EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed {
+                    workspace_id: ids[1].clone()
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn worktree_remove_completion_without_parent_keeps_close_fallback() {
+        for api in [false, true] {
+            for last_child in [false, true] {
+                let (mut app, _) = remove_focus_app();
+                let survivor = app.state.workspaces[0].id.clone();
+                app.state.workspaces[3].worktree_space.as_mut().unwrap().key = "other-key".into();
+                let child_idx = if last_child {
+                    let child = app.state.workspaces.remove(1);
+                    app.state.workspaces = vec![child];
+                    0
+                } else {
+                    1
+                };
+                let (result, response_rx) = prepare_focus_remove(&mut app, child_idx, api);
+
+                app.handle_worktree_remove_finished(result);
+
+                assert_eq!(app.state.active, (!last_child).then_some(0), "api={api}");
+                assert_eq!(app.state.selected, 0);
+                assert_eq!(app.state.workspaces.len(), if last_child { 0 } else { 3 });
+                if !last_child {
+                    assert_eq!(app.state.workspaces[0].id, survivor);
+                }
+                assert!(app.state.worktree_remove.is_none());
+                assert_eq!(
+                    app.state.mode,
+                    if last_child {
+                        crate::app::Mode::Navigate
+                    } else {
+                        crate::app::Mode::Terminal
+                    }
+                );
+                if api {
+                    let response = response_rx
+                        .recv_timeout(std::time::Duration::from_secs(2))
+                        .unwrap();
+                    assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
+                    assert!(app.pending_api_worktree_removes.is_empty());
+                    assert!(app.pending_api_worktree_remove_paths.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn worktree_remove_completion_changed_membership_preserves_focus() {
+        for api in [false, true] {
+            for change in ["path", "nonlinked", "missing"] {
+                let (mut app, hub) = remove_focus_app();
+                let ids: Vec<_> = app
+                    .state
+                    .workspaces
+                    .iter()
+                    .map(|ws| ws.id.clone())
+                    .collect();
+                let (result, response_rx) = prepare_focus_remove(&mut app, 1, api);
+                let membership = &mut app.state.workspaces[1].worktree_space;
+                match change {
+                    "path" => membership.as_mut().unwrap().checkout_path = "/repo/new-child".into(),
+                    "nonlinked" => membership.as_mut().unwrap().is_linked_worktree = false,
+                    "missing" => *membership = None,
+                    _ => unreachable!(),
+                }
+
+                app.handle_worktree_remove_finished(result);
+
+                assert_eq!(app.state.active, Some(0), "api={api}, change={change}");
+                assert_eq!(app.state.selected, 1);
+                assert_eq!(
+                    app.state
+                        .workspaces
+                        .iter()
+                        .map(|ws| ws.id.clone())
+                        .collect::<Vec<_>>(),
+                    ids
+                );
+                assert!(app.state.worktree_remove.is_none());
+                assert!(hub.events_after(0).is_empty());
+                if api {
+                    let response = response_rx
+                        .recv_timeout(std::time::Duration::from_secs(2))
+                        .unwrap();
+                    assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
+                    assert!(app.pending_api_worktree_removes.is_empty());
+                    assert!(app.pending_api_worktree_remove_paths.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn worktree_remove_failed_completion_does_not_close_or_refocus() {
+        for api in [false, true] {
+            let (mut app, hub) = remove_focus_app();
+            let (mut result, response_rx) = prepare_focus_remove(&mut app, 1, api);
+            result.result = Err("removal refused".into());
+
+            app.handle_worktree_remove_finished(result);
+
+            assert_eq!(app.state.workspaces.len(), 4);
+            assert_eq!(app.state.active, Some(0));
+            assert_eq!(app.state.selected, 1);
+            assert_eq!(app.state.mode, crate::app::Mode::ConfirmRemoveWorktree);
+            let remove = app.state.worktree_remove.as_ref().unwrap();
+            assert!(!remove.removing);
+            assert_eq!(remove.error.as_deref(), Some("removal refused"));
+            assert!(hub.events_after(0).is_empty());
+            if api {
+                let response = response_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+                assert_eq!(error.id, "remove-focus");
+                assert_eq!(error.error.code, "worktree_remove_failed");
+                assert_eq!(error.error.message, "removal refused");
+                assert!(app.pending_api_worktree_removes.is_empty());
+                assert!(app.pending_api_worktree_remove_paths.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn worktree_remove_stale_completion_keeps_pending_modal_and_focus() {
+        for superseded_key in ["workspace", "checkout"] {
+            let (mut app, hub) = remove_focus_app();
+            let (result, response_rx) = prepare_focus_remove(&mut app, 1, true);
+            if superseded_key == "workspace" {
+                app.pending_api_worktree_removes
+                    .insert(result.workspace_id.clone(), 72);
+            } else {
+                app.pending_api_worktree_remove_paths
+                    .insert(result.path.clone(), 72);
+            }
+            let pending_ids = app.pending_api_worktree_removes.clone();
+            let pending_paths = app.pending_api_worktree_remove_paths.clone();
+
+            app.handle_worktree_remove_finished(result);
+
+            assert_eq!(app.state.workspaces.len(), 4);
+            assert_eq!(app.state.active, Some(0));
+            assert_eq!(app.state.selected, 1);
+            assert_eq!(app.pending_api_worktree_removes, pending_ids);
+            assert_eq!(app.pending_api_worktree_remove_paths, pending_paths);
+            let remove = app.state.worktree_remove.as_ref().unwrap();
+            assert!(remove.removing);
+            assert!(remove.error.is_none());
+            assert_eq!(app.state.mode, crate::app::Mode::ConfirmRemoveWorktree);
+            assert!(hub.events_after(0).is_empty());
+            let response = response_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(error.id, "remove-focus");
+            assert_eq!(error.error.code, "stale_worktree_operation");
+        }
+    }
+
+    #[test]
+    fn worktree_remove_legacy_completion_ignores_unrelated_modal() {
+        for mismatch in ["workspace", "path"] {
+            let (mut app, hub) = remove_focus_app();
+            let (result, _) = prepare_focus_remove(&mut app, 1, false);
+            let remove = app.state.worktree_remove.as_mut().unwrap();
+            if mismatch == "workspace" {
+                remove.workspace_id = "unrelated".into();
+            } else {
+                remove.path = "/repo/unrelated".into();
+            }
+            let modal_id = remove.workspace_id.clone();
+            let modal_path = remove.path.clone();
+
+            app.handle_worktree_remove_finished(result);
+
+            assert_eq!(app.state.workspaces.len(), 4);
+            assert_eq!(app.state.active, Some(0));
+            assert_eq!(app.state.selected, 1);
+            let remove = app.state.worktree_remove.as_ref().unwrap();
+            assert_eq!(remove.workspace_id, modal_id);
+            assert_eq!(remove.path, modal_path);
+            assert!(remove.removing);
+            assert!(hub.events_after(0).is_empty());
+        }
+    }
+
+    struct RemoveFocusRoot(PathBuf);
+
+    impl Drop for RemoveFocusRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn assert_real_worktree_remove_focus(tui: bool) {
+        let root = std::env::var_os("ZYNK_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let path = root.join(unique_temp_path("worktree-focus").file_name().unwrap());
+        std::fs::create_dir(&path).unwrap();
+        let fixture = RemoveFocusRoot(path);
+        let repo = fixture.0.join("repo");
+        let checkout = fixture.0.join("child");
+        let sibling = fixture.0.join("sibling");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        set_repo_identity(&repo);
+        std::fs::write(repo.join("README.md"), "fixture\n").unwrap();
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "--quiet", "-m", "initial"]);
+        for (path, branch) in [(&checkout, "child"), (&sibling, "sibling")] {
+            run_git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    branch,
+                    path.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+        }
+        let key = crate::workspace::git_space_metadata(&repo).unwrap().key;
+        let (mut app, hub) = remove_focus_app();
+        for (idx, path) in [&repo, &checkout, &sibling, &repo].into_iter().enumerate() {
+            let ws = &mut app.state.workspaces[idx];
+            ws.identity_cwd = path.clone();
+            let space = ws.worktree_space.as_mut().unwrap();
+            space.repo_root = repo.clone();
+            space.checkout_path = path.clone();
+            if idx != 0 {
+                space.key = key.clone();
+            }
+        }
+        let ids: Vec<_> = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.id.clone())
+            .collect();
+        assert_ne!(ids[0], ids[3]);
+        app.open_remove_linked_worktree_confirmation(1);
+
+        if tui {
+            app.submit_worktree_remove_via_api();
+            assert!(app.state.worktree_remove.as_ref().unwrap().removing);
+            assert_eq!(app.pending_api_worktree_removes.len(), 1);
+            let event = wait_for_app_event(&mut app);
+            assert!(matches!(&event, AppEvent::WorktreeRemoveFinished(result)
+                if result.api_request.is_some() && result.result.is_ok()
+                    && result.workspace_id == ids[1] && result.path == checkout));
+            app.handle_internal_event(event);
+        } else {
+            let response = run_deferred_api_request(
+                &mut app,
+                Request {
+                    id: "real-remove-focus".into(),
+                    method: crate::api::schema::Method::WorktreeRemove(WorktreeRemoveParams {
+                        workspace_id: ids[1].clone(),
+                        force: false,
+                    }),
+                },
+            );
+            let response: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(response.id, "real-remove-focus");
+            assert!(
+                matches!(response.result, ResponseResult::WorktreeRemoved {workspace_id, path, forced}
+                if workspace_id == ids[1] && path == checkout.display().to_string() && !forced)
+            );
+        }
+
+        assert!(
+            !checkout.exists(),
+            "Git must finish removal before focus is assessed"
+        );
+        assert!(sibling.join("README.md").is_file());
+        assert_eq!(
+            app.state.active,
+            Some(2),
+            "tui={tui}: select the parent, not prior focus"
+        );
+        assert_eq!(app.state.selected, 2);
+        assert_eq!(app.state.workspaces[2].id, ids[3]);
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|ws| &ws.id)
+                .collect::<Vec<_>>(),
+            vec![&ids[0], &ids[2], &ids[3]]
+        );
+        assert!(app.state.worktree_remove.is_none());
+        assert!(app.pending_api_worktree_removes.is_empty());
+        assert!(app.pending_api_worktree_remove_paths.is_empty());
+        assert!(app.state.terminal_runtime_shutdowns.is_empty());
+        assert_eq!(app.state.mode, crate::app::Mode::Terminal);
+        assert_eq!(
+            hub.events_after(0)
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect::<Vec<_>>(),
+            vec![EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed {
+                    workspace_id: ids[1].clone()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn worktree_remove_real_api_focuses_parent_after_git_completion() {
+        assert_real_worktree_remove_focus(false);
+    }
+
+    #[test]
+    fn worktree_remove_real_tui_focuses_parent_after_git_completion() {
+        assert_real_worktree_remove_focus(true);
+    }
+
     #[test]
     fn deferred_api_worktree_remove_emits_removed_after_workspace_changes() {
         let event_hub = crate::api::EventHub::default();

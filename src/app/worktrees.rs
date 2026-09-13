@@ -830,8 +830,7 @@ impl App {
                             space.is_linked_worktree && space.checkout_path == result.path
                         });
                     if still_same_linked_worktree {
-                        self.state.selected = ws_idx;
-                        self.state.close_selected_workspace();
+                        self.close_removed_linked_worktree_workspace(ws_idx);
                     }
                 }
                 self.state.mode = if self.state.active.is_some() {
@@ -866,6 +865,31 @@ impl App {
         force: bool,
     ) -> bool {
         force
+    }
+
+    pub(crate) fn close_removed_linked_worktree_workspace(&mut self, ws_idx: usize) {
+        let parent_key = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.worktree_space())
+            .filter(|space| space.is_linked_worktree)
+            .map(|space| space.key.clone());
+
+        self.state.selected = ws_idx;
+        self.state.close_selected_workspace();
+
+        let Some(parent_key) = parent_key else {
+            return;
+        };
+        let Some(parent_idx) = self.state.workspaces.iter().position(|workspace| {
+            workspace
+                .worktree_space()
+                .is_some_and(|space| !space.is_linked_worktree && space.key == parent_key)
+        }) else {
+            return;
+        };
+        self.state.switch_workspace(parent_idx);
     }
 
     pub(crate) fn shutdown_workspace_terminal_runtimes_for_worktree_remove(
@@ -1687,6 +1711,56 @@ mod tests {
         crate::worktree::run_worktree_command(&remove_source).unwrap();
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn worktree_remove_legacy_completion_focuses_parent_workspace() {
+        let mut app = app_for_worktree_tests();
+        let checkout = std::path::PathBuf::from("/repo/zynk-issue");
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("parent"),
+            crate::workspace::Workspace::test_new("issue"),
+            crate::workspace::Workspace::test_new("sibling"),
+        ];
+        for (index, path, linked) in [
+            (0, "/repo/zynk", false),
+            (1, "/repo/zynk-issue", true),
+            (2, "/repo/zynk-sibling", true),
+        ] {
+            app.state.workspaces[index].worktree_space =
+                Some(crate::workspace::WorktreeSpaceMembership {
+                    key: "repo-key".into(),
+                    label: "zynk".into(),
+                    repo_root: "/repo/zynk".into(),
+                    checkout_path: path.into(),
+                    is_linked_worktree: linked,
+                });
+        }
+        let child_id = app.state.workspaces[1].id.clone();
+        let parent_id = app.state.workspaces[0].id.clone();
+        let sibling_id = app.state.workspaces[2].id.clone();
+        app.state.active = Some(1);
+        app.open_remove_linked_worktree_confirmation(1);
+        app.state.worktree_remove.as_mut().unwrap().removing = true;
+
+        app.handle_worktree_remove_finished(WorktreeRemoveResult {
+            workspace_id: child_id.clone(),
+            path: checkout,
+            workspace: None,
+            forced: false,
+            api_request: None,
+            result: Ok(()),
+        });
+
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 0);
+        assert_eq!(app.state.workspaces[0].id, parent_id);
+        assert_eq!(app.state.workspaces[1].id, sibling_id);
+        assert_eq!(app.state.workspaces[1].display_name(), "sibling");
+        assert!(app.state.workspaces.iter().all(|ws| ws.id != child_id));
+        assert!(app.state.worktree_remove.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]

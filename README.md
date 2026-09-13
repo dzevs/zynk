@@ -120,6 +120,10 @@ its identity seed. A named-workspace prompt remembers the source workspace and
 rechecks its current focused pane when confirmed, rather than freezing the
 suggested directory or following a different globally focused workspace.
 
+Removing a linked worktree returns focus to its surviving parent workspace in
+the same worktree group, even if another workspace became active during removal.
+If no parent remains, normal workspace-close selection applies.
+
 ## Agent messaging
 
 This is zynk's net-new layer on top of the multiplexer. Agents send each other **plain-text messages**; zynk

@@ -215,6 +215,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 - Worktrees: `worktree.create` / `worktree.remove` run their Git work in the background — the UI and server
   stay responsive and the requesting client still receives the final response; duplicate/stale operations are
   guarded; forced removal recovers leftover checkouts; creating a worktree checks out an existing branch.
+- Removing a linked worktree focuses its surviving parent workspace in the same worktree group,
+  rather than an adjacent sibling or the previously active workspace. Without a parent, normal
+  close-selection behavior remains unchanged.
 - Terminal/render: wide-character cells in pane text, border intersections use the active pane color, Kitty
   file/temp/shared-memory image media, split host-color replies, duplicate release-key input, focus after
   temporary pane commands.

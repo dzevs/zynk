@@ -4866,3 +4866,71 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   feature documentation are unchanged: no user-visible feature or advisory
   delta claimed. Full check, gate and normal hooks accompany the commit.
   M8-17/18 remain pending exact-SHA Gate-2; no whole-M8 or operator approval.
+
+### M8 checkpoint 08 - Exact-range Gate-2 approval
+
+- Gate-2 `msg_891a0e2fac42d37f` approves only
+  `32c8e36cd3fb09e4b242d13210a54a52056e2ac8..061e0f0cc8b6b988e3a2b0777c13863b2b1482c5`,
+  tree `7d823eca2d685e235c8a5075eaa9398d81e04f46`, and releases its freeze.
+  The original packet and verdict remain unchanged. Native correction
+  `msg_64b300b439cf8873` attaches to that verdict: M11 has two failures and
+  reaches the first EOF row; M13, not M11, pins the previously unreached second
+  row; M01 has four crossings. These correct reviewer evidence attribution,
+  not source or the approval outcome. No whole-M8 or operator gate transfers.
+
+### M8-19 - Focus parent after worktree removal (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `fbc3f0845a1ad94a739f999b4b1edc1bba4e291a` (PORT, fork adaptation).
+  Parent: `061e0f0cc8b6b988e3a2b0777c13863b2b1482c5`. Preserved patch SHA-256:
+  `517509f395166cba83cd700ae285492e3656208844dd28d9e886d4337ded9786`.
+  Gate-1 `msg_98ce87907916e2f2` binds design `92de42fd`; its count correction
+  `msg_9fc11d643850b495` records seven mutations, expanding both site bypasses.
+  The helper is introduced here; membership, close and switch prerequisites
+  exist at the parent. No forward creator or deferred remainder is consumed.
+- Source-derived population: two compiled close sites in the API and legacy
+  completion handlers, but only one production WorktreeRemoveResult producer,
+  start_api_worktree_remove, always carrying Some(api_request). The legacy
+  start_worktree_remove producer is cfg(test). The actual TUI submitter calls
+  runtime_worktree_remove_deferred and the same API completion path. This
+  corrects the preserved preliminary note's API/UI-completion wording; that
+  note is preparation, not authority. No production route was omitted.
+- Capture the removed linked child's membership key, perform the existing
+  close, then find the surviving nonlinked workspace with that key and use
+  switch_workspace. Resolve its index after removal. Labels, paths, common
+  repo roots, siblings and adjacency do not establish parenthood. A matching
+  parent wins even over another active workspace; without one, the existing
+  close-selection and empty-state fallback remain unchanged.
+- Both substitutions stay within their existing linked-status/checkout guards.
+  Preserve operation-id/path admission, stale and failed completions, dirty
+  force confirmation, pending maps, modal/mode handling and runtime drainage.
+  The API branch retains its workspace-id-only WorkspaceClosed event and
+  response. Do not recreate upstream WorktreeRemoved events, a worktree field
+  on the result, legacy event/runtime context, or Windows force policy.
+- Nine new controls are written before production changes. The first state
+  run has five characterization passes and two focus failures; the complete
+  parent run adds both real Git front doors, giving five passes and four
+  behavioral failures. Git removes the checkout before either real focus
+  assertion fails. Table rows that already pass are characterization, not
+  absent-feature proof or independent mutation coverage of every row.
+- Real fixtures use private roots, scrubbed Git, contained identity config,
+  actual background completions and owned cleanup. The TUI control drives
+  submit_worktree_remove_via_api, not the legacy test starter. Preserve the
+  sibling checkout, stable workspace IDs, exact event/response fields, cleared
+  pending/modal state and mode. The legacy control proves its compiled branch.
+- Seven compiled mutations fail intended assertions, with complete summaries
+  reconciled against distinct test outcomes and source restored each time.
+  API/legacy bypasses, key and linked-status mistakes, pre-close index, omitted
+  switch and outside-guard close are pinned. The last mutation moves close
+  before metadata capture as well, so its five crossings include wrong IDs
+  and an empty-state index panic; only its changed-checkout focus assertion
+  is claimed as the guard-placement kill, not five selective demonstrations.
+- Source audit `fe737ea2` reconstructs both modules after stripping the exact
+  helper/call-site changes and new test blocks: every other byte is unchanged.
+  All nine parent controls remain byte-identical. No old test conversion,
+  removed test/assertion or support-test recompilation; 126 worktree controls
+  pass. This bounded source comparison is not a general Rust AST proof.
+- Root changelog/README document the focus consequence. CLI command/flag/value/
+  alias and completion reconciliation is a recorded no-op. No schema, protocol
+  19, caller authority, dependency/advisory, generic close/switch or live runtime
+  change. Full check, gate and normal hooks precede commit. Exact-SHA Gate-2,
+  whole-M8 Gate-2/Gate-3 and operator actions remain separate and outstanding.

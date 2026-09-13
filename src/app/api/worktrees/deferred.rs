@@ -549,8 +549,7 @@ impl App {
             if current_matches {
                 workspace_id = self.public_workspace_id(ws_idx);
                 workspace_snapshot.get_or_insert_with(|| self.workspace_info(ws_idx));
-                self.state.selected = ws_idx;
-                self.state.close_selected_workspace();
+                self.close_removed_linked_worktree_workspace(ws_idx);
                 self.shutdown_detached_terminal_runtimes();
                 // Zynk's `workspace.closed` event carries only the workspace id
                 // (no workspace snapshot field, unlike upstream).
