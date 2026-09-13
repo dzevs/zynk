@@ -5158,3 +5158,66 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   reconciliation is a no-op: command, flag, value and alias sets are unchanged.
   This adds coverage to existing behavior, not a new README/CHANGELOG feature.
   No whole-M8, merge, push, install, tag, publish, release or cleanup approval.
+
+### M8-23 - Repeated API focus attention (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `0a684b4130e7e82074831a7af8db5f1af8fed84d` (PORT).
+  Parent: `c1b733811fb7bd9dcbd56ece1503b0f6b7a21bc2`. Preserved patch SHA-256:
+  `7579c9178480c550654b0943b529818bf27635f3788bb1235f4f65af1c8be330`.
+  Gate-1 `msg_1e2148864a8c2308` binds design `7f342024`; companion `ff716c54`
+  answers its reachability question, verified in `msg_c842d0ffcbd22429`.
+  M8-22's committed tip is the actual parent, not the design's preparation
+  base. The named prerequisites were rechecked there before source edits.
+- Add only mark_active_tab_seen after focus_pane_in_workspace and before
+  settle_terminal_mode_after_focus in focus_agent_target and handle_pane_focus.
+  The mark is unconditional on the focus helper's boolean: already-focused
+  returns false before the existing tab switch can mark attention. Do not
+  change the generic focus, switch, copy-mode, seen projection or detection
+  helpers. Work is one pass over the destination tab's panes per explicit
+  request, not per byte, frame, background pane or attached client.
+- The unconditional mark's safety is per call site, not a guarantee of
+  focus_pane_in_workspace: any new caller must re-establish workspace and pane
+  membership validation before using it. Pane focus independently guards
+  find_tab_index_for_pane after parse_pane_id; parse success alone is not the
+  proof because public mappings can be stale. Agent resolution returns an
+  existing terminal candidate through all three successful routes. Both doors
+  are synchronous under the same mutable App access with no intervening state
+  mutation or await. The helper's two missing-target false returns are thus
+  unreachable at these sites, but not for arbitrary direct callers.
+- Preserve the agent facade's existing possibility of resolving a non-agent
+  terminal before agent_info later refuses; not every agent-focus error is
+  claimed side-effect-free. The invalid-target table covers early resolution
+  refusal. Outer focus remains unchanged, including Some(false).
+- Attention remains tab-wide, as upstream requires: focusing one pane marks
+  every unseen sibling in that destination tab seen. An Idle sibling stops
+  projecting Done even if it was not displayed. README and CHANGELOG state
+  this consequence explicitly; no actual-viewing, identity or receipt claim.
+  Terminal detection state, other tabs and the prior workspace remain intact.
+- Five new tests in the existing binary, no support-test recompilation. The
+  two upstream-named controls agent_focus_marks_already_focused_done_agent_seen
+  and api_pane_focus_marks_already_focused_done_pane_seen compile and fail at
+  the parent on observed Done versus Idle responses. Two background-target
+  controls and the invalid-target table pass there as characterization, not
+  three additional behavioral reds. All five parent bodies survive unchanged.
+- Six compiled mutants, each running 141 focus/copy-mode controls, all exit
+  100 with exactly one named failure and 140 passes. M01/M03 kill the repeated
+  agent-focus control; M02/M04 the repeated pane-focus control. M05 kills
+  m823_agent_focus_marks_target_tab_without_marking_prior_workspace and M06
+  m823_pane_focus_marks_target_tab_without_marking_prior_workspace, both at
+  the prior-workspace unseen assertion. Destination status alone would not
+  discriminate these early-mark mutants because switching tabs already marks
+  the destination seen. Complete names, summaries and mutant bytes are kept;
+  no compile, timeout, abort or setup failure counts as a kill.
+- The bounded source audit strips exactly the two production insertions,
+  additive tests, and the new api/agents.rs provenance header to reconstruct
+  all three old modules byte-for-byte. The header gains its matching NOTICE
+  entry. No old assertion/test is removed or weakened, including the M8-21
+  scroll and M8-22 punctuation controls in panes.rs. No shared fixture API,
+  protocol/schema, CLI, transport, authorization or DB change is introduced.
+- Focused green is 141/141; full just check, gate, normal hooks and committed
+  verification precede exact-SHA Gate-2. No Cargo delta means no new advisory
+  comparison claim. Completion-spec reconciliation is a recorded no-op:
+  command, flag, value and alias sets are unchanged. No separately archived
+  pending origin arrives; the M8 source union remains 98. Earlier approvals
+  cover only their exact ranges. No whole-M8, merge, push, install, tag,
+  publish, release or cleanup approval follows.

@@ -97,6 +97,10 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Explicit pane or agent API focus clears unseen attention even for an already
+  focused target. Every unseen pane in that tab becomes seen, so an idle sibling
+  stops reporting `done` even if it was not displayed; this is not viewing or
+  message-receipt evidence.
 - `zynk server stop` and named `session stop` wait for both selected API and
   client sockets to become unreachable before reporting success. A stop ACK
   alone no longer permits an immediate restart to race the old listeners.

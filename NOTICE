@@ -62,6 +62,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/agents.rs
 - src/app/api.rs
 - src/app/api_helpers.rs
+- src/app/api/agents.rs
 - src/app/api/layouts.rs
 - src/app/api/panes.rs
 - src/app/api/plugins/panes.rs

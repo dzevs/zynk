@@ -159,6 +159,7 @@ impl App {
         };
 
         self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        self.state.mark_active_tab_seen();
         self.state.settle_terminal_mode_after_focus();
 
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
@@ -5249,6 +5250,71 @@ mod tests {
         assert_eq!(app.state.workspaces[1].active_tab, target_tab_idx);
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn api_pane_focus_marks_already_focused_done_pane_seen() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.outer_terminal_focus = Some(false);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let sibling = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        for target in [pane_id, sibling] {
+            let pane = app.state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&target)
+                .unwrap();
+            pane.seen = false;
+            app.state
+                .terminals
+                .get_mut(&pane.attached_terminal_id)
+                .unwrap()
+                .state = crate::detect::AgentState::Idle;
+        }
+        app.state.workspaces[0].tabs[0].layout.focus_pane(pane_id);
+        let public = app.public_pane_id(0, pane_id).unwrap();
+        assert_eq!(
+            app.pane_info(0, pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Done
+        );
+        assert_eq!(
+            app.pane_info(0, sibling).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Done
+        );
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
+
+        let response = app.handle_pane_focus(
+            "req".into(),
+            PaneTarget {
+                pane_id: public.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info response");
+        };
+        assert_eq!(success.id, "req");
+        assert_eq!(pane.pane_id, public);
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Idle);
+        for target in [pane_id, sibling] {
+            let state = &app.state.workspaces[0].tabs[0].panes[&target];
+            assert!(state.seen);
+            assert_eq!(
+                app.state.terminals[&state.attached_terminal_id].state,
+                crate::detect::AgentState::Idle
+            );
+            assert_eq!(
+                app.pane_info(0, target).unwrap().agent_status,
+                crate::api::schema::AgentStatus::Idle
+            );
+        }
+        assert_eq!(app.state.outer_terminal_focus, Some(false));
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
+        assert!(app.event_hub.events_after(0).is_empty());
     }
 
     #[test]

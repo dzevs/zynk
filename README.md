@@ -164,6 +164,11 @@ An already matching status wins even at timeout zero. Timeouts include setup and
 between bounded requests/polls, not as a hard wall-clock deadline. Status fields are observations,
 not authenticated identity or receipt evidence; `agent wait` retains its Idle-or-Done behavior.
 
+Explicit `pane.focus` and `agent.focus` API requests mark every unseen pane in the
+destination tab seen, including when the target is already focused. An idle sibling
+therefore stops reporting `done` even if it was not displayed. This is tab attention
+state, not proof of actual viewing, authenticated identity, or message receipt.
+
 The socket API accepts `events.subscribe` with `{"subscriptions":[{"type":"layout.updated"}]}`.
 Updates contain the target tab's current pane/split geometry, focus, and zoom after the supported
 pane/layout and creation operations. This is not an exhaustive TUI redraw stream or a plugin hook.
