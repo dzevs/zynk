@@ -991,7 +991,22 @@ impl AppState {
         self.terminals
             .values()
             .filter_map(|terminal| terminal.next_agent_metadata_expiry())
+            .chain(
+                self.workspaces
+                    .iter()
+                    .filter_map(|workspace| workspace.metadata_tokens.next_expiry()),
+            )
             .min()
+    }
+
+    pub(crate) fn expire_metadata_tokens(&mut self, now: std::time::Instant) -> Vec<usize> {
+        self.workspaces
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(ws_idx, workspace)| {
+                workspace.metadata_tokens.expire_at(now).then_some(ws_idx)
+            })
+            .collect()
     }
 
     pub(crate) fn expire_agent_metadata_at(

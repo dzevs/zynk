@@ -124,6 +124,10 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceUpdated,
                 last_sequence: 0,
             })),
+            Subscription::WorkspaceMetadataUpdated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorkspaceMetadataUpdated,
+                last_sequence: 0,
+            })),
             Subscription::WorkspaceRenamed {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceRenamed,
                 last_sequence: 0,
@@ -606,6 +610,53 @@ mod tests {
 
     use super::*;
     use crate::api::schema::{AgentStatus, EventData, EventEnvelope, EventKind};
+
+    #[test]
+    fn workspace_metadata_subscription_uses_dedicated_event_kind() {
+        let hub = EventHub::default();
+        let (api_tx, mut api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = ActiveSubscription::new(
+            Subscription::WorkspaceMetadataUpdated {},
+            "workspace-token",
+            0,
+            &api_tx,
+            &hub,
+        )
+        .unwrap();
+        assert!(matches!(&subscription, ActiveSubscription::Event(event)
+            if event.event_kind == EventKind::WorkspaceMetadataUpdated));
+        let workspace_json = serde_json::json!({
+            "workspace_id": "w2", "number": 2, "label": "background", "focused": false,
+            "pane_count": 1, "tab_count": 1, "active_tab_id": "w2:t1",
+            "agent_status": "unknown", "tokens": {"build": "ready"}
+        });
+        let workspace: crate::api::schema::WorkspaceInfo =
+            serde_json::from_value(workspace_json.clone()).unwrap();
+        hub.push(EventEnvelope {
+            event: EventKind::WorkspaceUpdated,
+            data: EventData::WorkspaceUpdated {
+                workspace: workspace.clone(),
+            },
+        });
+        assert_eq!(subscription.poll(&api_tx, &hub), None);
+        hub.push(EventEnvelope {
+            event: EventKind::WorkspaceMetadataUpdated,
+            data: EventData::WorkspaceMetadataUpdated { workspace },
+        });
+        assert_eq!(
+            subscription.poll(&api_tx, &hub),
+            Some(serde_json::json!({
+                "event": "workspace_metadata_updated", "data": {
+                    "type": "workspace_metadata_updated", "workspace": workspace_json
+                }
+            }))
+        );
+        assert_eq!(subscription.poll(&api_tx, &hub), None);
+        assert!(matches!(
+            api_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
 
     fn m821_pane(scroll: Option<PaneScrollInfo>) -> crate::api::schema::PaneInfo {
         serde_json::from_value(serde_json::json!({

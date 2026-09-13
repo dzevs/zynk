@@ -191,6 +191,16 @@ fn workspace_command() -> Command {
                 .arg(required("workspace_id", "WORKSPACE_ID"))
                 .arg(required("label", "LABEL").num_args(1..)),
         )
+        .subcommand(
+            Command::new("report-metadata")
+                .about("Report display-only workspace metadata")
+                .arg(required("workspace_id", "WORKSPACE_ID"))
+                .arg(option("source", "ID"))
+                .arg(repeatable_option("token", "NAME=VALUE"))
+                .arg(repeatable_option("clear-token", "NAME"))
+                .arg(option("seq", "N"))
+                .arg(option("ttl-ms", "N")),
+        )
         .subcommand(id_command("close", "workspace_id", "Close a workspace"))
 }
 
@@ -939,6 +949,10 @@ fn option(name: &'static str, value_name: &'static str) -> Arg {
         .action(ArgAction::Set)
 }
 
+fn repeatable_option(name: &'static str, value_name: &'static str) -> Arg {
+    option(name, value_name).action(ArgAction::Append)
+}
+
 fn path_option(name: &'static str, value_name: &'static str) -> Arg {
     option(name, value_name).value_hint(ValueHint::AnyPath)
 }
@@ -962,6 +976,36 @@ mod tests {
     }
 
     #[test]
+    fn m828a_workspace_metadata_completion_matches_manual_flags() {
+        let mut cmd = super::command();
+        cmd.build();
+        let workspace = command_path(&cmd, &["workspace"]);
+        let report = workspace.find_subcommand("report-metadata");
+        assert!(
+            report.is_some(),
+            "workspace report-metadata completion is absent"
+        );
+        let report = report.unwrap();
+        assert_eq!(
+            sorted(report.get_arguments().filter_map(|arg| arg.get_long())),
+            ["clear-token", "seq", "source", "token", "ttl-ms"]
+        );
+        let positional = report.get_positionals().collect::<Vec<_>>();
+        assert_eq!(positional.len(), 1);
+        assert!(positional[0].is_required_set());
+        for name in ["token", "clear-token"] {
+            let arg = report
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some(name))
+                .unwrap();
+            assert!(
+                matches!(arg.get_action(), clap::ArgAction::Append),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn spec_matches_manual_command_population() {
         let mut cmd = super::command();
         cmd.build();
@@ -972,7 +1016,7 @@ mod tests {
             ("status", "server client"),
             ("config", "check reset-keys"),
             ("channel", "show set"),
-            ("workspace", "list create get focus rename close"),
+            ("workspace", "list create get focus rename report-metadata close"),
             ("worktree", "list create open remove"),
             ("tab", "list create get focus rename close"),
             ("notification", "show"),

@@ -78,6 +78,8 @@ pub enum Method {
     WorkspaceRename(WorkspaceRenameParams),
     #[serde(rename = "workspace.move")]
     WorkspaceMove(WorkspaceMoveParams),
+    #[serde(rename = "workspace.report_metadata")]
+    WorkspaceReportMetadata(WorkspaceReportMetadataParams),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceTarget),
     #[serde(rename = "worktree.list")]
@@ -216,6 +218,91 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    fn m828a_workspace_json() -> serde_json::Value {
+        serde_json::json!({
+            "workspace_id": "w7", "number": 2, "label": "background", "focused": false,
+            "pane_count": 1, "tab_count": 1, "active_tab_id": "w7:t3", "agent_status": "unknown"
+        })
+    }
+
+    #[test]
+    fn m828a_workspace_metadata_json_and_schema_contract() {
+        let value = serde_json::json!({
+            "id": "metadata-schema", "method": "workspace.report_metadata",
+            "params": {"workspace_id": "w7", "source": "user:build", "seq": 0,
+                "ttl_ms": 86_400_000, "tokens": {"build": "ok", "old": null}}
+        });
+        let request = serde_json::from_value::<Request>(value.clone());
+        assert!(
+            request.is_ok(),
+            "workspace report JSON refused: {request:?}"
+        );
+        assert_eq!(serde_json::to_value(request.unwrap()).unwrap(), value);
+        for missing in ["workspace_id", "source", "tokens"] {
+            let mut invalid = value.clone();
+            invalid["params"].as_object_mut().unwrap().remove(missing);
+            assert!(
+                serde_json::from_value::<Request>(invalid).is_err(),
+                "{missing}"
+            );
+        }
+        let document = export::protocol_schema_document();
+        let params = &document["schemas"]["request"]["$defs"]["WorkspaceReportMetadataParams"];
+        assert_eq!(
+            params["required"],
+            serde_json::json!(["workspace_id", "source", "tokens"])
+        );
+        let tokens = &params["properties"]["tokens"];
+        assert_eq!(tokens["maxProperties"], 16);
+        assert_eq!(tokens["propertyNames"]["pattern"], "^[A-Za-z0-9_-]{1,32}$");
+        assert_eq!(
+            tokens["additionalProperties"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(params["properties"]["ttl_ms"]["minimum"], 1);
+        assert_eq!(params["properties"]["ttl_ms"]["maximum"], 86_400_000);
+        let values = &document["schemas"]["success_response"]["$defs"]["WorkspaceInfo"]
+            ["properties"]["tokens"];
+        assert_eq!(values["maxProperties"], 32);
+        assert_eq!(values["additionalProperties"]["type"], "string");
+    }
+
+    #[test]
+    fn m828a_workspace_metadata_event_json_is_known_but_not_a_plugin_hook() {
+        let subscription = serde_json::json!({"type": "workspace.metadata_updated"});
+        let decoded = serde_json::from_value::<Subscription>(subscription.clone());
+        assert!(
+            decoded.is_ok(),
+            "workspace subscription JSON refused: {decoded:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(decoded.unwrap()).unwrap(),
+            subscription
+        );
+        let mut workspace = m828a_workspace_json();
+        workspace["tokens"] = serde_json::json!({"build": "ok"});
+        let event = serde_json::json!({
+            "event": "workspace_metadata_updated",
+            "data": {"type": "workspace_metadata_updated", "workspace": workspace}
+        });
+        let decoded: EventEnvelope = serde_json::from_value(event.clone()).unwrap();
+        assert_eq!(decoded.event.dot_name(), "workspace.metadata_updated");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), event);
+        assert!(!plugin_hook_event_names().contains(&"workspace.metadata_updated"));
+        assert!(plugin_hook_event_names().contains(&"workspace.created"));
+    }
+
+    #[test]
+    fn m828a_empty_workspace_tokens_remain_omitted() {
+        let old = m828a_workspace_json();
+        let decoded: WorkspaceInfo = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), old);
+        let mut explicit = old.clone();
+        explicit["tokens"] = serde_json::json!({});
+        let decoded: WorkspaceInfo = serde_json::from_value(explicit).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), old);
+    }
 
     #[test]
     fn api_schema_bundle_has_all_five_roots() {
@@ -854,6 +941,7 @@ mod tests {
                     tab_count: 1,
                     active_tab_id: "w1:t1".into(),
                     agent_status: AgentStatus::Unknown,
+                    tokens: HashMap::new(),
                     worktree: Some(WorkspaceWorktreeInfo {
                         repo_key: "/repo/zynk/.git".into(),
                         repo_name: "zynk".into(),
@@ -1019,6 +1107,7 @@ mod tests {
         "workspace.focus",
         "workspace.rename",
         "workspace.move",
+        "workspace.report_metadata",
         "workspace.close",
         "worktree.list",
         "worktree.create",
@@ -1133,6 +1222,11 @@ mod tests {
             "workspace.updated",
         ),
         (
+            EventKind::WorkspaceMetadataUpdated,
+            "workspace_metadata_updated",
+            "workspace.metadata_updated",
+        ),
+        (
             EventKind::WorkspaceClosed,
             "workspace_closed",
             "workspace.closed",
@@ -1232,7 +1326,9 @@ mod tests {
             .filter(|(kind, _, _)| {
                 !matches!(
                     kind,
-                    EventKind::PaneOutputChanged | EventKind::LayoutUpdated
+                    EventKind::PaneOutputChanged
+                        | EventKind::LayoutUpdated
+                        | EventKind::WorkspaceMetadataUpdated
                 )
             })
             .map(|(_, _, dot_name)| *dot_name)

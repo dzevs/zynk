@@ -874,6 +874,9 @@ impl App {
             if self.drain_internal_events() {
                 needs_render = true;
             }
+            if self.expire_due_metadata(Instant::now()) {
+                needs_render = true;
+            }
             if self.drain_api_requests() {
                 needs_render = true;
             }

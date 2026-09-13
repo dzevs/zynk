@@ -2529,3 +2529,74 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
 
     cleanup_spawned_zynk(child, base);
 }
+
+#[test]
+fn m828a_workspace_token_subscription_observes_timer_expiry_without_read_requests() {
+    let _lock = test_lock();
+    let mut fixture = FollowCwdServer {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let socket = fixture.base.join("runtime/zynk.sock");
+    fixture.server = Some(spawn_zynk(
+        &fixture.base.join("config"),
+        &fixture.base.join("runtime"),
+        &socket,
+    ));
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let created = send_request(
+        &socket,
+        &serde_json::json!({
+            "id": "m828a-create", "method": "workspace.create",
+            "params": {"cwd": fixture.base, "focus": true}
+        })
+        .to_string(),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap();
+    let mut reader = open_subscription(
+        &socket,
+        &serde_json::json!({
+            "id": "m828a-sub", "method": "events.subscribe", "params": {
+                "subscriptions": [{"type": "workspace.metadata_updated"}]
+            }
+        })
+        .to_string(),
+    );
+    let ack = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(ack["result"]["type"], "subscription_started", "{ack}");
+    assert_eq!(ack["id"], "m828a-sub");
+    let reported = send_request(
+        &socket,
+        &serde_json::json!({
+            "id": "m828a-report", "method": "workspace.report_metadata", "params": {
+                "workspace_id": workspace_id, "source": "user:timer", "seq": 0,
+                "ttl_ms": 100, "tokens": {"build": "short lived"}
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        reported,
+        serde_json::json!({"id": "m828a-report", "result": {"type": "ok"}})
+    );
+    let set_event = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(set_event["event"], "workspace_metadata_updated");
+    assert_eq!(set_event["data"]["type"], "workspace_metadata_updated");
+    assert_eq!(set_event["data"]["workspace"]["workspace_id"], workspace_id);
+    assert_eq!(
+        set_event["data"]["workspace"]["tokens"],
+        serde_json::json!({"build": "short lived"})
+    );
+    let mut expected = set_event;
+    expected["data"]["workspace"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tokens");
+    let expired = reader.read_json_line(Duration::from_secs(3));
+    assert_eq!(expired, expected);
+    assert!(reader
+        .try_read_json_line(Duration::from_millis(150))
+        .is_none());
+}

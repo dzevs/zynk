@@ -62,7 +62,8 @@ impl App {
         &mut self,
         msg: crate::api::ApiRequestMessage,
     ) -> bool {
-        let mut changed = crate::api::request_changes_ui(&msg.request);
+        let mut changed = self.expire_due_metadata(Instant::now());
+        changed |= crate::api::request_changes_ui(&msg.request);
         let skip_default_workspace = matches!(
             &msg.request.method,
             crate::api::schema::Method::ServerStop(_)
@@ -361,18 +362,7 @@ impl App {
             self.start_background_session_save();
         }
 
-        if let Some(deadline) = self
-            .agent_metadata_deadline
-            .filter(|deadline| now >= *deadline)
-        {
-            let previous_toast = self.state.toast.clone();
-            for update in self.state.expire_agent_metadata_at(deadline, now) {
-                self.refresh_new_zynk_toast_context_for_update(&update, &previous_toast);
-                self.emit_pane_state_update(&update);
-            }
-            self.sync_agent_metadata_deadline();
-            changed = true;
-        }
+        changed |= self.expire_due_metadata(now);
 
         if geometry_dirty || resized {
             self.pending_agent_resume_deadline = None;
@@ -407,6 +397,29 @@ impl App {
 
     pub(crate) fn sync_agent_metadata_deadline(&mut self) {
         self.agent_metadata_deadline = self.state.next_agent_metadata_expiry();
+    }
+
+    pub(crate) fn expire_due_metadata(&mut self, now: Instant) -> bool {
+        let Some(deadline) = self
+            .agent_metadata_deadline
+            .filter(|deadline| now >= *deadline)
+        else {
+            return false;
+        };
+        self.expire_metadata_at(deadline, now);
+        true
+    }
+
+    pub(crate) fn expire_metadata_at(&mut self, deadline: Instant, now: Instant) {
+        let previous_toast = self.state.toast.clone();
+        for update in self.state.expire_agent_metadata_at(deadline, now) {
+            self.refresh_new_zynk_toast_context_for_update(&update, &previous_toast);
+            self.emit_pane_state_update(&update);
+        }
+        for ws_idx in self.state.expire_metadata_tokens(now) {
+            self.emit_workspace_token_updated(ws_idx);
+        }
+        self.sync_agent_metadata_deadline();
     }
 
     pub(crate) fn tick_selection_autoscroll(&mut self, now: Instant) {
@@ -632,6 +645,71 @@ mod tests {
     use crate::workspace::Workspace;
 
     #[test]
+    fn m828a_monolithic_api_read_expires_workspace_tokens_first() {
+        let (mut app, _) = test_app_with_pane();
+        let workspace_id = app.public_workspace_id(0);
+        let request = serde_json::from_value::<crate::api::schema::Request>(serde_json::json!({
+            "id": "m828a-seed", "method": "workspace.report_metadata", "params": {
+                "workspace_id": workspace_id, "source": "user:runtime", "ttl_ms": 20,
+                "tokens": {"status": "due"}
+            }
+        }));
+        assert!(
+            request.is_ok(),
+            "workspace report JSON refused: {request:?}"
+        );
+        let response: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(request.unwrap())).unwrap();
+        assert_eq!(response["result"]["type"], "ok");
+        let deadline = app.agent_metadata_deadline.expect("workspace deadline");
+        let limit = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            assert!(
+                Instant::now() < limit,
+                "workspace deadline wait exceeded bound"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            serde_json::to_value(app.workspace_info(0)).unwrap()["tokens"]["status"],
+            "due"
+        );
+        let sequence = app.event_hub.current_sequence();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: serde_json::from_value(serde_json::json!({
+                "id": "m828a-read", "method": "workspace.get", "params": {"workspace_id": workspace_id}
+            })).unwrap(),
+            respond_to,
+            caller: crate::api::ApiCaller::default(),
+        });
+        let response: serde_json::Value =
+            serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
+                .unwrap();
+        assert_eq!(response["id"], "m828a-read");
+        assert_eq!(response["result"]["type"], "workspace_info");
+        assert!(
+            response["result"]["workspace"].get("tokens").is_none(),
+            "{response}"
+        );
+        assert_eq!(app.agent_metadata_deadline, None);
+        let events = app
+            .event_hub
+            .events_after(sequence)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            vec![serde_json::json!({
+                "event": "workspace_metadata_updated", "data": {
+                    "type": "workspace_metadata_updated", "workspace": response["result"]["workspace"]
+                }
+            })]
+        );
+    }
+
+    #[test]
     fn hidden_render_attempt_keeps_presentation_cadence_available() {
         let (mut app, _) = test_app_with_pane();
         let initial_presentation = Instant::now();
@@ -650,6 +728,122 @@ mod tests {
         let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "test interrupt");
 
         assert!(retain_detached_process_after_wait(42, Err(interrupted)));
+    }
+
+    #[test]
+    fn m828a_scheduled_expiry_preserves_agent_presentation_and_workspace_tokens() {
+        use crate::api::schema::{EventData, EventKind};
+        use crate::events::AppEvent;
+
+        let (mut app, pane_id) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        app.next_resize_poll = Instant::now() + Duration::from_secs(3600);
+        app.handle_internal_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "zynk:pi".into(),
+            agent_label: "pi".into(),
+            state: crate::detect::AgentState::Working,
+            message: None,
+            custom_status: None,
+            seq: None,
+            session_ref: None,
+        });
+        app.handle_internal_event(AppEvent::HookMetadataReported {
+            pane_id,
+            source: "user:pi-display".into(),
+            agent_label: Some("pi".into()),
+            applies_to_source: Some("zynk:pi".into()),
+            title: Some("temporary title".into()),
+            display_agent: Some("display pi".into()),
+            custom_status: Some("short lived".into()),
+            state_labels: std::collections::HashMap::from([(
+                "working".into(),
+                "busy label".into(),
+            )]),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_custom_status: false,
+            clear_state_labels: false,
+            seq: Some(4),
+            ttl: Some(Duration::from_secs(60)),
+        });
+        let pane_deadline = app.agent_metadata_deadline.expect("presentation deadline");
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.state, crate::detect::AgentState::Working);
+        assert!(terminal.agent_metadata.contains_key("user:pi-display"));
+        assert_eq!(
+            terminal.effective_custom_status().as_deref(),
+            Some("short lived")
+        );
+        let authority = terminal.hook_authority.clone();
+        let identity = terminal.hook_identity.clone();
+        let report = serde_json::from_value(serde_json::json!({
+            "id": "co-expiry", "method": "workspace.report_metadata", "params": {
+                "workspace_id": app.state.workspaces[0].id, "source": "user:build",
+                "ttl_ms": 1000, "seq": 2, "tokens": {"build": "ready"}
+            }
+        }))
+        .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(report)).unwrap();
+        assert_eq!(response["result"]["type"], "ok");
+        let token_deadline = app.state.workspaces[0]
+            .metadata_tokens
+            .next_expiry()
+            .unwrap();
+        assert_eq!(
+            app.agent_metadata_deadline,
+            Some(pane_deadline.min(token_deadline))
+        );
+        app.state.toast = Some(state::ToastNotification {
+            kind: state::ToastKind::Finished,
+            title: "existing toast".into(),
+            context: "existing context".into(),
+            position: None,
+            target: Some(state::ToastTarget {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                pane_id,
+            }),
+        });
+        app.toast_deadline = Some(app.next_resize_poll);
+        let toast = app.state.toast.clone();
+        let start = app.event_hub.current_sequence();
+        let now = pane_deadline.max(token_deadline) + Duration::from_nanos(1);
+        assert!(app.handle_scheduled_tasks(now, false));
+        let terminal = &app.state.terminals[&terminal_id];
+        assert!(
+            terminal.agent_metadata.is_empty(),
+            "stored presentation must be purged"
+        );
+        assert_eq!(terminal.effective_custom_status(), None);
+        assert_eq!(terminal.state, crate::detect::AgentState::Working);
+        assert_eq!(terminal.hook_authority, authority);
+        assert_eq!(terminal.hook_identity, identity);
+        assert_eq!(app.state.toast, toast);
+        assert_eq!(app.agent_metadata_deadline, None);
+        assert!(app.state.workspaces[0].metadata_tokens.values().is_empty());
+        let events = app.event_hub.events_after(start);
+        assert_eq!(events.len(), 2, "fresh suffix only: {events:?}");
+        assert_eq!(events[0].1.event, EventKind::PaneAgentStatusChanged);
+        assert!(
+            matches!(&events[0].1.data, EventData::PaneAgentStatusChanged {
+            agent_status: crate::api::schema::AgentStatus::Working,
+            title: None, display_agent: None, custom_status: None, state_labels, ..
+        } if state_labels.is_empty())
+        );
+        assert_eq!(events[1].1.event, EventKind::WorkspaceMetadataUpdated);
+        assert!(
+            matches!(&events[1].1.data, EventData::WorkspaceMetadataUpdated { workspace }
+            if workspace.tokens.is_empty() && workspace.workspace_id == app.state.workspaces[0].id)
+        );
+        let after = app.event_hub.current_sequence();
+        assert!(!app.handle_scheduled_tasks(now, false));
+        assert!(app.event_hub.events_after(after).is_empty());
     }
 
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {

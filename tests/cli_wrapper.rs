@@ -4794,6 +4794,179 @@ fn m814_cli_snapshot_sends_exact_request_and_preserves_complete_response() {
 }
 
 #[test]
+fn m828a_workspace_metadata_cli_preserves_request_and_success_json() {
+    let response = serde_json::json!({
+        "id": "cli:workspace:report-metadata", "result": {"type": "ok"},
+        "future_envelope": {"retained": true}
+    });
+    let (request, output) = mock_snapshot_cli(
+        &[
+            "workspace",
+            "report-metadata",
+            "w7",
+            "--source",
+            "user:build",
+            "--seq",
+            "0",
+            "--ttl-ms",
+            "500",
+            "--token",
+            "build=old",
+            "--clear-token",
+            "build",
+            "--token",
+            "build=ok=x",
+            "--token",
+            "old=x",
+            "--clear-token",
+            "old",
+        ],
+        response.clone(),
+    );
+    assert_eq!(
+        request,
+        Some(serde_json::json!({
+            "id": "cli:workspace:report-metadata", "method": "workspace.report_metadata",
+            "params": {"workspace_id": "w7", "source": "user:build", "seq": 0, "ttl_ms": 500,
+                "tokens": {"build": "ok=x", "old": null}}
+        })),
+        "status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn m828a_workspace_metadata_cli_preserves_structured_error() {
+    let response = serde_json::json!({
+        "id": "cli:workspace:report-metadata",
+        "error": {"code": "metadata_token_limit", "message": "resource is full"},
+        "context": {"retained": "error envelope"}
+    });
+    let (request, output) = mock_snapshot_cli(
+        &[
+            "workspace",
+            "report-metadata",
+            "w7",
+            "--source",
+            "user:build",
+            "--token",
+            "build=x",
+        ],
+        response.clone(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        request,
+        Some(serde_json::json!({
+            "id": "cli:workspace:report-metadata", "method": "workspace.report_metadata",
+            "params": {"workspace_id": "w7", "source": "user:build", "tokens": {"build": "x"}}
+        }))
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stderr).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn m828a_workspace_metadata_cli_help_and_invalid_args_do_not_connect() {
+    for args in [
+        vec!["workspace", "report-metadata", "--help"],
+        vec!["workspace", "--help"],
+    ] {
+        let (request, output) = mock_snapshot_cli(&args, serde_json::json!({}));
+        assert!(request.is_none(), "help connected: {args:?}");
+        assert_eq!(output.status.code(), Some(0));
+        let help = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            help.contains("workspace report-metadata"),
+            "missing workspace metadata help: {help}"
+        );
+        for flag in ["--source", "--token", "--clear-token", "--seq", "--ttl-ms"] {
+            assert!(help.contains(flag), "{flag}: {help}");
+        }
+    }
+    for (tail, exit) in [
+        (vec![], 2),
+        (vec!["w7"], 2),
+        (vec!["w7", "--source"], 2),
+        (vec!["w7", "--source", " ", "--token", "x=y"], 2),
+        (vec!["w7", "--token", "x=y"], 2),
+        (vec!["w7", "--source", "user:build"], 2),
+        (vec!["w7", "--source", "user:build", "--token"], 2),
+        (
+            vec!["w7", "--source", "user:build", "--token", "missing-equals"],
+            2,
+        ),
+        (
+            vec!["w7", "--source", "user:build", "--token", "=empty-name"],
+            2,
+        ),
+        (vec!["w7", "--source", "user:build", "--clear-token"], 2),
+        (
+            vec![
+                "w7",
+                "--source",
+                "user:build",
+                "--token",
+                "x=y",
+                "--seq",
+                "bad",
+            ],
+            1,
+        ),
+        (
+            vec![
+                "w7",
+                "--source",
+                "user:build",
+                "--token",
+                "x=y",
+                "--ttl-ms",
+                "bad",
+            ],
+            1,
+        ),
+        (
+            vec![
+                "w7",
+                "--source",
+                "user:build",
+                "--token",
+                "x=y",
+                "--unknown",
+            ],
+            2,
+        ),
+    ] {
+        let mut args = vec!["workspace", "report-metadata"];
+        args.extend(tail);
+        let (request, output) = mock_snapshot_cli(&args, serde_json::json!({}));
+        assert!(request.is_none(), "invalid args connected: {args:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.stderr.is_empty(), "{args:?}");
+    }
+}
+
+#[test]
 fn m814_cli_snapshot_preserves_server_error_and_exit_status() {
     let response = serde_json::json!({
         "id": "cli:api:snapshot", "future_envelope": "retained",

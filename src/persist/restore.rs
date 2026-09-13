@@ -436,6 +436,8 @@ fn restore_workspace(
             cached_git_ahead_behind: None,
             cached_git_space,
             worktree_space,
+            metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
+            metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
             next_public_pane_number,
             next_public_tab_number,
@@ -964,6 +966,79 @@ mod tests {
 
     fn test_restore_shell() -> &'static str {
         "/bin/sh"
+    }
+
+    #[tokio::test]
+    async fn m828a_workspace_metadata_is_ephemeral_across_capture_and_restore() {
+        struct RestoredRuntimes(HashMap<TerminalId, TerminalRuntime>);
+        impl Drop for RestoredRuntimes {
+            fn drop(&mut self) {
+                for (_, runtime) in self.0.drain() {
+                    runtime.shutdown();
+                }
+            }
+        }
+
+        let mut state = crate::app::AppState::test_new();
+        state.workspaces = vec![Workspace::test_new("ephemeral")];
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        let capture = |state: &crate::app::AppState| {
+            crate::persist::capture(
+                &state.workspaces,
+                &state.terminals,
+                &crate::terminal::TerminalRuntimeRegistry::new(),
+                state.active,
+                state.selected,
+                state.sidebar_width,
+                state.sidebar_section_split,
+                state.collapsed_space_keys.clone(),
+            )
+        };
+        let before = serde_json::to_value(capture(&state)).unwrap();
+        assert!(state.workspaces[0].metadata_tokens.patch(
+            HashMap::from([("build".into(), Some("ready".into()))]),
+            None,
+            std::time::Instant::now(),
+        ));
+        state.workspaces[0]
+            .metadata_token_sequences
+            .insert("user:build".into(), 9);
+        assert_eq!(
+            state.workspaces[0].metadata_tokens.values()["build"],
+            "ready"
+        );
+        let snapshot = capture(&state);
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(encoded, before);
+        let saved_workspace = &encoded["workspaces"][0];
+        for field in ["tokens", "metadata_tokens", "metadata_token_sequences"] {
+            assert!(
+                saved_workspace.get(field).is_none(),
+                "{field}: {saved_workspace}"
+            );
+        }
+        let (events, _event_rx) = mpsc::channel(32);
+        let (workspaces, terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let runtimes = RestoredRuntimes(runtimes);
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(runtimes.0.len(), 1);
+        assert!(workspaces[0].metadata_tokens.values().is_empty());
+        assert_eq!(workspaces[0].metadata_tokens.next_expiry(), None);
+        assert!(workspaces[0].metadata_token_sequences.is_empty());
     }
 
     #[test]

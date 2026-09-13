@@ -760,6 +760,17 @@ impl App {
         self.event_hub.push(event);
     }
 
+    pub(crate) fn emit_workspace_token_updated(&mut self, ws_idx: usize) {
+        // Token updates bypass plugin hooks so a hook cannot refresh its own
+        // token and recursively trigger workspace.updated.
+        self.event_hub.push(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorkspaceMetadataUpdated,
+            data: crate::api::schema::EventData::WorkspaceMetadataUpdated {
+                workspace: self.workspace_info(ws_idx),
+            },
+        });
+    }
+
     pub(crate) fn sync_focus_events(&mut self) {
         self.sync_focus_events_with_outer_event(None);
     }
@@ -991,6 +1002,9 @@ impl App {
             }
             Method::WorkspaceMove(params) => {
                 return self.handle_workspace_move(request.id, params);
+            }
+            Method::WorkspaceReportMetadata(params) => {
+                return self.handle_workspace_report_metadata(request.id, params);
             }
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target)

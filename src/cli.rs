@@ -37,6 +37,16 @@ pub enum CommandOutcome {
     NotCli,
 }
 
+pub(crate) fn parse_token_assignment(raw: &str) -> Result<(String, Option<String>), String> {
+    let Some((key, value)) = raw.split_once('=') else {
+        return Err("token must use NAME=VALUE".into());
+    };
+    if key.is_empty() {
+        return Err("token name must not be empty".into());
+    }
+    Ok((key.to_string(), Some(value.to_string())))
+}
+
 /// Parse a `KEY=VALUE` env assignment from CLI args (used by `zynk plugin pane open --env`).
 pub(crate) fn parse_env_assignment(raw: &str) -> Result<(String, String), String> {
     let Some((key, value)) = raw.split_once('=') else {

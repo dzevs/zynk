@@ -179,6 +179,42 @@ API tab renames immediately resize labels and click targets in the active
 workspace, including its inactive tabs. Renaming a background workspace's tab
 does not change the active tab bar, focus, or scroll-follow policy.
 
+`workspace.report_metadata` reports display-only workspace tokens. Use a current ID from
+`zynk workspace list`, for example
+`zynk workspace report-metadata "$WORKSPACE_ID" --source user:build --token build=ready --seq 0 --ttl-ms 5000`.
+Repeat `--token NAME=VALUE` or `--clear-token NAME`; the last occurrence for a key wins,
+and values may contain `=`. The CLI preserves the existing structured workspace response.
+The socket request has this shape (replace `WORKSPACE_ID` with the current ID):
+
+```json
+{"id":"workspace-display","method":"workspace.report_metadata","params":{"workspace_id":"WORKSPACE_ID","source":"user:build","seq":0,"ttl_ms":5000,"tokens":{"build":"ready","old":null}}}
+```
+
+Success is `{"id":"workspace-display","result":{"type":"ok"}}`. Reports patch 1-16
+distinct keys, with at most 32 keys stored per workspace after applying clears and sets together.
+Keys contain 1-32 ASCII letters, digits, `_` or `-`. Values are trimmed, stripped of control
+characters, truncated to 80 Unicode scalar values, then trimmed again; empty values and `null`
+clear a key. Omitted keys keep their values and deadlines. TTL is 1-86,400,000 milliseconds;
+omitting it makes the keys being set persistent for the live workspace and cancels their old TTLs.
+
+The trimmed source is 1-80 ASCII letters, digits, `:`, `.`, `_` or `-`, not authenticated identity
+or ownership: another source may overwrite the same keys. Optional `seq` starts at zero and
+must increase per source; stale numbers are successful no-ops after syntax validation.
+Without `seq`, reports neither allocate nor update sequence slots. A workspace retains at most
+32 sequenced sources, even after clearing or expiring all values. Validation or capacity errors
+leave that report's token and sequence state unchanged. Ordinary API processing can first expire
+previously due metadata independently of the report's outcome.
+
+`workspace.get`, `workspace.list`, and live `session.snapshot` expose nonempty `tokens` maps.
+Subscribe with `{"subscriptions":[{"type":"workspace.metadata_updated"}]}` for full workspace
+snapshots after changed reports and scheduled expiry. Event envelope/data tags use
+`workspace_metadata_updated`. No-op reports do not emit; refreshing a TTL is a change.
+This is an ordinary retained-history subscription, not a plugin hook, initial-state probe,
+lossless log, or atomic snapshot/subscribe operation. Seed from `workspace.get`.
+Values and sequence slots are excluded from saved session snapshots and handoff payloads;
+report again after restart or handoff. Reporting, querying and subscribing are available here;
+configurable token display is staged separately. Tokens do not grant identity or message receipt.
+
 The socket API accepts `events.subscribe` with `{"subscriptions":[{"type":"layout.updated"}]}`.
 Updates contain the target tab's current pane/split geometry, focus, and zoom after the supported
 pane/layout and creation operations. This is not an exhaustive TUI redraw stream or a plugin hook.

@@ -43,7 +43,8 @@ impl App {
     ) -> PluginInvocationContext {
         match &event.data {
             EventData::WorkspaceCreated { workspace }
-            | EventData::WorkspaceUpdated { workspace } => {
+            | EventData::WorkspaceUpdated { workspace }
+            | EventData::WorkspaceMetadataUpdated { workspace } => {
                 self.plugin_context_for_workspace_info(workspace, correlation_id)
             }
             EventData::WorkspaceClosed { workspace_id } => self

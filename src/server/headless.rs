@@ -451,6 +451,11 @@ impl HeadlessServer {
             }
 
             // 3. Drain API requests.
+            if self.app.expire_due_metadata(Instant::now()) {
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.metadata_expiry");
+            }
             if self.drain_api_requests_with_shutdown_check() {
                 needs_render = true;
                 needs_full_render = true;
@@ -3011,6 +3016,8 @@ impl HeadlessServer {
             return false;
         }
 
+        let metadata_expired = self.app.expire_due_metadata(Instant::now());
+
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
             let response = match self.perform_live_handoff(params.clone()) {
                 Ok(()) => serde_json::to_string(&api::schema::SuccessResponse {
@@ -3054,7 +3061,7 @@ impl HeadlessServer {
             _ => {}
         }
 
-        let mut changed = api::request_changes_ui(&msg.request);
+        let mut changed = metadata_expired | api::request_changes_ui(&msg.request);
         let skip_default_workspace = skip_default_workspace_for_request
             || matches!(
                 &msg.request.method,
@@ -4044,13 +4051,7 @@ impl HeadlessServer {
             .agent_metadata_deadline
             .filter(|deadline| now >= *deadline)
         {
-            let previous_toast = self.app.state.toast.clone();
-            for update in self.app.state.expire_agent_metadata_at(deadline, now) {
-                self.app
-                    .refresh_new_zynk_toast_context_for_update(&update, &previous_toast);
-                self.app.emit_pane_state_update(&update);
-            }
-            self.app.sync_agent_metadata_deadline();
+            self.app.expire_metadata_at(deadline, now);
             changed = true;
         }
 
@@ -4683,6 +4684,180 @@ mod tests {
             }),
             RetainedRenderPlan::HiddenPty
         );
+    }
+
+    struct M828aHeadlessFixture {
+        server: Option<HeadlessServer>,
+        directory: PathBuf,
+    }
+
+    impl Drop for M828aHeadlessFixture {
+        fn drop(&mut self) {
+            drop(self.server.take());
+            let _ = fs::remove_dir(&self.directory);
+        }
+    }
+
+    fn m828a_headless_fixture() -> M828aHeadlessFixture {
+        let server = test_headless_server();
+        let directory = server.client_socket_path.parent().unwrap().to_path_buf();
+        M828aHeadlessFixture {
+            server: Some(server),
+            directory,
+        }
+    }
+
+    fn m828a_workspace_snapshot(app: &mut crate::app::App) -> serde_json::Value {
+        // Raw App dispatch intentionally bypasses the headless wrapper under test.
+        let response = app.handle_api_request(api::schema::Request {
+            id: "m828a-snapshot".into(),
+            method: api::schema::Method::WorkspaceGet(api::schema::WorkspaceTarget {
+                workspace_id: app.state.workspaces[0].id.clone(),
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["result"]["type"], "workspace_info");
+        value["result"]["workspace"].clone()
+    }
+
+    #[test]
+    fn m828a_headless_scheduled_expiry_removes_workspace_tokens() {
+        let mut fixture = m828a_headless_fixture();
+        let server = fixture.server.as_mut().unwrap();
+        server.app.state.workspaces =
+            vec![crate::workspace::Workspace::test_new("scheduled tokens")];
+        server.app.state.active = Some(0);
+        let report = serde_json::from_value(serde_json::json!({
+            "id": "scheduled", "method": "workspace.report_metadata", "params": {
+                "workspace_id": server.app.state.workspaces[0].id, "source": "user:build",
+                "ttl_ms": 20, "seq": 0, "tokens": {"status": "due"}
+            }
+        }))
+        .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&server.app.handle_api_request(report)).unwrap();
+        assert_eq!(response["result"]["type"], "ok");
+        assert_eq!(
+            m828a_workspace_snapshot(&mut server.app)["tokens"]["status"],
+            "due"
+        );
+        let deadline = server
+            .app
+            .agent_metadata_deadline
+            .expect("workspace deadline");
+        let start = server.app.event_hub.current_sequence();
+        server.handle_scheduled_tasks_headless(deadline, false);
+        let workspace = m828a_workspace_snapshot(&mut server.app);
+        assert!(
+            workspace.get("tokens").is_none(),
+            "expired snapshot: {workspace}"
+        );
+        assert!(server.app.state.workspaces[0]
+            .metadata_tokens
+            .values()
+            .is_empty());
+        assert_eq!(
+            server.app.state.workspaces[0].metadata_token_sequences["user:build"],
+            0
+        );
+        assert_eq!(server.app.agent_metadata_deadline, None);
+        let events = server
+            .app
+            .event_hub
+            .events_after(start)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            vec![serde_json::json!({
+                "event": "workspace_metadata_updated", "data": {
+                    "type": "workspace_metadata_updated", "workspace": workspace
+                }
+            })]
+        );
+        let after = server.app.event_hub.current_sequence();
+        assert!(!server.handle_scheduled_tasks_headless(deadline, false));
+        assert!(server.app.event_hub.events_after(after).is_empty());
+    }
+
+    #[test]
+    fn m828a_headless_api_read_expires_tokens_after_shutdown_guard() {
+        for shutting_down in [false, true] {
+            let mut fixture = m828a_headless_fixture();
+            let server = fixture.server.as_mut().unwrap();
+            server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("tokens")];
+            server.app.state.active = Some(0);
+            let workspace_id = server.app.state.workspaces[0].id.clone();
+            let request = serde_json::from_value::<api::schema::Request>(serde_json::json!({
+                "id": "m828a-headless-seed", "method": "workspace.report_metadata", "params": {
+                    "workspace_id": workspace_id, "source": "user:runtime", "ttl_ms": 20,
+                    "tokens": {"status": "due"}
+                }
+            }));
+            assert!(
+                request.is_ok(),
+                "workspace report JSON refused: {request:?}"
+            );
+            let response: serde_json::Value =
+                serde_json::from_str(&server.app.handle_api_request(request.unwrap())).unwrap();
+            assert_eq!(response["result"]["type"], "ok");
+            let deadline = server
+                .app
+                .agent_metadata_deadline
+                .expect("workspace deadline");
+            let limit = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                assert!(
+                    Instant::now() < limit,
+                    "workspace deadline wait exceeded bound"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let before = m828a_workspace_snapshot(&mut server.app);
+            assert_eq!(before["tokens"]["status"], "due");
+            let sequence = server.app.event_hub.current_sequence();
+            server.shutting_down = shutting_down;
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            let changed = server.handle_api_request_with_shutdown_check_inner(api::ApiRequestMessage {
+                request: serde_json::from_value(serde_json::json!({
+                    "id": "m828a-headless-read", "method": "workspace.get", "params": {"workspace_id": workspace_id}
+                })).unwrap(),
+                respond_to,
+                caller: api::ApiCaller::default(),
+            }, true);
+            let response: serde_json::Value =
+                serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
+                    .unwrap();
+            assert_eq!(response["id"], "m828a-headless-read");
+            let events = server.app.event_hub.events_after(sequence);
+            if shutting_down {
+                assert!(!changed);
+                assert_eq!(response["error"]["code"], "server_unavailable");
+                assert_eq!(m828a_workspace_snapshot(&mut server.app), before);
+                assert_eq!(server.app.agent_metadata_deadline, Some(deadline));
+                assert!(events.is_empty());
+            } else {
+                assert_eq!(response["result"]["type"], "workspace_info");
+                assert!(
+                    response["result"]["workspace"].get("tokens").is_none(),
+                    "{response}"
+                );
+                assert_eq!(server.app.agent_metadata_deadline, None);
+                let events = events
+                    .into_iter()
+                    .map(|(_, event)| serde_json::to_value(event).unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    events,
+                    vec![serde_json::json!({
+                        "event": "workspace_metadata_updated", "data": {
+                            "type": "workspace_metadata_updated", "workspace": response["result"]["workspace"]
+                        }
+                    })]
+                );
+            }
+        }
     }
 
     fn test_headless_server() -> HeadlessServer {

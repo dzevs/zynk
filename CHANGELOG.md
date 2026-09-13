@@ -10,6 +10,12 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- `workspace.report_metadata` and `zynk workspace report-metadata` accept bounded,
+  display-only token patches with per-source sequences and optional expiry.
+  Workspace reads expose tokens; `workspace.metadata_updated` subscriptions report
+  full snapshots after changes and expiry, without plugin hooks or receipt authority.
+  Values and sequence slots reset on restart or handoff. Configurable display is
+  staged separately; pane metadata and custom-status behavior are unchanged here.
 - `zynk config check` prints full local configuration diagnostics without a
   running server or config writes. It exits 0 for valid or missing config,
   1 for diagnostics, and 2 for unsupported arguments; no JSON mode is provided.

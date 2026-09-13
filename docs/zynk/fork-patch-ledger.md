@@ -5554,3 +5554,158 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   hooks and exact-SHA verification precede Gate-2. No release build, Zig check,
   whole-M8 approval or operator merge/push/install/tag/publish/release/cleanup
   authorization follows.
+
+### M8-28A - Workspace metadata reporting (IMPLEMENTED / PENDING VERIFICATION)
+
+- Partial assigned source: `5cfe5e5e730246948b0c9428ad876b6938590aad` (PORT),
+  fuller patch SHA-256
+  `c2bc7452af1883eedefd670eee30dc7fb250b35e86845fd098408780f7123208`.
+  Parent: `0cf4251f759756b1a03e760c945f295429a2c002`. Gate-1
+  `msg_dde5ba49b0de93df` approves design `0cd834df`; preservation companion
+  `ffc5d2b5` is accepted by `msg_d8d04d95dc22b769`. Its eight qualified-name
+  corrections are bound separately by `022fa440`; original file/line anchors
+  and bodies were correct. Checkpoint-14 approval and later precisions remain
+  individual native records, not rewritten verdicts or transferred approvals.
+- Roadmap `64e9b51d` and inventory `962ad33d` give every one of the source's
+  75 paths a disposition: 28 ADAPT, 15 DOC, 24 STAGE, 8 RETAIN. A implements
+  only workspace reporting and its usable shared dependencies in 24 production
+  paths. The typed CLI runtime adapter is a fork dependency outside those 75.
+  Co-occurring pane/title/sidebar/custom-status changes are not prerequisites
+  merely because they occur in the same patch; B-E retain their own Gate-1s.
+- A discharges no origin. Twenty archived origins remain; unions stay 98 M8 /
+  34 M9, with v2 and the creator overlay unchanged. M8-28's six primaries are
+  reserved: 49e333ae (D-M6-3) for C; 5b91dae1, cc9fa475, d4e0dd3d, 7db744ab,
+  d2c317ad (D-M5-4) for D. `4cd1481a` is in overlay.context_only, not entries:
+  already-landed Rose Pine context, not a seventh pending remainder. Its palette
+  effect is part, not all, of D's broader palette-preservation obligation.
+- D must preserve the fork glyph grammar and palette behavior as well as add
+  configurable rows; its further subdivision awaits executable preflight.
+  Even after D, D-M5-4 stays open at M8-33 for a0678a38 and M9-12 for the two
+  secondary adaptations of d4e0dd3d/d2c317ad. M8-65's six protocol-19 assertion
+  updates and M8-37's inherited pane_get error-fidelity/control conversion
+  remain due. Preservation in A is not discharge of any of these obligations.
+- Add the source MetadataTokens store and validation helpers, workspace fields,
+  report handler, JSON/schema variants, event mapping and manual CLI/completion.
+  Source/key/token/TTL admission stays workspace-only: trimmed ASCII source
+  1..80, ASCII key 1..32, 1..16 keys per patch, 32 keys per workspace, values
+  sanitized and bounded to 80 Unicode scalars, TTL 1..86400000 ms or absent.
+  Empty normalized values and null clear; omission retains a key and its TTL.
+  Net clear-plus-set capacity is checked before sequence acceptance; errors
+  do not partially mutate report state or advance its source sequence.
+- Syntax validation precedes stale-sequence success/no-op; resource limits
+  follow it. Sequence zero is valid, repeats/lower numbers are stale, and
+  unsequenced reports neither allocate nor overwrite fences. At most 32 source
+  slots survive clearing/expiry within one live workspace-state generation.
+  Source labels confer no ownership: another source can overwrite a key.
+  No authentication, delivery, receipt, caller or hook-authority grant is added.
+- Values and sequence slots are ephemeral. All workspace constructors and
+  restore_workspace initialize empty fields; disk snapshot and handoff formats
+  are unchanged. T17 captures equal serialized snapshots then uses real restore
+  with explicitly shut-down runtimes. This is not a live-handoff execution test;
+  unchanged payload/reconstruction boundaries carry the handoff accounting.
+  Live session.snapshot uses WorkspaceInfo and does expose nonempty tokens.
+- values() does not consult the clock: snapshots stay stable until explicit
+  expiry. Patches compare value and deadline; refreshed TTL changes emit, an
+  identical value/deadline does not, and no-TTL replacement cancels old expiry.
+  Sweep uses actual now and removes all due workspace entries, then emits one
+  full WorkspaceInfo per changed workspace. Repeated empty sweeps emit nothing.
+  Accepted no-op reports can advance sequence without an event.
+- Subscription.type and EventKind.dot_name use workspace.metadata_updated;
+  EventEnvelope.event and EventData.type use workspace_metadata_updated. The
+  direct EventHub route bypasses plugin dispatch and the hook allowlist remains
+  unchanged. Ordinary retained-history semantics apply: no initial-state probe,
+  new lossless log, workspace filter or EventMatch/events.wait selector. Seed
+  from workspace.get; no atomic snapshot-plus-subscribe guarantee is introduced.
+- Consolidate both old presentation-expiry blocks after comparing their full
+  bodies modulo receiver, indentation and one receiver-line wrap. Removing
+  only the new workspace loop reconstructs the old runtime body: prior-toast
+  capture, old expiry, per-update toast refresh then pane emission, and deadline
+  resynchronization keep their order. T27 checks stored presentation removal,
+  the fresh two-event suffix, lifecycle/authority/identity and an existing toast.
+  It is not a refresh invocation/count/order trace; source comparison carries
+  those properties. All twelve named old preservation controls remain raw.
+- Ordinary API wrappers and main-loop drains sweep before reads. Headless
+  shutdown refusal remains before expiry; forwarding, bounded drain order and
+  special-method branches stay intact. Raw private App dispatch need not sweep.
+  Therefore rejection/no-op atomicity describes the report, not an assertion
+  that an independent pre-request sweep cannot change previously due metadata.
+  Old pane TTL validation and internal zero-duration behavior are unchanged;
+  P10's direct TerminalState test is not pane-handler validation evidence.
+- B is expected to extend expire_metadata_tokens(now)'s Vec<usize> result to
+  the source's pane/workspace tuple, retaining all A workspace semantics and
+  controls. B also extends validators/parser/schemas, projection and event arms.
+  A introduces no empty pane vector or dead pane branch. B must preserve the
+  separate metadata_report_sequences handoff fence; A does not pre-adapt it.
+  E's pane custom-status retirement waits for B reporting and D display. No
+  retirement occurs in A; ADR 0014 is immutable, with its historical field-list
+  staleness to be recorded when E actually retires that field, not asserted now.
+- CLI repeats use last-key-wins and split_once('=') keeps embedded equals.
+  The fork's cli:workspace:report-metadata request uses print_method_response,
+  preserving the existing structured workspace success/error envelope instead
+  of upstream silent success. This is not a claim about the broader F4 field
+  contract of every legacy workspace command. The leaf-help guard and numeric
+  parsing/error conventions remain unchanged. Completion mirrors manual flags.
+- Twenty-nine distinct additions: fifteen parent-compatible and fourteen
+  post-interface, in existing binary/integration harnesses; zero new harnesses
+  or support-recompilation growth. Parent evidence assembles nineteen valid
+  outcomes and eight missing-selector outcomes on identical source: fourteen
+  new failures, one new characterization, twelve old passes. No old pass is
+  growth. Most reds are public decode/command absence, not fine validation or
+  expiry discrimination. Every unreached group is listed in the parent record.
+- Child and restored focused runs are 41/41: all 29 additions plus 12 named
+  preservation controls. Child record `1f7f4527` binds each of the fifteen IDs
+  to selected passing tests, raw-identical parent bodies and explicit fixed
+  rows/branches. T05's twelve invalid/retry rows, both T11 modes, T14's two help
+  and thirteen invalid rows, T12/T13 envelopes and T16 set/expiry now execute
+  and pass. T16 sends no intervening read request. This is source-control-flow
+  inference, not branch tracing; no wait/poll iteration counts are claimed.
+- Twenty-eight one-site mutants use the full 41-name population without
+  narrowing or disjointness claims. M01-M28 failure counts are
+  10/5/4/2/1/2/2/1/4/2/11/3/4/1/2/1/6/7/2/1/1/1/2/1/1/1/1/1.
+  All intended diagnostic locations and complete pass/fail names reconcile;
+  each test run exits 100 and each source hash is restored. M14 targets T09's
+  delayed second-workspace removal; M21/M22 the normal wrappers; M26 T11's
+  separate shutdown row. These are observed pairings, not independent killers.
+- Counts include non-intended crossings: M11/M17 also hit missing-deadline
+  expect/unwrap preconditions; M11/M18/M19 hit T16's bounded receive panic,
+  not a nextest TIMEOUT or intended assertion. M01 stops T16 at the set snapshot,
+  leaving expiry unreached. M23 preserves T12's request/exit/stderr before its
+  empty-stdout JSON comparison fails; T13 crosses at exit status. M24/M25 stop
+  at request equality before stdout. Crossings are classified per diagnostic,
+  never substituted for the intended property's evidence or green reachedness.
+- Retain parent instruments: newline-crossing attribute regex, private-App-call
+  compile failure, and the eight #[path]-relocated qualified-name corrections.
+  The nineteen valid parent outcomes were not rerolled. Retain the child compile
+  failure's four diagnostics across three new-test signature mistakes, fixed
+  in tests without widening production visibility. No compile red is claimed.
+  Companion locator faults and failed predecessor logs remain separately bound.
+- Retain the consolidation extractor's earlier-toast-capture fault and corrected
+  unique-loop boundary. Mutation preflight refused a patch name shared by the
+  store method and test helper; production-only selection resolves it. M21/M22
+  diagnostic predictions were corrected before any run. None changed Rust.
+- M01 completed all 41 outcomes and stamped test exit100 before the outer pipe
+  capture stalled. Descriptor evidence records the owned tee pipe's write end
+  held by sccache. Only verified owned driver/tee processes were terminated;
+  driver exit143 is not a test result. M01's exact completed log was retained
+  without rerun and its verified mutant restored. M02-M28 capture directly to
+  file descriptors with unchanged runner settings; original instruments remain.
+  Optional socket-fixture ECHILD status probes remain observed/unclassified,
+  not captured server exit statuses or cause claims. No evidence is swept.
+- Bounded source reconstruction reverses only enumerated edits and reproduces
+  all 25 old Rust files raw. Of 723 old test bodies in those files, 720 are raw
+  equal; the three adapted bodies are the WorkspaceInfo fixture, hook-name
+  expectation and CLI population fixture. No assertion start or test attribute
+  is removed among the 28 deleted lines. Eight retained production regions or
+  functions match upstream with the CLI's explicit adapter/branding exception.
+- Two source-audit instruments stopped before accepting evidence: the first
+  assumed a separator after the last test in a module; the second passed the
+  preflight's source record rather than its SHA to Git. The corrected reader
+  validates source.sha and requests a blob explicitly. Both scripts and failed
+  logs remain; neither failure changed Rust or required a test rerun.
+- README documents reporting/query/subscription, limits, sequences, cross-source
+  overwrite, expiry and restart/handoff state; configurable display is staged.
+  CHANGELOG records A only. The source predates upstream relicensing by ancestry;
+  existing license headers and NOTICE stay unchanged. Full source audit, normal
+  check/content gates/hooks and exact-SHA verification precede Gate-2. No release
+  build, Zig verification, whole-M8 approval, B-E approval or operator merge,
+  push, install, tag, publish, release or shared-cleanup authorization follows.
