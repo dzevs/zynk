@@ -4814,3 +4814,55 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   No Cargo/advisory, schema, App/server/input, IPC, caller authority or protocol
   19 delta. Full check, gate and normal hooks precede the exact commit;
   release/Zig and whole-M8 Gate-2/Gate-3 remain owed. No operator action.
+
+### M8-18 - Render-aware crash control (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `e713949ca51facf1e40c584b271f812f527bc522` (PORT, test-only
+  Linux harness adaptation). Parent: `bd1c23b06fed4805e14d71be9be23fdeb2c45c98`.
+  Preserved patch SHA-256:
+  `f319f1519e127c241073bfef41608f4265040643e8431b2b33c985f6c48211a3`.
+  Gate-1 `msg_0f263e3d8189e92f` binds preserved design `8087571b`.
+  Preflight verifies client_mode.rs blob 17498699 is identical at M8-17
+  and approved checkpoint 07. No forward creator or deferred arrival needed.
+- The existing real crash control used any nonempty read as readiness, so
+  setup bytes alone satisfied its claim to have received a frame. Its parent
+  run passes and is characterization only, not behavioral red-first evidence.
+  Require accumulated fixture render indicators: U+2500, workspace, pane or
+  terminal, refusing zynk: errors before matching those words. Retain raw
+  bytes across reads before UTF-8 conversion, including split scalars/words.
+  These indicators are fixture heuristics, not a frame decoder, authenticated
+  identity or receipt boundary. Failure diagnostics include attach output.
+- All three observation loops formerly performed blocking PTY reads inside
+  outer deadlines. Narrowing readiness alone would retain that hang hazard.
+  Set O_NONBLOCK on the owned test master via checked F_GETFL/F_SETFL,
+  preserving other flags; portable-pty 0.9.0 clones that same open file
+  description and propagates WouldBlock, mapping only EIO to EOF. No new
+  reader thread, raw-FD ownership transfer or production PTY flag change.
+  Existing SpawnedZynk PID/master ownership and bounded reaping stay intact.
+- Attach, client-exit progress and trailing-output reads distinguish EOF,
+  WouldBlock, Interrupted and unexpected errors, with no blocking read hiding
+  an observation deadline. Exit polling continues after reader EOF; output is
+  drained while the child runs. These budgets are not scheduling guarantees.
+  Preserve real server SIGKILL after readiness, nonzero client exit, explicit
+  case-insensitive lost-connection text, server wait and private-base cleanup.
+  No ignored test, signal downgrade, synthetic disconnect or constant outcome.
+- Three new controls pin non-render/error refusal, each accepted indicator,
+  split raw-byte accumulation, and kernel-observed O_NONBLOCK followed by
+  WouldBlock on an empty PTY with its slave open. The kernel flag is asserted
+  before reading. Five compiled one-site mutants fail intended assertions;
+  removing O_NONBLOCK runs only that pre-read control, never the real crash
+  fixture. No timeout or abort is counted as a kill. Actual crossing kills
+  and restored-source hashes are retained; all nineteen client-mode tests pass.
+- Source audit `d5fb290c` verifies the entire pre-existing file outside the
+  changed crash body is byte-identical, plus the actual helper/accumulated-byte
+  call sites and all three explicit read-outcome matches. It is not a general
+  Rust AST proof or dynamic execution of every Interrupted/error branch.
+  Test attributes grow 10 to 13; assertions 31 to 40; no new test binary or
+  recompiled support-test growth. The first audit script wrongly required a
+  semicolon after all three append expressions; two are match-arm expressions
+  ending with commas. That failed instrument and source are preserved; v2
+  counts expressions independently of their terminator, with no Rust change.
+- Production source, dependencies, protocol 19, CLI/help/completion and root
+  feature documentation are unchanged: no user-visible feature or advisory
+  delta claimed. Full check, gate and normal hooks accompany the commit.
+  M8-17/18 remain pending exact-SHA Gate-2; no whole-M8 or operator approval.

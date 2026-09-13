@@ -489,6 +489,101 @@ fn server_unreachable_shows_clear_error() {
     cleanup_test_base(&base);
 }
 
+fn crash_fixture_nonblocking_reader(master: &dyn MasterPty) -> Box<dyn Read + Send> {
+    let fd = master.as_raw_fd().expect("client fixture master FD");
+    // SAFETY: the test owns this live master; fcntl neither closes nor transfers it.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert_ne!(
+        flags,
+        -1,
+        "get PTY flags: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: preserve existing status flags on the same owned open file description.
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    assert_ne!(
+        result,
+        -1,
+        "set PTY flags: {}",
+        std::io::Error::last_os_error()
+    );
+    master.try_clone_reader().expect("clone client PTY reader")
+}
+
+fn crash_fixture_has_rendered_content(bytes: &[u8]) -> bool {
+    // Fixture indicators only, not a frame decoder or an identity boundary.
+    let output = String::from_utf8_lossy(bytes).to_lowercase();
+    if output.contains("zynk:") {
+        return false;
+    }
+    output.contains('\u{2500}')
+        || output.contains("workspace")
+        || output.contains("pane")
+        || output.contains("terminal")
+}
+
+#[test]
+fn crash_fixture_render_indicators_reject_setup_and_errors() {
+    for output in [
+        "",
+        "\x1b[?1049h\x1b[2J\x1b[H",
+        "arbitrary bytes",
+        "zynk 3.1.0",
+        "zynk: terminal setup failed",
+        "\x1b[0mZYNK: workspace pane terminal failed",
+    ] {
+        assert!(
+            !crash_fixture_has_rendered_content(output.as_bytes()),
+            "not render readiness: {output:?}"
+        );
+    }
+    for output in ["\u{2500}", "workspace", "pane", "terminal"] {
+        assert!(
+            crash_fixture_has_rendered_content(output.as_bytes()),
+            "expected fixture indicator: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn crash_fixture_render_indicators_span_reads() {
+    for marker in ["workspace", "pane", "terminal", "\u{2500}"] {
+        for split in 1..marker.len() {
+            let mut output = b"\x1b[0m".to_vec();
+            output.extend_from_slice(&marker.as_bytes()[..split]);
+            assert!(
+                !crash_fixture_has_rendered_content(&output),
+                "incomplete marker {marker:?} at {split}"
+            );
+            output.extend_from_slice(&marker.as_bytes()[split..]);
+            assert!(
+                crash_fixture_has_rendered_content(&output),
+                "accumulated marker {marker:?} at {split}"
+            );
+        }
+    }
+}
+
+#[test]
+fn crash_fixture_reader_is_nonblocking_before_any_read() {
+    let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    let mut reader = crash_fixture_nonblocking_reader(pair.master.as_ref());
+    let fd = pair.master.as_raw_fd().unwrap();
+    // SAFETY: the pair owns the live master, and the slave remains open with no output.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert_ne!(flags, -1);
+    assert_ne!(
+        flags & libc::O_NONBLOCK,
+        0,
+        "assert before any possibly blocking read"
+    );
+    let mut buf = [0u8; 1];
+    assert_eq!(
+        reader.read(&mut buf).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
 #[test]
 fn server_crash_after_attach_causes_lost_connection_error() {
     // attach a real thin client connection, kill server unexpectedly,
@@ -508,35 +603,44 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     // terminal setup paths are exercised.
     let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
 
-    // Prove attached before kill by waiting for at least one frame message.
-    let mut thin_reader = thin_client
-        ._master
-        .as_ref()
-        .expect("thin client master")
-        .try_clone_reader()
-        .expect("clone client PTY reader");
-    let attached_before_kill = {
+    // Wait for fixture render indicators, not merely terminal setup escapes.
+    let mut thin_reader = crash_fixture_nonblocking_reader(
+        thin_client
+            ._master
+            .as_ref()
+            .expect("thin client master")
+            .as_ref(),
+    );
+    let (attached_before_kill, attach_output) = {
         let deadline = Instant::now() + Duration::from_secs(8);
         let mut buf = [0u8; 4096];
         let mut seen = false;
+        let mut output = Vec::new();
         while Instant::now() < deadline {
             match thin_reader.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    let out = String::from_utf8_lossy(&buf[..n]);
-                    if !out.is_empty() {
+                Ok(0) => break,
+                Ok(n) => {
+                    output.extend_from_slice(&buf[..n]);
+                    if crash_fixture_has_rendered_content(&output) {
                         seen = true;
                         break;
                     }
                 }
-                Ok(_) => thread::sleep(Duration::from_millis(30)),
-                Err(_) => thread::sleep(Duration::from_millis(30)),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(30));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => panic!(
+                    "read client attach output: {err}; output: {:?}",
+                    String::from_utf8_lossy(&output)
+                ),
             }
         }
-        seen
+        (seen, String::from_utf8_lossy(&output).into_owned())
     };
     assert!(
         attached_before_kill,
-        "thin client must complete attach and receive frame before server crash"
+        "thin client must complete attach and receive frame before server crash; output: {attach_output:?}"
     );
 
     // Kill server unexpectedly.
@@ -548,20 +652,33 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     spawned.close_master();
 
     // Client should exit non-zero after connection loss.
-    let mut crash_output = String::new();
+    let mut crash_output = Vec::new();
+    let mut reader_ended = false;
     let exited = {
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut exited = false;
         while Instant::now() < deadline {
-            if thin_client.child.try_wait().ok().flatten().is_some() {
+            if thin_client
+                .child
+                .try_wait()
+                .expect("poll thin client status")
+                .is_some()
+            {
                 exited = true;
                 break;
             }
             // Keep draining client output so the process can progress to exit.
             let mut buf = [0u8; 1024];
-            if let Ok(n) = thin_reader.read(&mut buf) {
-                if n > 0 {
-                    crash_output.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if !reader_ended {
+                match thin_reader.read(&mut buf) {
+                    Ok(0) => reader_ended = true,
+                    Ok(n) => crash_output.extend_from_slice(&buf[..n]),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(err) => panic!(
+                        "read client exit output: {err}; output: {:?}",
+                        String::from_utf8_lossy(&crash_output)
+                    ),
                 }
             }
             thread::sleep(Duration::from_millis(20));
@@ -579,15 +696,21 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     // Drain trailing output and require the explicit user-visible lost-connection message.
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut buf = [0u8; 2048];
-    while Instant::now() < deadline {
+    while !reader_ended && Instant::now() < deadline {
         match thin_reader.read(&mut buf) {
-            Ok(n) if n > 0 => crash_output.push_str(&String::from_utf8_lossy(&buf[..n])),
-            Ok(_) => break,
-            Err(_) => break,
+            Ok(0) => break,
+            Ok(n) => crash_output.extend_from_slice(&buf[..n]),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => panic!(
+                "read trailing client output: {err}; output: {:?}",
+                String::from_utf8_lossy(&crash_output)
+            ),
         }
         thread::sleep(Duration::from_millis(30));
     }
 
+    let crash_output = String::from_utf8_lossy(&crash_output);
     let crash_output_lc = crash_output.to_lowercase();
     assert!(
         crash_output_lc.contains("lost connection to server"),
