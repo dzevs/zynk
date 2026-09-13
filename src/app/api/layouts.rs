@@ -352,11 +352,9 @@ impl App {
                 &self.terminal_runtimes,
             )
         });
-        self.resolve_new_terminal_cwd(follow_cwd.or_else(|| {
-            self.state
-                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
-                .and_then(|runtime| runtime.cwd())
-        }))
+        self.resolve_new_terminal_cwd(
+            follow_cwd.or_else(|| self.focused_pane_cwd_in_workspace(ws_idx)),
+        )
     }
 
     fn apply_layout_node_to_pane(
@@ -403,16 +401,11 @@ impl App {
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
         let host_terminal_appearance = self.state.host_terminal_appearance;
-        let cwd = pane.cwd.as_ref().map(PathBuf::from).or_else(|| {
-            self.state.workspaces.get(ws_idx).and_then(|ws| {
-                let tab_idx = ws.find_tab_index_for_pane(target_pane_id)?;
-                ws.tabs.get(tab_idx)?.cwd_for_pane(
-                    target_pane_id,
-                    &self.state.terminals,
-                    &self.terminal_runtimes,
-                )
-            })
-        });
+        let cwd = pane
+            .cwd
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| self.cwd_for_pane_in_workspace(ws_idx, target_pane_id));
         let extra_env = super::env::normalize_launch_env(pane.env.clone())
             .map_err(|(_, message)| message.to_string())?;
         let direction = match direction {

@@ -4173,3 +4173,58 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   the new handoff daemon test module preceded production items. Move that
   unchanged module to EOF, with no allow attribute or production change, then
   rerun the full check. The failed invocation remains evidence, not a test pass.
+
+### M8-08 - Cached Creation CWD (2026-09-13)
+
+- Source: `48d58648aefcc59964a99be9c23778fe69346663`, pre-relicense PORT.
+  The two App lookup helpers resolve the owning workspace/tab and delegate to
+  existing Tab::cwd_for_pane: runtime CWD first, cached TerminalState.cwd second.
+  All four production adaptations land: tab creation, layout-root fallback,
+  pane split and layout split. The two split substitutions preserve the prior
+  lookup population; only tab/new-layout gain the missing cached fallback.
+  Workspace identity/seed meaning is unchanged. No forward creator is needed;
+  the M8-07 delta was rechecked against the complete CWD path population first.
+- Adapt upstream controls into one cfg(test) fixture with distinct workspace,
+  first-tab seed and focused second-tab CWDs. Real handler calls run terminating
+  /usr/bin/true NonLogin PTYs; Drop drains and shuts down all owned runtimes.
+  Exclude Windows fixtures and absent creation-env context. LayoutPane.env and
+  its normalization remain intact, including the existing layout controls.
+- This is the first D-M6-2 arrival, not closure of its cluster. M8-09 still owes
+  focused-before-seed workspace creation across API, prompt and confirmation.
+  M8-25 `4f7fcc48d1f760ab6057d0964f009c05b753456a` remains the creator arrival
+  for follow_cwd_for_pane, with `550e9f8cc085f428429f5cf2da0bb2dba897e8b8`'s
+  foreground-group leader getter/runtime/Tab and creation controls. Neither
+  source's remainder is pulled forward or claimed from cached-CWD coverage.
+- Preserve the literal usable_directory predicate is_absolute() && is_dir(),
+  at final Follow resolution, not merely at CWD reporting. Explicit CWD and
+  Home/Current/Path precedence remain. Layout replacement consults its target
+  tab before workspace focus; split targets may be in inactive tabs/workspaces.
+  ensure_default_workspace intentionally still resolves None: startup has no
+  source workspace, so Follow cannot select one and falls through to policy.
+  Test-only creation helpers are not extra production arrivals. No topology,
+  focus, identity, receipt, delivery, Method, protocol or dependency change.
+  Manual completion reconciliation: no command/flag/value/alias changed.
+- Evidence: two actual tab/layout handler controls fail before production edits
+  at HOME versus the distinct expected cached CWD, then pass. Eight additional
+  controls are written during implementation and are mutation-pinned, not
+  retrospective parent red-first evidence. They cover owner/missing lookups,
+  runtime-before-cache, inactive split/replacement targets, explicit/policy
+  precedence and separate relative/file/deleted source validation. The 65-test
+  affected CWD/layout selection passes before mutation. Every old test and
+  assertion is preserved unchanged; the existing seed-identity tests remain
+  identity characterization, not evidence for the next workspace slice.
+- Ten one-site mutations each exit100 on the same 65-control selection. Two
+  runtime-only restorations, split and layout-split focus substitutions, loss of
+  replacement preference, cached-before-runtime and relative acceptance have
+  their named single-control kills. Focused/first-tab helper substitutions and
+  removal of is_dir have actual crossing kills, recorded with every selected
+  result. All source snapshots/logs are retained and every file hash is restored
+  before the next mutation; no green is claimed from a mutant.
+- Harness disclosures: the initial red fixture used nonexistent registry
+  is_empty and failed compilation; v2 uses len and supplies the behavioral red.
+  An added runtime control initially lacked a Tokio reactor and failed setup;
+  it now uses tokio::test without production changes. The mutation driver refused
+  a non-unique M03 selector before editing; it was narrowed to the named helper.
+  None of these invocation/setup failures establishes behavior. Final full
+  check/gate and exact-SHA checkpoint evidence remain separate; this row grants
+  no Gate-2, whole-M8, independent Gate-3 or operator-action approval.

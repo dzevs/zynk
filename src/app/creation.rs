@@ -48,6 +48,23 @@ impl App {
             .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
     }
 
+    pub(super) fn cwd_for_pane_in_workspace(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<PathBuf> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
+        ws.tabs
+            .get(tab_idx)?
+            .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
+    }
+
+    pub(super) fn focused_pane_cwd_in_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
+        let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
+        self.cwd_for_pane_in_workspace(ws_idx, pane_id)
+    }
+
     pub(super) fn resolve_new_terminal_cwd(&self, follow_cwd: Option<PathBuf>) -> PathBuf {
         resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
     }
@@ -506,6 +523,7 @@ pub(crate) fn terminal_agent_session_info(
 #[cfg(test)]
 mod tests {
     use super::App;
+    use crate::api::schema as api;
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
     use std::time::{Duration, Instant};
@@ -519,6 +537,420 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    struct CwdFixture {
+        app: App,
+        root: std::path::PathBuf,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum CachedCwdRoute {
+        Tab,
+        Layout,
+        Split,
+    }
+
+    const CACHED_CWD_ROUTES: [CachedCwdRoute; 3] = [
+        CachedCwdRoute::Tab,
+        CachedCwdRoute::Layout,
+        CachedCwdRoute::Split,
+    ];
+
+    impl CwdFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "zynk-creation-cwd-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            for name in ["seed", "cached", "other"] {
+                std::fs::create_dir_all(root.join(name)).unwrap();
+            }
+            let mut app = test_app();
+            app.state.default_shell = "/usr/bin/true".into();
+            app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+            app.state.new_terminal_cwd = crate::config::NewTerminalCwdConfig::Follow;
+            let mut source = Workspace::test_new("cwd-source");
+            source.identity_cwd = root.join("seed");
+            source.test_add_tab(None);
+            let mut other = Workspace::test_new("cwd-other");
+            other.identity_cwd = root.join("other");
+            app.state.workspaces = vec![source, other];
+            app.state.ensure_test_terminals();
+            for (ws, tab, name) in [(0, 0, "seed"), (0, 1, "cached"), (1, 0, "other")] {
+                let tab = &app.state.workspaces[ws].tabs[tab];
+                let terminal = tab.terminal_id(tab.root_pane).unwrap().clone();
+                app.state.terminals.get_mut(&terminal).unwrap().cwd = root.join(name);
+            }
+            app.state.switch_workspace_tab(0, 1);
+            app.state.mode = crate::app::Mode::Terminal;
+            assert_eq!(app.terminal_runtimes.len(), 0);
+            assert_ne!(root.join("cached"), std::env::current_dir().unwrap());
+            assert_ne!(
+                Some(root.join("cached").into_os_string()),
+                std::env::var_os("HOME")
+            );
+            Self { app, root }
+        }
+
+        fn cwd(&self, ws: usize, tab: usize) -> std::path::PathBuf {
+            let tab = &self.app.state.workspaces[ws].tabs[tab];
+            let terminal = tab.terminal_id(tab.root_pane).unwrap();
+            self.app.state.terminals.get(terminal).unwrap().cwd.clone()
+        }
+
+        fn call(&mut self, method: api::Method) -> api::ResponseResult {
+            let response = self.app.handle_api_request(api::Request {
+                id: "test.creation.cwd".into(),
+                method,
+            });
+            let response: api::SuccessResponse = serde_json::from_str(&response)
+                .unwrap_or_else(|error| panic!("{error}: {response}"));
+            response.result
+        }
+
+        fn create_target(
+            &mut self,
+            route: CachedCwdRoute,
+            cwd: Option<String>,
+        ) -> std::path::PathBuf {
+            self.app.state.switch_workspace(1);
+            let focus = self.app.state.current_pane_focus_target();
+            let before: std::collections::HashSet<_> =
+                self.app.state.terminals.keys().cloned().collect();
+            let workspace_id = Some(self.app.public_workspace_id(0));
+            let method = match route {
+                CachedCwdRoute::Tab => api::Method::TabCreate(api::TabCreateParams {
+                    workspace_id,
+                    cwd,
+                    focus: false,
+                    label: None,
+                }),
+                CachedCwdRoute::Layout => api::Method::LayoutApply(api::LayoutApplyParams {
+                    workspace_id,
+                    tab_id: None,
+                    tab_label: None,
+                    focus: false,
+                    root: api::LayoutNode::Pane {
+                        pane: api::LayoutPane {
+                            cwd,
+                            ..Default::default()
+                        },
+                    },
+                }),
+                CachedCwdRoute::Split => api::Method::PaneSplit(api::PaneSplitParams {
+                    workspace_id,
+                    target_pane_id: None,
+                    cwd,
+                    focus: false,
+                    direction: api::SplitDirection::Right,
+                    ratio: None,
+                }),
+            };
+            self.call(method);
+            let created: Vec<_> = self
+                .app
+                .state
+                .terminals
+                .iter()
+                .filter(|(id, _)| !before.contains(*id))
+                .map(|(_, terminal)| terminal.cwd.clone())
+                .collect();
+            assert_eq!(created.len(), 1, "{route:?}");
+            assert_eq!(
+                self.app.state.current_pane_focus_target(),
+                focus,
+                "{route:?}"
+            );
+            created[0].clone()
+        }
+    }
+
+    impl Drop for CwdFixture {
+        fn drop(&mut self) {
+            for (_, runtime) in self.app.terminal_runtimes.drain() {
+                runtime.shutdown();
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[tokio::test]
+    async fn tab_create_follows_cached_focused_pane_cwd_without_runtime() {
+        let mut fixture = CwdFixture::new();
+        fixture.app.state.switch_workspace(1);
+        let focus = fixture.app.state.current_pane_focus_target();
+        let result = fixture.call(api::Method::TabCreate(api::TabCreateParams {
+            workspace_id: Some(fixture.app.public_workspace_id(0)),
+            cwd: None,
+            focus: false,
+            label: Some("cached".into()),
+        }));
+        assert!(matches!(result, api::ResponseResult::TabCreated { .. }));
+        assert_eq!(fixture.app.state.workspaces[0].tabs.len(), 3);
+        assert_eq!(fixture.cwd(0, 2), fixture.root.join("cached"));
+        assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
+    }
+
+    #[tokio::test]
+    async fn layout_apply_new_tab_follows_cached_focused_pane_cwd_without_runtime() {
+        let mut fixture = CwdFixture::new();
+        fixture.app.state.switch_workspace(1);
+        let focus = fixture.app.state.current_pane_focus_target();
+        let result = fixture.call(api::Method::LayoutApply(api::LayoutApplyParams {
+            workspace_id: Some(fixture.app.public_workspace_id(0)),
+            tab_id: None,
+            tab_label: Some("cached".into()),
+            focus: false,
+            root: api::LayoutNode::Pane {
+                pane: api::LayoutPane::default(),
+            },
+        }));
+        assert!(matches!(result, api::ResponseResult::LayoutApply { .. }));
+        assert_eq!(fixture.app.state.workspaces[0].tabs.len(), 3);
+        assert_eq!(fixture.cwd(0, 2), fixture.root.join("cached"));
+        assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
+    }
+
+    #[test]
+    fn cached_cwd_helpers_resolve_owner_and_missing_targets() {
+        let mut fixture = CwdFixture::new();
+        fixture.app.state.switch_workspace(1);
+        for (ws, tab, name) in [(0, 0, "seed"), (0, 1, "cached"), (1, 0, "other")] {
+            let pane = fixture.app.state.workspaces[ws].tabs[tab].root_pane;
+            assert_eq!(
+                fixture.app.cwd_for_pane_in_workspace(ws, pane),
+                Some(fixture.root.join(name))
+            );
+            assert_eq!(fixture.app.cwd_for_pane_in_workspace(1 - ws, pane), None);
+        }
+        assert_eq!(
+            fixture.app.focused_pane_cwd_in_workspace(0),
+            Some(fixture.root.join("cached"))
+        );
+        assert_eq!(
+            fixture.app.focused_pane_cwd_in_workspace(1),
+            Some(fixture.root.join("other"))
+        );
+        assert_eq!(fixture.app.focused_pane_cwd_in_workspace(2), None);
+        let pane = fixture.app.state.workspaces[0].tabs[1].root_pane;
+        assert_eq!(fixture.app.cwd_for_pane_in_workspace(2, pane), None);
+        assert_eq!(
+            fixture
+                .app
+                .cwd_for_pane_in_workspace(0, crate::layout::PaneId::alloc()),
+            None
+        );
+        let terminal_id = fixture.app.state.workspaces[0].tabs[1]
+            .terminal_id(pane)
+            .unwrap()
+            .clone();
+        fixture.app.state.terminals.remove(&terminal_id);
+        assert_eq!(fixture.app.cwd_for_pane_in_workspace(0, pane), None);
+        assert_eq!(fixture.app.focused_pane_cwd_in_workspace(0), None);
+    }
+
+    #[tokio::test]
+    async fn cached_cwd_helpers_prefer_runtime_then_cached_state() {
+        let mut fixture = CwdFixture::new();
+        let pane = fixture.app.state.workspaces[0].tabs[1].root_pane;
+        let terminal_id = fixture.app.state.workspaces[0].tabs[1]
+            .terminal_id(pane)
+            .unwrap()
+            .clone();
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        assert_eq!(runtime.cwd(), None);
+        fixture
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+        assert_eq!(
+            fixture.app.focused_pane_cwd_in_workspace(0),
+            Some(fixture.root.join("cached"))
+        );
+        let reported = fixture.root.join("other");
+        fixture
+            .app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_publish_reported_cwd(reported.clone());
+        assert_eq!(
+            fixture.app.cwd_for_pane_in_workspace(0, pane),
+            Some(reported.clone())
+        );
+        assert_eq!(fixture.app.focused_pane_cwd_in_workspace(0), Some(reported));
+        fixture
+            .app
+            .terminal_runtimes
+            .remove(&terminal_id)
+            .unwrap()
+            .shutdown();
+        assert_eq!(
+            fixture.app.focused_pane_cwd_in_workspace(0),
+            Some(fixture.root.join("cached"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_cwd_pane_split_preserves_inactive_target_ownership() {
+        let mut fixture = CwdFixture::new();
+        fixture.app.state.switch_workspace(1);
+        let focus = fixture.app.state.current_pane_focus_target();
+        let pane = fixture.app.state.workspaces[0].tabs[0].root_pane;
+        let result = fixture.call(api::Method::PaneSplit(api::PaneSplitParams {
+            workspace_id: None,
+            target_pane_id: fixture.app.public_pane_id(0, pane),
+            direction: api::SplitDirection::Right,
+            ratio: Some(0.4),
+            cwd: None,
+            focus: false,
+        }));
+        let api::ResponseResult::PaneInfo { pane: created } = result else {
+            panic!("not a split response")
+        };
+        let (ws_idx, created_pane) = fixture.app.parse_pane_id(&created.pane_id).unwrap();
+        assert_eq!(ws_idx, 0);
+        assert_eq!(
+            fixture.app.state.workspaces[0].find_tab_index_for_pane(created_pane),
+            Some(0)
+        );
+        let terminal_id = fixture.app.state.workspaces[0].tabs[0]
+            .terminal_id(created_pane)
+            .unwrap();
+        assert_eq!(
+            fixture.app.state.terminals.get(terminal_id).unwrap().cwd,
+            fixture.root.join("seed")
+        );
+        assert_eq!(fixture.app.state.workspaces[0].tabs[0].panes.len(), 2);
+        assert_eq!(fixture.app.state.workspaces[0].tabs[1].panes.len(), 1);
+        assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
+    }
+
+    #[tokio::test]
+    async fn cached_cwd_layout_replacement_and_split_preserve_target_before_focus() {
+        let mut fixture = CwdFixture::new();
+        fixture.app.state.switch_workspace(1);
+        let focus = fixture.app.state.current_pane_focus_target();
+        let result = fixture.call(api::Method::LayoutApply(api::LayoutApplyParams {
+            workspace_id: None,
+            tab_id: fixture.app.public_tab_id(0, 0),
+            tab_label: None,
+            focus: false,
+            root: api::LayoutNode::Split {
+                direction: api::SplitDirection::Right,
+                ratio: 0.4,
+                first: Box::new(api::LayoutNode::Pane {
+                    pane: api::LayoutPane::default(),
+                }),
+                second: Box::new(api::LayoutNode::Pane {
+                    pane: api::LayoutPane::default(),
+                }),
+            },
+        }));
+        let api::ResponseResult::LayoutApply { layout } = result else {
+            panic!("not a layout response")
+        };
+        let (ws_idx, tab_idx) = fixture.app.parse_tab_id(&layout.tab_id).unwrap();
+        assert_eq!(ws_idx, 0);
+        let tab = &fixture.app.state.workspaces[ws_idx].tabs[tab_idx];
+        assert_eq!(fixture.app.state.workspaces[0].tabs.len(), 2);
+        assert_eq!(tab.panes.len(), 2);
+        for pane in tab.panes.keys() {
+            let terminal_id = tab.terminal_id(*pane).unwrap();
+            assert_eq!(
+                fixture.app.state.terminals.get(terminal_id).unwrap().cwd,
+                fixture.root.join("seed")
+            );
+        }
+        assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
+    }
+
+    #[tokio::test]
+    async fn cached_cwd_creation_respects_explicit_and_policy_precedence() {
+        use crate::config::NewTerminalCwdConfig;
+        for route in CACHED_CWD_ROUTES {
+            for policy in [
+                NewTerminalCwdConfig::Home,
+                NewTerminalCwdConfig::Current,
+                NewTerminalCwdConfig::Path("/".into()),
+            ] {
+                let mut fixture = CwdFixture::new();
+                let expected = super::resolve_new_terminal_cwd(&policy, None);
+                assert_ne!(expected, fixture.root.join("cached"));
+                fixture.app.state.new_terminal_cwd = policy;
+                assert_eq!(fixture.create_target(route, None), expected, "{route:?}");
+            }
+            let mut fixture = CwdFixture::new();
+            fixture.app.state.new_terminal_cwd = NewTerminalCwdConfig::Home;
+            let explicit = fixture.root.join("seed");
+            assert_eq!(
+                fixture.create_target(route, Some(explicit.display().to_string())),
+                explicit,
+                "{route:?}"
+            );
+        }
+    }
+
+    fn assert_invalid_cached_cwd_rejected(invalid: impl Fn(&CwdFixture) -> std::path::PathBuf) {
+        for route in CACHED_CWD_ROUTES {
+            let mut fixture = CwdFixture::new();
+            let cwd = invalid(&fixture);
+            let pane = fixture.app.state.workspaces[0].tabs[1].root_pane;
+            let terminal_id = fixture.app.state.workspaces[0].tabs[1]
+                .terminal_id(pane)
+                .unwrap()
+                .clone();
+            fixture
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .cwd = cwd.clone();
+            assert_eq!(
+                fixture.app.focused_pane_cwd_in_workspace(0),
+                Some(cwd.clone())
+            );
+            let expected =
+                super::resolve_new_terminal_cwd(&crate::config::NewTerminalCwdConfig::Follow, None);
+            assert_ne!(expected, cwd);
+            let actual = fixture.create_target(route, None);
+            assert_eq!(actual, expected, "{route:?}");
+            assert!(
+                actual.is_absolute() && actual.is_dir(),
+                "{route:?}: {actual:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_cwd_creation_rejects_relative_directory() {
+        assert!(std::path::Path::new(".").is_dir());
+        assert_invalid_cached_cwd_rejected(|_| ".".into());
+    }
+
+    #[tokio::test]
+    async fn cached_cwd_creation_rejects_file() {
+        assert_invalid_cached_cwd_rejected(|fixture| {
+            let path = fixture.root.join("file");
+            std::fs::write(&path, b"not a directory").unwrap();
+            path
+        });
+    }
+
+    #[tokio::test]
+    async fn cached_cwd_creation_rejects_deleted_directory() {
+        assert_invalid_cached_cwd_rejected(|fixture| {
+            let path = fixture.root.join("deleted");
+            std::fs::create_dir(&path).unwrap();
+            std::fs::remove_dir(&path).unwrap();
+            path
+        });
     }
 
     #[test]

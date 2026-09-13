@@ -103,6 +103,12 @@ restart recommendation even when their version and protocol match. Existing
 restart/install confirmations still apply. After a remote connection drops,
 the client prints a reattach command; this is not a guarantee that its panes survived.
 
+With `terminal.new_cwd = "follow"`, new tabs and new-tab layouts use the focused
+pane's runtime CWD, falling back to its cached CWD when needed. Explicit CWDs and
+other configured policies retain precedence. Automatic following requires an
+absolute, existing directory; a deleted or invalid source falls back to HOME or
+the server's working directory.
+
 ## Agent messaging
 
 This is zynk's net-new layer on top of the multiplexer. Agents send each other **plain-text messages**; zynk

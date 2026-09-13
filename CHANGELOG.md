@@ -74,6 +74,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- New tabs and new-tab layouts follow the focused pane's cached working
+  directory when no runtime CWD is available, respecting the target workspace.
 - Normal server launches and live-handoff replacements create a separate POSIX
   session, avoiding the launching terminal's session hangup. Remote connection
   loss includes a reattach hint without promising that every pane survived.

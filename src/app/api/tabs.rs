@@ -64,11 +64,7 @@ impl App {
             return encode_error(id, "workspace_not_found", "no active workspace");
         };
         let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
-            let follow_cwd = self
-                .state
-                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
-                .and_then(|rt| rt.cwd());
-            self.resolve_new_terminal_cwd(follow_cwd)
+            self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
         });
         let (rows, cols) = self.state.estimate_pane_size();
         let default_shell = self.state.default_shell.clone();
