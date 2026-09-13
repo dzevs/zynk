@@ -3952,3 +3952,61 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   release changed. Reviewer acceptance of this disclosure is not operator
   closure. No destructive remote remedy is proposed. WORKFLOW.md records
   this same event in the same docs-only commit without changing its rules.
+
+### M8-03/M8-04 - Runtime Socket Schema and Offline CLI (2026-09-13)
+
+- Sources: `25aeaa46f6c807be686b710c5c3aa656969f07e5` then
+  `6703413fc7ef864f102aa2de5840bf874b589101`, both pre-relicense EVALUATE
+  assignments, resolved as PORT of runtime functionality. Land this creator
+  and its only runtime consumer as one vertical slice: a production builder
+  without its CLI would be dead code. Exclude the generated upstream website
+  JSON and its update-environment/artifact test; no tracked generated schema,
+  packaging include, server Method, binary ClientMessage or protocol bump.
+- Add schemars 1.2.1 derives to the complete existing API type population,
+  including fork-owned `ZynkMessageReceivedParams`; the root trait bounds force
+  every reachable type to implement the schema contract. Keep serde attributes
+  and wire IDs unchanged. Outside schema modules, only `AgentSessionRefKind`,
+  `ToastZynkPosition` and `ConfigReloadStatus` need the derive. A sibling module
+  constructs the five typed roots and structurally rebases their local `$ref`
+  values under the matching bundle entry. Tests resolve every pointer against
+  the complete document, not merely reject standalone `$defs` prefixes.
+- The manually dispatched `api schema` command uses compiled metadata only.
+  Default output is a short summary, `--json` is deterministic pretty JSON with
+  a newline, and `--output PATH` writes those same bytes to the supplied path
+  without making parent directories. Help succeeds; malformed/conflicting
+  options return 2, ordinary output-file errors remain errors. No server start,
+  environment identity lookup, DB open or hidden runtime directory creation.
+  Do not import the later broken-pipe source `e3c3d443` at this arrival.
+- The schema reports `schema_version = 1` and the current `PROTOCOL_VERSION`,
+  tested against that constant rather than a literal 19. The later M8-65 bump
+  therefore needs no artificial schema-test update. Schema visibility is not
+  receipt/caller authority: ADR-0014 and the five M8-02 read-only controls are
+  unchanged and retained. Official derive/serde contract:
+  `https://docs.rs/schemars/1.2.1/schemars/`; pin the dependency to this reviewed
+  version because generated structure/default draft are not stable across all
+  schemars releases. Cargo generates the lock delta: seven added packages,
+  no existing package removed or upgraded, one `libsqlite3-sys` 0.30.1 node.
+- The complete accepted audit prior is now explicit by class/package/version:
+  vulnerabilities `crossbeam-epoch` 0.9.18 (RUSTSEC-2026-0204), `h2` 0.4.14
+  (RUSTSEC-2026-0258), `rsa` 0.9.10 (RUSTSEC-2023-0071); unmaintained warnings
+  `bincode` 2.0.1 (RUSTSEC-2025-0141), `paste` 1.0.15 (RUSTSEC-2024-0436);
+  unsound warnings `anyhow` 1.0.102 (RUSTSEC-2026-0190), `event-listener` 5.4.1
+  (RUSTSEC-2026-0221), `lru` 0.16.3 (RUSTSEC-2026-0253), `rand` 0.8.5
+  (RUSTSEC-2026-0097); yanked `der` 0.8.0 and `spin` 0.9.8 (no advisory IDs).
+  Raw JSON preserves affected/patched ranges, including rsa's empty patched
+  set. Before/after audits both exit 1 with these same 3+8 entries, not green.
+  No ignore policy is added. Compare all classes, package versions and default
+  Linux graph exposure; no new or newly reachable entry is introduced here.
+  The inherited audit-triage scope/review deadline above is not extended.
+- Red-first is one real CLI test failing with `unknown command: api` at the
+  prior binary (exit100), not a fabricated behavior failure from missing
+  derives. The four bundle controls and two additional CLI controls were added
+  during implementation, not claimed as prior red evidence. The focused green
+  selection includes all seven new controls, six shared support tests, and six
+  retained snapshot/wire controls. One-site mutations pin missing ref rebasing,
+  the five-root population and wrong protocol metadata separately. A fourth
+  mutation keeps the bundle prefix but breaks the pointer target, pinning the
+  actual lookup rather than only the prefix check; each mutation exits100 at
+  its named control, with the other three bundle controls passing. Existing
+  tests are not deleted, converted or weakened. Exact-SHA checkpoint and whole
+  M8 gates remain pending; this is not M8/M9 completion or operator authority.

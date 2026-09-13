@@ -524,6 +524,7 @@ fn main() -> io::Result<()> {
         println!("       zynk channel set <stable|preview>");
         println!("       zynk server stop");
         println!("       zynk server reload-config");
+        println!("       zynk api <subcommand> ...");
         println!("       zynk config <subcommand> ...");
         println!("       zynk channel <subcommand> ...");
         println!("       zynk workspace <subcommand> ...");
@@ -548,6 +549,10 @@ fn main() -> io::Result<()> {
         println!("Common commands:");
         for (command, description) in [
             ("zynk", "Launch or attach to the persistent session"),
+            (
+                "zynk api <subcommand>",
+                "Inspect the socket API schema offline",
+            ),
             (
                 "zynk status [server|client]",
                 "Show local client and running server status",

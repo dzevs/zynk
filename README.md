@@ -129,6 +129,9 @@ Design guarantees (binding):
 Agents can drive zynk over the same local Unix socket — create workspaces, split panes, spawn helpers, read
 output, wait for state changes, and message each other. Start with [`SKILL.md`](SKILL.md).
 
+`zynk api schema --json` exports the socket API's JSON schema, including native receipt methods,
+without a running server or database. Use `--output PATH` instead to write the schema to a file.
+
 ## How it compares
 
 |                                       | tmux | gui managers | zynk |

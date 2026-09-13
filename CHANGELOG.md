@@ -10,6 +10,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- `zynk api schema` describes the socket API offline. `--json` prints its schema
+  and `--output PATH` writes it to an explicit file, including fork-owned receipt
+  methods without opening a server, configuration directory, or conversation DB.
 - The read-only `session.snapshot` socket method returns all workspace, tab,
   pane, layout, and agent projections together with current focus and version
   metadata. Agent projections are observations, not authenticated identity or

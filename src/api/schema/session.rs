@@ -6,7 +6,7 @@ use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
 
 /// Observed topology, not authenticated caller or delivery-receipt identity.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionSnapshot {
     pub version: String,
     pub protocol: u32,

@@ -9,6 +9,7 @@ use crate::api::schema::{
 };
 
 mod agent;
+mod api;
 mod integration;
 mod native;
 mod notification;
@@ -66,6 +67,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     };
 
     let exit_code = match command {
+        "api" => api::run_api_command(&args[2..])?,
         "server" => {
             let Some(exit_code) = server::run_server_command(&args[2..])? else {
                 return Ok(CommandOutcome::NotCli);

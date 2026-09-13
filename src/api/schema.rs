@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod agents;
 pub mod common;
 pub mod events;
+pub(crate) mod export;
 pub mod integrations;
 pub mod panes;
 pub mod plugins;
@@ -32,14 +33,14 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Request {
     pub id: String,
     #[serde(flatten)]
     pub method: Method,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "method", content = "params")]
 // Request enums are short-lived wire values; keeping variants direct preserves
 // the simple serde shape and avoids boxing churn across every caller.
@@ -215,6 +216,104 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn api_schema_bundle_has_all_five_roots() {
+        let document = export::protocol_schema_document();
+        let names = document["schemas"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "error_response",
+                "event",
+                "request",
+                "subscription_event",
+                "success_response"
+            ]
+        );
+    }
+
+    #[test]
+    fn api_schema_bundle_metadata_uses_current_protocol() {
+        let document = export::protocol_schema_document();
+        assert_eq!(document["protocol"], crate::protocol::PROTOCOL_VERSION);
+        assert_eq!(document["schema_version"], 1);
+        assert_eq!(document["title"], "Zynk API");
+        assert_eq!(
+            document["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+    }
+
+    #[test]
+    fn api_schema_bundle_every_reference_resolves() {
+        let document = export::protocol_schema_document();
+        let mut pending = vec![&document];
+        let mut references = 0;
+        while let Some(value) = pending.pop() {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if let Some(reference) = object.get("$ref") {
+                        let reference = reference.as_str().unwrap();
+                        assert!(reference.starts_with("#/schemas/"), "{reference}");
+                        let pointer = reference.strip_prefix('#').unwrap();
+                        assert!(
+                            document.pointer(pointer).is_some(),
+                            "unresolved {reference}"
+                        );
+                        references += 1;
+                    }
+                    pending.extend(object.values());
+                }
+                serde_json::Value::Array(items) => pending.extend(items),
+                _ => {}
+            }
+        }
+        assert!(references > 0);
+    }
+
+    #[test]
+    fn api_schema_bundle_includes_fork_receipt_and_session_methods() {
+        let document = export::protocol_schema_document();
+        let mut pending = vec![&document["schemas"]["request"]];
+        let mut methods = Vec::new();
+        while let Some(value) = pending.pop() {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if let Some(method) = value
+                        .pointer("/properties/method/const")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        methods.push(method);
+                    }
+                    pending.extend(object.values());
+                }
+                serde_json::Value::Array(items) => pending.extend(items),
+                _ => {}
+            }
+        }
+        for method in [
+            "zynk.message_received",
+            "session.snapshot",
+            "pane.send_input",
+            "pane.read",
+        ] {
+            assert!(methods.contains(&method), "missing {method}");
+        }
+        let receipt = &document["schemas"]["request"]["$defs"]["ZynkMessageReceivedParams"];
+        assert!(receipt["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("runtime_session_id")));
+        assert!(receipt["properties"]
+            .get("receiver_agent_session")
+            .is_some());
+    }
 
     #[test]
     fn request_uses_dot_method_names() {
