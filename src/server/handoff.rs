@@ -1,7 +1,6 @@
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -76,10 +75,10 @@ pub(crate) fn spawn_handoff_import(
         .arg("--handoff-import")
         .arg(socket_path)
         .arg(token)
-        .process_group(0)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    crate::platform::detach_server_daemon_command(&mut command);
     if crate::session::explicit_session_requested() {
         // The import child no longer has the original `--session` argument, so
         // stale socket overrides must not mask the inherited ZYNK_SESSION.
@@ -501,4 +500,14 @@ fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
 
 pub(crate) fn log_import_result(panes: usize) {
     info!(panes, "handoff import ready");
+}
+
+#[cfg(test)]
+mod daemon_tests {
+    #[test]
+    fn handoff_import_launcher_creates_new_session() {
+        super::super::test_support::assert_detached_launch(|exe| {
+            super::spawn_handoff_import(Some(exe), &exe.with_extension("sock"), "probe-token")
+        });
+    }
 }

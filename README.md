@@ -95,6 +95,14 @@ The prefix is `ctrl+b`:
 - `ctrl+b` then `c` — new tab · `ctrl+b` then `w` — switch workspaces
 - `ctrl+b` then `q` — detach (the server and pane processes keep running; run `zynk` again to reattach)
 
+Normal daemon launches and live-handoff replacements start a new POSIX session,
+separate from the launching terminal. `zynk status server --json` exposes
+`capabilities.detached_server_daemon`, observed from the server's session ID.
+Remote restart checks treat a missing field as false, so older peers trigger a
+restart recommendation even when their version and protocol match. Existing
+restart/install confirmations still apply. After a remote connection drops,
+the client prints a reattach command; this is not a guarantee that its panes survived.
+
 ## Agent messaging
 
 This is zynk's net-new layer on top of the multiplexer. Agents send each other **plain-text messages**; zynk

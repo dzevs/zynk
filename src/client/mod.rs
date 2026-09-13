@@ -265,7 +265,14 @@ impl std::fmt::Display for ClientError {
                 Ok(())
             }
             ClientError::ConnectionLost(err) => {
-                write!(f, "lost connection to server: {err}")
+                if let Ok(reattach_command) = std::env::var(crate::remote::REATTACH_COMMAND_ENV_VAR)
+                {
+                    write!(f, "lost connection to remote Zynk: {err}")?;
+                    write!(f, "\nIf the remote server survived the SSH or network drop, its panes may still be running.")?;
+                    write!(f, "\nRun `{reattach_command}` to reattach")
+                } else {
+                    write!(f, "lost connection to server: {err}")
+                }
             }
             ClientError::Protocol(err) => {
                 write!(f, "protocol error: {err}")
@@ -2286,12 +2293,33 @@ mod tests {
 
     #[test]
     fn client_error_display_connection_lost() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvVarsRemovedGuard::new(&[crate::remote::REATTACH_COMMAND_ENV_VAR]);
         let err =
             ClientError::ConnectionLost(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"));
         let msg = err.to_string();
         assert!(
             msg.contains("lost connection to server"),
             "should mention lost connection: {msg}"
+        );
+        assert_eq!(msg, "lost connection to server: broken pipe");
+    }
+
+    #[test]
+    fn client_error_display_remote_connection_lost_has_reattach_hint() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvVarGuard::set(
+            crate::remote::REATTACH_COMMAND_ENV_VAR,
+            "zynk --remote host --session work",
+        );
+        let err =
+            ClientError::ConnectionLost(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"));
+        let msg = err.to_string();
+        assert!(msg.contains("lost connection to remote Zynk"), "{msg}");
+        assert!(msg.contains("panes may still be running"), "{msg}");
+        assert!(
+            msg.contains("Run `zynk --remote host --session work` to reattach"),
+            "{msg}"
         );
     }
 

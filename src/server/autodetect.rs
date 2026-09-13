@@ -9,7 +9,6 @@
 //! (escape hatch for users who want the traditional single-process behavior).
 
 use std::io;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -160,9 +159,7 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    // Create a new process group so the server survives the parent's exit
-    // and doesn't receive SIGHUP when the client's terminal closes.
-    command.process_group(0);
+    crate::platform::detach_server_daemon_command(&mut command);
 
     match std::env::current_dir() {
         Ok(cwd) => {
@@ -270,6 +267,13 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::path::PathBuf::from(format!("/tmp/ha-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn server_daemon_launcher_creates_new_session() {
+        super::super::test_support::assert_detached_launch(|exe| {
+            build_server_daemon_command(exe.to_path_buf()).spawn()
+        });
     }
 
     #[test]

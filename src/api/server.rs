@@ -76,6 +76,7 @@ pub fn start_server_with_capabilities(
 fn default_capabilities() -> Option<ServerCapabilities> {
     Some(ServerCapabilities {
         live_handoff: crate::platform::capabilities().live_handoff,
+        detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
     })
 }
 
@@ -846,6 +847,13 @@ mod tests {
     }
 
     #[test]
+    fn default_server_capabilities_observe_current_session() {
+        let capabilities = serde_json::to_value(default_capabilities().unwrap()).unwrap();
+        let expected = unsafe { libc::getsid(0) == libc::getpid() };
+        assert_eq!(capabilities["detached_server_daemon"], expected);
+    }
+
+    #[test]
     fn ping_request_returns_pong() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let response = handle_request(
@@ -854,7 +862,10 @@ mod tests {
                 method: Method::Ping(crate::api::schema::PingParams::default()),
             },
             &tx,
-            Some(ServerCapabilities { live_handoff: true }),
+            Some(ServerCapabilities {
+                live_handoff: true,
+                detached_server_daemon: true,
+            }),
             ApiCaller::default(),
             None,
         );

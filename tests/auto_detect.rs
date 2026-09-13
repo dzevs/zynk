@@ -288,6 +288,53 @@ fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
 /// Running `zynk` with no server present starts a server
 /// and attaches as client.
 #[test]
+fn auto_detect_daemon_session_and_capability_match_kernel() {
+    use interprocess::local_socket::traits::StreamCommon as _;
+    use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
+
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let client_socket = runtime_dir.join("zynk-client.sock");
+    let client = spawn_zynk_auto(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let peer = Stream::connect(
+        api_socket
+            .as_path()
+            .to_fs_name::<GenericFilePath>()
+            .unwrap(),
+    )
+    .unwrap();
+    let daemon_pid = peer.peer_creds().unwrap().pid().unwrap();
+    register_spawned_zynk_pid(Some(daemon_pid as u32));
+    let daemon_sid = unsafe { libc::getsid(daemon_pid) };
+    let daemon_pgid = unsafe { libc::getpgid(daemon_pid) };
+    let client_sid = unsafe { libc::getsid(client.child.process_id().unwrap() as i32) };
+    let ping: Value = serde_json::from_str(&ping_socket(&api_socket)).unwrap();
+    let status_output = run_cli(&api_socket, &["status", "server", "--json"]);
+    let status: Value = serde_json::from_slice(&status_output.stdout).unwrap();
+    drop(peer);
+    cleanup_spawned_zynk(client, base);
+
+    assert!(daemon_pid > 0);
+    assert_eq!(daemon_sid, daemon_pid, "real daemon must lead its session");
+    assert_eq!(daemon_pgid, daemon_pid);
+    assert_ne!(
+        daemon_sid, client_sid,
+        "client and daemon sessions must differ"
+    );
+    assert_eq!(ping["result"]["type"], "pong");
+    assert_eq!(
+        ping["result"]["capabilities"]["detached_server_daemon"],
+        true
+    );
+    assert!(status_output.status.success());
+    assert_eq!(status["capabilities"]["detached_server_daemon"], true);
+}
+
+#[test]
 fn auto_detect_no_server_spawns_server_and_attaches() {
     let _lock = test_lock();
     let base = unique_test_dir();

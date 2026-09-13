@@ -51,6 +51,26 @@ fn process_detection_mode() -> ProcessDetectionMode {
 
 pub fn raise_server_nofile_limit() {}
 
+pub fn detach_server_daemon_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: the post-fork callback only calls setsid and captures errno.
+    // It does not allocate, acquire locks, or access the environment.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+pub fn current_process_is_detached_server_daemon() -> bool {
+    // SAFETY: both calls inspect the current process without touching memory.
+    unsafe { libc::getsid(0) == libc::getpid() }
+}
+
 /// The parent PID of `pid` and the start time the kernel stamped on it, from a
 /// SINGLE read of `/proc/<pid>/stat` (ADR 0014).
 ///

@@ -46,6 +46,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Changed**
 
+- Remote restart checks now recognize detached-daemon support. Older servers
+  without that capability trigger a restart recommendation even when version
+  and protocol match; existing stop, handoff, and install confirmation gates remain.
 - Binary client protocol 19 carries key source metadata, grouped repeats, and explicit text commits.
   Clients and servers must use the same protocol version.
 - The Experiments tab is removed from Settings. Pane history remains available
@@ -71,6 +74,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Normal server launches and live-handoff replacements create a separate POSIX
+  session, avoiding the launching terminal's session hangup. Remote connection
+  loss includes a reattach hint without promising that every pane survived.
 - High-rate output from hidden panes now coalesces redundant wakeups, while a
   pane visible to the app or a direct terminal stream still wakes pending work.
   Terminal input-mode checks also avoid formatting scrollback for scalar state.

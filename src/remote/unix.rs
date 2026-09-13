@@ -695,6 +695,7 @@ enum RemoteServerStatus {
         version: Option<String>,
         protocol: Option<u32>,
         live_handoff: bool,
+        detached_server_daemon: bool,
     },
     NotRunning,
 }
@@ -702,8 +703,16 @@ enum RemoteServerStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemoteServerRestartReason {
     ProtocolMismatch,
+    DaemonDetachMissing,
     BinaryUpdated,
     VersionMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteInstallRunningServerPlan {
+    KeepRunning,
+    LiveHandoff,
+    StopRequired(RemoteServerRestartReason),
 }
 
 fn ensure_remote_server_ready(
@@ -718,14 +727,18 @@ fn ensure_remote_server_ready(
         version,
         protocol,
         live_handoff,
+        detached_server_daemon,
     } = status
     else {
         return Ok(());
     };
 
-    let Some(reason) =
-        remote_server_restart_reason(version.as_deref(), protocol, remote_binary_changed)
-    else {
+    let Some(reason) = remote_server_restart_reason(
+        version.as_deref(),
+        protocol,
+        detached_server_daemon,
+        remote_binary_changed,
+    ) else {
         return Ok(());
     };
 
@@ -753,16 +766,20 @@ fn ensure_remote_server_ready(
 fn remote_server_restart_reason(
     version: Option<&str>,
     protocol: Option<u32>,
+    detached_server_daemon: bool,
     remote_binary_changed: bool,
 ) -> Option<RemoteServerRestartReason> {
     if protocol != Some(CURRENT_PROTOCOL) {
         return Some(RemoteServerRestartReason::ProtocolMismatch);
     }
-    if remote_binary_changed {
-        return Some(RemoteServerRestartReason::BinaryUpdated);
+    if !detached_server_daemon {
+        return Some(RemoteServerRestartReason::DaemonDetachMissing);
     }
     if version != Some(current_version().as_str()) {
         return Some(RemoteServerRestartReason::VersionMismatch);
+    }
+    if remote_binary_changed {
+        return Some(RemoteServerRestartReason::BinaryUpdated);
     }
     None
 }
@@ -800,23 +817,48 @@ fn confirm_remote_install_with_running_server(
     };
     let RemoteServerStatus::Running {
         version,
-        protocol: _,
+        protocol,
         live_handoff,
-    } = status
+        detached_server_daemon,
+    } = &status
     else {
         return Ok(false);
     };
-    if !io::stdin().is_terminal() {
-        if live_handoff_enabled && live_handoff {
-            return Ok(false);
+    let plan = remote_install_running_server_plan(
+        version.as_deref(),
+        *protocol,
+        *detached_server_daemon,
+        true,
+        *live_handoff,
+        live_handoff_enabled,
+    );
+
+    if plan == RemoteInstallRunningServerPlan::KeepRunning {
+        if io::stdin().is_terminal() {
+            eprintln!("remote zynk server on {target} is already compatible:");
+            eprintln!("  server: v{}", version_label(version.as_deref()));
+            eprintln!(
+                "Zynk will install {} without stopping the running remote server.",
+                current_version()
+            );
         }
-        return Err(io::Error::other(format!(
-            "remote zynk server on {target} is running v{}; run from an interactive terminal to approve stopping it for the update",
-            version_label(version.as_deref())
-        )));
+        return Ok(false);
     }
 
-    if live_handoff_enabled && live_handoff {
+    if !io::stdin().is_terminal() {
+        match plan {
+            RemoteInstallRunningServerPlan::LiveHandoff => return Ok(false),
+            RemoteInstallRunningServerPlan::StopRequired(_) => {
+                return Err(io::Error::other(format!(
+                    "remote zynk server on {target} is running v{}; run from an interactive terminal to approve stopping it for the update",
+                    version_label(version.as_deref())
+                )));
+            }
+            RemoteInstallRunningServerPlan::KeepRunning => return Ok(false),
+        }
+    }
+
+    if plan == RemoteInstallRunningServerPlan::LiveHandoff {
         eprintln!("remote zynk server on {target} is currently running:");
         eprintln!("  server: v{}", version_label(version.as_deref()));
         eprintln!(
@@ -852,6 +894,29 @@ fn confirm_remote_install_with_running_server(
     Ok(true)
 }
 
+fn remote_install_running_server_plan(
+    version: Option<&str>,
+    protocol: Option<u32>,
+    detached_server_daemon: bool,
+    remote_binary_changed: bool,
+    live_handoff: bool,
+    live_handoff_enabled: bool,
+) -> RemoteInstallRunningServerPlan {
+    let Some(reason) = remote_server_restart_reason(
+        version,
+        protocol,
+        detached_server_daemon,
+        remote_binary_changed,
+    ) else {
+        return RemoteInstallRunningServerPlan::KeepRunning;
+    };
+
+    if live_handoff_enabled && live_handoff {
+        return RemoteInstallRunningServerPlan::LiveHandoff;
+    }
+    RemoteInstallRunningServerPlan::StopRequired(reason)
+}
+
 fn remote_server_status(target: &str, remote_zynk: &RemoteZynk) -> io::Result<RemoteServerStatus> {
     let command = if remote_zynk.expected_sha256.is_some() {
         prepared_remote_script(remote_zynk, "/proc/self/fd/3 status server --json")?
@@ -885,6 +950,8 @@ struct RemoteServerStatusJson {
 #[derive(Debug, Deserialize)]
 struct RemoteServerCapabilitiesJson {
     live_handoff: bool,
+    #[serde(default)]
+    detached_server_daemon: bool,
 }
 
 fn parse_client_status_json(status: &str) -> Option<RemoteClientStatusJson> {
@@ -906,7 +973,12 @@ fn parse_remote_server_status_json(status: &str) -> io::Result<RemoteServerStatu
         protocol: parsed.protocol,
         live_handoff: parsed
             .capabilities
+            .as_ref()
             .is_some_and(|capabilities| capabilities.live_handoff),
+        detached_server_daemon: parsed
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.detached_server_daemon),
     })
 }
 
@@ -939,6 +1011,11 @@ fn confirm_remote_server_stop(
     match reason {
         RemoteServerRestartReason::ProtocolMismatch => {
             eprintln!("the remote server must stop before this client can attach.");
+        }
+        RemoteServerRestartReason::DaemonDetachMissing => {
+            eprintln!(
+                "the remote server was started by a zynk build that may not survive SSH connection loss. restart it so network drops disconnect only this client."
+            );
         }
         RemoteServerRestartReason::BinaryUpdated => {
             eprintln!(
@@ -2221,7 +2298,8 @@ mod tests {
             RemoteServerStatus::Running {
                 version: Some("0.6.0".into()),
                 protocol: Some(8),
-                live_handoff: true
+                live_handoff: true,
+                detached_server_daemon: false
             }
         );
     }
@@ -2236,7 +2314,8 @@ mod tests {
             RemoteServerStatus::Running {
                 version: Some("0.6.0".into()),
                 protocol: Some(8),
-                live_handoff: false
+                live_handoff: false,
+                detached_server_daemon: false
             }
         );
     }
@@ -2255,7 +2334,7 @@ mod tests {
     #[test]
     fn remote_server_restart_reason_requires_stop_for_protocol_mismatch() {
         assert_eq!(
-            remote_server_restart_reason(Some(&current_version()), Some(0), false),
+            remote_server_restart_reason(Some(&current_version()), Some(0), true, false),
             Some(RemoteServerRestartReason::ProtocolMismatch)
         );
     }
@@ -2263,7 +2342,12 @@ mod tests {
     #[test]
     fn remote_server_restart_reason_offers_restart_after_binary_update() {
         assert_eq!(
-            remote_server_restart_reason(Some(&current_version()), Some(CURRENT_PROTOCOL), true),
+            remote_server_restart_reason(
+                Some(&current_version()),
+                Some(CURRENT_PROTOCOL),
+                true,
+                true
+            ),
             Some(RemoteServerRestartReason::BinaryUpdated)
         );
     }
@@ -2271,11 +2355,11 @@ mod tests {
     #[test]
     fn remote_server_restart_reason_offers_restart_for_version_mismatch() {
         assert_eq!(
-            remote_server_restart_reason(Some("0.0.0"), Some(CURRENT_PROTOCOL), false),
+            remote_server_restart_reason(Some("0.0.0"), Some(CURRENT_PROTOCOL), true, false),
             Some(RemoteServerRestartReason::VersionMismatch)
         );
         assert_eq!(
-            remote_server_restart_reason(None, Some(CURRENT_PROTOCOL), false),
+            remote_server_restart_reason(None, Some(CURRENT_PROTOCOL), true, false),
             Some(RemoteServerRestartReason::VersionMismatch)
         );
     }
@@ -2283,8 +2367,240 @@ mod tests {
     #[test]
     fn remote_server_restart_reason_allows_current_server() {
         assert_eq!(
-            remote_server_restart_reason(Some(&current_version()), Some(CURRENT_PROTOCOL), false),
+            remote_server_restart_reason(
+                Some(&current_version()),
+                Some(CURRENT_PROTOCOL),
+                true,
+                false
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn remote_server_restart_reason_prefers_version_mismatch_over_helper_update() {
+        assert_eq!(
+            remote_server_restart_reason(Some("0.0.0"), Some(CURRENT_PROTOCOL), true, true),
+            Some(RemoteServerRestartReason::VersionMismatch)
+        );
+    }
+
+    #[test]
+    fn parse_remote_server_status_json_reads_detached_daemon_capability() {
+        for detached in [false, true] {
+            let json = serde_json::json!({
+                "running": true,
+                "version": current_version(),
+                "protocol": CURRENT_PROTOCOL,
+                "capabilities": {"live_handoff": true, "detached_server_daemon": detached}
+            });
+            assert_eq!(
+                parse_remote_server_status_json(&json.to_string()).unwrap(),
+                RemoteServerStatus::Running {
+                    version: Some(current_version()),
+                    protocol: Some(CURRENT_PROTOCOL),
+                    live_handoff: true,
+                    detached_server_daemon: detached,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn remote_server_restart_reason_requires_restart_for_old_daemon() {
+        for changed in [false, true] {
+            assert_eq!(
+                remote_server_restart_reason(
+                    Some(&current_version()),
+                    Some(CURRENT_PROTOCOL),
+                    false,
+                    changed
+                ),
+                Some(RemoteServerRestartReason::DaemonDetachMissing)
+            );
+        }
+    }
+
+    #[test]
+    fn remote_server_restart_reason_prioritizes_protocol_then_daemon() {
+        for protocol in [None, Some(0)] {
+            assert_eq!(
+                remote_server_restart_reason(Some("0.0.0"), protocol, false, true),
+                Some(RemoteServerRestartReason::ProtocolMismatch)
+            );
+        }
+        assert_eq!(
+            remote_server_restart_reason(Some("0.0.0"), Some(CURRENT_PROTOCOL), false, true),
+            Some(RemoteServerRestartReason::DaemonDetachMissing)
+        );
+    }
+
+    #[test]
+    fn remote_install_plan_covers_reasons_and_both_handoff_gates() {
+        use RemoteInstallRunningServerPlan::{KeepRunning, LiveHandoff, StopRequired};
+        use RemoteServerRestartReason::*;
+        let current = current_version();
+        let rows = [
+            (current.as_str(), Some(0), false, true, ProtocolMismatch),
+            (
+                current.as_str(),
+                Some(CURRENT_PROTOCOL),
+                false,
+                true,
+                DaemonDetachMissing,
+            ),
+            ("0.0.0", Some(CURRENT_PROTOCOL), true, true, VersionMismatch),
+            (
+                current.as_str(),
+                Some(CURRENT_PROTOCOL),
+                true,
+                true,
+                BinaryUpdated,
+            ),
+        ];
+        for (peer, enabled) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(
+                remote_install_running_server_plan(
+                    Some(&current),
+                    Some(CURRENT_PROTOCOL),
+                    true,
+                    false,
+                    peer,
+                    enabled
+                ),
+                KeepRunning,
+                "unchanged compatible peer={peer} enabled={enabled}"
+            );
+            for (version, protocol, detached, changed, reason) in rows {
+                let expected = if peer && enabled {
+                    LiveHandoff
+                } else {
+                    StopRequired(reason)
+                };
+                assert_eq!(
+                    remote_install_running_server_plan(
+                        Some(version),
+                        protocol,
+                        detached,
+                        changed,
+                        peer,
+                        enabled
+                    ),
+                    expected,
+                    "reason={reason:?} peer={peer} enabled={enabled}"
+                );
+            }
+        }
+    }
+
+    struct RemoteStatusFixture {
+        path: PathBuf,
+        calls: PathBuf,
+        remote: RemoteZynk,
+    }
+
+    impl RemoteStatusFixture {
+        fn new(status: serde_json::Value) -> Self {
+            let path = write_fake_zynk("install-decision", "unused");
+            let calls = path.with_file_name("calls");
+            fs::write(&path, format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$*\" >> {}\ntest \"$*\" = 'status server --json' || exit 42\nprintf '%s\\n' {}\n",
+                shell_quote(calls.to_str().unwrap()), shell_quote(&status.to_string())
+            )).unwrap();
+            let custody = InstallCustody {
+                sha256: crate::checksum::file_sha256(&path).unwrap(),
+                ..custody_fixture()
+            };
+            let remote = RemoteZynk::for_platform(RemotePlatform::local())
+                .with_shell_path(shell_quote(path.to_str().unwrap()))
+                .with_custody(&custody);
+            Self {
+                path,
+                calls,
+                remote,
+            }
+        }
+
+        fn confirm_install(&self, enabled: bool) -> io::Result<bool> {
+            assert!(
+                !io::stdin().is_terminal(),
+                "requires noninteractive test input"
+            );
+            SSH_SCRIPT_ENV.with(|slot| {
+                assert!(slot.borrow().is_none());
+                *slot.borrow_mut() = Some(vec![("PATH".into(), "/usr/bin:/bin".into())]);
+            });
+            confirm_remote_install_with_running_server("isolated-shell", &self.remote, enabled)
+        }
+    }
+
+    impl Drop for RemoteStatusFixture {
+        fn drop(&mut self) {
+            SSH_SCRIPT_ENV.with(|slot| *slot.borrow_mut() = None);
+            let _ = fs::remove_dir_all(self.path.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn remote_install_wrapper_preserves_noninteractive_stop_authority() {
+        for detached in [None, Some(false), Some(true)] {
+            for (peer, enabled) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut capabilities = serde_json::json!({"live_handoff": peer});
+                if let Some(detached) = detached {
+                    capabilities["detached_server_daemon"] = detached.into();
+                }
+                let fixture = RemoteStatusFixture::new(serde_json::json!({
+                    "running": true, "version": current_version(),
+                    "protocol": CURRENT_PROTOCOL, "capabilities": capabilities,
+                }));
+                let result = fixture.confirm_install(enabled);
+                if peer && enabled {
+                    assert!(!result.unwrap(), "handoff must not approve stopping");
+                } else {
+                    let error = result.unwrap_err().to_string();
+                    assert!(
+                        error.contains("approve stopping it for the update"),
+                        "{error}"
+                    );
+                }
+                assert_eq!(
+                    fs::read_to_string(&fixture.calls).unwrap(),
+                    "/proc/self/fd/3\nstatus server --json\n",
+                    "decision may query only the pinned executable; no stop/install/handoff"
+                );
+            }
+        }
+        let fixture = RemoteStatusFixture::new(serde_json::json!({
+            "running": true, "version": current_version(), "protocol": CURRENT_PROTOCOL,
+        }));
+        assert!(fixture
+            .confirm_install(true)
+            .unwrap_err()
+            .to_string()
+            .contains("approve stopping"));
+        assert_eq!(
+            fs::read_to_string(&fixture.calls).unwrap(),
+            "/proc/self/fd/3\nstatus server --json\n"
+        );
+    }
+
+    #[test]
+    fn remote_install_wrapper_rejects_changed_prepared_bytes_before_status() {
+        let fixture = RemoteStatusFixture::new(serde_json::json!({"running": false}));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.path)
+            .unwrap()
+            .write_all(b"# changed after preparation\n")
+            .unwrap();
+        let error = fixture.confirm_install(true).unwrap_err().to_string();
+        assert!(
+            error.contains("executable bytes changed; refusing execution"),
+            "{error}"
+        );
+        assert!(
+            !fixture.calls.exists(),
+            "no command may run before hash acceptance"
         );
     }
 

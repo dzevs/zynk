@@ -4102,3 +4102,74 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   controls passing; no cross-boundary kill is claimed. All mutation sources
   and both red logs remain in the checkpoint evidence. Whole-M8 gates and
   operator integration/deployment authority remain separate and pending.
+
+### M8-07 - Detached Daemons and Remote Restart Decisions (2026-09-13)
+
+- Source: `26db26e416318e17a6e7f3f196ec72109fb37998`, pre-relicense SPLIT.
+  Take the Linux daemon-session, status capability, remote decision and hint
+  changes. Exclude Windows/fallback modules, OS cfg restoration and generated
+  docs/next schema. No forward creator or deferred remainder is consumed.
+  The existing Linux platform boundary exports both new helpers; retain the
+  fork's target-string/RemoteZynk signatures rather than importing RemoteSsh.
+- The exhaustive production launch population is build_server_daemon_command
+  and spawn_handoff_import. Both remove process_group(0) and install the same
+  pre_exec setsid callback. std applies setpgid before pre_exec, so retaining
+  process_group would make setsid fail on a group leader. The callback only
+  performs the syscall and OS-error construction, with no allocation, lock,
+  logging or environment access. Failed detachment propagates as spawn failure.
+  Both actual launchers have PID/SID/PGID child probes with bounded waits and
+  RAII reaping; the real auto-detect daemon is also checked against kernel SID
+  and PGID, API ping and CLI status. Existing teardown kills registered PIDs,
+  not POSIX sessions; runtime-directory registration is a different namespace.
+- default_capabilities is the sole production ServerCapabilities constructor
+  and observes getsid(0) == getpid(). Three test literals gain the field without
+  weakening their assertions. The API type keeps schemars and defaults a missing
+  detached_server_daemon to false. CLI status maps the observation; the separate
+  remote decoder defaults both a missing field and missing capabilities object
+  to false. This is JSON status metadata, not a new binary message or Method.
+  Protocol19, HANDOFF_VERSION2, caller authority, stop/pending/input fences,
+  DB preflight/worker installation and named-session socket clearing are intact.
+  The monolithic --no-session entry continues passing no capability object.
+- Restart precedence follows upstream code: protocol mismatch, missing daemon
+  detachment, version mismatch, then changed binary. The last is deliberately
+  moved after version, not left in its previous second position. An unchanged
+  compatible detached peer needs no restart; other install decisions allow
+  LiveHandoff only when BOTH peer support and caller opt-in are true. Otherwise
+  stopping still requires existing confirmation. A missing old-peer field now
+  prompts a restart recommendation; root changelog and README state that effect.
+  Upstream prose claiming a helper update preserves a compatible running server
+  is NOT imported: its code passes changed=true and requires BinaryUpdated.
+  KeepRunning is not permission to bypass binary custody or install authority.
+- The existing prepared_remote_script hash and /proc/self/fd/3 boundary is
+  unchanged. New wrapper controls execute the actual generated script locally,
+  assert only a pinned status query runs, refuse noninteractive stop without
+  permission, and refuse changed prepared bytes before any command executes.
+  No real SSH host, interactive approval, install or network-drop test is claimed.
+  ConnectionLost displays the existing reattach-command variable as a hint only;
+  no-variable bytes stay identical and there is no execution or survival promise.
+  Manual completion reconciliation finds no new command, flag, value or alias.
+- Evidence/P7: eight new controls fail before their respective production edits
+  (six launch/capability/schema/hint controls, real-daemon SID, restart precedence).
+  The other six new remote controls were written during implementation and are
+  mutation-pinned, not retrospectively called parent red-first. No existing test
+  is deleted or converted. The four legacy restart tests retain all five reason
+  assertions with detached=true supplied; old decoder fixtures retain their JSON
+  and old assertions, adding detached=false. The no-env error control retains its
+  assertion and gains an exact-byte assertion plus environment isolation.
+  Focused 144/144 passes precede fourteen one-site mutations over 29 controls.
+  Every mutant exits100 at the intended behavioral control, with all selected
+  outcomes and source copies retained; each file's hash is restored before the
+  next mutation. Shared syscall/reason/table kills are reported as crossing kills,
+  not falsely selective ones. Constant true and false observations are pinned
+  separately, as are the two decoders, missing object and both handoff operands.
+- Harness disclosure: the first real-daemon red invocation failed to compile
+  because the fixture moved its PathBuf into to_fs_name. It proves no behavior;
+  v2 borrows the path and fails at SID != PID after cleanup. The first green
+  filter selected five controls, omitting launcher and remote-hint names; the
+  next eleven-control run includes them and the complete 144-control run passes.
+  All retained logs identify their actual selections; no narrow run is presented
+  as the whole surface. Gate-2/whole-M8/independent Gate-3 remain separate gates.
+- The first restored full check stopped at clippy's items_after_test_module:
+  the new handoff daemon test module preceded production items. Move that
+  unchanged module to EOF, with no allow attribute or production change, then
+  rerun the full check. The failed invocation remains evidence, not a test pass.
