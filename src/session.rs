@@ -254,36 +254,84 @@ pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
     stop_session_with_timeout(name, STOP_WAIT_TIMEOUT)
 }
 
+pub(crate) fn stop_active_server() -> Result<(), String> {
+    let socket_path = active_api_socket_path();
+    let client_socket_path = crate::server::socket_paths::client_socket_path();
+    stop_socket_with_timeout(
+        socket_path.clone(),
+        vec![socket_path, client_socket_path],
+        STOP_WAIT_TIMEOUT,
+        "server",
+        "cli:request",
+    )
+    .map_err(|err| match err {
+        StopError::Local(message) => message,
+        StopError::Response(response) => response.to_string(),
+    })
+}
+
 fn stop_session_with_timeout(name: Option<&str>, timeout: Duration) -> Result<SessionInfo, String> {
-    let deadline = Instant::now() + timeout;
     let socket_path = api_socket_path_for(name);
+    let client_socket_path = client_socket_path_for(name);
+    let label = format!("session {}", name.unwrap_or(DEFAULT_SESSION_NAME));
+    stop_socket_with_timeout(
+        socket_path.clone(),
+        vec![socket_path, client_socket_path],
+        timeout,
+        &label,
+        "cli:session:stop",
+    )
+    .map_err(|err| match err {
+        StopError::Local(message) => message,
+        StopError::Response(response) => response["error"].to_string(),
+    })?;
+    Ok(session_info(name))
+}
+
+// Keep the response intact until each front door applies its existing error presentation.
+enum StopError {
+    Local(String),
+    Response(serde_json::Value),
+}
+
+fn stop_socket_with_timeout(
+    socket_path: PathBuf,
+    stopped_socket_paths: Vec<PathBuf>,
+    timeout: Duration,
+    label: &str,
+    request_id: &str,
+) -> Result<(), StopError> {
+    let deadline = Instant::now() + timeout;
     let request = serde_json::json!({
-        "id": "cli:session:stop",
+        "id": request_id,
         "method": "server.stop",
         "params": {}
     });
     let stream = crate::ipc::connect_local_stream(&socket_path).map_err(|err| {
-        format!(
-            "session {} is not running or cannot be reached at {}: {err}",
-            name.unwrap_or(DEFAULT_SESSION_NAME),
+        StopError::Local(format!(
+            "{label} is not running or cannot be reached at {}: {err}",
             socket_path.display()
-        )
+        ))
     })?;
-    let stop_response = send_stop_request(stream, &request, deadline)?;
+    let stop_response = send_stop_request(stream, &request, deadline).map_err(StopError::Local)?;
     if let Some(response) = stop_response {
-        if let Some(error) = response.get("error") {
-            return Err(error.to_string());
+        if response.get("error").is_some() {
+            return Err(StopError::Response(response));
         }
     }
-    if !wait_until_stopped_until(&socket_path, deadline) {
-        return Err(format!(
-            "session {} did not stop within {}ms; socket is still reachable at {}",
-            name.unwrap_or(DEFAULT_SESSION_NAME),
+    if !wait_until_stopped_until(&stopped_socket_paths, deadline) {
+        let reachable = reachable_socket_paths(&stopped_socket_paths);
+        return Err(StopError::Local(format!(
+            "{label} did not stop within {}ms; sockets are still reachable at {}",
             timeout.as_millis(),
-            socket_path.display()
-        ));
+            reachable
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
-    Ok(session_info(name))
+    Ok(())
 }
 
 pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
@@ -374,14 +422,22 @@ fn is_running_at(socket_path: &Path) -> bool {
     socket_path.exists() && crate::ipc::connect_local_stream(socket_path).is_ok()
 }
 
-fn wait_until_stopped_until(socket_path: &Path, deadline: Instant) -> bool {
+fn wait_until_stopped_until(socket_paths: &[PathBuf], deadline: Instant) -> bool {
     while Instant::now() < deadline {
-        if !is_running_at(socket_path) {
+        if socket_paths.iter().all(|path| !is_running_at(path)) {
             return true;
         }
         std::thread::sleep(STOP_WAIT_POLL.min(time_until(deadline)));
     }
-    !is_running_at(socket_path)
+    socket_paths.iter().all(|path| !is_running_at(path))
+}
+
+fn reachable_socket_paths(socket_paths: &[PathBuf]) -> Vec<PathBuf> {
+    socket_paths
+        .iter()
+        .filter(|path| is_running_at(path))
+        .cloned()
+        .collect()
 }
 
 fn time_until(deadline: Instant) -> Duration {
@@ -983,6 +1039,92 @@ mod tests {
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(&config_home);
         std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn stop_named_ack_with_client_still_reachable_fails() {
+        let _guard = env_lock().lock().unwrap();
+        struct ConfigGuard {
+            base: PathBuf,
+            previous: Option<std::ffi::OsString>,
+        }
+        impl Drop for ConfigGuard {
+            fn drop(&mut self) {
+                if let Some(value) = &self.previous {
+                    std::env::set_var("XDG_CONFIG_HOME", value);
+                } else {
+                    std::env::remove_var("XDG_CONFIG_HOME");
+                }
+                let _ = std::fs::remove_dir_all(&self.base);
+            }
+        }
+        let root = std::env::var_os("ZYNK_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let config = ConfigGuard {
+            base: root.join(format!("sc-{}", std::process::id())),
+            previous: std::env::var_os("XDG_CONFIG_HOME"),
+        };
+        std::env::set_var("XDG_CONFIG_HOME", &config.base);
+        let api = api_socket_path_for(Some("n"));
+        let client = client_socket_path_for(Some("n"));
+        std::fs::create_dir_all(api.parent().unwrap()).unwrap();
+        let api_listener = std::os::unix::net::UnixListener::bind(&api).unwrap();
+        api_listener.set_nonblocking(true).unwrap();
+        let client_listener = std::os::unix::net::UnixListener::bind(&client).unwrap();
+        client_listener.set_nonblocking(true).unwrap();
+        let done = AtomicBool::new(false);
+        let (result, request) = std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let started = Instant::now();
+                let mut stream = loop {
+                    match api_listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(started.elapsed() < Duration::from_secs(3));
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(err) => panic!("accept: {err}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                drop(api_listener);
+                writeln!(stream, "{{\"id\":\"cli:session:stop\",\"result\":{{}}}}").unwrap();
+                drop(stream);
+                while !done.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(3) {
+                    match client_listener.accept() {
+                        Ok(_) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(err) => panic!("client probe: {err}"),
+                    }
+                }
+                request
+            });
+            let result = stop_session_with_timeout(Some("n"), Duration::from_millis(75));
+            done.store(true, Ordering::Release);
+            (result, server.join().unwrap())
+        });
+        assert_eq!(
+            request,
+            serde_json::json!({"id":"cli:session:stop", "method":"server.stop", "params":{}})
+        );
+        let error = result.expect_err("reachable client socket must prevent named stop success");
+        assert!(error.contains("did not stop"), "{error}");
+        assert!(error.contains(client.to_str().unwrap()), "{error}");
+        assert!(api.exists());
+        assert!(client.exists());
     }
 
     #[test]

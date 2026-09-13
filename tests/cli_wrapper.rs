@@ -2680,6 +2680,15 @@ fn server_stop_command_shuts_down_running_server() {
         String::from_utf8_lossy(&stopped.stdout)
     );
 
+    assert!(
+        !socket_path.exists() || UnixStream::connect(&socket_path).is_err(),
+        "api socket should be removed or stale before server stop returns"
+    );
+    assert!(
+        !client_socket.exists() || UnixStream::connect(&client_socket).is_err(),
+        "client socket should be removed or stale before server stop returns"
+    );
+
     let pid = zynk.child.process_id();
     let started = Instant::now();
     let exit_status = loop {
@@ -2698,20 +2707,6 @@ fn server_stop_command_shuts_down_running_server() {
         delivery_events_count(&db),
         delivery_events_before,
         "server.stop must not create a zynk delivery event"
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline && (socket_path.exists() || client_socket.exists()) {
-        thread::sleep(Duration::from_millis(25));
-    }
-
-    assert!(
-        !socket_path.exists() || UnixStream::connect(&socket_path).is_err(),
-        "api socket should be removed or stale after server stop"
-    );
-    assert!(
-        !client_socket.exists() || UnixStream::connect(&client_socket).is_err(),
-        "client socket should be removed or stale after server stop"
     );
 
     cleanup_spawned_zynk(zynk, base);

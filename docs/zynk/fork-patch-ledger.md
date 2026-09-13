@@ -4744,3 +4744,73 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   authorization, paste/stop fences and protocol 19 remain unchanged. No Cargo
   delta or advisory claim. Full check/gate/hooks accompany the exact commit;
   no Gate-2/Gate-3, whole-M8 or merge/push/install/tag/publish/release approval.
+
+### M8-17 - Stop waits for both sockets (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `c78349f422139577f8d7bf5e07f84dcec5a48456` (PORT, fork adaptation).
+  Parent: `32c8e36cd3fb09e4b242d13210a54a52056e2ac8`, checkpoint 07
+  approved by Gate-2 `msg_8bb4c2e970120706`. That approval covers M8-15/16,
+  not this delta. Preserved patch SHA-256:
+  `9474e52aaa2e9ef1f7de0568a0cd1da83d027ebff5e4a3660e255d4c34122ccd`.
+  Gate-1 `msg_63aefb9d42abadd6` binds design `af1abb74` and clarification
+  `af3832c5`, both preserved. No deferred remainder or later source consumed.
+- Preflight derives two front doors: active server stop and named session
+  stop. The named wait had one production caller and checked only the API.
+  stop_active_server, stop_socket_with_timeout and reachable_socket_paths
+  are creators in this source, not forward dependencies. Both front doors
+  now share request transport and require all selected sockets unreachable.
+  Both production call sites provide exactly API and binary-client paths.
+- Preserve fork contracts that upstream's extraction would have changed:
+  active request ID cli:request and full remote error response; named ID
+  cli:session:stop and serialized error member. The private StopError keeps
+  the remote response until each entry point applies its existing rendering.
+  A present null error is still an error. The named CLI's unchanged outer
+  session_stop_failed envelope contains that serialized member as message;
+  it does not print the bare remote error object. Both layers are pinned.
+- Reuse existing active/explicit/named socket resolvers, preserving explicit
+  --session precedence, API-derived client path precedence over a competing
+  client override, and client-only override behavior. No parallel environment
+  resolver or changes to session observation/deletion are introduced.
+- Active stop deliberately gains the existing session transport's response
+  budget and EOF/reset/timeout-to-poll behavior. EOF is not success by itself.
+  Reuse one two-second budget across request/response and 25 ms polling, with
+  both all predicates, including the final probe. Errors return before polling.
+  Existing connect calls and OS scheduling are not a hard wall-clock deadline;
+  diagnostic re-probes are not an atomic snapshot. Stale files may remain.
+  Success proves neither process death, path removal, pane persistence,
+  receipt-worker completion nor immunity to a later rebind.
+- Binding parent v2 selected eleven controls: six characterization positives
+  and five failures. Three are deterministic premature-success reproductions
+  (active API, active client, named client). The EOF table fails first on the
+  old EmptyResponse diagnostic; its second row was not reached at the parent.
+  The real-server control also failed, but remains timing-dependent rather
+  than the deterministic warrant. Ten new feature tests plus six recompiled
+  support tests are not sixteen distinct new controls.
+- Harness correction disclosed: v1 used the release config/zynk name for
+  debug binaries which use config/zynk-dev, so two failures were setup errors.
+  The first filter also omitted the namespaced unit. V1 and diagnosis logs
+  remain; v2 fixes fixture selection before any production change. Neither
+  invalid setup failure is claimed as a feature red. Actual listeners stay
+  live until CLI exit for negative cases, draining probes without backlog
+  saturation; threads and child processes are owned and reaped on failure.
+- Thirteen compiled one-site mutations fail intended assertions, with actual
+  crossings recorded. API/client omission, loop/final all-to-any, request IDs,
+  both error presentations, client selection, unconditional EOF success,
+  ignored remote errors and stale-file-as-live are discriminated. M01 maps
+  the old ACK-only call to unit success, so it also collapses its error status;
+  its four crossing kills are not claimed as a wait-only selective mutation.
+  All mutated bytes and restored-source hashes travel with the logs.
+- P7/source audit `0fd7dce8` verifies twelve unchanged functions, including
+  send_stop_request and its inner body, the six-kind whitelist, timeout
+  conversion, is_running_at and path/observation/deletion helpers. All old
+  session tests and the new parent-v2 controls are byte-identical. The real
+  server test moves the same two connectivity conditions before process wait
+  and removes only the masking socket retry delay. Its bounded try_wait,
+  clean exit, PID cleanup and exact zero-delivery-event delta are preserved.
+  No test or assertion-count decrease; fifty-three targeted controls pass.
+- Root changelog/README document the observable completion rule. Dispatcher,
+  help and completion reconciliation finds no command, flag, value or alias
+  change; this is a no-op under the standing second-surface obligation.
+  No Cargo/advisory, schema, App/server/input, IPC, caller authority or protocol
+  19 delta. Full check, gate and normal hooks precede the exact commit;
+  release/Zig and whole-M8 Gate-2/Gate-3 remain owed. No operator action.

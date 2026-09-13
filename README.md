@@ -300,6 +300,11 @@ overwrite it, and points you at the explicit `zynk db` adopt/backup/import actio
 > doesn't fetch yet. Update with a source rebuild — then stop the old server (`zynk server stop`) so the new
 > binary takes effect.
 
+`server stop` and named `session stop` check that both selected API and client
+sockets are unreachable before reporting success, rather than accepting only
+the stop acknowledgement. A still-reachable socket produces a failure. This
+connectivity check is not a guarantee that every process has exited.
+
 ## Docs
 
 - [`SKILL.md`](SKILL.md) — reusable agent skill for driving zynk over the socket

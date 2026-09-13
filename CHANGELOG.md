@@ -90,6 +90,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- `zynk server stop` and named `session stop` wait for both selected API and
+  client sockets to become unreachable before reporting success. A stop ACK
+  alone no longer permits an immediate restart to race the old listeners.
 - Local clients no longer read clipboard images for empty bracketed paste.
   Remote clients keep this bridge even when the raw image-paste shortcut is disabled.
 - Interactive terminal clients clear inherited mouse-reporting modes on setup,
