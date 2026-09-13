@@ -5272,3 +5272,96 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   deferred origin arrives and the source union stays 98. No protocol, caller,
   identity, receipt or DB policy change. No whole-M8 or operator-action
   approval; M8-22/23/24 await their exact-range implementation verdict.
+
+### M8-25 - Foreground-leader creation CWD (IMPLEMENTED / PENDING VERIFICATION)
+
+- Assigned source: `4f7fcc48d1f760ab6057d0964f009c05b753456a` (PORT), patch
+  SHA-256 `3f5fd8616905299f688122714e7990d94b4eba8c64523c5c5ee28dd117f5faaa`.
+  Paired D-M6-2 remainder: `550e9f8cc085f428429f5cf2da0bb2dba897e8b8`, patch
+  SHA-256 `c5e207b71482326deb63d366f4bdc323ee63a8f36d7b7fc3484b7f0e1214d997`.
+  Parent: `b69429ad8231ef0850d9d223664b34d4e3d5836e`. Gate-1
+  `msg_15d4f30e69891ad8` approves design `dd454116`; the separate machine window
+  ended in `msg_60d318c923a84e64`. Execution preflight rechecks the actual
+  parent and 25 named prerequisites. Both preserved source patches reproduce
+  their upstream git objects. README/CHANGELOG anchors were reread before edits.
+- The creator overlay, not v2's arrival fields alone, binds the remainder to
+  M8-25: both new Tab/App follow anchors are created by 4f7fcc48 and absent
+  in its parent. The approved per-entry preflight also adjudicates current
+  fork applicability, beyond the overlay's named-creator proof. Land both
+  sources as one leader-first vertical slice, never the intermediate member
+  selection. This is the first of 21 archived pending origins; the remaining
+  twenty still require their own adjudications. The M8 union remains 98 and
+  the historical archive/overlay remain byte-identical, not live counters.
+- D-M6-2's earlier instruction at the M6-17 row to recreate usable_process_cwd
+  is qualified by the M6 Gate-3 correction: general creation validation was
+  already consumed and must not be duplicated or weakened. Reuse the existing
+  pane::usable_reported_cwd predicate, exactly cwd.is_absolute() && cwd.is_dir(),
+  for leader-candidate admission. Preserve creation::usable_directory and its
+  identical two-part final Follow validation in place. No third predicate is
+  introduced. absolute_process_cwd checks only is_absolute() and remains a
+  reporting helper, never substituted for leader admission or final validation.
+- PaneRuntime::follow_cwd queries the existing PTY foreground-group boundary,
+  looks up that leader through platform::process_cwd, admits a usable directory,
+  then falls back to cwd(). TerminalRuntime forwards it; Tab tries the attached
+  runtime before TerminalState.cwd. Rename the private App target lookup and
+  route the existing focused helper through it. Public cwd/foreground_cwd,
+  OSC admission, member selection, workspace identity and detection stay intact.
+- Seven production decisions retain their ownership: pane split, tab create,
+  layout root/replacement, layout split, workspace API, workspace prompt and
+  confirmation. Several reuse unchanged M8-08/09 front doors rather than gaining
+  separate edits. The M5-16 begin_tui_workspace_create carry-forward is satisfied
+  here once, including prompt-off API dispatch and stable-source confirmation.
+  Three adapted cfg(test) wrappers (workspace, tab, split) are not production
+  routes. The real TUI split control drives split_focused_pane_via_api through
+  runtime_pane_split and the API handler, independently of the legacy wrapper.
+- Startup has no source pane. Snapshot/layout export, pane/agent projections,
+  resolved identity, command/argv/env overlays keep the old CWD lookup. Preserve
+  explicit leaf CWD and Home/Current/Path policy precedence; nested layout leaves
+  inherit their new target rather than introducing another global-policy choice.
+  These are process/filesystem observations, not atomic snapshots, path pins,
+  authority inputs or total-deadline guarantees; procfs/directory checks can delay.
+- Sixteen distinct added tests: fourteen parent-phase additions and two runtime
+  controls added after implementation. One existing socket control,
+  pane_info_reports_foreground_cwd_without_changing_pane_cwd, is extended while
+  preserving every old reporting assertion. No new integration binary or support
+  recompilation. Final parent selection: 19 = 14 new + that one extended old +
+  four existing Follow controls swept in by the filter. Outcomes: 13 behavioral
+  failures (12 new plus the extension) and six passes (two new characterization
+  plus four old). The extension fails at its new split assertion after all old
+  assertions; its later tab rows are unreached at the parent, not passing evidence.
+- Two real-socket fixtures establish actual PIDs, groups and cwd links before
+  creation: shell/leader/helper all distinct, and shell=leader with helper distinct.
+  Only the second distinguishes the unchanged member-reporting getter from the
+  creation getter. Background ownership, focus=false and explicit overrides stay
+  asserted. Live App controls cover the remaining decisions and all three legacy
+  wrappers. The direct private layout-split control proves helper behavior; its
+  unchanged handler link is structural evidence, not a claimed socket red.
+- Runtime controls pin no-group fallback and a still-live leader whose deleted
+  directory remains readable through procfs as an absolute but unusable path.
+  The latter asserts the admitted runtime fallback directly, independently of
+  final creation validation; merely rejecting the leader would be insufficient.
+  Shared App fixture visibility broadens only inside cfg(test). The three socket
+  controls own their private paths on panic as well as success; no suite-wide
+  cleanup or zero-residue claim follows from that fixture-local ownership.
+- Focused green is 92/92. Eighteen compiled one-site mutants run those same 92
+  controls, all exit 100; failure counts M01-M18 are
+  14/4/1/3/13/14/16/11/23/4/1/1/5/2/3/1/1/1. Complete pass/fail names, summaries,
+  mutant bytes and restored source hashes accompany each. M03 fails only the
+  deleted-leader runtime assertion; M02 kills the shell=leader socket fixture,
+  while the three-distinct fixture passes. Shared-helper crossings are reported,
+  not independent or selective proofs. No timeout/abort/setup failure is a kill.
+- Three failed instruments are retained: the socket fixture's nonexistent
+  top-level focused_pane_id (corrected to per-pane focused), layout replacement's
+  stale tab index (corrected to returned layout.tab_id before the final parent
+  red), and M06's text slicer selecting a parameter instead of its body use.
+  M06 compile exit 101 is not a kill; V2 corrects the script, retaining the first
+  five valid V1 results and running M06-M18 without any Rust correction.
+- The source audit reverses the exact additions/substitutions and private helper
+  rename, using stdin-only rustfmt to undo rename-induced wrapping before whole
+  old-module comparison. Named reporting/validation bodies are also compared raw.
+  It is point-in-time evidence, not an installed future invariant. Full check,
+  gate, normal hooks and committed-source verification precede exact-SHA Gate-2.
+  No Cargo delta or advisory comparison claim; completion reconciliation is a
+  no-op because command/flag/value/alias sets do not change. No new schema,
+  protocol, caller, receipt, platform or DB surface. No whole-M8, merge, push,
+  install, tag, publish, release or shared-cleanup approval follows.

@@ -2828,6 +2828,17 @@ impl PaneRuntime {
         (start_time > 0).then_some(start_time)
     }
 
+    /// Choose a CWD for new terminals without following nonleader job members.
+    pub fn follow_cwd(&self) -> Option<std::path::PathBuf> {
+        let leader_cwd = self
+            .io
+            .foreground_process_group_id()
+            .and_then(crate::platform::process_cwd)
+            // Process candidates need the same absolute-directory admission as OSC reports.
+            .and_then(usable_reported_cwd);
+        leader_cwd.or_else(|| self.cwd())
+    }
+
     /// Get the current working directory of the process group controlling the pane PTY.
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Acquire);
@@ -3395,6 +3406,92 @@ mod tests {
                 eprintln!("failed to remove CWD probe: {err}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn follow_cwd_falls_back_to_reported_pane_cwd_without_foreground_group() {
+        let probe = CwdTestProbe::new();
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        runtime.test_publish_reported_cwd(probe.base.clone());
+        assert_eq!(runtime.io.foreground_process_group_id(), None);
+        assert_eq!(runtime.cwd(), Some(probe.base.clone()));
+        assert_eq!(runtime.follow_cwd(), Some(probe.base.clone()));
+    }
+
+    #[tokio::test]
+    async fn m825_follow_cwd_rejects_deleted_live_leader_before_falling_back() {
+        let probe = CwdTestProbe::new();
+        let shell_cwd = probe.base.join("shell");
+        let leader_cwd = probe.base.join("leader");
+        let fallback = probe.base.join("reported");
+        let marker = probe.base.join("leader.pid");
+        for dir in [&shell_cwd, &leader_cwd, &fallback] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        let (events, _rx) = mpsc::channel(16);
+        let runtime = PaneRuntime::spawn_argv_command(
+            PaneId::alloc(),
+            24,
+            80,
+            shell_cwd.clone(),
+            &[
+                "/bin/bash".into(),
+                "--noprofile".into(),
+                "--norc".into(),
+                "-i".into(),
+            ],
+            &PaneLaunchEnv::default(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+        // Runtime Drop owns the whole private PTY session, including on assertion failure.
+        let shell = runtime.child_pid().unwrap();
+        runtime
+            .send_bytes(bytes::Bytes::from(format!(
+                "/bin/sh -c 'cd \"{}\" && printf %s $$ > \"{}\" && exec sleep 30'\r",
+                leader_cwd.display(),
+                marker.display()
+            )))
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let leader = loop {
+            if let Ok(text) = std::fs::read_to_string(&marker) {
+                if let Ok(pid) = text.parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "leader setup timeout: shell={shell}, output={:?}",
+                runtime.recent_text(10)
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert_ne!(shell, leader);
+        assert_eq!(crate::platform::process_cwd(shell), Some(shell_cwd));
+        assert_eq!(runtime.io.foreground_process_group_id(), Some(leader));
+        assert_eq!(unsafe { libc::getpgid(leader as i32) }, leader as i32);
+        assert_eq!(runtime.follow_cwd(), Some(leader_cwd.clone()));
+        runtime.test_publish_reported_cwd(fallback.clone());
+        assert_eq!(runtime.cwd(), Some(fallback.clone()));
+        std::fs::remove_dir(&leader_cwd).unwrap();
+        let unusable = crate::platform::process_cwd(leader).expect("lookup must remain present");
+        assert!(crate::platform::process_exists(leader));
+        assert_eq!(runtime.io.foreground_process_group_id(), Some(leader));
+        assert!(unusable.is_absolute());
+        assert!(!unusable.is_dir());
+        assert_ne!(unusable, fallback);
+        assert_eq!(
+            runtime.follow_cwd(),
+            Some(fallback),
+            "present but unusable leader: {unusable:?}"
+        );
     }
 
     #[tokio::test]

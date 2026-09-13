@@ -687,7 +687,11 @@ fn tab_methods_round_trip_over_socket() {
 #[test]
 fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
     let _lock = test_lock();
-    let base = unique_test_dir();
+    let mut fixture = FollowCwdServer {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let base = fixture.base.clone();
     let foreground = base.join("foreground-process");
     let marker = base.join("foreground-ready");
     let pid_file = base.join("foreground.pid");
@@ -696,7 +700,12 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
     let runtime_dir = base.join("runtime");
     let socket_path = runtime_dir.join("zynk.sock");
 
-    let child = spawn_zynk_with_shell(&config_home, &runtime_dir, &socket_path, "/bin/bash");
+    fixture.server = Some(spawn_zynk_with_shell(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        "/bin/bash",
+    ));
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
     let created = send_request(
@@ -707,6 +716,10 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
         ),
     );
     let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -793,7 +806,268 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
         foreground.display().to_string()
     );
 
-    cleanup_spawned_zynk(child, base);
+    let split = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "fg_split",
+            "method": "pane.split",
+            "params": {
+                "target_pane_id": pane_id,
+                "direction": "right",
+                "focus": false,
+            },
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        split["result"]["pane"]["cwd"],
+        foreground.display().to_string()
+    );
+
+    let tab = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "fg_tab",
+            "method": "tab.create",
+            "params": {
+                "workspace_id": workspace_id,
+                "focus": false,
+            },
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        tab["result"]["root_pane"]["cwd"],
+        foreground.display().to_string()
+    );
+
+    let explicit = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "fg_explicit_tab",
+            "method": "tab.create",
+            "params": {
+                "workspace_id": workspace_id,
+                "cwd": base,
+                "focus": false,
+            },
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        explicit["result"]["root_pane"]["cwd"],
+        base.display().to_string()
+    );
+
+    drop(fixture);
+}
+
+#[test]
+fn new_terminal_cwd_follow_prefers_distinct_foreground_leader() {
+    assert_new_terminal_cwd_follow(false);
+}
+
+#[test]
+fn new_terminal_cwd_follow_ignores_nonleader_group_member_cwd() {
+    assert_new_terminal_cwd_follow(true);
+}
+
+struct FollowCwdServer {
+    base: PathBuf,
+    server: Option<SpawnedZynk>,
+}
+
+impl Drop for FollowCwdServer {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            if let Some(server) = self.server.as_mut() {
+                eprintln!(
+                    "follow fixture server status: {:?}",
+                    server.child.try_wait()
+                );
+                if let Some(fd) = server._master.as_raw_fd() {
+                    // SAFETY: only the fixture-owned PTY master is made nonblocking.
+                    let nonblocking = unsafe {
+                        let flags = libc::fcntl(fd, libc::F_GETFL);
+                        flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
+                    };
+                    if nonblocking {
+                        if let Ok(reader) = server._master.try_clone_reader() {
+                            let mut bytes = Vec::new();
+                            let result = reader.take(64 * 1024).read_to_end(&mut bytes);
+                            eprintln!(
+                                "follow fixture server PTY read={result:?}: {}",
+                                String::from_utf8_lossy(&bytes)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(mut stream) = UnixStream::connect(self.base.join("runtime/zynk.sock")) {
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+            let _ = stream.write_all(
+                b"{\"id\":\"follow_cleanup\",\"method\":\"server.stop\",\"params\":{}}\n",
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                if self
+                    .server
+                    .as_mut()
+                    .is_none_or(|server| !matches!(server.child.try_wait(), Ok(None)))
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        drop(self.server.take());
+        cleanup_test_base(&self.base);
+    }
+}
+
+fn assert_new_terminal_cwd_follow(leader_matches_shell: bool) {
+    let _lock = test_lock();
+    let mut fixture = FollowCwdServer {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let base = &fixture.base;
+    let shell_cwd = base.join("shell");
+    let leader_cwd = if leader_matches_shell {
+        shell_cwd.clone()
+    } else {
+        base.join("leader")
+    };
+    let helper_cwd = base.join("helper");
+    let other_cwd = base.join("other");
+    for dir in [&shell_cwd, &leader_cwd, &helper_cwd, &other_cwd] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let script = base.join("leader.sh");
+    fs::write(&script, format!(
+        "cd '{}' || exit 1\nprintf %s $$ > '{}/leader.pid'\n(cd '{}' && touch '{}/helper.ready' && exec sleep 30) &\nprintf %s $! > '{}/helper.pid'\nwhile [ ! -e '{}/helper.ready' ]; do sleep 0.01; done\ntouch '{}/leader.ready'\nwait\n",
+        leader_cwd.display(), base.display(), helper_cwd.display(), base.display(),
+        base.display(), base.display(), base.display()
+    )).unwrap();
+    let socket = base.join("runtime/zynk.sock");
+    fixture.server = Some(spawn_zynk_with_shell(
+        &base.join("config"),
+        &base.join("runtime"),
+        &socket,
+        "/bin/bash",
+    ));
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let call = |method: &str, params: serde_json::Value| {
+        let response = send_request(
+            &socket,
+            &serde_json::json!({
+                "id": "follow", "method": method, "params": params,
+            })
+            .to_string(),
+        );
+        assert!(response.get("error").is_none(), "{response}");
+        response["result"].clone()
+    };
+    let source = call(
+        "workspace.create",
+        serde_json::json!({"cwd": shell_cwd, "focus": true}),
+    );
+    let pane_id = source["root_pane"]["pane_id"].as_str().unwrap();
+    let workspace_id = source["workspace"]["workspace_id"].as_str().unwrap();
+    call(
+        "pane.send_text",
+        serde_json::json!({"pane_id": pane_id, "text": format!(
+            "printf %s $$ > '{}/shell.pid'; /bin/sh '{}'", base.display(), script.display()
+        )}),
+    );
+    call(
+        "pane.send_keys",
+        serde_json::json!({"pane_id": pane_id, "keys": ["Enter"]}),
+    );
+    wait_for_path(&base.join("leader.ready"), Duration::from_secs(5));
+    let pid = |name: &str| -> i32 {
+        fs::read_to_string(base.join(format!("{name}.pid")))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let (shell, leader, helper) = (pid("shell"), pid("leader"), pid("helper"));
+    let observed: Vec<_> = [shell, leader, helper]
+        .into_iter()
+        .map(|pid| {
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            let fields: Vec<_> = stat
+                .rsplit_once(") ")
+                .unwrap()
+                .1
+                .split_whitespace()
+                .collect();
+            let group: i32 = fields[2].parse().unwrap();
+            let foreground: i32 = fields[5].parse().unwrap();
+            let cwd = fs::read_link(format!("/proc/{pid}/cwd")).unwrap();
+            (pid, group, foreground, cwd)
+        })
+        .collect();
+    assert_ne!(shell, leader, "{observed:?}");
+    assert_ne!(leader, helper, "{observed:?}");
+    assert_eq!(
+        observed,
+        vec![
+            (shell, shell, leader, shell_cwd.clone()),
+            (leader, leader, leader, leader_cwd.clone()),
+            (helper, leader, leader, helper_cwd.clone()),
+        ]
+    );
+    let reported = call("pane.get", serde_json::json!({"pane_id": pane_id}));
+    assert_eq!(reported["pane"]["cwd"], shell_cwd.to_str().unwrap());
+    assert_eq!(
+        reported["pane"]["foreground_cwd"],
+        if leader_matches_shell {
+            helper_cwd.to_str().unwrap()
+        } else {
+            leader_cwd.to_str().unwrap()
+        },
+        "{observed:?}"
+    );
+    let other = call(
+        "workspace.create",
+        serde_json::json!({"cwd": other_cwd, "focus": true}),
+    );
+    let focused = other["root_pane"]["pane_id"].clone();
+    let mut actual = Vec::new();
+    for explicit in [false, true] {
+        let mut params =
+            serde_json::json!({"target_pane_id": pane_id, "direction": "right", "focus": false});
+        if explicit {
+            params["cwd"] = serde_json::json!(other_cwd);
+        }
+        actual.push(call("pane.split", params)["pane"]["cwd"].clone());
+        let mut params = serde_json::json!({"workspace_id": workspace_id, "focus": false});
+        if explicit {
+            params["cwd"] = serde_json::json!(other_cwd);
+        }
+        actual.push(call("tab.create", params)["root_pane"]["cwd"].clone());
+    }
+    let listed = call("pane.list", serde_json::json!({}));
+    let focused_panes: Vec<_> = listed["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|pane| pane["focused"] == true)
+        .map(|pane| pane["pane_id"].clone())
+        .collect();
+    assert_eq!(focused_panes, vec![focused]);
+    assert_eq!(
+        actual,
+        vec![
+            serde_json::json!(leader_cwd),
+            serde_json::json!(leader_cwd),
+            serde_json::json!(other_cwd),
+            serde_json::json!(other_cwd),
+        ],
+        "{observed:?}"
+    );
 }
 
 #[test]

@@ -110,11 +110,17 @@ split mouse reports to reassemble. These are poll windows, not total latency
 guarantees. Recognized delayed mouse tails are discarded without swallowing
 following keys or bracketed-paste text. JSON terminal streams emit no reset bytes.
 
-With `terminal.new_cwd = "follow"`, new tabs and new-tab layouts use the focused
-pane's runtime CWD, falling back to its cached CWD when needed. Explicit CWDs and
-other configured policies retain precedence. Automatic following requires an
-absolute, existing directory; a deleted or invalid source falls back to HOME or
-the server's working directory.
+With `terminal.new_cwd = "follow"`, new terminals prefer their source pane's
+foreground process-group leader CWD, then its runtime CWD, then its cached CWD.
+New tabs use the source workspace's focused pane; splits and layout replacements
+use their target pane or tab, even in a background workspace. Explicit CWDs and
+other configured policies retain precedence. Process-derived candidates and the
+final Follow choice must be absolute, existing directories; an unusable leader
+falls back to the pane's runtime CWD, while an invalid final choice falls back to
+HOME or the server's working directory. These are observations, not an atomic
+process/filesystem snapshot, and slow procfs or directory checks can delay creation.
+Public `cwd` and `foreground_cwd` reporting is unchanged: the latter can report
+a nonleader group member even though new terminals follow the leader.
 New workspaces likewise prefer their source workspace's focused-pane CWD before
 its identity seed. A named-workspace prompt remembers the source workspace and
 rechecks its current focused pane when confirmed, rather than freezing the

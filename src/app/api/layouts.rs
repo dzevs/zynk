@@ -348,7 +348,7 @@ impl App {
         let follow_cwd = replace_target.and_then(|(_, tab_idx)| {
             let ws = self.state.workspaces.get(ws_idx)?;
             let tab = ws.tabs.get(tab_idx)?;
-            tab.cwd_for_pane(
+            tab.follow_cwd_for_pane(
                 tab.layout.focused(),
                 &self.state.terminals,
                 &self.terminal_runtimes,
@@ -407,7 +407,7 @@ impl App {
             .cwd
             .as_ref()
             .map(PathBuf::from)
-            .or_else(|| self.cwd_for_pane_in_workspace(ws_idx, target_pane_id));
+            .or_else(|| self.follow_cwd_for_pane_in_workspace(ws_idx, target_pane_id));
         let extra_env = super::env::normalize_launch_env(pane.env.clone())
             .map_err(|(_, message)| message.to_string())?;
         let direction = match direction {
@@ -632,6 +632,48 @@ mod tests {
             })
             .collect();
         assert_eq!(layouts, vec![app.pane_layout_snapshot(0, 0).unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn m825_private_layout_split_follows_live_target_and_preserves_leaf_override() {
+        let mut fixture = crate::app::creation::tests::CwdFixture::new();
+        let leader = fixture.install_foreground(0, 0).await;
+        fixture.app.state.switch_workspace(1);
+        let focus = fixture.app.state.current_pane_focus_target();
+        let target = fixture.app.state.workspaces[0].tabs[0].root_pane;
+        let explicit_cwd = fixture.root.join("other");
+        let mut actual = Vec::new();
+        for cwd in [None, Some(explicit_cwd.display().to_string())] {
+            // Direct production helper evidence, not a socket-level layout-apply red.
+            let created = fixture
+                .app
+                .layout_split_pane(
+                    0,
+                    target,
+                    SplitDirection::Right,
+                    0.4,
+                    &LayoutPane {
+                        cwd,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let tab = &fixture.app.state.workspaces[0].tabs[0];
+            let terminal = tab.terminal_id(created).unwrap();
+            actual.push(
+                fixture
+                    .app
+                    .state
+                    .terminals
+                    .get(terminal)
+                    .unwrap()
+                    .cwd
+                    .clone(),
+            );
+            assert!(fixture.app.terminal_runtimes.get(terminal).is_some());
+        }
+        assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
+        assert_eq!(actual, vec![leader, explicit_cwd]);
     }
 
     #[test]

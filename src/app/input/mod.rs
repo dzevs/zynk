@@ -682,7 +682,7 @@ impl AppState {
             .and_then(|i| self.workspaces.get(i))
             .and_then(|ws| {
                 let tab = ws.active_tab()?;
-                tab.cwd_for_pane(tab.layout.focused(), &self.terminals, terminal_runtimes)
+                tab.follow_cwd_for_pane(tab.layout.focused(), &self.terminals, terminal_runtimes)
             });
         let cwd = Some(super::creation::resolve_new_terminal_cwd(
             &self.new_terminal_cwd,

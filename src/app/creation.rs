@@ -48,21 +48,23 @@ impl App {
             .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
     }
 
-    pub(super) fn cwd_for_pane_in_workspace(
+    pub(super) fn follow_cwd_for_pane_in_workspace(
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) -> Option<PathBuf> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
-        ws.tabs
-            .get(tab_idx)?
-            .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
+        ws.tabs.get(tab_idx)?.follow_cwd_for_pane(
+            pane_id,
+            &self.state.terminals,
+            &self.terminal_runtimes,
+        )
     }
 
     pub(super) fn focused_pane_cwd_in_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
-        self.cwd_for_pane_in_workspace(ws_idx, pane_id)
+        self.follow_cwd_for_pane_in_workspace(ws_idx, pane_id)
     }
 
     pub(super) fn workspace_creation_cwd(&self, ws_idx: usize) -> Option<PathBuf> {
@@ -129,7 +131,7 @@ impl App {
     pub(crate) fn create_workspace(&mut self) {
         let follow_cwd = self
             .workspace_creation_source()
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+            .and_then(|ws_idx| self.workspace_creation_cwd(ws_idx));
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         if let Err(e) = self.create_workspace_with_events(initial_cwd, true) {
             error!(err = %e, "failed to create workspace");
@@ -158,7 +160,7 @@ impl App {
         let follow_cwd = self
             .state
             .active
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+            .and_then(|ws_idx| self.workspace_creation_cwd(ws_idx));
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         match self.create_tab_with_options(initial_cwd, true) {
             Ok(created_idx) => {
@@ -536,7 +538,7 @@ pub(crate) fn terminal_agent_session_info(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::App;
     use crate::api::schema as api;
     use crate::detect::{Agent, AgentState};
@@ -554,9 +556,9 @@ mod tests {
         )
     }
 
-    struct CwdFixture {
-        app: App,
-        root: std::path::PathBuf,
+    pub(in crate::app) struct CwdFixture {
+        pub(in crate::app) app: App,
+        pub(in crate::app) root: std::path::PathBuf,
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -573,7 +575,7 @@ mod tests {
     ];
 
     impl CwdFixture {
-        fn new() -> Self {
+        pub(in crate::app) fn new() -> Self {
             let root = std::env::temp_dir().join(format!(
                 "zynk-creation-cwd-{}-{}",
                 std::process::id(),
@@ -610,6 +612,84 @@ mod tests {
                 std::env::var_os("HOME")
             );
             Self { app, root }
+        }
+
+        pub(in crate::app) async fn install_foreground(
+            &mut self,
+            ws: usize,
+            tab_idx: usize,
+        ) -> std::path::PathBuf {
+            let shell_cwd = self.cwd(ws, tab_idx);
+            let leader_cwd = self.root.join(format!("leader-{ws}-{tab_idx}"));
+            let marker = self.root.join(format!("ready-{ws}-{tab_idx}"));
+            std::fs::create_dir(&leader_cwd).unwrap();
+            let tab = &self.app.state.workspaces[ws].tabs[tab_idx];
+            let pane_id = tab.root_pane;
+            let terminal_id = tab.terminal_id(pane_id).unwrap().clone();
+            let runtime = crate::terminal::TerminalRuntime::spawn_argv_command(
+                pane_id,
+                24,
+                80,
+                shell_cwd.clone(),
+                &[
+                    "/bin/bash".into(),
+                    "--noprofile".into(),
+                    "--norc".into(),
+                    "-i".into(),
+                ],
+                &crate::pane::PaneLaunchEnv::default(),
+                0,
+                self.app.state.host_terminal_theme,
+                self.app.state.host_terminal_appearance,
+                self.app.event_tx.clone(),
+                self.app.render_notify.clone(),
+                self.app.render_dirty.clone(),
+            )
+            .unwrap();
+            // Own the real runtime before readiness or any assertion can fail.
+            assert!(self
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime)
+                .is_none());
+            let runtime = self.app.terminal_runtimes.get(&terminal_id).unwrap();
+            let shell = runtime.child_pid().unwrap();
+            runtime
+                .send_bytes(bytes::Bytes::from(format!(
+                    "/bin/sh -c 'cd \"{}\" && printf %s $$ > \"{}\" && exec sleep 30'\r",
+                    leader_cwd.display(),
+                    marker.display()
+                )))
+                .await
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let leader = loop {
+                if let Ok(text) = std::fs::read_to_string(&marker) {
+                    if let Ok(pid) = text.parse::<u32>() {
+                        break pid;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "foreground setup timeout: shell={shell}, marker={marker:?}, output={:?}",
+                    runtime.recent_text(10)
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            assert_ne!(shell, leader);
+            assert_eq!(crate::platform::process_cwd(shell), Some(shell_cwd.clone()));
+            assert_eq!(
+                crate::platform::process_cwd(leader),
+                Some(leader_cwd.clone())
+            );
+            assert_eq!(
+                crate::platform::foreground_process_group_id(shell),
+                Some(leader)
+            );
+            assert_eq!(unsafe { libc::getpgid(leader as i32) }, leader as i32);
+            assert_eq!(runtime.cwd(), Some(shell_cwd));
+            assert_eq!(runtime.foreground_cwd(), Some(leader_cwd.clone()));
+            leader_cwd
         }
 
         fn cwd(&self, ws: usize, tab: usize) -> std::path::PathBuf {
@@ -695,6 +775,240 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn m825_live_foreground_drives_background_tab_layout_and_split() {
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for route in CACHED_CWD_ROUTES {
+            let mut fixture = CwdFixture::new();
+            let leader = fixture.install_foreground(0, 1).await;
+            actual.push(fixture.create_target(route, None));
+            expected.push(leader);
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn m825_live_layout_replacement_uses_target_before_workspace_focus() {
+        let mut fixture = CwdFixture::new();
+        let target_cwd = fixture.install_foreground(0, 0).await;
+        let focused_cwd = fixture.install_foreground(0, 1).await;
+        assert_ne!(target_cwd, focused_cwd);
+        fixture.app.state.switch_workspace(1);
+        let focus = fixture.app.state.current_pane_focus_target();
+        let result = fixture.call(api::Method::LayoutApply(api::LayoutApplyParams {
+            workspace_id: None,
+            tab_id: fixture.app.public_tab_id(0, 0),
+            tab_label: None,
+            focus: false,
+            root: api::LayoutNode::Pane {
+                pane: api::LayoutPane::default(),
+            },
+        }));
+        let api::ResponseResult::LayoutApply { layout } = result else {
+            panic!("not a layout response")
+        };
+        let (ws, tab) = fixture.app.parse_tab_id(&layout.tab_id).unwrap();
+        assert_eq!(ws, 0);
+        assert_eq!(fixture.app.state.workspaces[0].tabs.len(), 2);
+        assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
+        assert_eq!(fixture.cwd(ws, tab), target_cwd);
+    }
+
+    #[tokio::test]
+    async fn m825_live_workspace_api_uses_focused_leader() {
+        let mut fixture = CwdFixture::new();
+        let leader = fixture.install_foreground(0, 1).await;
+        let focus = fixture.app.state.current_pane_focus_target();
+        fixture.call(api::Method::WorkspaceCreate(api::WorkspaceCreateParams {
+            cwd: None,
+            focus: false,
+            label: Some("live".into()),
+        }));
+        assert_eq!(fixture.app.state.workspaces.len(), 3);
+        assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
+        assert_eq!(
+            fixture.app.state.workspaces[2].custom_name.as_deref(),
+            Some("live")
+        );
+        assert_eq!(fixture.app.state.workspaces[2].identity_cwd, leader);
+        assert_eq!(fixture.cwd(2, 0), leader);
+    }
+
+    #[tokio::test]
+    async fn m825_live_workspace_prompt_suggests_selected_sources_leader() {
+        let mut fixture = CwdFixture::new();
+        let leader = fixture.install_foreground(0, 1).await;
+        let source_id = fixture.app.state.workspaces[0].id.clone();
+        fixture.app.state.switch_workspace(1);
+        fixture.app.state.mode = crate::app::Mode::Navigate;
+        fixture.app.state.selected = 0;
+        fixture.app.state.prompt_new_workspace_name = true;
+        fixture.app.begin_tui_workspace_create("test.m825.prompt");
+        let Some(crate::app::state::PendingWorkspaceCreateCwd::Follow {
+            source_workspace_id,
+            suggested_cwd,
+        }) = fixture.app.state.pending_workspace_create_cwd.as_ref()
+        else {
+            panic!("missing Follow intent")
+        };
+        assert_eq!(source_workspace_id.as_deref(), Some(source_id.as_str()));
+        assert_eq!(fixture.app.state.workspaces.len(), 2);
+        assert_eq!(fixture.app.state.mode, crate::app::Mode::RenameWorkspace);
+        assert!(fixture.app.state.name_input_replace_on_type);
+        assert_eq!(suggested_cwd, &leader);
+        assert_eq!(fixture.app.state.name_input, "leader-0-1");
+    }
+
+    #[tokio::test]
+    async fn m825_live_workspace_confirmation_reresolves_original_sources_new_leader() {
+        let mut fixture = CwdFixture::new();
+        let original = fixture.install_foreground(0, 1).await;
+        let source_id = fixture.app.state.workspaces[0].id.clone();
+        fixture.app.state.prompt_new_workspace_name = true;
+        fixture.app.begin_tui_workspace_create("test.m825.confirm");
+        assert!(
+            matches!(fixture.app.state.pending_workspace_create_cwd.as_ref(),
+            Some(crate::app::state::PendingWorkspaceCreateCwd::Follow { source_workspace_id: Some(id), .. }) if id == &source_id)
+        );
+        let new_tab = fixture.app.state.workspaces[0].test_add_tab(None);
+        fixture.app.state.ensure_test_terminals();
+        let tab = &fixture.app.state.workspaces[0].tabs[new_tab];
+        let terminal_id = tab.terminal_id(tab.root_pane).unwrap().clone();
+        fixture
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .cwd = fixture.root.join("other");
+        let new_leader = fixture.install_foreground(0, new_tab).await;
+        assert_ne!(original, new_leader);
+        fixture.app.state.switch_workspace_tab(0, new_tab);
+        fixture.app.state.switch_workspace(1);
+        fixture.app.state.name_input = "  chosen live label  ".into();
+        fixture
+            .app
+            .handle_rename_key_via_api(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::empty(),
+            ));
+        assert_eq!(fixture.app.state.workspaces.len(), 3);
+        assert_eq!(
+            fixture.app.state.workspaces[2].custom_name.as_deref(),
+            Some("chosen live label")
+        );
+        assert!(fixture.app.state.pending_workspace_create_cwd.is_none());
+        assert_eq!(fixture.app.state.active, Some(2));
+        assert_eq!(fixture.app.state.workspaces[2].identity_cwd, new_leader);
+        assert_eq!(fixture.cwd(2, 0), new_leader);
+    }
+
+    #[tokio::test]
+    async fn m825_live_workspace_prompt_off_dispatches_selected_sources_leader() {
+        let mut fixture = CwdFixture::new();
+        let leader = fixture.install_foreground(0, 1).await;
+        fixture.app.state.switch_workspace(1);
+        fixture.app.state.mode = crate::app::Mode::Navigate;
+        fixture.app.state.selected = 0;
+        fixture.app.state.prompt_new_workspace_name = false;
+        fixture
+            .app
+            .begin_tui_workspace_create("test.m825.prompt-off");
+        assert_eq!(fixture.app.state.workspaces.len(), 3);
+        assert!(fixture.app.state.pending_workspace_create_cwd.is_none());
+        assert_eq!(fixture.app.state.active, Some(2));
+        assert_eq!(fixture.app.state.mode, crate::app::Mode::Terminal);
+        assert_eq!(fixture.cwd(2, 0), leader);
+    }
+
+    #[tokio::test]
+    async fn m825_live_tui_split_submitter_follows_leader() {
+        let mut fixture = CwdFixture::new();
+        let leader = fixture.install_foreground(0, 1).await;
+        fixture
+            .app
+            .split_focused_pane_via_api(api::SplitDirection::Right);
+        let tab = &fixture.app.state.workspaces[0].tabs[1];
+        assert_eq!(tab.panes.len(), 2);
+        assert_ne!(tab.layout.focused(), tab.root_pane);
+        let terminal = tab.terminal_id(tab.layout.focused()).unwrap();
+        assert_eq!(
+            fixture.app.state.terminals.get(terminal).unwrap().cwd,
+            leader
+        );
+    }
+
+    #[tokio::test]
+    async fn m825_legacy_workspace_wrapper_follows_focused_leader() {
+        let mut fixture = CwdFixture::new();
+        let leader = fixture.install_foreground(0, 1).await;
+        fixture.app.create_workspace();
+        assert_eq!(fixture.app.state.workspaces.len(), 3);
+        assert_eq!(fixture.app.state.active, Some(2));
+        assert_eq!(fixture.cwd(2, 0), leader);
+    }
+
+    #[tokio::test]
+    async fn m825_legacy_tab_wrapper_follows_focused_leader() {
+        let mut fixture = CwdFixture::new();
+        let leader = fixture.install_foreground(0, 1).await;
+        fixture.app.state.requested_new_tab_name = Some("legacy live".into());
+        fixture.app.create_tab();
+        assert_eq!(fixture.app.state.workspaces[0].tabs.len(), 3);
+        assert_eq!(fixture.app.state.workspaces[0].active_tab, 2);
+        assert_eq!(fixture.cwd(0, 2), leader);
+    }
+
+    #[tokio::test]
+    async fn m825_legacy_split_wrapper_follows_leader() {
+        let mut fixture = CwdFixture::new();
+        let leader = fixture.install_foreground(0, 1).await;
+        fixture.app.state.split_pane(
+            &mut fixture.app.terminal_runtimes,
+            ratatui::layout::Direction::Horizontal,
+        );
+        let tab = &fixture.app.state.workspaces[0].tabs[1];
+        assert_eq!(tab.panes.len(), 2);
+        assert_ne!(tab.layout.focused(), tab.root_pane);
+        let terminal = tab.terminal_id(tab.layout.focused()).unwrap();
+        assert_eq!(
+            fixture.app.state.terminals.get(terminal).unwrap().cwd,
+            leader
+        );
+    }
+
+    #[tokio::test]
+    async fn m825_live_source_preserves_explicit_and_nonfollow_policies() {
+        use crate::config::NewTerminalCwdConfig;
+        for route in CACHED_CWD_ROUTES {
+            for policy in [
+                NewTerminalCwdConfig::Follow,
+                NewTerminalCwdConfig::Home,
+                NewTerminalCwdConfig::Current,
+                NewTerminalCwdConfig::Path("/".into()),
+            ] {
+                let mut fixture = CwdFixture::new();
+                let leader = fixture.install_foreground(0, 1).await;
+                let explicit =
+                    (policy == NewTerminalCwdConfig::Follow).then(|| fixture.root.join("other"));
+                let expected = match &policy {
+                    NewTerminalCwdConfig::Follow => explicit.clone().unwrap(),
+                    NewTerminalCwdConfig::Home => std::env::var_os("HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| std::env::current_dir().unwrap()),
+                    NewTerminalCwdConfig::Current => std::env::current_dir().unwrap(),
+                    NewTerminalCwdConfig::Path(_) => std::path::PathBuf::from("/"),
+                };
+                assert_ne!(expected, leader);
+                fixture.app.state.new_terminal_cwd = policy;
+                let created =
+                    fixture.create_target(route, explicit.map(|path| path.display().to_string()));
+                assert_eq!(created, expected, "{route:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn tab_create_follows_cached_focused_pane_cwd_without_runtime() {
         let mut fixture = CwdFixture::new();
         fixture.app.state.switch_workspace(1);
@@ -738,10 +1052,13 @@ mod tests {
         for (ws, tab, name) in [(0, 0, "seed"), (0, 1, "cached"), (1, 0, "other")] {
             let pane = fixture.app.state.workspaces[ws].tabs[tab].root_pane;
             assert_eq!(
-                fixture.app.cwd_for_pane_in_workspace(ws, pane),
+                fixture.app.follow_cwd_for_pane_in_workspace(ws, pane),
                 Some(fixture.root.join(name))
             );
-            assert_eq!(fixture.app.cwd_for_pane_in_workspace(1 - ws, pane), None);
+            assert_eq!(
+                fixture.app.follow_cwd_for_pane_in_workspace(1 - ws, pane),
+                None
+            );
         }
         assert_eq!(
             fixture.app.focused_pane_cwd_in_workspace(0),
@@ -753,11 +1070,11 @@ mod tests {
         );
         assert_eq!(fixture.app.focused_pane_cwd_in_workspace(2), None);
         let pane = fixture.app.state.workspaces[0].tabs[1].root_pane;
-        assert_eq!(fixture.app.cwd_for_pane_in_workspace(2, pane), None);
+        assert_eq!(fixture.app.follow_cwd_for_pane_in_workspace(2, pane), None);
         assert_eq!(
             fixture
                 .app
-                .cwd_for_pane_in_workspace(0, crate::layout::PaneId::alloc()),
+                .follow_cwd_for_pane_in_workspace(0, crate::layout::PaneId::alloc()),
             None
         );
         let terminal_id = fixture.app.state.workspaces[0].tabs[1]
@@ -765,7 +1082,7 @@ mod tests {
             .unwrap()
             .clone();
         fixture.app.state.terminals.remove(&terminal_id);
-        assert_eq!(fixture.app.cwd_for_pane_in_workspace(0, pane), None);
+        assert_eq!(fixture.app.follow_cwd_for_pane_in_workspace(0, pane), None);
         assert_eq!(fixture.app.focused_pane_cwd_in_workspace(0), None);
     }
 
@@ -795,7 +1112,7 @@ mod tests {
             .unwrap()
             .test_publish_reported_cwd(reported.clone());
         assert_eq!(
-            fixture.app.cwd_for_pane_in_workspace(0, pane),
+            fixture.app.follow_cwd_for_pane_in_workspace(0, pane),
             Some(reported.clone())
         );
         assert_eq!(fixture.app.focused_pane_cwd_in_workspace(0), Some(reported));

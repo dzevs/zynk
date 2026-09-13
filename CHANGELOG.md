@@ -64,6 +64,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Changed**
 
+- Follow-policy terminal creation prefers the source pane's foreground process-group
+  leader CWD, with runtime and cached CWD fallbacks. Explicit CWDs and other policies
+  keep precedence; public CWD reporting can still show a nonleader group member.
 - CLI workspace, tab, worktree, and pane-placement requests share typed internal adapters;
   argument parsing, target selection, JSON responses, and exit statuses are unchanged.
 - New workspaces follow the source workspace's focused-pane CWD instead of its
