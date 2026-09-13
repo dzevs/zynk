@@ -4934,3 +4934,83 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   19, caller authority, dependency/advisory, generic close/switch or live runtime
   change. Full check, gate and normal hooks precede commit. Exact-SHA Gate-2,
   whole-M8 Gate-2/Gate-3 and operator actions remain separate and outstanding.
+
+### M8 checkpoint 09 - Exact-range Gate-2 approval
+
+- Gate-2 `msg_bf5cba76de79992d` approves only
+  `061e0f0cc8b6b988e3a2b0777c13863b2b1482c5..5e495b311db139e89af712e9bae1d457c1667c58`,
+  tree `399c3b9668bc1bd19f8020051984bd2ced891140`, and releases the freeze.
+  The packet and reviewed object remain unchanged. This is not whole-M8 or
+  operator merge/push/install/tag/publish/release approval.
+
+### M8-20 - Remote image drops (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `ed31632ebf6e63ca87e6d9a57b7eee79df5ae142` (PORT, Linux adaptation).
+  Parent: `5e495b311db139e89af712e9bae1d457c1667c58`. Preserved patch SHA-256:
+  `4ca9aa163a2f6ca387550bf3955c3f03e40b093671a1b84cf7d5e839d4c10f85`.
+  Gate-1 `msg_71f77569aef376e2` binds design `7ebf8889` and the M10 companion;
+  clarification `598ee93b` preserves that design unchanged. Corrections in
+  `msg_e93e9fd1aaaabcea` and framing confirmation `msg_2ef37081bd9a558a`
+  qualify evidence, not the approved scope. No deferred arrival is consumed.
+- One recognition call in run_client_loop follows the unchanged clipboard
+  attempt and precedes raw Input. Successful remote drops send the existing
+  ClipboardImage then continue, without also forwarding the local path.
+  Local clients never read through this feature. Interactive App and acquired
+  direct attach use this loop; JSON observe/control entry points are unchanged.
+  Server staging/admission remains unchanged, including pending refusal and
+  acquired direct-session targeting without global App promotion.
+- Port the single-path grammar: exact outer bracketed pair, UTF-8, trailing
+  CR/LF trimming, embedded-newline refusal, matching quotes and backslash
+  unescaping, absolute path, case-insensitive supported extension. This is not
+  shell parsing, expansion, multiple-file handling or drag-intent detection.
+  Actual ordinary input is one UTF-8 scalar/key per StdinInput; palette-only
+  accumulation does not coalesce user input. Reliable end-to-end recognition
+  is bracketed paste. Plain unframed paths are helper grammar evidence only;
+  quoted/escaped paths inside a bracketed envelope are end-to-end tested.
+- Linux platform read_image_file pins with O_PATH, checks descriptor metadata
+  through reopen_regular_image_file(&File), then read-opens that same object
+  through procfs. Regular-file symlinks remain supported. No original pathname
+  is re-resolved after pinning; no read_link-based or unchecked fallback exists.
+  A single actual bounded read feeds both the existing signature validator and
+  emitted bytes. Read errors, missing/nonregular/empty/oversized/mismatched files
+  fall back to original Input, including both bracketed-paste delimiters.
+- Keep the existing 16 MiB wire cap and shallow PNG/JPEG/GIF/WebP/BMP signature
+  rules. Upstream arbitrary image-bytes fixtures become signature-valid data;
+  suffix-only admission would weaken the fork's existing ingestion boundary.
+  Pinning is object identity, not immutable content. O_PATH prevents FIFO/device
+  read-open hazards, not filesystem latency. There is no image decoding,
+  sanitization, total read deadline, privileged access or path/content logging.
+- Valid parent controls: three real-client cases, two characterization passes
+  and one behavioral failure on raw path instead of ClipboardImage. Initial
+  v1 and diagnostic runs fail before Hello due to conflicting API/client socket
+  overrides: API override derived api-client.sock. Preserve them as failed
+  instruments, not reds. V2 removes the API override like the real remote
+  launcher; all config/home/runtime/PTY/socket resources remain private.
+- Fixture readiness is an ordinary input round trip after terminal setup, not
+  a banner or sleep. The PTY reader is nonblocking, the client is owned/reaped,
+  no reader thread is detached, and cleanup accepts kernel ECHILD when the
+  existing support panic hook already reaped the registered child. All three
+  valid parent control bodies remain byte-identical. A fourth implementation-
+  phase control covers quoted JPEG and escaped-space PNG through the real client.
+- Ten compiled mutations fail intended assertions with no timeout/abort kills.
+  M01-M08 each run fourteen controls, with actual failures 2/2/2/3/3/2/2/1.
+  M09 runs only the direct directory reopen control: one run, one failure.
+  A wrapper-directory test would still return None on EISDIR without the type
+  gate, so it is not evidence of wrapper-to-helper enforcement. No intentionally
+  blocking FIFO mutant runs. M10 preserves the type check but reopens read_link's
+  path: thirteen pass, one fails with observed None versus Some(original bytes)
+  after unlink and a different-byte replacement, not a setup unwrap failure.
+- Source audit `064d010d` is load-bearing for wrapper-to-helper linkage: the
+  wrapper's sole readable reopen is the helper, and its one content read feeds
+  validation and payload. Whole old client/platform modules reconstruct exactly
+  after stripping only named additions; all five named clipboard controls,
+  the signature validator, limited reader and JSON controller paths are intact.
+  This bounded source/type-shape check is not a general Rust AST proof. Every
+  mutant is preserved, its complete summary reconciled and source hash restored.
+- Fourteen distinct new feature controls plus six support tests recompiled in
+  the new integration binary; no old test/assertion removed or weakened. The
+  172-control focused run passes. Full check, gate and normal hooks precede
+  commit; exact-SHA review remains outstanding. No Cargo, protocol 19, CLI
+  command/flag/value/alias or completion delta: reconciliation is a recorded
+  no-op. Root README/CHANGELOG state the transfer and framing limitations.
+  No whole-M8, release/Zig, operator action or cleanup approval follows.

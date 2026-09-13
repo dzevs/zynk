@@ -1238,6 +1238,21 @@ async fn run_client_loop(
                         "clipboard image paste trigger received, but local clipboard has no image"
                     );
                 }
+                if let Some(image) = read_image_file_from_terminal_drop(&data, is_remote_client) {
+                    info!(
+                        bytes = image.bytes.len(),
+                        extension = image.extension,
+                        "bridging local image file drop to remote server"
+                    );
+                    let msg = ClientMessage::ClipboardImage {
+                        extension: image.extension.to_owned(),
+                        data: image.bytes,
+                    };
+                    if let Err(e) = write_to_server(&mut write_stream, &msg) {
+                        return Err(ClientError::ConnectionLost(e));
+                    }
+                    continue;
+                }
                 let msg = ClientMessage::Input { data };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
                     return Err(ClientError::ConnectionLost(e));
@@ -1540,6 +1555,85 @@ fn should_bridge_clipboard_image_paste(
     )
 }
 
+fn read_image_file_from_terminal_drop(
+    data: &[u8],
+    is_remote_client: bool,
+) -> Option<crate::platform::ClipboardImage> {
+    let (path, extension) = image_path_from_terminal_drop(data, is_remote_client)?;
+    crate::platform::read_image_file(&path, extension)
+}
+
+fn image_path_from_terminal_drop(
+    data: &[u8],
+    is_remote_client: bool,
+) -> Option<(std::path::PathBuf, &'static str)> {
+    if !is_remote_client {
+        return None;
+    }
+
+    let bytes = bracketed_paste_payload(data).unwrap_or(data);
+    let text = std::str::from_utf8(bytes).ok()?;
+    let text = text.trim_end_matches(['\r', '\n']);
+    if text.is_empty() || text.contains(['\r', '\n']) {
+        return None;
+    }
+
+    let text = unescape_terminal_drop_path(strip_matching_path_quotes(text));
+    let path = std::path::PathBuf::from(text);
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let extension = recognized_image_extension(path.extension()?.to_str()?)?;
+    Some((path, extension))
+}
+
+fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
+    const START: &[u8] = b"\x1b[200~";
+    const END: &[u8] = b"\x1b[201~";
+    data.strip_prefix(START)?.strip_suffix(END)
+}
+
+fn strip_matching_path_quotes(text: &str) -> &str {
+    if text.len() < 2 {
+        return text;
+    }
+
+    match (text.as_bytes().first(), text.as_bytes().last()) {
+        (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"')) => &text[1..text.len() - 1],
+        _ => text,
+    }
+}
+
+fn unescape_terminal_drop_path(text: &str) -> String {
+    let mut unescaped = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            unescaped.push(chars.next().unwrap_or(ch));
+        } else {
+            unescaped.push(ch);
+        }
+    }
+    unescaped
+}
+
+fn recognized_image_extension(extension: &str) -> Option<&'static str> {
+    if extension.eq_ignore_ascii_case("png") {
+        Some("png")
+    } else if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") {
+        Some("jpg")
+    } else if extension.eq_ignore_ascii_case("gif") {
+        Some("gif")
+    } else if extension.eq_ignore_ascii_case("webp") {
+        Some("webp")
+    } else if extension.eq_ignore_ascii_case("bmp") {
+        Some("bmp")
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Clipboard forwarding
 // ---------------------------------------------------------------------------
@@ -1817,6 +1911,76 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m820_image_drop_grammar_preserves_single_path_contract() {
+        for (input, path, extension) in [
+            ("/tmp/image.png", "/tmp/image.png", "png"),
+            ("'/tmp/screen shot.PNG'\r\n", "/tmp/screen shot.PNG", "png"),
+            ("\"/tmp/screen shot.jpg\"", "/tmp/screen shot.jpg", "jpg"),
+            ("/tmp/screen\\ shot.JPEG", "/tmp/screen shot.JPEG", "jpg"),
+            ("/tmp/image.GiF", "/tmp/image.GiF", "gif"),
+            ("/tmp/image.WebP", "/tmp/image.WebP", "webp"),
+            ("/tmp/image.BMP", "/tmp/image.BMP", "bmp"),
+            ("\x1b[200~/tmp/image.png\x1b[201~", "/tmp/image.png", "png"),
+        ] {
+            assert_eq!(
+                image_path_from_terminal_drop(input.as_bytes(), true),
+                Some((std::path::PathBuf::from(path), extension)),
+                "{input:?}"
+            );
+            assert_eq!(image_path_from_terminal_drop(input.as_bytes(), false), None);
+        }
+    }
+
+    #[test]
+    fn m820_image_drop_grammar_rejects_nonpaths_and_incomplete_envelopes() {
+        for input in [
+            b"".as_slice(),
+            b"\r\n",
+            b"image.png",
+            b"~/image.png",
+            b"/tmp/image.txt",
+            b"/tmp/image",
+            b"/tmp/a.png\n/tmp/b.png",
+            b"/tmp/a.png\r/tmp/b.png",
+            b"\xff/tmp/image.png",
+            b"\x1b[200~/tmp/image.png",
+            b"/tmp/image.png\x1b[201~",
+            b"\x1b[200~\x1b[201~",
+            b"\"/tmp/image.png'",
+        ] {
+            assert_eq!(
+                image_path_from_terminal_drop(input, true),
+                None,
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn m820_image_drop_quote_escape_and_envelope_helpers_are_literal() {
+        for (input, expected) in [
+            ("\"/a b\"", "/a b"),
+            ("'/a b'", "/a b"),
+            ("'/a b\"", "'/a b\""),
+            ("'", "'"),
+            ("", ""),
+        ] {
+            assert_eq!(strip_matching_path_quotes(input), expected);
+        }
+        assert_eq!(unescape_terminal_drop_path("/a\\ b\\\\c\\"), "/a b\\c\\");
+        assert_eq!(
+            unescape_terminal_drop_path("/$(literal).png"),
+            "/$(literal).png"
+        );
+        assert_eq!(
+            bracketed_paste_payload(b"\x1b[200~x\x1b[201~"),
+            Some(b"x".as_slice())
+        );
+        assert_eq!(bracketed_paste_payload(b"\x1b[200~x\x1b[201~suffix"), None);
+        assert_eq!(bracketed_paste_payload(b"prefix\x1b[200~x\x1b[201~"), None);
+    }
 
     #[test]
     fn m810_initial_mouse_state_matches_direct_or_configured_setup() {

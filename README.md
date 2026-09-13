@@ -283,7 +283,18 @@ remote_image_paste = "ctrl+v"    # raw-key image paste, only in `zynk --remote`;
 An empty bracketed paste can also request a local clipboard image in a remote
 client, even when `keys.remote_image_paste` is empty. Local clients pass empty
 paste through as ordinary input without reading the clipboard; nonempty text
-paste is never an image-paste trigger.
+paste is never a clipboard-image trigger.
+
+Separately, remote interactive clients recognize a single absolute image path
+inside bracketed paste and transfer that file instead of the local path. Quoted
+and backslash-escaped paths are supported; ordinary typed paths are not
+reassembled. PNG, JPG/JPEG, GIF, WebP, and BMP require matching file signatures
+and at most 16 MiB. Regular-file symlinks work; unreadable, missing, nonregular,
+empty, oversized, or mismatched files leave the original paste unchanged.
+Pasting such a valid image path has the same effect as dropping it: this is not
+drag-intent detection. Local clients and JSON terminal controllers do not use
+this interpretation. Signature checks are not full image decoding, and slow
+filesystems can still delay reads.
 
 `ui.agent_panel_scope` (3.0.x) is no longer supported: the agent panel shows all workspaces, and
 `ui.agent_panel_sort` controls ordering only. Custom keys and prefixes displace conflicting defaults.

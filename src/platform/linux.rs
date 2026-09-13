@@ -483,6 +483,43 @@ fn read_validated_clipboard_image(
     Some(ClipboardImage { bytes, extension })
 }
 
+/// Read a signature-checked image from one pinned regular file, up to the wire limit.
+pub(crate) fn read_image_file(
+    path: &std::path::Path,
+    extension: &'static str,
+) -> Option<ClipboardImage> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // O_PATH does not read-open a device or wait for a FIFO writer.
+    // https://man7.org/linux/man-pages/man2/open.2.html
+    let pinned = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH)
+        .open(path)
+        .ok()?;
+    let file = reopen_regular_image_file(&pinned)?;
+    let bytes =
+        match read_limited_reader(file, crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD).ok()? {
+            LimitedRead::Complete(bytes) => bytes,
+            LimitedRead::Empty | LimitedRead::Oversized => return None,
+        };
+    if !bytes_match_image_signature(extension, &bytes) {
+        return None;
+    }
+    Some(ClipboardImage { bytes, extension })
+}
+
+fn reopen_regular_image_file(pinned: &std::fs::File) -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd;
+
+    if !pinned.metadata().ok()?.is_file() {
+        return None;
+    }
+    // Reopen the pinned object, not its possibly replaced pathname. The owner
+    // remains alive, and procfs enforces read permission on the actual reopen.
+    std::fs::File::open(format!("/proc/self/fd/{}", pinned.as_raw_fd())).ok()
+}
+
 fn bytes_match_image_signature(extension: &str, bytes: &[u8]) -> bool {
     match extension {
         "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
@@ -717,6 +754,161 @@ fn process_session_id(pid: u32) -> Option<i32> {
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+
+    struct ImageFileFixture(std::path::PathBuf);
+
+    impl ImageFileFixture {
+        fn new() -> Self {
+            let root = std::env::var_os("ZYNK_TEST_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let fixture =
+                Self(root.join(format!("zynk-image-file-{}-{stamp}", std::process::id())));
+            std::fs::create_dir_all(&fixture.0).unwrap();
+            fixture
+        }
+
+        fn write(&self, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+
+        fn pin(&self, path: &std::path::Path) -> std::fs::File {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH)
+                .open(path)
+                .unwrap()
+        }
+    }
+
+    impl Drop for ImageFileFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn m820_image_file_validates_each_signature_family_and_mismatches() {
+        let fixture = ImageFileFixture::new();
+        let mut bmp = vec![0; 26];
+        bmp[..2].copy_from_slice(b"BM");
+        bmp[10..14].copy_from_slice(&26u32.to_le_bytes());
+        for (extension, bytes) in [
+            ("png", b"\x89PNG\r\n\x1a\nbody".as_slice()),
+            ("jpg", b"\xff\xd8\xffbody"),
+            ("gif", b"GIF87abody"),
+            ("gif", b"GIF89abody"),
+            ("webp", b"RIFFxxxxWEBPbody"),
+            ("bmp", bmp.as_slice()),
+        ] {
+            let path = fixture.write(extension, bytes);
+            assert_eq!(
+                read_image_file(&path, extension),
+                Some(ClipboardImage {
+                    bytes: bytes.to_vec(),
+                    extension
+                })
+            );
+            let wrong = if extension == "png" { "jpg" } else { "png" };
+            assert_eq!(
+                read_image_file(&path, wrong),
+                None,
+                "{extension} as {wrong}"
+            );
+        }
+        let path = fixture.write("suffix.png", b"image-bytes");
+        assert_eq!(read_image_file(&path, "png"), None);
+    }
+
+    #[test]
+    fn m820_image_file_refuses_empty_missing_and_directory() {
+        let fixture = ImageFileFixture::new();
+        let empty = fixture.write("empty.png", b"");
+        for path in [empty, fixture.0.join("missing.png"), fixture.0.clone()] {
+            assert_eq!(read_image_file(&path, "png"), None, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn m820_image_file_bounds_actual_read_at_exact_limit() {
+        let fixture = ImageFileFixture::new();
+        let header = b"\x89PNG\r\n\x1a\n";
+        let path = fixture.write("large.png", header);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let max = crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD;
+        file.set_len(max as u64).unwrap();
+        let image = read_image_file(&path, "png").unwrap();
+        assert_eq!(image.extension, "png");
+        assert_eq!(image.bytes.len(), max);
+        assert_eq!(&image.bytes[..header.len()], header);
+        assert!(image.bytes[header.len()..].iter().all(|byte| *byte == 0));
+        drop(image);
+        file.set_len(max as u64 + 1).unwrap();
+        assert!(read_image_file(&path, "png").is_none());
+    }
+
+    #[test]
+    fn m820_image_file_supports_regular_symlinks() {
+        let fixture = ImageFileFixture::new();
+        let bytes = b"\x89PNG\r\n\x1a\nlinked image";
+        let original = fixture.write("original.png", bytes);
+        let link = fixture.0.join("link.png");
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        assert_eq!(
+            read_image_file(&link, "png"),
+            Some(ClipboardImage {
+                bytes: bytes.to_vec(),
+                extension: "png"
+            })
+        );
+    }
+
+    #[test]
+    fn m820_image_reopen_refuses_directory_before_read() {
+        let fixture = ImageFileFixture::new();
+        let pinned = fixture.pin(&fixture.0);
+        assert!(pinned.metadata().unwrap().is_dir());
+        assert!(reopen_regular_image_file(&pinned).is_none());
+    }
+
+    #[test]
+    fn m820_image_file_and_reopen_refuse_owned_fifo_without_reader_open() {
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = ImageFileFixture::new();
+        let path = fixture.0.join("pipe.png");
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the live NUL-terminated path belongs to this private fixture.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let pinned = fixture.pin(&path);
+        assert!(reopen_regular_image_file(&pinned).is_none());
+        assert_eq!(read_image_file(&path, "png"), None);
+    }
+
+    #[test]
+    fn m820_image_reopen_retains_unlinked_object_not_replacement_path() {
+        use std::io::Read;
+        let fixture = ImageFileFixture::new();
+        let original = b"\x89PNG\r\n\x1a\noriginal bytes";
+        let replacement = b"\x89PNG\r\n\x1a\ndifferent replacement";
+        let path = fixture.write("replaced.png", original);
+        let pinned = fixture.pin(&path);
+        std::fs::remove_file(&path).unwrap();
+        fixture.write("replaced.png", replacement);
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
+        let observed = reopen_regular_image_file(&pinned).and_then(|mut file| {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).ok()?;
+            Some(bytes)
+        });
+        assert_eq!(observed, Some(original.to_vec()));
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

@@ -10,6 +10,10 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- Remote interactive clients can transfer a local image path received as one
+  bracketed paste, including quoted or backslash-escaped paths. PNG, JPEG, GIF,
+  WebP, and BMP files must match their signatures and fit within 16 MiB;
+  rejected input is forwarded unchanged. Ordinary typed paths are not reassembled.
 - `zynk api snapshot` prints the complete live `session.snapshot` JSON response.
   Agent projections remain observations, not authenticated identity or receipt
   evidence; the command takes no arguments and needs a running server.
