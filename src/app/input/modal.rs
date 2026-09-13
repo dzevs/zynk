@@ -1035,7 +1035,7 @@ impl App {
                                         .iter()
                                         .position(|ws| ws.id == workspace_id)
                                 })
-                                .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+                                .and_then(|ws_idx| self.workspace_creation_cwd(ws_idx));
                             self.resolve_new_terminal_cwd(follow_cwd)
                         }
                     };

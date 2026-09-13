@@ -108,6 +108,10 @@ pane's runtime CWD, falling back to its cached CWD when needed. Explicit CWDs an
 other configured policies retain precedence. Automatic following requires an
 absolute, existing directory; a deleted or invalid source falls back to HOME or
 the server's working directory.
+New workspaces likewise prefer their source workspace's focused-pane CWD before
+its identity seed. A named-workspace prompt remembers the source workspace and
+rechecks its current focused pane when confirmed, rather than freezing the
+suggested directory or following a different globally focused workspace.
 
 ## Agent messaging
 

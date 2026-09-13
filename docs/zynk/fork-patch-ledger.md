@@ -4228,3 +4228,56 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   None of these invocation/setup failures establishes behavior. Final full
   check/gate and exact-SHA checkpoint evidence remain separate; this row grants
   no Gate-2, whole-M8, independent Gate-3 or operator-action approval.
+
+### M8-09 - Focused Workspace Creation CWD (2026-09-13)
+
+- Source: `cf3769feb9837c6040820c3e6096c5cc2907adc0`, pre-relicense PORT.
+  Consume M8-08's helpers and prefer the source workspace's focused-pane CWD,
+  then its identity seed, through one workspace_creation_cwd helper. The
+  existing seed_cwd_from_workspace keeps its identity meaning. Upstream test
+  cleanup consolidation is adapted to M8-08's single CwdFixture/Drop rather
+  than introducing another shared test module or Windows command branches.
+  Absent creation-env fields are contextual, not imported forward dependencies.
+- Three production decisions use that helper: handle_workspace_create,
+  begin_tui_workspace_create's prompt suggestion, and save_rename_modal_via_api's
+  confirmation. Prompt-off already delegates through runtime_workspace_create
+  to the same API handler. The production population was re-derived before
+  editing, distinguishing the two cfg(test) creation helpers and seed test.
+  ensure_default_workspace remains an intentional resolve(None) exemption:
+  at startup no source workspace exists, making Follow's source choice vacuous.
+- Follow prompt intent still carries a stable source workspace ID. Confirming
+  looks it up again and reads that workspace's current focused pane, not the
+  prior suggestion, a captured index/PaneId or the newly global active workspace.
+  Source removal still falls back through None/policy; typed/trimmed labels,
+  prompt-off routing, focus=false and final creation validation remain intact.
+  No workspace identity, layout, CWD-report, detection or caller/receipt change.
+  Manual completion reconciliation: no command, flag, value set or alias change.
+- D-M6-2 remains OPEN beyond these two arrivals. Its literal creation predicate
+  is_absolute() && is_dir() and invalid HOME/directory checks remain unchanged.
+  M8-25 `4f7fcc48d1f760ab6057d0964f009c05b753456a` plus deferred
+  `550e9f8cc085f428429f5cf2da0bb2dba897e8b8` still owe follow_cwd_for_pane,
+  foreground-group leader lookup, runtime/Tab integration and the same THREE
+  workspace routes, as well as their full recorded leader/helper/creation
+  controls. No such creator/remainder lands here; cached CWD is not evidence
+  of foreground-process-group following. Protocol19 and dependencies stay put.
+- Four behavioral controls fail at the preceding source before edits: actual
+  API creation, initial prompt, prompt-off runtime delegation, and confirmation
+  after source focus and global workspace changes. All use distinct real CWDs,
+  terminating PTYs and owned cleanup. The API/runtime table stops on its API
+  row in red; the direct runtime row is green coverage, not separately executed
+  parent red evidence. The distinct prompt-off red does exercise delegation.
+  Four later controls pin seed fallback without identity changes, source-ID
+  lookup after a real workspace.move, explicit/non-Follow precedence and final
+  invalid cached-source validation. They are mutation/positive coverage, not
+  retrospectively labelled red-first. No legacy test or assertion is changed.
+- The expanded 91-test CWD/workspace/layout selection passes before mutations,
+  including existing moved/deleted source, removed-workspace, invalid-HOME,
+  typed-label, cancellation and prompt-off controls. Eight one-site mutations
+  each exit100: shared seed-only, each of the three callers independently,
+  frozen suggested CWD, global-active instead of source, lost seed fallback,
+  and a fixed source index. Actual crossing kills are retained, including old
+  delayed/removed-source controls killing frozen suggestions; no false promise
+  of per-caller independence is made for the shared helper. Source snapshots,
+  all selected outcomes and byte-identical restoration hashes travel with the
+  checkpoint. Full check/gate and reviews remain separate evidence and gates;
+  no whole-M8, Gate-3 or operator integration/deployment approval is claimed.

@@ -46,6 +46,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Changed**
 
+- New workspaces follow the source workspace's focused-pane CWD instead of its
+  first-tab root. A named-workspace prompt rechecks that source's current focus
+  on confirmation, even after workspace focus or ordering changes.
 - Remote restart checks now recognize detached-daemon support. Older servers
   without that capability trigger a restart recommendation even when version
   and protocol match; existing stop, handoff, and install confirmation gates remain.

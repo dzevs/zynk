@@ -65,6 +65,11 @@ impl App {
         self.cwd_for_pane_in_workspace(ws_idx, pane_id)
     }
 
+    pub(super) fn workspace_creation_cwd(&self, ws_idx: usize) -> Option<PathBuf> {
+        self.focused_pane_cwd_in_workspace(ws_idx)
+            .or_else(|| self.seed_cwd_from_workspace(ws_idx))
+    }
+
     pub(super) fn resolve_new_terminal_cwd(&self, follow_cwd: Option<PathBuf>) -> PathBuf {
         resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
     }
@@ -90,7 +95,7 @@ impl App {
             let source_workspace_id = source_ws_idx
                 .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
                 .map(|ws| ws.id.clone());
-            let follow_cwd = source_ws_idx.and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+            let follow_cwd = source_ws_idx.and_then(|ws_idx| self.workspace_creation_cwd(ws_idx));
             let cwd = self.resolve_new_terminal_cwd(follow_cwd);
             let intent = if self.state.new_terminal_cwd == NewTerminalCwdConfig::Follow {
                 crate::app::state::PendingWorkspaceCreateCwd::Follow {
@@ -951,6 +956,274 @@ mod tests {
             std::fs::remove_dir(&path).unwrap();
             path
         });
+    }
+
+    #[tokio::test]
+    async fn workspace_create_follows_focused_cwd_through_api_and_runtime() {
+        for through_runtime in [false, true] {
+            let mut fixture = CwdFixture::new();
+            let focus = fixture.app.state.current_pane_focus_target();
+            let params = api::WorkspaceCreateParams {
+                cwd: None,
+                focus: false,
+                label: Some("focused".into()),
+            };
+            if through_runtime {
+                fixture
+                    .app
+                    .runtime_workspace_create("test.workspace.focused", params);
+            } else {
+                assert!(matches!(
+                    fixture.call(api::Method::WorkspaceCreate(params)),
+                    api::ResponseResult::WorkspaceCreated { .. }
+                ));
+            }
+            assert_eq!(fixture.app.state.workspaces.len(), 3);
+            assert_eq!(
+                fixture.app.state.workspaces[2].identity_cwd,
+                fixture.root.join("cached"),
+                "runtime={through_runtime}"
+            );
+            assert_eq!(fixture.cwd(2, 0), fixture.root.join("cached"));
+            assert_eq!(
+                fixture.app.state.workspaces[2].custom_name.as_deref(),
+                Some("focused")
+            );
+            assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
+        }
+    }
+
+    #[test]
+    fn workspace_create_prompt_suggests_selected_workspaces_focused_cwd() {
+        let mut fixture = CwdFixture::new();
+        let source_id = fixture.app.state.workspaces[0].id.clone();
+        fixture.app.state.switch_workspace(1);
+        fixture.app.state.mode = crate::app::Mode::Navigate;
+        fixture.app.state.selected = 0;
+        fixture.app.state.prompt_new_workspace_name = true;
+        fixture
+            .app
+            .begin_tui_workspace_create("test.workspace.prompt");
+        let Some(crate::app::state::PendingWorkspaceCreateCwd::Follow {
+            source_workspace_id,
+            suggested_cwd,
+        }) = fixture.app.state.pending_workspace_create_cwd.as_ref()
+        else {
+            panic!("missing Follow intent")
+        };
+        assert_eq!(source_workspace_id.as_deref(), Some(source_id.as_str()));
+        assert_eq!(suggested_cwd, &fixture.root.join("cached"));
+        assert_eq!(fixture.app.state.name_input, "cached");
+        assert!(fixture.app.state.name_input_replace_on_type);
+        assert_eq!(fixture.app.state.mode, crate::app::Mode::RenameWorkspace);
+        assert_eq!(fixture.app.state.workspaces.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn workspace_create_confirmation_reresolves_original_sources_new_focus() {
+        let mut fixture = CwdFixture::new();
+        let source_id = fixture.app.state.workspaces[0].id.clone();
+        fixture.app.state.prompt_new_workspace_name = true;
+        fixture
+            .app
+            .begin_tui_workspace_create("test.workspace.confirm");
+        assert!(
+            matches!(fixture.app.state.pending_workspace_create_cwd.as_ref(),
+            Some(crate::app::state::PendingWorkspaceCreateCwd::Follow { source_workspace_id: Some(id), .. }) if id == &source_id)
+        );
+
+        let new_cwd = fixture.root.join("new-focus");
+        std::fs::create_dir(&new_cwd).unwrap();
+        let new_tab = fixture.app.state.workspaces[0].test_add_tab(None);
+        fixture.app.state.ensure_test_terminals();
+        let tab = &fixture.app.state.workspaces[0].tabs[new_tab];
+        let terminal_id = tab.terminal_id(tab.root_pane).unwrap().clone();
+        fixture
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .cwd = new_cwd.clone();
+        fixture.app.state.switch_workspace_tab(0, new_tab);
+        fixture.app.state.switch_workspace(1);
+        assert_eq!(fixture.app.state.mode, crate::app::Mode::RenameWorkspace);
+        fixture.app.state.name_input = "  chosen label  ".into();
+        fixture
+            .app
+            .handle_rename_key_via_api(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::empty(),
+            ));
+
+        assert_eq!(fixture.app.state.workspaces.len(), 3);
+        assert_eq!(fixture.app.state.workspaces[2].identity_cwd, new_cwd);
+        assert_eq!(fixture.cwd(2, 0), new_cwd);
+        assert_eq!(
+            fixture.app.state.workspaces[2].custom_name.as_deref(),
+            Some("chosen label")
+        );
+        assert!(fixture.app.state.pending_workspace_create_cwd.is_none());
+        assert_eq!(fixture.app.state.active, Some(2));
+    }
+
+    #[tokio::test]
+    async fn workspace_create_prompt_off_follows_selected_workspace_focus() {
+        let mut fixture = CwdFixture::new();
+        fixture.app.state.switch_workspace(1);
+        fixture.app.state.mode = crate::app::Mode::Navigate;
+        fixture.app.state.selected = 0;
+        fixture.app.state.prompt_new_workspace_name = false;
+        fixture
+            .app
+            .begin_tui_workspace_create("test.workspace.prompt-off");
+        assert_eq!(fixture.app.state.workspaces.len(), 3);
+        assert_eq!(fixture.cwd(2, 0), fixture.root.join("cached"));
+        assert!(fixture.app.state.pending_workspace_create_cwd.is_none());
+        assert_eq!(fixture.app.state.active, Some(2));
+        assert_eq!(fixture.app.state.mode, crate::app::Mode::Terminal);
+    }
+
+    #[test]
+    fn workspace_creation_cwd_falls_back_to_seed_without_redefining_identity() {
+        let mut fixture = CwdFixture::new();
+        assert_eq!(
+            fixture.app.seed_cwd_from_workspace(0),
+            Some(fixture.root.join("seed"))
+        );
+        assert_eq!(
+            fixture.app.workspace_creation_cwd(0),
+            Some(fixture.root.join("cached"))
+        );
+        let pane = fixture.app.state.workspaces[0].tabs[1].root_pane;
+        let terminal_id = fixture.app.state.workspaces[0].tabs[1]
+            .terminal_id(pane)
+            .unwrap()
+            .clone();
+        fixture.app.state.terminals.remove(&terminal_id);
+        assert_eq!(fixture.app.focused_pane_cwd_in_workspace(0), None);
+        assert_eq!(
+            fixture.app.workspace_creation_cwd(0),
+            Some(fixture.root.join("seed"))
+        );
+        assert_eq!(
+            fixture.app.seed_cwd_from_workspace(0),
+            Some(fixture.root.join("seed"))
+        );
+        assert_eq!(fixture.app.workspace_creation_cwd(2), None);
+    }
+
+    #[tokio::test]
+    async fn workspace_create_confirmation_tracks_source_id_after_reorder() {
+        let mut fixture = CwdFixture::new();
+        let source_id = fixture.app.state.workspaces[0].id.clone();
+        fixture.app.state.prompt_new_workspace_name = true;
+        fixture
+            .app
+            .begin_tui_workspace_create("test.workspace.reorder");
+        fixture.call(api::Method::WorkspaceMove(api::WorkspaceMoveParams {
+            workspace_id: fixture.app.public_workspace_id(0),
+            insert_index: 2,
+        }));
+        assert_eq!(fixture.app.state.workspaces[1].id, source_id);
+        fixture.app.state.switch_workspace(0);
+        assert_eq!(fixture.app.state.mode, crate::app::Mode::RenameWorkspace);
+        fixture.app.state.name_input = "reordered".into();
+        fixture
+            .app
+            .handle_rename_key_via_api(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::empty(),
+            ));
+        assert_eq!(fixture.app.state.workspaces.len(), 3);
+        assert_eq!(fixture.cwd(2, 0), fixture.root.join("cached"));
+        assert_eq!(
+            fixture.app.state.workspaces[2].identity_cwd,
+            fixture.root.join("cached")
+        );
+        assert_eq!(
+            fixture.app.state.workspaces[2].custom_name.as_deref(),
+            Some("reordered")
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_create_preserves_explicit_and_nonfollow_cwd_policies() {
+        use crate::config::NewTerminalCwdConfig;
+        for (policy, explicit) in [
+            (NewTerminalCwdConfig::Home, false),
+            (NewTerminalCwdConfig::Current, false),
+            (NewTerminalCwdConfig::Path("/".into()), false),
+            (NewTerminalCwdConfig::Follow, true),
+            (NewTerminalCwdConfig::Home, true),
+        ] {
+            let mut fixture = CwdFixture::new();
+            let cwd = explicit.then(|| fixture.root.join("other"));
+            let expected = cwd
+                .clone()
+                .unwrap_or_else(|| super::resolve_new_terminal_cwd(&policy, None));
+            fixture.app.state.new_terminal_cwd = policy;
+            let focus = fixture.app.state.current_pane_focus_target();
+            fixture.call(api::Method::WorkspaceCreate(api::WorkspaceCreateParams {
+                cwd: cwd.map(|path| path.display().to_string()),
+                focus: false,
+                label: None,
+            }));
+            assert_eq!(fixture.app.state.workspaces.len(), 3);
+            assert_eq!(fixture.app.state.workspaces[2].identity_cwd, expected);
+            assert_eq!(fixture.cwd(2, 0), expected);
+            assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_create_revalidates_invalid_cached_focus_at_creation() {
+        for invalid in ["relative", "file", "deleted"] {
+            let mut fixture = CwdFixture::new();
+            let cwd = match invalid {
+                "relative" => std::path::PathBuf::from("."),
+                "file" => {
+                    let path = fixture.root.join("file");
+                    std::fs::write(&path, b"not a directory").unwrap();
+                    path
+                }
+                "deleted" => {
+                    let path = fixture.root.join("deleted");
+                    std::fs::create_dir(&path).unwrap();
+                    std::fs::remove_dir(&path).unwrap();
+                    path
+                }
+                _ => unreachable!(),
+            };
+            let pane = fixture.app.state.workspaces[0].tabs[1].root_pane;
+            let terminal_id = fixture.app.state.workspaces[0].tabs[1]
+                .terminal_id(pane)
+                .unwrap()
+                .clone();
+            fixture
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .cwd = cwd.clone();
+            assert_eq!(fixture.app.workspace_creation_cwd(0), Some(cwd.clone()));
+            let expected =
+                super::resolve_new_terminal_cwd(&crate::config::NewTerminalCwdConfig::Follow, None);
+            assert_ne!(expected, cwd);
+            fixture.call(api::Method::WorkspaceCreate(api::WorkspaceCreateParams {
+                cwd: None,
+                focus: false,
+                label: None,
+            }));
+            assert_eq!(fixture.app.state.workspaces.len(), 3);
+            assert_eq!(
+                fixture.app.state.workspaces[2].identity_cwd, expected,
+                "{invalid}"
+            );
+            assert_eq!(fixture.cwd(2, 0), expected, "{invalid}");
+            assert!(expected.is_absolute() && expected.is_dir());
+        }
     }
 
     #[test]
