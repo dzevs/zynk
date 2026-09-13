@@ -10,6 +10,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- Pane reads expose optional scroll offset, maximum offset, and viewport rows.
+  The `pane.scroll_changed` subscription reports subsequent sampled changes;
+  seed from `pane.get`, because it sends no initial event or lossless replay.
 - Remote interactive clients can transfer a local image path received as one
   bracketed paste, including quoted or backslash-escaped paths. PNG, JPEG, GIF,
   WebP, and BMP files must match their signatures and fit within 16 MiB;

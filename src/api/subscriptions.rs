@@ -1,8 +1,9 @@
 use regex::Regex;
 
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, PaneAgentStatusChangedEvent, PaneOutputMatchedEvent, Request,
-    Subscription, SubscriptionEventData, SubscriptionEventEnvelope, SubscriptionEventKind,
+    ErrorBody, ErrorResponse, Method, PaneAgentStatusChangedEvent, PaneOutputMatchedEvent,
+    PaneScrollChangedEvent, PaneScrollInfo, Request, Subscription, SubscriptionEventData,
+    SubscriptionEventEnvelope, SubscriptionEventKind,
 };
 use crate::api::server::{dispatch_to_app_with_timeout, APP_RESPONSE_TIMEOUT};
 use crate::api::{ApiRequestSender, EventHub};
@@ -55,6 +56,12 @@ pub(super) struct ActiveAgentStatusChangedSubscription {
     request_prefix: String,
 }
 
+pub(super) struct ActiveScrollChangedSubscription {
+    pane_id: String,
+    last_scroll: Option<PaneScrollInfo>,
+    request_prefix: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PanePresentationSnapshot {
     title: Option<String>,
@@ -97,6 +104,7 @@ pub(super) enum ActiveSubscription {
     Event(ActiveEventSubscription),
     OutputMatched(ActiveOutputMatchedSubscription),
     AgentStatusChanged(Box<ActiveAgentStatusChangedSubscription>),
+    ScrollChanged(ActiveScrollChangedSubscription),
 }
 
 impl ActiveSubscription {
@@ -224,6 +232,14 @@ impl ActiveSubscription {
                     request_prefix: format!("{request_id}:sub:{index}"),
                 }))
             }
+            Subscription::PaneScrollChanged { pane_id } => {
+                let probe = pane_get(format!("{request_id}:sub:{index}:probe"), &pane_id, api_tx)?;
+                Ok(Self::ScrollChanged(ActiveScrollChangedSubscription {
+                    pane_id: probe.pane_id,
+                    last_scroll: probe.scroll,
+                    request_prefix: format!("{request_id}:sub:{index}"),
+                }))
+            }
             Subscription::PaneAgentStatusChanged {
                 pane_id,
                 agent_status,
@@ -272,6 +288,9 @@ impl ActiveSubscription {
             }
             Self::AgentStatusChanged(subscription) => {
                 serde_json::to_value(subscription.poll(api_tx, event_hub)?).ok()
+            }
+            Self::ScrollChanged(subscription) => {
+                serde_json::to_value(subscription.poll(api_tx)?).ok()
             }
         }
     }
@@ -322,6 +341,38 @@ impl ActiveOutputMatchedSubscription {
                 None
             }
         }
+    }
+}
+
+impl ActiveScrollChangedSubscription {
+    fn poll(&mut self, api_tx: &ApiRequestSender) -> Option<SubscriptionEventEnvelope> {
+        let pane = pane_get(
+            format!("{}:pane", self.request_prefix),
+            &self.pane_id,
+            api_tx,
+        )
+        .ok()?;
+        self.event_from_snapshot(pane)
+    }
+
+    fn event_from_snapshot(
+        &mut self,
+        pane: crate::api::schema::PaneInfo,
+    ) -> Option<SubscriptionEventEnvelope> {
+        let scroll = pane.scroll;
+        if scroll == self.last_scroll {
+            return None;
+        }
+        self.last_scroll = scroll;
+        let scroll = scroll?;
+        Some(SubscriptionEventEnvelope {
+            event: SubscriptionEventKind::ScrollChanged,
+            data: SubscriptionEventData::ScrollChanged(PaneScrollChangedEvent {
+                pane_id: pane.pane_id,
+                workspace_id: pane.workspace_id,
+                scroll,
+            }),
+        })
     }
 }
 
@@ -555,6 +606,262 @@ mod tests {
 
     use super::*;
     use crate::api::schema::{AgentStatus, EventData, EventEnvelope, EventKind};
+
+    fn m821_pane(scroll: Option<PaneScrollInfo>) -> crate::api::schema::PaneInfo {
+        serde_json::from_value(serde_json::json!({
+            "pane_id": "w2:p4", "terminal_id": "term_4", "workspace_id": "w2",
+            "tab_id": "w2:t1", "focused": false, "agent_status": "unknown", "revision": 7,
+            "scroll": scroll
+        }))
+        .unwrap()
+    }
+
+    fn m821_metrics(offset: u64, maximum: u64, rows: u64) -> PaneScrollInfo {
+        PaneScrollInfo {
+            offset_from_bottom: offset,
+            max_offset_from_bottom: maximum,
+            viewport_rows: rows,
+        }
+    }
+
+    fn m821_event(metrics: PaneScrollInfo) -> serde_json::Value {
+        serde_json::json!({"event": "pane.scroll_changed", "data": {
+            "pane_id": "w2:p4", "workspace_id": "w2", "scroll": metrics
+        }})
+    }
+
+    #[test]
+    fn m821_scroll_changes_each_metric_and_deduplicates() {
+        let baseline = m821_metrics(12, 240, 30);
+        for next in [
+            m821_metrics(13, 240, 30),
+            m821_metrics(12, 241, 30),
+            m821_metrics(12, 240, 31),
+        ] {
+            let mut subscription = ActiveScrollChangedSubscription {
+                pane_id: "unused-selector".into(),
+                last_scroll: Some(baseline),
+                request_prefix: "scroll".into(),
+            };
+            assert_eq!(
+                subscription.event_from_snapshot(m821_pane(Some(baseline))),
+                None
+            );
+            let event = subscription.event_from_snapshot(m821_pane(Some(next)));
+            assert_eq!(
+                event.map(|event| serde_json::to_value(event).unwrap()),
+                Some(m821_event(next))
+            );
+            assert_eq!(
+                subscription.event_from_snapshot(m821_pane(Some(next))),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn m821_scroll_unavailability_clears_baseline_without_emitting() {
+        let baseline = m821_metrics(12, 240, 30);
+        let mut subscription = ActiveScrollChangedSubscription {
+            pane_id: "w2:p4".into(),
+            last_scroll: Some(baseline),
+            request_prefix: "scroll".into(),
+        };
+        assert_eq!(subscription.event_from_snapshot(m821_pane(None)), None);
+        assert_eq!(subscription.event_from_snapshot(m821_pane(None)), None);
+        assert_eq!(
+            subscription
+                .event_from_snapshot(m821_pane(Some(baseline)))
+                .map(|event| serde_json::to_value(event).unwrap()),
+            Some(m821_event(baseline))
+        );
+        assert_eq!(
+            subscription.event_from_snapshot(m821_pane(Some(baseline))),
+            None
+        );
+    }
+
+    fn m821_responses(
+        responses: Vec<Option<serde_json::Value>>,
+        run: impl FnOnce(&ApiRequestSender, &EventHub),
+    ) -> Vec<Request> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::api::ApiRequestMessage>();
+        std::thread::scope(|scope| {
+            let responder = scope.spawn(move || {
+                let mut requests = Vec::new();
+                for response in responses {
+                    let start = std::time::Instant::now();
+                    let message = loop {
+                        match rx.try_recv() {
+                            Ok(message) => break message,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                                if start.elapsed() < std::time::Duration::from_secs(2) =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            }
+                            Err(error) => panic!("bounded scroll responder: {error:?}"),
+                        }
+                    };
+                    assert!(matches!(message.request.method, Method::PaneGet(_)));
+                    if let Some(mut response) = response {
+                        response["id"] = message.request.id.clone().into();
+                        message.respond_to.send(response.to_string()).unwrap();
+                    }
+                    requests.push(message.request);
+                }
+                requests
+            });
+            let hub = EventHub::default();
+            run(&tx, &hub);
+            assert!(hub.events_after(0).is_empty());
+            drop(tx);
+            responder.join().unwrap()
+        })
+    }
+
+    fn m821_response(scroll: Option<PaneScrollInfo>) -> Option<serde_json::Value> {
+        Some(serde_json::json!({"result": {"type": "pane_info", "pane": m821_pane(scroll)}}))
+    }
+
+    #[test]
+    fn m821_scroll_setup_seeds_baseline_and_polls_canonical_target() {
+        let baseline = m821_metrics(12, 240, 30);
+        let changed = m821_metrics(13, 240, 30);
+        let requests = m821_responses(
+            vec![
+                m821_response(Some(baseline)),
+                m821_response(Some(baseline)),
+                m821_response(Some(changed)),
+            ],
+            |tx, hub| {
+                let mut subscription = ActiveSubscription::new(
+                    Subscription::PaneScrollChanged {
+                        pane_id: "legacy-selector".into(),
+                    },
+                    "scroll",
+                    2,
+                    tx,
+                    hub,
+                )
+                .unwrap();
+                assert_eq!(
+                    subscription.poll(tx, hub),
+                    None,
+                    "setup baseline is not an initial event"
+                );
+                assert_eq!(subscription.poll(tx, hub), Some(m821_event(changed)));
+            },
+        );
+        let wire: Vec<_> = requests
+            .into_iter()
+            .map(|r| serde_json::to_value(r).unwrap())
+            .collect();
+        assert_eq!(
+            wire,
+            vec![
+                serde_json::json!({"id": "scroll:sub:2:probe", "method": "pane.get", "params": {"pane_id": "legacy-selector"}}),
+                serde_json::json!({"id": "scroll:sub:2:pane", "method": "pane.get", "params": {"pane_id": "w2:p4"}}),
+                serde_json::json!({"id": "scroll:sub:2:pane", "method": "pane.get", "params": {"pane_id": "w2:p4"}}),
+            ]
+        );
+    }
+
+    #[test]
+    fn m821_scroll_failed_poll_retains_successful_baseline() {
+        let baseline = m821_metrics(12, 240, 30);
+        let requests = m821_responses(
+            vec![
+                m821_response(Some(baseline)),
+                None,
+                m821_response(Some(baseline)),
+            ],
+            |tx, hub| {
+                let mut subscription = ActiveSubscription::new(
+                    Subscription::PaneScrollChanged {
+                        pane_id: "w2:p4".into(),
+                    },
+                    "scroll",
+                    0,
+                    tx,
+                    hub,
+                )
+                .unwrap();
+                assert_eq!(
+                    subscription.poll(tx, hub),
+                    None,
+                    "failed App request emits nothing"
+                );
+                assert_eq!(
+                    subscription.poll(tx, hub),
+                    None,
+                    "failed read must not clear baseline"
+                );
+            },
+        );
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn m821_scroll_none_setup_baseline_emits_only_when_available() {
+        let baseline = m821_metrics(0, 240, 30);
+        let requests = m821_responses(
+            vec![
+                m821_response(None),
+                m821_response(None),
+                m821_response(Some(baseline)),
+            ],
+            |tx, hub| {
+                let mut subscription = ActiveSubscription::new(
+                    Subscription::PaneScrollChanged {
+                        pane_id: "w2:p4".into(),
+                    },
+                    "scroll",
+                    0,
+                    tx,
+                    hub,
+                )
+                .unwrap();
+                assert_eq!(subscription.poll(tx, hub), None);
+                assert_eq!(subscription.poll(tx, hub), Some(m821_event(baseline)));
+            },
+        );
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn m821_scroll_setup_error_preserves_existing_probe_error_contract() {
+        // Known inherited pane_get defect: M8-37 must replace this internal_error expectation
+        // with the real App error, preserving refusal, probe ID, one request and no hub writes.
+        let requests = m821_responses(
+            vec![Some(serde_json::json!({"error": {
+                "code": "pane_not_found", "message": "missing scroll target"
+            }}))],
+            |tx, hub| {
+                let result = ActiveSubscription::new(
+                    Subscription::PaneScrollChanged {
+                        pane_id: "missing".into(),
+                    },
+                    "scroll",
+                    0,
+                    tx,
+                    hub,
+                );
+                let error = match result {
+                    Err(error) => error,
+                    Ok(_) => panic!("setup error acknowledged"),
+                };
+                assert_eq!(
+                    serde_json::to_value(error).unwrap(),
+                    serde_json::json!({
+                        "id": "scroll:sub:0:probe", "error": {
+                            "code": "internal_error", "message": "failed to decode pane get error"
+                        }
+                    })
+                );
+            },
+        );
+        assert_eq!(requests.len(), 1);
+    }
 
     fn status_event(custom_status: Option<&str>) -> EventEnvelope {
         EventEnvelope {

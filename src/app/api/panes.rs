@@ -2309,6 +2309,66 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn m821_pane_get_exposes_background_scroll_metrics() {
+        let mut app = app_with_linked_worktree();
+        app.state
+            .workspaces
+            .push(Workspace::test_new("scroll-target"));
+        seed_terminal_states(&mut app);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let target = app.state.workspaces[1].tabs[0].root_pane;
+        let decoy = app.state.workspaces[0].tabs[0].root_pane;
+        for (ws_idx, pane, rows, amount) in [(0, decoy, 7, 1), (1, target, 5, 3)] {
+            let lines = (0..30)
+                .map(|n| format!("line {n:02}\r\n"))
+                .collect::<String>();
+            let runtime = crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                20,
+                rows,
+                1000,
+                lines.as_bytes(),
+            );
+            runtime.scroll_up(amount);
+            app.state.workspaces[ws_idx].insert_test_runtime(pane, runtime);
+        }
+        let public = app.public_pane_id(1, target).unwrap();
+        let response = app.handle_pane_get(
+            "scroll-target".into(),
+            PaneTarget {
+                pane_id: public.clone(),
+            },
+        );
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let pane = &value["result"]["pane"];
+        assert_eq!(pane["pane_id"], public);
+        assert_eq!(pane["focused"], false);
+        assert_eq!(pane["scroll"]["offset_from_bottom"], 3);
+        assert_eq!(pane["scroll"]["viewport_rows"], 5);
+        assert!(pane["scroll"]["max_offset_from_bottom"].as_u64().unwrap() > 3);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 0);
+        assert!(app.event_hub.events_after(0).is_empty());
+    }
+
+    #[test]
+    fn m821_pane_get_omits_unavailable_scroll() {
+        let mut app = app_with_linked_worktree();
+        seed_terminal_states(&mut app);
+        let target = app.state.workspaces[0].tabs[0].root_pane;
+        let public = app.public_pane_id(0, target).unwrap();
+        let response = app.handle_pane_get(
+            "no-scroll".into(),
+            PaneTarget {
+                pane_id: public.clone(),
+            },
+        );
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["result"]["pane"]["pane_id"], public);
+        assert!(value["result"]["pane"].get("scroll").is_none());
+    }
+
     fn app_with_cross_workspace_move_source(
         source_has_sibling: bool,
     ) -> (App, PaneId, Option<PaneId>, PaneId) {

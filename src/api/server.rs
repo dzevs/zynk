@@ -956,6 +956,118 @@ mod tests {
         assert!(api_rx.try_recv().is_err());
     }
 
+    fn m821_scroll_connection(
+        stopped: bool,
+    ) -> (
+        EventWaitConnection,
+        mpsc::UnboundedReceiver<ApiRequestMessage>,
+    ) {
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        let (mut client, server, path) = local_stream_pair("scroll-sub");
+        writeln!(
+            client,
+            "{}",
+            serde_json::json!({
+                "id": "scroll-subscription", "method": "events.subscribe",
+                "params": {"subscriptions": [{"type": "pane.scroll_changed", "pane_id": "legacy"}]}
+            })
+        )
+        .unwrap();
+        client.flush().unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = running.clone();
+        let server = std::thread::spawn(move || {
+            handle_connection_with_stop(
+                server,
+                &api_tx,
+                &EventHub::default(),
+                &server_running,
+                None,
+                Some(&Arc::new(AtomicBool::new(stopped))),
+            )
+        });
+        (
+            EventWaitConnection {
+                client: Some(client),
+                running,
+                requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                server: Some(server),
+                responder: None,
+                path,
+            },
+            api_rx,
+        )
+    }
+
+    fn m821_answer_scroll_probe(message: ApiRequestMessage, offset: u64) {
+        message.respond_to.send(serde_json::json!({
+            "id": message.request.id, "result": {"type": "pane_info", "pane": {
+                "pane_id": "w2:p4", "terminal_id": "term_4", "workspace_id": "w2",
+                "tab_id": "w2:t1", "focused": false, "agent_status": "unknown", "revision": 7,
+                "scroll": {"offset_from_bottom": offset, "max_offset_from_bottom": 240, "viewport_rows": 30}
+            }}
+        }).to_string()).unwrap();
+    }
+
+    #[test]
+    fn m821_scroll_socket_acknowledges_before_exact_changed_event() {
+        let (mut connection, mut rx) = m821_scroll_connection(false);
+        let probe = recv_api_request_for(&mut rx, Duration::from_secs(1)).expect("setup probe");
+        assert_eq!(
+            serde_json::to_value(&probe.request).unwrap(),
+            serde_json::json!({
+                "id": "scroll-subscription:sub:0:probe", "method": "pane.get", "params": {"pane_id": "legacy"}
+            })
+        );
+        m821_answer_scroll_probe(probe, 12);
+        // Hold the first poll response until the single-line ACK has been consumed.
+        assert_eq!(
+            connection.response(),
+            serde_json::json!({
+                "id": "scroll-subscription", "result": {"type": "subscription_started"}
+            })
+        );
+        let poll = recv_api_request_for(&mut rx, Duration::from_secs(1)).expect("canonical poll");
+        assert_eq!(
+            serde_json::to_value(&poll.request).unwrap(),
+            serde_json::json!({
+                "id": "scroll-subscription:sub:0:pane", "method": "pane.get", "params": {"pane_id": "w2:p4"}
+            })
+        );
+        m821_answer_scroll_probe(poll, 13);
+        assert_eq!(
+            connection.response(),
+            serde_json::json!({"event": "pane.scroll_changed", "data": {
+                "pane_id": "w2:p4", "workspace_id": "w2",
+                "scroll": {"offset_from_bottom": 13, "max_offset_from_bottom": 240, "viewport_rows": 30}
+            }})
+        );
+        drop(rx);
+    }
+
+    #[test]
+    fn m821_stopped_scroll_subscription_refuses_before_app_enqueue() {
+        let (mut connection, mut rx) = m821_scroll_connection(true);
+        let routed = recv_api_request_for(&mut rx, Duration::from_millis(100));
+        let enqueued = routed.is_some();
+        if let Some(message) = routed {
+            // A bypass mutant gets an immediate answer, never a harness timeout.
+            message
+                .respond_to
+                .send(error_response_json(
+                    message.request.id,
+                    "unexpected_dispatch",
+                    "stopped request reached App".into(),
+                ))
+                .unwrap();
+        }
+        let response = connection.response();
+        assert_eq!(response["id"], "scroll-subscription");
+        assert_eq!(response["error"]["code"], "server_unavailable");
+        assert!(!enqueued, "stopped subscription enqueued App work");
+        assert!(rx.try_recv().is_err());
+    }
+
     fn event_wait_params(timeout_ms: Option<u64>) -> crate::api::schema::EventsWaitParams {
         crate::api::schema::EventsWaitParams {
             match_event: crate::api::schema::EventMatch::PaneAgentStatusChanged {

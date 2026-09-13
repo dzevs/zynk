@@ -171,6 +171,15 @@ Subscriptions can replay matching entries from the existing 512-record history; 
 fresh `session.snapshot` because replay is neither lossless nor atomic with snapshot acquisition.
 Layout and agent projections are observations, not identity or delivery-receipt authority.
 
+`pane.get`, `pane.list`, and `session.snapshot` include optional `scroll` metrics:
+`offset_from_bottom`, `max_offset_from_bottom`, and `viewport_rows`. Offset zero means
+the bottom; an omitted field means metrics are unavailable. Subscribe with
+`{"subscriptions":[{"type":"pane.scroll_changed","pane_id":"w1:p1"}]}` using the
+current pane ID. Seed from `pane.get`: the subscription sends no initial event and
+reports only subsequent sampled changes, not a lossless replay log or an atomic
+snapshot/subscribe operation. These observations do not change focus or grant identity
+or delivery-receipt authority.
+
 `zynk api snapshot` prints the complete live `session.snapshot` JSON response from the running
 server. It accepts no arguments. Agent projections are non-authoritative observations: this
 command cannot grant a principal or confirm message receipt. Server errors retain their JSON

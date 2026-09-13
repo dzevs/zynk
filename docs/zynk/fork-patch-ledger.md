@@ -5014,3 +5014,99 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   command/flag/value/alias or completion delta: reconciliation is a recorded
   no-op. Root README/CHANGELOG state the transfer and framing limitations.
   No whole-M8, release/Zig, operator action or cleanup approval follows.
+
+### M8-21 - Pane scroll observations (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `56edcbcba83b8ff7f6f69ee4231f163e97df3346` (PORT).
+  Parent: `940fe24df37fb835b4909c016e5606e595d6193d`. Preserved patch SHA-256:
+  `825200d0db773d8566b1881214e8b299bae8fefaba21ccee51db644196d2acc7`.
+  Gate-1 `msg_c04c1e99e591cb1d` binds design `9358475a`; companion
+  `f39550e3` preserves the design and corrects pane_get's anchor to :508,
+  makes the two enum populations explicit, and records projection-only width
+  conversion, committed preflight, and README's seed/no-initial-event contract.
+  No deferred arrival is consumed; the 21 pending remainders stay pending.
+- Add optional PaneInfo.scroll with three u64 fields, mapping existing usize
+  runtime metrics only at App::pane_info. This conversion is lossless on the
+  supported Linux x86_64 target; ScrollMetrics and every runtime source remain
+  unchanged. Resolve the supplied workspace/pane, never global focus. Missing
+  runtime means omitted metrics, not fabricated zero values. Compiler-enforced
+  constructor closure is one production expression plus two old schema literals
+  gaining only scroll: None. layout::PaneInfo and PluginPaneInfo are distinct.
+- Subscription gains pane.scroll_changed before layout.updated; all twenty
+  prior wire IDs retain their order. EventKind keeps its exact twenty variant
+  names, and EVENT_KIND_WIRE_IDS remains byte-identical. Source audit records
+  both complete before/after lists, not just coincident counts. No EventData,
+  EventMatch, plugin hook, events.wait match, Method or protocol-19 change.
+  The existing dynamic schema includes the integer metric/event types with Eq;
+  no generated upstream website schema is copied.
+- ActiveScrollChangedSubscription is the fourth active variant. Setup probes
+  pane.get, captures its canonical pane ID and Option baseline, and sends no
+  initial event. Polls use the existing bounded READ redispatch. Failed polls
+  retain the baseline; successful Some-to-None observations clear it without
+  emitting. Reappearance emits even when equal to the pre-gap value. Full
+  Option comparison detects changes to any metric and deduplicates repeats.
+  Event IDs come from the observed snapshot, not the original selector.
+- Keep pane_get and stream_subscriptions byte-identical. In particular, the
+  pre-existing pane_get error-member branch attempts PaneInfo decoding and
+  maps failure to internal_error / failed to decode pane get error. A new
+  setup-error control initially expected the remote body; the corrected
+  implementation-phase control pins the actual existing error and probe ID.
+  This observation is recorded, not fixed or declared desirable here. Setup
+  still refuses, never acknowledges a synthetic pane; any error-mapping fix
+  is already assigned to M8-37, not left as an unassigned follow-up. Source
+  `8915f01c6577b5507d1dd1a7851ec3ecb9154189` explicitly decodes ErrorResponse
+  then returns Err(response); its archived patch hash is
+  `2123a1190b7bb715c5066dd705a721f425c5ed55c5338df7b89859b45724cd03`.
+  Per `msg_69c398bfe4b5643e`, the adjacent comment on
+  m821_scroll_setup_error_preserves_existing_probe_error_contract labels the
+  known inherited defect. M8-37 MUST update this control to the real App error
+  (pane_not_found / missing scroll target), preserving refusal, probe ID, one
+  request and no EventHub writes. Its expected failure at that arrival is not
+  a reason to weaken M8-37's fix. Error occurrence is intact today; fidelity
+  is lost because error-envelope fields cannot decode as the required PaneInfo.
+  The M8-37 companion records the same obligation; no new deferred source is
+  added to the union and no production error-path change is consumed here.
+- Two parent behavioral reds use serialized JSON: missing background scroll
+  fields and unknown subscription decoding. Missing-runtime omission is a
+  parent-green characterization, not a third red. V1's background fixture
+  lacked a Tokio reactor; V2 changes only its test annotation/signature before
+  source edits. Both versions are retained. The three valid parent bodies are
+  byte-identical at landing, and no parent control constructs a PaneInfo literal.
+- Fifteen new feature controls, no support-test recompilation. Add literal wire
+  shape/required metrics, old JSON omission, dynamic schema, all three metric
+  changes, deduplication, unavailability/reappearance, canonical setup/polling,
+  failed polls/setup, real socket ACK then event, stopped-before-enqueue, and
+  real-server get/list/snapshot equality with zero delivery-event delta. The
+  socket fixture holds its first poll response until ACK is read; the real
+  server uses a quiet /bin/cat pane to keep geometry/history stable. Threads,
+  connections and server processes retain bounded, owned cleanup.
+- Ten compiled mutations each run 23 controls; actual failure counts in order
+  M01-M10 are 2/1/1/2/2/1/2/1/1/5. M10 crosses four older stop controls as well
+  as the new scroll control. No timeout/abort or compile failure counts as a
+  kill. The first matrix refused an ambiguous M03 anchor before any mutation;
+  V2 narrows it to the scroll_metrics consumer. Full failing/passing control
+  names accompany each reconciled summary. The M02/M06, M04/M07 and M08/M09
+  failure sets are pairwise disjoint for those three pairs. Final-source
+  reruns follow the known-defect comment; all source hashes are restored.
+- The final-source audit reconstructs every old affected module after removing
+  only the enumerated additions/import changes and the two None fields. No
+  old test/assertion removed or weakened. This is bounded source evidence,
+  not a general Rust AST proof. A failed new test diagnostic requiring Debug
+  was fixed in its Err pattern, without changing ApiRequestMessage.
+- The 23-control focused run passes; full check, gate, normal hooks and an
+  exact-commit rerun precede checkpoint-10 Gate-2. README/CHANGELOG anchors
+  were reread at 940fe24d: production prerequisites were unchanged by M8-20,
+  not the three shared documentation files. CLI completion reconciliation is
+  a recorded no-op: no command, flag, value set or alias changes. No Cargo
+  delta means no new advisory comparison claim. Sampling is not lossless,
+  atomic snapshot/subscribe or a hard latency guarantee. No detection,
+  authorization, delivery/receipt, runtime-state or whole-M8 approval follows.
+- Full-check disclosure: the first run failed 11 old CLI integration controls
+  during a peer-owned recursive binary/archive scan, including captured startup
+  exit 1 with db_init_lock_timeout and a persistence_busy response. The scan's
+  owner stopped it; no foreign process was signalled by the implementer. All
+  eleven controls and the full unchanged-source check then passed (4093 Rust,
+  5 existing skips; 35 Bun, 6 architecture, 107 maintenance). No deadline,
+  concurrency setting, test population or production code changed for the rerun.
+  Both runs remain evidence. I/O contention is consistent with the observation,
+  not proof that the first failure could not expose a latent scheduling race.

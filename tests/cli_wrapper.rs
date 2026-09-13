@@ -4400,6 +4400,65 @@ fn m814_cli_snapshot_matches_live_read_only_projection() {
     cleanup_spawned_zynk(zynk, base);
 }
 
+#[test]
+fn m821_live_scroll_get_list_snapshot_agree_without_delivery_events() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket = runtime_dir.join("zynk.sock");
+    // No shell prompt or startup output can change history between observations.
+    let zynk = spawn_zynk_with_config(
+        &config_home,
+        &runtime_dir,
+        &socket,
+        None,
+        "[terminal]\ndefault_shell = \"/bin/cat\"\nshell_mode = \"non_login\"\n",
+    );
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let created = send_request(&socket, &serde_json::json!({
+        "id": "scroll-create", "method": "workspace.create", "params": {"cwd": base, "focus": true}
+    }).to_string());
+    let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let db = config_home.join("sqlite/zynk.db");
+    let before = delivery_events_count(&db);
+    let get = send_request(
+        &socket,
+        &serde_json::json!({
+            "id": "scroll-get", "method": "pane.get", "params": {"pane_id": pane_id}
+        })
+        .to_string(),
+    );
+    let scroll = &get["result"]["pane"]["scroll"];
+    assert_eq!(scroll["offset_from_bottom"], 0);
+    assert_eq!(scroll["max_offset_from_bottom"], 0);
+    assert!(scroll["viewport_rows"].as_u64().unwrap() > 0);
+    let listed = send_request(
+        &socket,
+        r#"{"id":"scroll-list","method":"pane.list","params":{}}"#,
+    );
+    let listed_pane = listed["result"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pane| pane["pane_id"] == pane_id)
+        .unwrap();
+    assert_eq!(&listed_pane["scroll"], scroll);
+    let snapshot = send_request(
+        &socket,
+        r#"{"id":"scroll-snapshot","method":"session.snapshot","params":{}}"#,
+    );
+    let snapshot_pane = snapshot["result"]["snapshot"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pane| pane["pane_id"] == pane_id)
+        .unwrap();
+    assert_eq!(&snapshot_pane["scroll"], scroll);
+    assert_eq!(snapshot["result"]["snapshot"]["focused_pane_id"], pane_id);
+    assert_eq!(delivery_events_count(&db), before);
+    cleanup_spawned_zynk(zynk, base);
+}
+
 struct SnapshotCliFixture {
     base: PathBuf,
 }

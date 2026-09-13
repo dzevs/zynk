@@ -270,6 +270,114 @@ mod tests {
     }
 
     #[test]
+    fn m821_scroll_subscription_request_wire_shape() {
+        let value = serde_json::json!({
+            "id": "scroll-request", "method": "events.subscribe",
+            "params": {"subscriptions": [{"type": "pane.scroll_changed", "pane_id": "w2:p4"}]}
+        });
+        let request: Request =
+            serde_json::from_value(value.clone()).expect("scroll subscription must decode");
+        assert_eq!(serde_json::to_value(request).unwrap(), value);
+        let missing = serde_json::json!({
+            "id": "scroll-missing-target", "method": "events.subscribe",
+            "params": {"subscriptions": [{"type": "pane.scroll_changed"}]}
+        });
+        assert!(serde_json::from_value::<Request>(missing).is_err());
+    }
+
+    #[test]
+    fn m821_scroll_event_round_trip_requires_all_metrics() {
+        let value = serde_json::json!({
+            "event": "pane.scroll_changed", "data": {
+                "pane_id": "w2:p4", "workspace_id": "w2",
+                "scroll": {"offset_from_bottom": 12, "max_offset_from_bottom": 240,
+                    "viewport_rows": 30}
+            }
+        });
+        let event: SubscriptionEventEnvelope = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(event.event, SubscriptionEventKind::ScrollChanged);
+        assert_eq!(serde_json::to_value(event).unwrap(), value);
+        for field in [
+            "offset_from_bottom",
+            "max_offset_from_bottom",
+            "viewport_rows",
+        ] {
+            let mut missing = value.clone();
+            missing["data"]["scroll"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<SubscriptionEventEnvelope>(missing).is_err(),
+                "{field}"
+            );
+        }
+        fn requires_eq<T: Eq>() {}
+        requires_eq::<PaneScrollInfo>();
+        requires_eq::<SubscriptionEventEnvelope>();
+        requires_eq::<SubscriptionEventData>();
+    }
+
+    #[test]
+    fn m821_old_pane_json_omits_scroll_until_available() {
+        let old = serde_json::json!({
+            "pane_id": "w2:p4", "terminal_id": "term_4", "workspace_id": "w2",
+            "tab_id": "w2:t1", "focused": false, "agent_status": "unknown", "revision": 7
+        });
+        let mut pane: PaneInfo = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(pane.scroll, None);
+        assert_eq!(serde_json::to_value(&pane).unwrap(), old);
+        pane.scroll = Some(PaneScrollInfo {
+            offset_from_bottom: 0,
+            max_offset_from_bottom: 42,
+            viewport_rows: 24,
+        });
+        let mut expected = old;
+        expected["scroll"] = serde_json::json!({
+            "offset_from_bottom": 0, "max_offset_from_bottom": 42, "viewport_rows": 24
+        });
+        assert_eq!(serde_json::to_value(pane).unwrap(), expected);
+    }
+
+    #[test]
+    fn m821_dynamic_schema_exposes_scroll_only_as_parameterized_subscription() {
+        let document = export::protocol_schema_document();
+        let subscriptions = &document["schemas"]["request"]["$defs"]["Subscription"]["oneOf"];
+        let scroll = subscriptions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|variant| {
+                variant.pointer("/properties/type/const")
+                    == Some(&serde_json::json!("pane.scroll_changed"))
+            })
+            .expect("scroll subscription schema");
+        assert!(scroll["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("pane_id")));
+        let defs = &document["schemas"]["subscription_event"]["$defs"];
+        assert_eq!(
+            defs["PaneScrollInfo"]["required"],
+            serde_json::json!([
+                "offset_from_bottom",
+                "max_offset_from_bottom",
+                "viewport_rows"
+            ])
+        );
+        assert_eq!(
+            defs["PaneScrollChangedEvent"]["required"],
+            serde_json::json!(["pane_id", "workspace_id", "scroll"])
+        );
+        assert!(!document["schemas"]["event"]["$defs"]["EventKind"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("scroll_changed")));
+        assert!(!plugin_hook_event_names().contains(&"pane.scroll_changed"));
+        assert_eq!(document["protocol"], crate::protocol::PROTOCOL_VERSION);
+    }
+
+    #[test]
     fn m813_dynamic_schema_includes_layout_event_and_snapshot_fields() {
         let document = export::protocol_schema_document();
         let definitions = &document["schemas"]["event"]["$defs"];
@@ -779,6 +887,7 @@ mod tests {
                     custom_status: None,
                     state_labels: HashMap::new(),
                     agent_session: None,
+                    scroll: None,
                     revision: 0,
                 },
                 worktree: WorktreeInfo {
@@ -830,6 +939,7 @@ mod tests {
                     custom_status: None,
                     state_labels: HashMap::new(),
                     agent_session: None,
+                    scroll: None,
                     revision: 0,
                 },
             },
