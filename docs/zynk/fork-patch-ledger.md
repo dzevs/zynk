@@ -4064,3 +4064,41 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   comparison. The retained v2 uses the absolute path and verifies the full
   prior. Dependency resolution is not a candidate check. Exact-SHA checkpoint
   and whole-M8 reviews remain separate from this implementation record.
+
+### M8-06 - Caller-Relative Explicit Split (2026-09-13)
+
+- Source: `c71c6c108245b91f6478d95a3abf9a9a9e2e57a9`, pre-relicense PORT.
+  Read ZYNK_PANE_ID once at pane_split, treating missing/non-Unicode/blank
+  values as absent, and pass the optional value to the pure argument parser.
+  Only explicit --current selects that caller; omitted targets retain focus
+  fallback even with a populated environment. Positional and --pane targets
+  retain last-selector precedence, and normalize_pane_id preserves spelling.
+  The source's incidental creation-env context is not imported; all required
+  helpers already exist and no forward creator or deferred remainder is taken.
+- This is selection convenience, not identity authority. pane.split is outside
+  ADR-0014's pane_bound_target set (PaneReportAgent, PaneReportAgentSession,
+  ZynkMessageReceived). Typing the target explicitly grants the same behavior;
+  environment data grants no new principal. Revisit if the bound set widens.
+  No server handler, wire schema, protocol or focus policy is changed. M8-05's
+  completion surface already advertises --current; no new flag/value/alias
+  requires a completion entry at this arrival.
+- P7: the three legacy parser controls retain all seven original assertions
+  and their argument values, with None supplied at the adapted calls. No test
+  conversion/deletion or assertion weakening. Three added pure controls pin
+  caller selection, omitted-target fallback and explicit-target precedence.
+  Four real CLI controls use caller A while workspace B is focused, assert
+  only the selected workspace gains one pane, retain its existing pane, leave
+  the other workspace unchanged, and preserve global workspace/tab/pane focus.
+  The environment boundary is exercised in child processes, including absent,
+  blank and non-Unicode values, without mutating the test process environment.
+- Red-first disclosure: the first fixture omitted required params from its
+  session.snapshot request and failed before exercising split. It is retained
+  as harness evidence only. The corrected v2 request includes params and checks
+  the response type/error; the real caller-selection test then fails exit100
+  at workspace w2 versus expected w1 on the unmodified preceding binary.
+  Ten focused controls pass after implementation. Each one-site mutation
+  (ignore caller, seed omitted target, override explicit --pane from caller)
+  exits100 at its corresponding pure/real-CLI pair, with the other eight
+  controls passing; no cross-boundary kill is claimed. All mutation sources
+  and both red logs remain in the checkpoint evidence. Whole-M8 gates and
+  operator integration/deployment authority remain separate and pending.

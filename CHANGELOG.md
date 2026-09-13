@@ -10,6 +10,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- `pane split --current` now selects the calling pane through `ZYNK_PANE_ID`,
+  independently of UI focus. Omitted targets and unusable caller values keep
+  focus fallback; explicit targets retain argument-order precedence.
 - `zynk completion` (alias `completions`) generates static scripts for Bash,
   Elvish, Fish, PowerShell, and Zsh without a server, database, or file installation.
 - `zynk api schema` describes the socket API offline. `--json` prints its schema

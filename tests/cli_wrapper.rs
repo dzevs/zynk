@@ -4067,6 +4067,183 @@ fn workspace_ids_and_public_pane_ids_are_stable() {
     cleanup_spawned_zynk(zynk, base);
 }
 
+#[derive(Clone, Copy)]
+enum SplitSelector {
+    Current,
+    Omitted,
+    Positional,
+    PaneOption,
+}
+
+#[derive(Clone, Copy)]
+enum SplitCallerEnv {
+    Pane,
+    Missing,
+    Blank,
+    NonUnicode,
+}
+
+fn assert_cli_split_selection(selector: SplitSelector, caller_env: SplitCallerEnv) {
+    use std::os::unix::ffi::OsStringExt;
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("zynk.sock");
+    let zynk = spawn_zynk(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let caller_workspace = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    )["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let focused_workspace = run_cli_json(
+        &socket_path,
+        &[
+            "workspace",
+            "create",
+            "--cwd",
+            base.to_str().unwrap(),
+            "--focus",
+        ],
+    )["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(caller_workspace, focused_workspace);
+    let caller_panes = run_cli_json(
+        &socket_path,
+        &["pane", "list", "--workspace", &caller_workspace],
+    );
+    let caller_pane = caller_panes["result"]["panes"][0]["pane_id"]
+        .as_str()
+        .unwrap();
+    let before = send_request(
+        &socket_path,
+        r#"{"id":"before","method":"session.snapshot","params":{}}"#,
+    );
+    assert!(
+        before.get("error").is_none(),
+        "snapshot setup failed: {before}"
+    );
+    assert_eq!(before["result"]["type"], "session_snapshot");
+    let before = &before["result"]["snapshot"];
+    assert_eq!(before["focused_workspace_id"], focused_workspace);
+    let focused_pane = before["focused_pane_id"].as_str().unwrap();
+    assert_ne!(caller_pane, focused_pane);
+
+    let mut args = vec!["pane", "split"];
+    match selector {
+        SplitSelector::Current => args.push("--current"),
+        SplitSelector::Omitted => {}
+        SplitSelector::Positional => args.push(focused_pane),
+        SplitSelector::PaneOption => args.extend(["--pane", focused_pane]),
+    }
+    args.extend(["--direction", "right", "--no-focus"]);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    command
+        .args(&args)
+        .env("ZYNK_SOCKET_PATH", &socket_path)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("ZYNK_SQLITE_HOME", runtime_dir.join("sqlite"))
+        .env_remove("ZYNK_HOME")
+        .env_remove("ZYNK_PANE_ID");
+    match caller_env {
+        SplitCallerEnv::Pane => {
+            command.env("ZYNK_PANE_ID", caller_pane);
+        }
+        SplitCallerEnv::Missing => {}
+        SplitCallerEnv::Blank => {
+            command.env("ZYNK_PANE_ID", " \t ");
+        }
+        SplitCallerEnv::NonUnicode => {
+            command.env("ZYNK_PANE_ID", std::ffi::OsString::from_vec(vec![0xff]));
+        }
+    }
+    let result = parse_cli_json_output(&args, command.output().unwrap());
+    let expected_workspace = if matches!(selector, SplitSelector::Current)
+        && matches!(caller_env, SplitCallerEnv::Pane)
+    {
+        &caller_workspace
+    } else {
+        &focused_workspace
+    };
+    assert_eq!(
+        result["result"]["pane"]["workspace_id"], *expected_workspace,
+        "split must select caller only for explicit --current with a usable caller env"
+    );
+
+    let after = send_request(
+        &socket_path,
+        r#"{"id":"after","method":"session.snapshot","params":{}}"#,
+    );
+    assert!(
+        after.get("error").is_none(),
+        "snapshot verification failed: {after}"
+    );
+    assert_eq!(after["result"]["type"], "session_snapshot");
+    let after = &after["result"]["snapshot"];
+    for field in ["focused_workspace_id", "focused_tab_id", "focused_pane_id"] {
+        assert_eq!(after[field], before[field], "split changed global {field}");
+    }
+    for workspace in [&caller_workspace, &focused_workspace] {
+        let pane_ids = |snapshot: &serde_json::Value| -> Vec<String> {
+            snapshot["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|pane| pane["workspace_id"] == *workspace)
+                .map(|pane| pane["pane_id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let prior_ids = pane_ids(before);
+        let after_ids = pane_ids(after);
+        assert_eq!(prior_ids.len(), 1, "fixture needs one pane per workspace");
+        if workspace == expected_workspace {
+            assert_eq!(after_ids.len(), prior_ids.len() + 1);
+            assert!(prior_ids.iter().all(|id| after_ids.contains(id)));
+        } else {
+            assert_eq!(
+                after_ids, prior_ids,
+                "unselected workspace must be unchanged"
+            );
+        }
+    }
+    cleanup_spawned_zynk(zynk, base);
+}
+
+#[test]
+fn pane_split_current_uses_caller_without_moving_global_focus() {
+    assert_cli_split_selection(SplitSelector::Current, SplitCallerEnv::Pane);
+}
+
+#[test]
+fn pane_split_omitted_target_keeps_focus_fallback_with_caller_env() {
+    assert_cli_split_selection(SplitSelector::Omitted, SplitCallerEnv::Pane);
+}
+
+#[test]
+fn pane_split_explicit_targets_are_not_overridden_by_caller_env() {
+    for selector in [SplitSelector::Positional, SplitSelector::PaneOption] {
+        assert_cli_split_selection(selector, SplitCallerEnv::Pane);
+    }
+}
+
+#[test]
+fn pane_split_current_ignores_missing_blank_and_nonunicode_caller_env() {
+    for env in [
+        SplitCallerEnv::Missing,
+        SplitCallerEnv::Blank,
+        SplitCallerEnv::NonUnicode,
+    ] {
+        assert_cli_split_selection(SplitSelector::Current, env);
+    }
+}
+
 #[test]
 fn pane_shell_gets_zynk_socket_and_pane_env() {
     let base = unique_test_dir();

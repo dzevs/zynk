@@ -486,7 +486,10 @@ fn pane_read(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn pane_split(args: &[String]) -> std::io::Result<i32> {
-    let params = match parse_pane_split_args(args) {
+    let env_pane_id = std::env::var("ZYNK_PANE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let params = match parse_pane_split_args(args, env_pane_id.as_deref()) {
         Ok(params) => params,
         Err(message) => {
             eprintln!("{message}");
@@ -500,7 +503,10 @@ fn pane_split(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
-fn parse_pane_split_args(args: &[String]) -> Result<PaneSplitParams, String> {
+fn parse_pane_split_args(
+    args: &[String],
+    env_pane_id: Option<&str>,
+) -> Result<PaneSplitParams, String> {
     let mut pane_id = None;
     let mut direction = None;
     let mut ratio = None;
@@ -525,7 +531,7 @@ fn parse_pane_split_args(args: &[String]) -> Result<PaneSplitParams, String> {
                 index += 2;
             }
             "--current" => {
-                pane_id = None;
+                pane_id = env_pane_id.map(super::normalize_pane_id);
                 index += 1;
             }
             "--direction" => {
@@ -1913,13 +1919,10 @@ mod tests {
 
     #[test]
     fn parse_pane_split_args_accepts_ratio() {
-        let params = parse_pane_split_args(&args(&[
-            "issue-1",
-            "--direction",
-            "right",
-            "--ratio",
-            "0.333",
-        ]))
+        let params = parse_pane_split_args(
+            &args(&["issue-1", "--direction", "right", "--ratio", "0.333"]),
+            None,
+        )
         .unwrap();
 
         assert_eq!(params.target_pane_id, Some("issue-1".into()));
@@ -1929,7 +1932,8 @@ mod tests {
 
     #[test]
     fn parse_pane_split_args_accepts_current_target() {
-        let params = parse_pane_split_args(&args(&["--direction", "down", "--current"])).unwrap();
+        let params =
+            parse_pane_split_args(&args(&["--direction", "down", "--current"]), None).unwrap();
 
         assert_eq!(params.target_pane_id, None);
         assert_eq!(params.direction, crate::api::schema::SplitDirection::Down);
@@ -1938,10 +1942,46 @@ mod tests {
     #[test]
     fn parse_pane_split_args_accepts_pane_option() {
         let params =
-            parse_pane_split_args(&args(&["--pane", "issue-2", "--direction", "right"])).unwrap();
+            parse_pane_split_args(&args(&["--pane", "issue-2", "--direction", "right"]), None)
+                .unwrap();
 
         assert_eq!(params.target_pane_id, Some("issue-2".into()));
         assert_eq!(params.direction, crate::api::schema::SplitDirection::Right);
+    }
+
+    #[test]
+    fn parse_pane_split_args_current_selects_caller_in_argument_order() {
+        for raw in [
+            vec!["--direction", "down", "--current"],
+            vec!["issue-2", "--direction", "down", "--current"],
+        ] {
+            let params = parse_pane_split_args(&args(&raw), Some("issue-1")).unwrap();
+            assert_eq!(params.target_pane_id.as_deref(), Some("issue-1"));
+            assert_eq!(params.direction, SplitDirection::Down);
+            assert!(!params.focus);
+        }
+    }
+
+    #[test]
+    fn parse_pane_split_args_omitted_target_does_not_use_caller() {
+        let params =
+            parse_pane_split_args(&args(&["--direction", "down"]), Some("issue-1")).unwrap();
+        assert_eq!(params.target_pane_id, None);
+        assert_eq!(params.direction, SplitDirection::Down);
+        assert!(!params.focus);
+    }
+
+    #[test]
+    fn parse_pane_split_args_explicit_target_overrides_caller() {
+        for raw in [
+            vec!["issue-2", "--direction", "right"],
+            vec!["--pane", "issue-2", "--direction", "right"],
+            vec!["--current", "--pane", "issue-2", "--direction", "right"],
+        ] {
+            let params = parse_pane_split_args(&args(&raw), Some("issue-1")).unwrap();
+            assert_eq!(params.target_pane_id.as_deref(), Some("issue-2"));
+            assert_eq!(params.direction, SplitDirection::Right);
+        }
     }
 
     #[test]

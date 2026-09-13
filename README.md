@@ -135,6 +135,9 @@ without a running server or database. Use `--output PATH` instead to write the s
 `zynk completion <bash|elvish|fish|powershell|zsh>` prints an offline shell-completion script;
 `completions` is an alias. It does not install files, edit shell startup files, or contact the server.
 
+`zynk pane split --current --direction right --no-focus` uses the calling pane's `ZYNK_PANE_ID`
+when available, even if another workspace is focused. Omitting the target still uses UI focus.
+
 ## How it compares
 
 |                                       | tmux | gui managers | zynk |
