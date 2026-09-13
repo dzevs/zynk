@@ -4302,6 +4302,167 @@ fn pane_shell_gets_zynk_socket_and_pane_env() {
     cleanup_spawned_zynk(zynk, base);
 }
 
+fn run_event_wait_cli_bounded(socket: &Path, pane: &str, timeout: &str) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zynk"))
+        .args([
+            "wait",
+            "agent-status",
+            pane,
+            "--status",
+            "blocked",
+            "--timeout",
+            timeout,
+        ])
+        .env_clear()
+        .env("ZYNK_SOCKET_PATH", socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let finished = wait_until(Duration::from_secs(3), Duration::from_millis(5), || {
+        child.try_wait().unwrap().is_some()
+    });
+    if !finished {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        finished,
+        "events.wait CLI did not finish in 3s; child reaped"
+    );
+    output
+}
+
+fn mock_event_wait_cli(response: serde_json::Value) -> (serde_json::Value, std::process::Output) {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket = base.join("wait.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let started = Instant::now();
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(3),
+                        "CLI did not connect"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("mock accept: {err}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let mut response = response;
+        response["id"] = request["id"].clone();
+        writeln!(stream, "{response}").unwrap();
+        stream.flush().unwrap();
+        request
+    });
+    let output = run_event_wait_cli_bounded(&socket, "caller:p7", "4321");
+    let request = server.join().unwrap();
+    cleanup_test_base(&base);
+    (request, output)
+}
+
+#[test]
+fn m811_cli_wait_status_sends_event_wait_and_preserves_subscription_stdout() {
+    let data = serde_json::json!({
+        "pane_id": "caller:p7", "workspace_id": "caller", "agent_status": "blocked",
+        "agent": "pi", "title": "Question", "display_agent": "Reviewer",
+        "custom_status": "approval", "state_labels": {"blocked": "Needs input"}
+    });
+    let mut wire_data = data.clone();
+    wire_data["type"] = "pane_agent_status_changed".into();
+    let (request, output) = mock_event_wait_cli(serde_json::json!({
+        "result": {"type": "wait_matched", "event": {
+            "event": "pane_agent_status_changed", "data": wire_data
+        }}
+    }));
+    assert_eq!(
+        request,
+        serde_json::json!({
+            "id": "cli:wait:agent-status", "method": "events.wait", "params": {
+                "match_event": {"event": "pane_agent_status_changed", "pane_id": "caller:p7", "agent_status": "blocked"},
+                "timeout_ms": 4321
+            }
+        })
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        printed,
+        serde_json::json!({"event": "pane.agent_status_changed", "data": data})
+    );
+}
+
+#[test]
+fn m811_cli_wait_preserves_error_body_and_refuses_unexpected_result() {
+    let error = serde_json::json!({"code": "not_found", "message": "pane does not exist"});
+    let (_, output) = mock_event_wait_cli(serde_json::json!({"error": error}));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stderr).unwrap(),
+        serde_json::json!({"id": "cli:wait:agent-status", "error": error})
+    );
+    let (_, output) = mock_event_wait_cli(serde_json::json!({"result": {"type": "ok"}}));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected wait response result"));
+}
+
+#[test]
+fn m811_cli_wait_real_server_timeout_is_read_only() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket = runtime_dir.join("zynk.sock");
+    let zynk = spawn_zynk(&config_home, &runtime_dir, &socket);
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let created = send_request(&socket, &serde_json::json!({
+        "id": "create_wait_target", "method": "workspace.create", "params": {"cwd": base, "focus": true}
+    }).to_string());
+    let workspace = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap();
+    let pane = format!("{workspace}:p1");
+    let observed = send_request(
+        &socket,
+        &serde_json::json!({
+            "id": "observe_wait_target", "method": "pane.get", "params": {"pane_id": pane}
+        })
+        .to_string(),
+    );
+    assert_eq!(observed["result"]["pane"]["agent_status"], "unknown");
+    let db = config_home.join("sqlite/zynk.db");
+    let before = delivery_events_count(&db);
+    let output = run_event_wait_cli_bounded(&socket, &pane, "30");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "timed out waiting for agent status change\n"
+    );
+    assert_eq!(delivery_events_count(&db), before);
+    cleanup_spawned_zynk(zynk, base);
+}
+
 #[test]
 fn wait_agent_status_exits_when_idle_status_matches() {
     let base = unique_test_dir();

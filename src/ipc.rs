@@ -1,7 +1,9 @@
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+
+use interprocess::local_socket::traits::Stream as _;
 
 pub(crate) type LocalListener = interprocess::local_socket::Listener;
 pub(crate) type LocalStream = interprocess::local_socket::Stream;
@@ -97,6 +99,41 @@ fn stale_socket_connect_error(kind: io::ErrorKind) -> bool {
     )
 }
 
+/// Probe a one-request-per-connection API stream, consuming any unexpected extra
+/// byte as a reason to close. This is not a general-purpose, non-consuming peek.
+pub(crate) fn local_stream_peer_closed(stream: &mut LocalStream) -> io::Result<bool> {
+    stream.set_nonblocking(true)?;
+    let mut probe = [0u8; 1];
+    let status = match stream.read(&mut probe) {
+        Ok(0) => Ok(true),
+        Ok(_) => Ok(true),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(err) if is_connection_closed_error(&err) => Ok(true),
+        Err(err) => Err(err),
+    };
+    stream.set_nonblocking(false)?;
+    status
+}
+
+pub(crate) fn is_connection_closed_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::WriteZero
+    )
+}
+
 pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity> {
     let metadata = fs::metadata(path)?;
     Ok(SocketFileIdentity {
@@ -135,6 +172,59 @@ pub(crate) fn restrict_socket_permissions(path: &Path, mode: u32) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m811_api_peer_probe_distinguishes_idle_extra_bytes_and_closed() {
+        use interprocess::local_socket::traits::Listener as _;
+        use std::io::Write;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("zynk-probe-{}-{nanos}", std::process::id()));
+        let listener = bind_local_listener(&path).unwrap();
+        let mut client = connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+        assert!(!local_stream_peer_closed(&mut server).unwrap());
+        client.write_all(b"x").unwrap();
+        client.flush().unwrap();
+        assert!(local_stream_peer_closed(&mut server).unwrap());
+        assert!(
+            !local_stream_peer_closed(&mut server).unwrap(),
+            "extra byte was consumed"
+        );
+        drop(client);
+        assert!(local_stream_peer_closed(&mut server).unwrap());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn m811_connection_closed_error_kinds_do_not_include_idle_or_timeout() {
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::NotConnected,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::WriteZero,
+        ] {
+            assert!(
+                is_connection_closed_error(&io::Error::from(kind)),
+                "{kind:?}"
+            );
+        }
+        for kind in [
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::PermissionDenied,
+        ] {
+            assert!(
+                !is_connection_closed_error(&io::Error::from(kind)),
+                "{kind:?}"
+            );
+        }
+    }
 
     #[test]
     fn stale_socket_connect_errors_keep_unix_would_block_strict() {

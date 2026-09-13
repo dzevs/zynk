@@ -16,13 +16,13 @@ use crate::api::schema::{
     ErrorBody, ErrorResponse, Method, Request, ResponseResult, ServerCapabilities, SuccessResponse,
 };
 use crate::api::subscriptions::ActiveSubscription;
-use crate::api::wait::wait_for_output;
+use crate::api::wait::{wait_for_event, wait_for_output};
 use crate::api::{
     request_changes_ui, socket_path, ApiCaller, ApiRequestMessage, ApiRequestSender, EventHub,
 };
 use crate::ipc::{
-    bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalStream,
-    SocketFileIdentity,
+    bind_local_listener, is_connection_closed_error, local_stream_peer_closed,
+    remove_socket_file_if_owned, socket_file_identity, LocalStream, SocketFileIdentity,
 };
 
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -206,7 +206,7 @@ fn handle_connection_with_stop(
     let changes_ui = request_changes_ui(&request);
     crate::logging::api_request_started(&request_id, method, changes_ui);
 
-    // Fork adaptation: subscriptions and output waits branch before
+    // Fork adaptation: subscriptions and event/output waits branch before
     // `handle_request`, so they need the same stop preflight here.
     if let Some(response) = priority_stop_response(&request, server_stop) {
         let result = write_text_line_allow_disconnect(&mut stream, &response);
@@ -237,6 +237,38 @@ fn handle_connection_with_stop(
                     &request_id,
                     method,
                     "stream_closed",
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
+        }
+        Method::EventsWait(params) => {
+            let Some(response) = wait_for_event(
+                request_id.clone(),
+                params,
+                &mut stream,
+                api_tx,
+                event_hub,
+                running,
+            )?
+            else {
+                crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "client_disconnected",
+                    changes_ui,
+                );
+                return Ok(());
+            };
+            let result = write_text_line_allow_disconnect(&mut stream, &response);
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    api_response_outcome(&response),
                     changes_ui,
                 ),
                 Err(err) => {
@@ -606,40 +638,7 @@ pub(super) fn should_stop_connection(
         return Ok(true);
     }
 
-    probe_stream_closed(stream)
-}
-
-fn probe_stream_closed(stream: &mut LocalStream) -> std::io::Result<bool> {
-    stream.set_nonblocking(true)?;
-    let mut probe = [0u8; 1];
-    let status = match stream.read(&mut probe) {
-        Ok(0) => Ok(true),
-        Ok(_) => Ok(true),
-        Err(err)
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(err) if is_connection_closed_error(&err) => Ok(true),
-        Err(err) => Err(err),
-    };
-    stream.set_nonblocking(false)?;
-    status
-}
-
-fn is_connection_closed_error(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::BrokenPipe
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::NotConnected
-            | std::io::ErrorKind::UnexpectedEof
-            | std::io::ErrorKind::WriteZero
-    )
+    local_stream_peer_closed(stream)
 }
 
 fn dispatch_to_app(request: Request, api_tx: &ApiRequestSender, caller: ApiCaller) -> String {
@@ -761,6 +760,313 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, path)
+    }
+
+    struct EventWaitConnection {
+        client: Option<LocalStream>,
+        running: Arc<AtomicBool>,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        server: Option<std::thread::JoinHandle<io::Result<()>>>,
+        responder: Option<std::thread::JoinHandle<()>>,
+        path: PathBuf,
+    }
+
+    impl EventWaitConnection {
+        fn start(
+            params: crate::api::schema::EventsWaitParams,
+            event_hub: EventHub,
+            stopped: bool,
+            mut pane_response: impl FnMut(String, usize) -> String + Send + 'static,
+        ) -> Self {
+            let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let request_count = requests.clone();
+            let responder = std::thread::spawn(move || {
+                while let Some(message) = api_rx.blocking_recv() {
+                    let count = request_count.fetch_add(1, Ordering::Relaxed);
+                    let response = match message.request.method {
+                        Method::PaneGet(target) => {
+                            assert_eq!(target.pane_id, "pane_1");
+                            pane_response(message.request.id, count)
+                        }
+                        Method::EventsWait(_) => error_response_json(
+                            message.request.id,
+                            "not_implemented",
+                            "parent App fallback has no events.wait handler".into(),
+                        ),
+                        other => panic!("unexpected wait dispatch: {other:?}"),
+                    };
+                    let _ = message.respond_to.send(response);
+                }
+            });
+            let (mut client, server, path) = local_stream_pair("events-wait");
+            let request = Request {
+                id: "event_wait".into(),
+                method: Method::EventsWait(params),
+            };
+            writeln!(client, "{}", serde_json::to_string(&request).unwrap()).unwrap();
+            client.flush().unwrap();
+            let running = Arc::new(AtomicBool::new(true));
+            let server_running = running.clone();
+            let server = std::thread::spawn(move || {
+                handle_connection_with_stop(
+                    server,
+                    &api_tx,
+                    &event_hub,
+                    &server_running,
+                    None,
+                    Some(&Arc::new(AtomicBool::new(stopped))),
+                )
+            });
+            Self {
+                client: Some(client),
+                running,
+                requests,
+                server: Some(server),
+                responder: Some(responder),
+                path,
+            }
+        }
+
+        fn response(&mut self) -> serde_json::Value {
+            let client = self.client.as_mut().unwrap();
+            client.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut bytes = Vec::new();
+            loop {
+                let mut buffer = [0; 4096];
+                match client.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("wait response read failed: {error}"),
+                }
+                if bytes.contains(&b'\n') {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "events.wait did not answer in 3s"
+                );
+                assert!(bytes.len() <= 65536, "unexpected oversized wait response");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            serde_json::from_slice(&bytes).unwrap()
+        }
+    }
+
+    impl Drop for EventWaitConnection {
+        fn drop(&mut self) {
+            self.running.store(false, Ordering::Relaxed);
+            drop(self.client.take());
+            if let Some(server) = self.server.take() {
+                let _ = server.join();
+            }
+            if let Some(responder) = self.responder.take() {
+                let _ = responder.join();
+            }
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    fn event_wait_params(timeout_ms: Option<u64>) -> crate::api::schema::EventsWaitParams {
+        crate::api::schema::EventsWaitParams {
+            match_event: crate::api::schema::EventMatch::PaneAgentStatusChanged {
+                pane_id: "pane_1".into(),
+                agent_status: crate::api::schema::AgentStatus::Idle,
+            },
+            timeout_ms,
+        }
+    }
+
+    fn event_wait_presentation(status: &str) -> serde_json::Value {
+        serde_json::json!({
+            "pane_id": "pane_1", "workspace_id": "ws_1", "agent_status": status,
+            "agent": "pi", "title": "Observed title", "display_agent": "Review",
+            "custom_status": "waiting", "state_labels": {"idle": "Ready"}
+        })
+    }
+
+    fn event_wait_pane_response(id: String, status: &str) -> String {
+        let mut pane = event_wait_presentation(status);
+        pane["terminal_id"] = "term_1".into();
+        pane["tab_id"] = "tab_1".into();
+        pane["focused"] = false.into();
+        pane["revision"] = 9.into();
+        serde_json::json!({"id": id, "result": {"type": "pane_info", "pane": pane}}).to_string()
+    }
+
+    fn event_wait_wire_event(status: &str) -> serde_json::Value {
+        let mut data = event_wait_presentation(status);
+        data["type"] = "pane_agent_status_changed".into();
+        serde_json::json!({"event": "pane_agent_status_changed", "data": data})
+    }
+
+    #[test]
+    fn m811_events_wait_initial_match_precedes_zero_timeout() {
+        let mut connection = EventWaitConnection::start(
+            event_wait_params(Some(0)),
+            EventHub::default(),
+            false,
+            |id, _| event_wait_pane_response(id, "idle"),
+        );
+        let response = connection.response();
+        assert_eq!(response["id"], "event_wait");
+        assert_eq!(response["result"]["type"], "wait_matched", "{response}");
+        assert_eq!(response["result"]["event"], event_wait_wire_event("idle"));
+        assert_eq!(connection.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn m811_events_wait_server_timeout_returns_original_request_id() {
+        let mut connection = EventWaitConnection::start(
+            event_wait_params(Some(30)),
+            EventHub::default(),
+            false,
+            |id, _| event_wait_pane_response(id, "working"),
+        );
+        let response = connection.response();
+        assert_eq!(response["id"], "event_wait");
+        assert_eq!(response["error"]["code"], "timeout", "{response}");
+        assert!(connection.requests.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[test]
+    fn m811_events_wait_later_match_filters_status_and_preserves_event_fields() {
+        let hub = EventHub::default();
+        let emitter = hub.clone();
+        let mut connection = EventWaitConnection::start(
+            event_wait_params(Some(1500)),
+            hub,
+            false,
+            move |id, count| {
+                if count == 1 || count == 2 {
+                    let status = if count == 1 { "blocked" } else { "idle" };
+                    emitter.push(serde_json::from_value(event_wait_wire_event(status)).unwrap());
+                }
+                event_wait_pane_response(id, "working")
+            },
+        );
+        let response = connection.response();
+        assert_eq!(response["result"]["type"], "wait_matched", "{response}");
+        assert_eq!(response["result"]["event"], event_wait_wire_event("idle"));
+        assert!(connection.requests.load(Ordering::Relaxed) >= 3);
+    }
+
+    #[test]
+    fn m811_events_wait_unsupported_matches_never_enqueue() {
+        use crate::api::schema::EventMatch;
+        for match_event in [
+            EventMatch::WorkspaceCreated { workspace_id: None },
+            EventMatch::PaneOutputChanged {
+                pane_id: "pane_1".into(),
+                min_revision: None,
+            },
+        ] {
+            let mut params = event_wait_params(Some(0));
+            params.match_event = match_event;
+            let mut connection =
+                EventWaitConnection::start(params, EventHub::default(), false, |id, _| {
+                    event_wait_pane_response(id, "idle")
+                });
+            let response = connection.response();
+            assert_eq!(response["id"], "event_wait");
+            assert_eq!(response["error"]["code"], "unsupported_event_wait_match");
+            assert_eq!(connection.requests.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn m811_events_wait_setup_error_retains_body_but_rebinds_probe_id() {
+        let mut connection = EventWaitConnection::start(
+            event_wait_params(Some(0)),
+            EventHub::default(),
+            false,
+            |id, _| {
+                assert_eq!(id, "event_wait:sub:0:probe");
+                "invalid JSON".into()
+            },
+        );
+        assert_eq!(
+            connection.response(),
+            serde_json::json!({
+                "id": "event_wait",
+                "error": {"code": "internal_error", "message": "failed to decode pane get response"}
+            })
+        );
+        assert_eq!(connection.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn m811_events_wait_post_stop_rejects_before_setup() {
+        let mut connection = EventWaitConnection::start(
+            event_wait_params(Some(0)),
+            EventHub::default(),
+            true,
+            |id, _| event_wait_pane_response(id, "idle"),
+        );
+        let response = connection.response();
+        assert_eq!(response["id"], "event_wait");
+        assert_eq!(response["error"]["code"], "server_unavailable");
+        assert_eq!(connection.requests.load(Ordering::Relaxed), 0);
+    }
+
+    fn assert_event_wait_stops_on_close(server_stop: bool) {
+        let mut connection = EventWaitConnection::start(
+            event_wait_params(None),
+            EventHub::default(),
+            false,
+            |id, _| event_wait_pane_response(id, "working"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while connection.requests.load(Ordering::Relaxed) < 2 {
+            assert!(Instant::now() < deadline, "wait never finished setup");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if server_stop {
+            connection.running.store(false, Ordering::Relaxed);
+        } else {
+            drop(connection.client.take());
+        }
+        while !connection.server.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline, "wait did not notice close/stop");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        connection.server.take().unwrap().join().unwrap().unwrap();
+        if server_stop {
+            let mut bytes = Vec::new();
+            connection
+                .client
+                .as_mut()
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            assert!(
+                bytes.is_empty(),
+                "shutdown must not produce a matched event"
+            );
+        }
+    }
+
+    #[test]
+    fn m811_events_wait_stops_on_client_disconnect() {
+        assert_event_wait_stops_on_close(false);
+    }
+
+    #[test]
+    fn m811_events_wait_stops_on_server_shutdown() {
+        assert_event_wait_stops_on_close(true);
+    }
+
+    #[test]
+    fn m811_events_wait_accepts_huge_timeout_without_instant_overflow() {
+        let mut connection = EventWaitConnection::start(
+            event_wait_params(Some(u64::MAX)),
+            EventHub::default(),
+            false,
+            |id, _| event_wait_pane_response(id, "idle"),
+        );
+        assert_eq!(connection.response()["result"]["type"], "wait_matched");
     }
 
     #[test]

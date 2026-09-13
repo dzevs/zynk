@@ -10,6 +10,10 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- `events.wait` now handles pane agent-status matches at the socket layer with
+  server-owned timeouts. `wait agent-status` uses it without changing its event
+  JSON output; the fork's `agent wait` still accepts Idle or Done. These status
+  projections remain observations, not identity or delivery-receipt authority.
 - `pane split --current` now selects the calling pane through `ZYNK_PANE_ID`,
   independently of UI focus. Omitted targets and unusable caller values keep
   focus fallback; explicit targets retain argument-order precedence.

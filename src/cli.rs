@@ -4,8 +4,9 @@ use serde::Serialize;
 
 use crate::api::client::{ApiClient, ApiClientError};
 use crate::api::schema::{
-    AgentStatus, Method, OutputMatch, PaneAgentState, PaneWaitForOutputParams, ReadFormat,
-    ReadSource, Request, SplitDirection, Subscription,
+    AgentStatus, EventData, EventKind, EventMatch, EventsWaitParams, Method, OutputMatch,
+    PaneAgentState, PaneWaitForOutputParams, ReadFormat, ReadSource, Request, ResponseResult,
+    SplitDirection, SubscriptionEventData, SubscriptionEventEnvelope, SubscriptionEventKind,
 };
 
 mod agent;
@@ -843,19 +844,72 @@ fn wait_agent_status(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    wait_for_agent_change(
-        Request {
-            id: "cli:wait:agent-status".into(),
-            method: Method::EventsSubscribe(crate::api::schema::EventsSubscribeParams {
-                subscriptions: vec![Subscription::PaneAgentStatusChanged {
-                    pane_id,
-                    agent_status: Some(agent_status),
-                }],
-            }),
-        },
-        timeout_ms,
-        "timed out waiting for agent status change",
-    )
+    let request = Request {
+        id: "cli:wait:agent-status".into(),
+        method: Method::EventsWait(EventsWaitParams {
+            match_event: EventMatch::PaneAgentStatusChanged {
+                pane_id,
+                agent_status,
+            },
+            timeout_ms,
+        }),
+    };
+    let response = send_request(&request)?;
+    match crate::api::client::parse_response_value(response) {
+        Ok(success) => {
+            let ResponseResult::WaitMatched { event } = success.result else {
+                return Err(std::io::Error::other("unexpected wait response result"));
+            };
+            if event.event != EventKind::PaneAgentStatusChanged {
+                return Err(std::io::Error::other("unexpected wait event kind"));
+            }
+            let EventData::PaneAgentStatusChanged {
+                pane_id,
+                workspace_id,
+                agent_status,
+                agent,
+                title,
+                display_agent,
+                custom_status,
+                state_labels,
+            } = event.data
+            else {
+                return Err(std::io::Error::other("unexpected wait event data"));
+            };
+            let event = SubscriptionEventEnvelope {
+                event: SubscriptionEventKind::PaneAgentStatusChanged,
+                data: SubscriptionEventData::PaneAgentStatusChanged(
+                    crate::api::schema::PaneAgentStatusChangedEvent {
+                        pane_id,
+                        workspace_id,
+                        agent_status,
+                        agent,
+                        custom_status,
+                        title,
+                        display_agent,
+                        state_labels,
+                    },
+                ),
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&event).map_err(std::io::Error::other)?
+            );
+            Ok(0)
+        }
+        Err(ApiClientError::ErrorResponse(response)) => {
+            if response.error.code == "timeout" {
+                eprintln!("timed out waiting for agent status change");
+            } else {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&response).map_err(std::io::Error::other)?
+                );
+            }
+            Ok(1)
+        }
+        Err(err) => Err(api_client_error_to_io(err)),
+    }
 }
 
 pub(super) fn wait_for_agent_change(

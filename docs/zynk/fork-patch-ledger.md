@@ -4403,3 +4403,64 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   title APIs. The overlay does not overwrite the prior archive or claim the
   human choice of each prerequisite is machine-proven. No whole-M8/M9,
   Gate-3, merge, push, install, tag, publish or release approval is implied.
+
+### M8-11 - Single-response agent-status waits (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `045f506ec8a333cde84718304a7d21bcdb93a1fc` (EVALUATE, portable
+  hunks taken). Parent: `68112c5097a5724c79d181d4f17b624b8eba0fa6`.
+  Preserved patch SHA-256: `4abc2e57c4ca9c7e5c43d12083d1449b4080edf3c47f99f302fea15c8a8af820`.
+  Gate-1: `msg_9e00a1c502d50f06`, design `73e699ee` (187 lines).
+  This source predates the relicense boundary; no new NOTICE entry is due.
+- Take the portable events.wait handler, single-response CLI adaptation, and
+  Linux IPC probe extraction. Exclude Windows PeekNamedPipe, windows-sys Pipes,
+  named-pipe tests and Windows-only HeadlessServer lifetime cfg hunks. No new
+  dependency or platform branch. The Linux server already owns its API handle.
+  Every consumed type/helper exists at the parent; no deferred arrival is used.
+- EventsWait is now the third pre-dispatch special method beside subscriptions
+  and output waits, below api_request_started and M7's outer stop preflight.
+  The ordinary inner fence and final headless admission fences are unchanged.
+  Rejections retain the existing logged outcome/write shape; stopped shared-
+  control servers reject before PaneGet setup. Monolithic stop scope is unchanged.
+- Reuse ActiveSubscription and EventHub for PaneAgentStatusChanged only;
+  unsupported matches return unsupported_event_wait_match before setup.
+  Initial and later matches preserve all eight presentation fields in the
+  existing WaitMatched EventEnvelope. Match precedes timeout, including zero;
+  elapsed Duration comparison handles u64::MAX without Instant overflow.
+  Timeout includes setup but is checked between bounded App requests/polls:
+  not a hard wall-clock deadline. Disconnect/server-running false ends waiting.
+- Setup failures retain the ActiveSubscription error body and replace its
+  internal :sub:0:probe id with the original request id. This is not a change
+  to the existing helper's own error mapping. Malformed/mismatched internal
+  event data fails closed. New serialization is fallible, without new unwraps.
+- wait agent-status uses EventsWait but prints the same SubscriptionEventEnvelope
+  as before, including its dotted event name and all presentation fields.
+  Timeout remains exit 1 with the exact existing diagnostic; other API errors
+  retain their JSON body. Deliberately retain wait_for_agent_change for its sole
+  remaining consumer, agent wait: Idle-or-Done multi-subscription is a fork
+  divergence, not dead code or a single-status behavior to simplify away.
+- Linux local_stream_peer_closed preserves the previous one-byte probe body
+  and six closed-error kinds. Unexpected extra bytes are consumed and mean
+  close in this one-request-per-connection protocol, not a general socket peek.
+  Peer credentials, socket ownership/permissions, caller.rs, headless workers,
+  M7 input admission, schema/wire IDs and protocol 19 are unchanged. Internal
+  PaneGet retains its deliberate default caller. Observations confer no
+  principal or receipt authority; a real-server wait writes zero delivery events.
+- Two parent-executable socket controls failed at not_implemented. The first
+  run also contained an unreached incorrect expected event shape; before source
+  edits v2 corrected it to EventEnvelope's snake_case kind and tagged data and
+  failed at the same missing-handler assertion. Both logs/source copies remain.
+  Thirteen additional tests are implementation-phase controls, not parent reds.
+  Existing initial/idle/done CLI bodies, wait_for_agent_change and output-wait
+  bodies remain byte-identical. No legacy test or assertion is removed.
+- Ten one-site mutations each fail behaviorally across 378 affected controls;
+  the full pass/fail sets and restored source hashes are retained. Outer-fence
+  removal kills all three special-method controls while the inner-fence control
+  passes. The timeout mutant fails bounded socket/CLI controls; the CLI child
+  is killed and reaped on a harness deadline rather than leaving a hung test.
+  Source audit `578383bb` records exact-body and unchanged-boundary checks,
+  complementing manual review rather than proving future synchronization.
+- CLI commands/flags/value sets/aliases are unchanged, so completion needs no
+  edit after manual reconciliation. No Cargo delta means no advisory-delta
+  claim. Linux checks are not Windows, real-SSH, hard-deadline, or whole-M8
+  evidence. Check/gate results and exact commit identity travel in checkpoint 05;
+  no Gate-2/Gate-3 or operator action is authorized by this implementation row.

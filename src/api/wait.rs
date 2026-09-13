@@ -4,14 +4,16 @@ use std::sync::Arc;
 use regex::Regex;
 
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, Request, ResponseResult, SuccessResponse,
+    ErrorBody, ErrorResponse, EventData, EventEnvelope, EventKind, EventMatch, EventsWaitParams,
+    Method, Request, ResponseResult, Subscription, SubscriptionEventData,
+    SubscriptionEventEnvelope, SubscriptionEventKind, SuccessResponse,
 };
 use crate::api::server::{
     dispatch_to_app_with_timeout, should_stop_connection, APP_RESPONSE_TIMEOUT,
     CONNECTION_POLL_INTERVAL,
 };
-use crate::api::subscriptions::{match_output, output_match_read_source};
-use crate::api::ApiRequestSender;
+use crate::api::subscriptions::{match_output, output_match_read_source, ActiveSubscription};
+use crate::api::{ApiRequestSender, EventHub};
 use crate::ipc::LocalStream;
 
 pub(super) fn wait_for_output(
@@ -127,5 +129,140 @@ pub(super) fn wait_for_output(
         }
 
         std::thread::sleep(CONNECTION_POLL_INTERVAL);
+    }
+}
+
+pub(super) fn wait_for_event(
+    request_id: String,
+    params: EventsWaitParams,
+    stream: &mut LocalStream,
+    api_tx: &ApiRequestSender,
+    event_hub: &EventHub,
+    running: &Arc<AtomicBool>,
+) -> std::io::Result<Option<String>> {
+    let started = std::time::Instant::now();
+    let subscription = match event_match_subscription(&request_id, params.match_event) {
+        Ok(subscription) => subscription,
+        Err(response) => {
+            return serde_json::to_string(&response)
+                .map(Some)
+                .map_err(std::io::Error::other);
+        }
+    };
+    let mut active = match ActiveSubscription::new(subscription, &request_id, 0, api_tx, event_hub)
+    {
+        Ok(active) => active,
+        Err(mut response) => {
+            response.id = request_id;
+            return serde_json::to_string(&response)
+                .map(Some)
+                .map_err(std::io::Error::other);
+        }
+    };
+
+    loop {
+        if should_stop_connection(stream, running)? {
+            return Ok(None);
+        }
+        if let Some(event) = active.poll(api_tx, event_hub) {
+            return wait_matched_response(&request_id, event).map(Some);
+        }
+        if params
+            .timeout_ms
+            .is_some_and(|ms| started.elapsed() >= std::time::Duration::from_millis(ms))
+        {
+            return serde_json::to_string(&ErrorResponse {
+                id: request_id,
+                error: ErrorBody {
+                    code: "timeout".into(),
+                    message: "timed out waiting for event match".into(),
+                },
+            })
+            .map(Some)
+            .map_err(std::io::Error::other);
+        }
+        std::thread::sleep(CONNECTION_POLL_INTERVAL);
+    }
+}
+
+fn event_match_subscription(
+    request_id: &str,
+    match_event: EventMatch,
+) -> Result<Subscription, ErrorResponse> {
+    match match_event {
+        EventMatch::PaneAgentStatusChanged {
+            pane_id,
+            agent_status,
+        } => Ok(Subscription::PaneAgentStatusChanged {
+            pane_id,
+            agent_status: Some(agent_status),
+        }),
+        _ => Err(ErrorResponse {
+            id: request_id.into(),
+            error: ErrorBody {
+                code: "unsupported_event_wait_match".into(),
+                message: "events.wait currently supports pane agent status matches".into(),
+            },
+        }),
+    }
+}
+
+fn wait_matched_response(request_id: &str, event: serde_json::Value) -> std::io::Result<String> {
+    let event = serde_json::from_value::<SubscriptionEventEnvelope>(event);
+    let Ok(SubscriptionEventEnvelope {
+        event: SubscriptionEventKind::PaneAgentStatusChanged,
+        data: SubscriptionEventData::PaneAgentStatusChanged(data),
+    }) = event
+    else {
+        return serde_json::to_string(&ErrorResponse {
+            id: request_id.into(),
+            error: ErrorBody {
+                code: "internal_error".into(),
+                message: "failed to decode matched agent status event".into(),
+            },
+        })
+        .map_err(std::io::Error::other);
+    };
+    serde_json::to_string(&SuccessResponse {
+        id: request_id.into(),
+        result: ResponseResult::WaitMatched {
+            event: EventEnvelope {
+                event: EventKind::PaneAgentStatusChanged,
+                data: EventData::PaneAgentStatusChanged {
+                    pane_id: data.pane_id,
+                    workspace_id: data.workspace_id,
+                    agent_status: data.agent_status,
+                    agent: data.agent,
+                    title: data.title,
+                    display_agent: data.display_agent,
+                    custom_status: data.custom_status,
+                    state_labels: data.state_labels,
+                },
+            },
+        },
+    })
+    .map_err(std::io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn m811_matched_response_rejects_malformed_data_and_mismatched_kind() {
+        for event in [
+            serde_json::json!(null),
+            serde_json::json!({"event": "pane.agent_status_changed", "data": {}}),
+            serde_json::json!({
+                "event": "pane.output_matched", "data": {
+                    "pane_id": "p1", "workspace_id": "w1", "agent_status": "idle"
+                }
+            }),
+        ] {
+            let response: ErrorResponse =
+                serde_json::from_str(&wait_matched_response("original", event).unwrap()).unwrap();
+            assert_eq!(response.id, "original");
+            assert_eq!(response.error.code, "internal_error");
+        }
     }
 }

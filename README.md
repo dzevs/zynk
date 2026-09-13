@@ -154,6 +154,12 @@ Design guarantees (binding):
 Agents can drive zynk over the same local Unix socket — create workspaces, split panes, spawn helpers, read
 output, wait for state changes, and message each other. Start with [`SKILL.md`](SKILL.md).
 
+`zynk wait agent-status <pane_id> --status blocked --timeout 30000` uses the server's
+single-response `events.wait` operation and keeps the existing subscription-event JSON on stdout.
+An already matching status wins even at timeout zero. Timeouts include setup and are checked
+between bounded requests/polls, not as a hard wall-clock deadline. Status fields are observations,
+not authenticated identity or receipt evidence; `agent wait` retains its Idle-or-Done behavior.
+
 `zynk api schema --json` exports the socket API's JSON schema, including native receipt methods,
 without a running server or database. Use `--output PATH` instead to write the schema to a file.
 
