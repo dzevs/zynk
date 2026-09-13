@@ -4637,3 +4637,63 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   No Cargo delta or advisory comparison. No upstream generated docs are copied.
   Exact check/gate/commit evidence travels with checkpoint 06; no whole-M8,
   Gate-2/Gate-3 or merge/push/install/tag/publish/release approval is claimed.
+
+### M8-15 - Workspace/tab/worktree CLI adapters (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `ce6c0dc842c3614789624e5cdc6689b580e62806` (PORT).
+  Parent: `4fd7705d5596021899921086bffcbc3b71a62912`.
+  Preserved patch SHA-256: `6c2a2c0ce0b2455092a34bc38b8528f6dc9102f1741cabf8b14f32d04974409a`.
+  Gate-1 `msg_298174c3bd0c4b25` binds design `153ee2b8`; checkpoint 06
+  `edb48d35..4fd7705d` was separately approved and released by Gate-2
+  `msg_4bb05369bb86d34e`. Neither verdict approves this implementation.
+- Actual-parent preflight: cli/runtime.rs absent; all retained typed params,
+  Method variants, request and print helpers present. M8-16's runtime preimage
+  is the M8-15 creator blob 0f6fccd1; no other forward creator or deferred
+  remainder is consumed. No dependency, NOTICE, protocol or platform change.
+- Move exactly sixteen production request expressions: six workspace, six
+  tab, four worktree, each with one real caller. A private helper retains
+  send_request then print_response, and pub(super) adapters construct the
+  original ID/Method/target tuple. Runtime source equals the preserved
+  88-line creator byte-for-byte. No trait, registry or execution engine.
+- Fork parsing stays in its original modules. Absent upstream HashMap/env
+  context is not imported; no new --env field, option or environment read.
+  Workspace/tab cwd stays raw, worktree paths keep relative/tilde expansion,
+  focus precedence and defaults survive, and invalid arguments still finish
+  before connecting. Full untyped responses and error envelopes survive.
+- Source audit `d3152a44` records every removed Request and new call plus
+  each adapter, and proves entire parser remainders byte-identical after only
+  the enumerated expressions/imports and one module declaration are replaced.
+  All pre-existing test files remain unchanged. This is primary extraction
+  evidence; green tests alone cannot establish parser shape or caller coverage.
+- Three parent-green CLI tables cover all sixteen leaves with 25 literal
+  request cases, both success/error responses per case, and 17 invalid cases
+  proving no socket request. Unknown response fields, status/channel/newline,
+  labels, raw versus expanded cwd, target spelling, focus and force are pinned.
+  These are characterization, not red-first controls. The new binary also
+  recompiles six existing support tests; three plus six explains count growth.
+  Owned child cleanup runs before scoped pipe-reader joins on panic; socket
+  operations and process waiting are bounded, and roots remain isolated.
+- Seven compiled one-site mutants fail their intended behavioral controls.
+  Shared ID/field/status mutants each kill all three tables; workspace method
+  and focus each kill only workspace, tab target only tab, force only worktree.
+  Exact source restoration is checked each time. Fifteen targeted controls
+  also include real-server management, worktree, caller split and snapshot.
+- Harness disclosure: the first parent characterization was started before
+  cargo fmt had fully exited (one-second overlap), and its broad runtime_
+  filter selected two incidental support tests. It is not the binding parent
+  evidence. V2 ran after formatting completed, selected exactly three tables,
+  passed, and its preserved source is byte-identical to the final controls.
+- Checkpoint-06 follow-up: carry SIX pre-existing literal-19 status assertions
+  in tests/cli_wrapper.rs to M8-65 / 6f311498: text at 2447/2480/2492 and JSON
+  at 2502/2516/2521 (same at f821af47 and this parent). The reviewer named only
+  the JSON three; the preserved M8-65 companion records the full population.
+  Re-enumerate at arrival, retain text/JSON client/server coverage, and use the
+  then-live contract. No change now; protocol 20 still absorbs both 19 sets.
+  Packet validation now uses a reusable fd-backed tar-ID harness, not a
+  one-off pipeline fix; checkpoint-06 archive/hash/population verification
+  passes without changing the sealed packet. Prior EPIPE failures remain.
+- Manual dispatcher/help/README/completion reconciliation finds no command,
+  flag, value or alias change; the standing second-surface obligation remains.
+  No Cargo delta or advisory-comparison claim. Server/App/auth/input paths,
+  schema export, M8-13/14 and binary protocol 19 stay unchanged. Full check,
+  gate and normal hooks accompany the commit; no whole-M8 or operator action.

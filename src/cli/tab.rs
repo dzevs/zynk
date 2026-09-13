@@ -1,6 +1,4 @@
-use crate::api::schema::{
-    Method, Request, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
-};
+use crate::api::schema::{TabCreateParams, TabListParams, TabRenameParams};
 
 pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -52,10 +50,7 @@ fn tab_list(args: &[String]) -> std::io::Result<i32> {
         }
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:tab:list".into(),
-        method: Method::TabList(TabListParams { workspace_id }),
-    })?)
+    super::runtime::tab_list(TabListParams { workspace_id })
 }
 
 fn tab_create(args: &[String]) -> std::io::Result<i32> {
@@ -106,15 +101,12 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
         }
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:tab:create".into(),
-        method: Method::TabCreate(TabCreateParams {
-            workspace_id,
-            cwd,
-            focus,
-            label,
-        }),
-    })?)
+    super::runtime::tab_create(TabCreateParams {
+        workspace_id,
+        cwd,
+        focus,
+        label,
+    })
 }
 
 fn tab_get(args: &[String]) -> std::io::Result<i32> {
@@ -127,12 +119,7 @@ fn tab_get(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:tab:get".into(),
-        method: Method::TabGet(TabTarget {
-            tab_id: super::normalize_tab_id(raw_tab_id),
-        }),
-    })?)
+    super::runtime::tab_get(super::normalize_tab_id(raw_tab_id))
 }
 
 fn tab_focus(args: &[String]) -> std::io::Result<i32> {
@@ -145,12 +132,7 @@ fn tab_focus(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:tab:focus".into(),
-        method: Method::TabFocus(TabTarget {
-            tab_id: super::normalize_tab_id(raw_tab_id),
-        }),
-    })?)
+    super::runtime::tab_focus(super::normalize_tab_id(raw_tab_id))
 }
 
 fn tab_rename(args: &[String]) -> std::io::Result<i32> {
@@ -159,13 +141,10 @@ fn tab_rename(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:tab:rename".into(),
-        method: Method::TabRename(TabRenameParams {
-            tab_id: super::normalize_tab_id(&args[0]),
-            label: args[1..].join(" "),
-        }),
-    })?)
+    super::runtime::tab_rename(TabRenameParams {
+        tab_id: super::normalize_tab_id(&args[0]),
+        label: args[1..].join(" "),
+    })
 }
 
 fn tab_close(args: &[String]) -> std::io::Result<i32> {
@@ -178,12 +157,7 @@ fn tab_close(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:tab:close".into(),
-        method: Method::TabClose(TabTarget {
-            tab_id: super::normalize_tab_id(raw_tab_id),
-        }),
-    })?)
+    super::runtime::tab_close(super::normalize_tab_id(raw_tab_id))
 }
 
 fn print_tab_help() {

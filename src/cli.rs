@@ -17,6 +17,7 @@ mod native;
 mod notification;
 mod pane;
 mod plugin;
+mod runtime;
 mod server;
 mod skill;
 mod spec;
