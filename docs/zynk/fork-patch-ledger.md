@@ -3864,3 +3864,24 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   obligation remains intact. The successor is **IMPLEMENTED / PENDING
   VERIFICATION** until exact-SHA Gate-2 and fresh whole-M7 Gate-3 approval. No
   merge, push, install, tag, publish, or release is authorized by this entry.
+
+### M8-01: Shared Linux Host Input Environment (2026-09-13)
+
+- **Source:** c792f2fd53794a02b12c369903fd463c4896b7ef, SPLIT. Take the
+  environment wrapper and its two shared callers; exclude Windows Alacritty,
+  Windows input/backend tests, and website content. The source is pre-relicense;
+  existing modified-file notices remain and no new NOTICE entry is warranted.
+- Consolidate TMUX, TERM_PROGRAM, and WEZTERM_PANE reads without changing Linux
+  mode selection. Preserve tmux precedence, case-insensitive WezTerm recognition,
+  the different UTF-8/presence semantics of var/var_os, and lazy client protocol
+  setup. The private pure helper retains all five pre-existing assertions.
+- A new fresh-process table covers eight environment cases, including invalid
+  UTF-8 and ignored Alacritty hints, without mutating the parent test environment.
+  Its initial zero-argument call failed compilation (exit101), not a behavioral
+  regression. All thirteen input-model controls then passed. Separate one-site
+  mutations of each environment input fail the new control; the precedence
+  mutation also fails the retained tmux control. Every mutation exits100.
+- Lazy call placement is a source-shape check, not a behavioral-test claim.
+  No wire/protocol, CLI command, hook/receipt authority, or runtime ownership
+  change. M8-01 is **IMPLEMENTED / PENDING VERIFICATION** by exact checkpoint
+  and milestone gates; this is not completion of M8 or the remaining port.

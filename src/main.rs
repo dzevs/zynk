@@ -754,11 +754,7 @@ fn main() -> io::Result<()> {
         Err(err) => return Err(err),
     };
 
-    let modify_other_keys_mode = crate::input::host_modify_other_keys_mode(
-        std::env::var("TMUX").is_ok(),
-        std::env::var("TERM_PROGRAM").ok().as_deref(),
-        std::env::var_os("WEZTERM_PANE").is_some(),
-    );
+    let modify_other_keys_mode = crate::input::host_modify_other_keys_mode();
 
     let original_hook = std::panic::take_hook();
     let panic_resets_modify_other_keys = modify_other_keys_mode.is_some();

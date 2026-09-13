@@ -238,7 +238,15 @@ impl ModifyOtherKeysMode {
     }
 }
 
-pub fn host_modify_other_keys_mode(
+pub fn host_modify_other_keys_mode() -> Option<ModifyOtherKeysMode> {
+    host_modify_other_keys_mode_for_env(
+        std::env::var("TMUX").is_ok(),
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var_os("WEZTERM_PANE").is_some(),
+    )
+}
+
+fn host_modify_other_keys_mode_for_env(
     in_tmux: bool,
     term_program: Option<&str>,
     wezterm_pane: bool,
@@ -449,7 +457,7 @@ mod tests {
     #[test]
     fn modify_other_keys_mode_is_enabled_for_tmux() {
         assert_eq!(
-            host_modify_other_keys_mode(true, Some("WezTerm"), true),
+            host_modify_other_keys_mode_for_env(true, Some("WezTerm"), true),
             Some(ModifyOtherKeysMode::Mode2)
         );
     }
@@ -457,11 +465,11 @@ mod tests {
     #[test]
     fn modify_other_keys_mode_is_enabled_for_wezterm_hosts() {
         assert_eq!(
-            host_modify_other_keys_mode(false, Some("WezTerm"), false),
+            host_modify_other_keys_mode_for_env(false, Some("WezTerm"), false),
             Some(ModifyOtherKeysMode::Mode1)
         );
         assert_eq!(
-            host_modify_other_keys_mode(false, None, true),
+            host_modify_other_keys_mode_for_env(false, None, true),
             Some(ModifyOtherKeysMode::Mode1)
         );
     }
@@ -469,9 +477,70 @@ mod tests {
     #[test]
     fn modify_other_keys_mode_is_not_enabled_for_unknown_hosts() {
         assert_eq!(
-            host_modify_other_keys_mode(false, Some("ghostty"), false),
+            host_modify_other_keys_mode_for_env(false, Some("ghostty"), false),
             None
         );
-        assert_eq!(host_modify_other_keys_mode(false, None, false), None);
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn host_modify_other_keys_mode_reads_linux_environment() {
+        use std::os::unix::ffi::OsStrExt;
+
+        const CASE: &str = "ZYNK_TEST_MODIFY_OTHER_KEYS_EXPECTED";
+        if let Ok(expected) = std::env::var(CASE) {
+            let expected = match expected.as_str() {
+                "none" => None,
+                "mode1" => Some(ModifyOtherKeysMode::Mode1),
+                "mode2" => Some(ModifyOtherKeysMode::Mode2),
+                _ => panic!("unknown child expectation"),
+            };
+            assert_eq!(host_modify_other_keys_mode(), expected);
+            return;
+        }
+
+        let invalid_utf8 = std::ffi::OsStr::from_bytes(b"\xff");
+        let cases = [
+            (None, None, None, "none"),
+            (Some("".as_ref()), None, None, "mode2"),
+            (None, Some("wEzTeRm".as_ref()), None, "mode1"),
+            (None, None, Some("".as_ref()), "mode1"),
+            (
+                Some("tmux".as_ref()),
+                Some("WezTerm".as_ref()),
+                Some("42".as_ref()),
+                "mode2",
+            ),
+            (None, Some("ghostty".as_ref()), None, "none"),
+            (Some(invalid_utf8), Some(invalid_utf8), None, "none"),
+            (None, None, Some(invalid_utf8), "mode1"),
+        ];
+        for (tmux, term_program, wezterm_pane, expected) in cases {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "input::model::tests::host_modify_other_keys_mode_reads_linux_environment",
+                    "--nocapture",
+                ])
+                .env(CASE, expected)
+                .env("ALACRITTY_WINDOW_ID", "ignored-on-linux");
+            for (name, value) in [
+                ("TMUX", tmux),
+                ("TERM_PROGRAM", term_program),
+                ("WEZTERM_PANE", wezterm_pane),
+            ] {
+                command.env_remove(name);
+                if let Some(value) = value {
+                    command.env(name, value);
+                }
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "expected {expected}: {output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
     }
 }
