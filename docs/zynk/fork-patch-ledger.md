@@ -4588,3 +4588,52 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
 - No Cargo delta or CLI command/flag/value/alias change, so no advisory-delta
   claim or completion-spec edit. Exact check/gate/commit evidence travels with
   checkpoint 06. This row is not Gate-2/Gate-3, whole-M8 or operator approval.
+
+### M8-14 - Live snapshot CLI (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `5d9212a55acf4db05b8c5cdf3fee3c56ac404cf7` (PORT).
+  Parent: `d568b57022a6900fc1fe6cfa2e5ec415b77b3454`.
+  Preserved patch SHA-256: `e839edb9b87152d2fbe6735dc7f0f8d5aa3bb4fd8824256e991d669e97d67901`.
+  Gate-1 `msg_007d1865306c7e11` binds design `d3eb9709` and its preserved
+  caller-count companion `ebb4f6d`. M8-13 is separately implemented at the
+  parent, not approved by this append. Both slices join checkpoint 06.
+- Forward preflight rechecks the actual parent: M8-13 left every planned
+  CLI/source/test path unchanged, and SessionSnapshot, EmptyParams, the
+  request/print helpers and dynamic schema exporter already exist. No deferred
+  remainder or additional creator is consumed; pre-relicense, no NOTICE change.
+- Add no-argument api snapshot with cli:api:snapshot and session.snapshot,
+  preserving the entire JSON response through existing send_request and
+  print_response. Unknown envelope and nested fields survive. Server errors
+  retain their complete stderr envelope and exit 1; any argument, including
+  --help/--json, returns usage 2 before connecting. API/root help distinguish
+  live state from offline schema. The completion-only tree and exact command
+  population are reconciled under the standing second-surface obligation;
+  hand-written dispatchers remain the execution authority.
+- No new identity or receipt authority: the real-server control compares
+  panes to pane.list, focus to the created target, protocol/version to ping,
+  version also to CARGO_PKG_VERSION, and requires zero delivery-event delta.
+  Protocol is never pinned to literal 19: ping consumes the live constant,
+  so M8-65's bump does not self-break this control. The existing raw-API
+  snapshot control and all old CLI/offline-schema tests remain byte-identical.
+- One corrected parent behavioral red completes real server/list/ping/DB
+  setup, then fails because api snapshot is absent (exit 2). The initial
+  fixture instead tried to import a nonexistent library crate from this
+  binary-only project; retain its compile failure, not as behavioral red.
+  Four further controls are implementation-phase, not retrospective reds.
+  Private socket and pipe-reader threads are scoped; waits and socket I/O
+  are bounded, child processes reaped, and temporary roots cleaned. A 128 KiB
+  unknown payload exceeds pipe capacity and is preserved byte-for-byte as a
+  JSON string. Invalid-argument probes own a listening socket and prove no
+  connection and no runtime/config/DB creation.
+- Four valid one-site mutants are killed across 28 controls each: wrong
+  WorkspaceList method (two failures), unknown envelope-field removal (two),
+  ignored arguments (one), and omitted completion (one). The first draft used
+  Ping with EmptyParams although Ping requires PingParams; that exit 101 and
+  stopped matrix are retained but not counted. V2 compiles, fails behaviorally,
+  and restores exact source hashes. Source/P7 audit `94de5ac0` checks all old
+  test bodies and the bounded production delta, not only assertion counts.
+- M8-13 event/emission code, schema export, caller.rs, print_response/send_request,
+  raw/controller/paste/stop fences, binary wire and protocol 19 are unchanged.
+  No Cargo delta or advisory comparison. No upstream generated docs are copied.
+  Exact check/gate/commit evidence travels with checkpoint 06; no whole-M8,
+  Gate-2/Gate-3 or merge/push/install/tag/publish/release approval is claimed.

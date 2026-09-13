@@ -553,7 +553,7 @@ fn main() -> io::Result<()> {
             ("zynk", "Launch or attach to the persistent session"),
             (
                 "zynk api <subcommand>",
-                "Inspect the socket API schema offline",
+                "Inspect socket API metadata and live runtime state",
             ),
             (
                 "zynk status [server|client]",

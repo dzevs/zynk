@@ -167,6 +167,11 @@ Subscriptions can replay matching entries from the existing 512-record history; 
 fresh `session.snapshot` because replay is neither lossless nor atomic with snapshot acquisition.
 Layout and agent projections are observations, not identity or delivery-receipt authority.
 
+`zynk api snapshot` prints the complete live `session.snapshot` JSON response from the running
+server. It accepts no arguments. Agent projections are non-authoritative observations: this
+command cannot grant a principal or confirm message receipt. Server errors retain their JSON
+on stderr with exit status 1; argument errors exit 2 without connecting.
+
 `zynk api schema --json` exports the socket API's JSON schema, including native receipt methods,
 without a running server or database. Use `--output PATH` instead to write the schema to a file.
 

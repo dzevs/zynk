@@ -10,6 +10,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- `zynk api snapshot` prints the complete live `session.snapshot` JSON response.
+  Agent projections remain observations, not authenticated identity or receipt
+  evidence; the command takes no arguments and needs a running server.
 - The `layout.updated` socket subscription reports layout snapshots after pane,
   layout, workspace/tab creation, and plugin-pane changes. It is not a plugin
   hook or a lossless redraw stream; reconnecting consumers should refresh with

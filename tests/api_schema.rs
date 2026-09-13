@@ -61,6 +61,21 @@ fn successful(output: &Output) {
 }
 
 #[test]
+fn m814_api_help_distinguishes_live_snapshot_and_offline_schema() {
+    let cli = OfflineCli::new();
+    let help = cli.run(&["api", "--help"]);
+    successful(&help);
+    let text = String::from_utf8(help.stderr).unwrap();
+    assert!(text.contains("zynk api snapshot"));
+    assert!(text.contains("zynk api schema [--json | --output PATH]"));
+    let root = cli.run(&["--help"]);
+    successful(&root);
+    let text = String::from_utf8(root.stdout).unwrap();
+    assert!(text.contains("Inspect socket API metadata and live runtime state"));
+    cli.assert_no_runtime_created();
+}
+
+#[test]
 fn api_schema_json_is_deterministic_and_needs_no_runtime() {
     let cli = OfflineCli::new();
     let first = cli.run(&["api", "schema", "--json"]);

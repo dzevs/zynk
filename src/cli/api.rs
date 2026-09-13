@@ -1,8 +1,10 @@
 use crate::api::schema::export::protocol_schema_document;
+use crate::api::schema::{EmptyParams, Method, Request};
 
 pub(super) fn run_api_command(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(String::as_str) {
         Some("schema") => api_schema(&args[1..]),
+        Some("snapshot") => api_snapshot(&args[1..]),
         Some("help" | "--help" | "-h") if args.len() == 1 => {
             print_api_help();
             Ok(0)
@@ -39,6 +41,18 @@ fn api_schema(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
+fn api_snapshot(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: zynk api snapshot");
+        return Ok(2);
+    }
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:api:snapshot".into(),
+        method: Method::SessionSnapshot(EmptyParams::default()),
+    })?)
+}
+
 fn schema_json() -> std::io::Result<String> {
     Ok(format!(
         "{}\n",
@@ -65,5 +79,6 @@ fn schema_summary_text() -> String {
 }
 
 fn print_api_help() {
+    eprintln!("usage: zynk api snapshot");
     eprintln!("usage: zynk api schema [--json | --output PATH]");
 }

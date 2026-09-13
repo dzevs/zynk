@@ -160,7 +160,8 @@ fn server_command() -> Command {
 
 fn api_command() -> Command {
     Command::new("api")
-        .about("Inspect socket API metadata")
+        .about("Inspect socket API metadata and live runtime state")
+        .subcommand(Command::new("snapshot").about("Print the live session snapshot as JSON"))
         .subcommand(
             Command::new("schema")
                 .about("Print or write the bundled API schema")
@@ -965,7 +966,7 @@ mod tests {
         cmd.build();
         for (path, children) in [
             ("", "api server status config channel workspace worktree tab notification agent terminal pane wait integration skill plugin session zynk db send reply thread inbox trace whoami who query update completion"),
-            ("api", "schema"),
+            ("api", "schema snapshot"),
             ("server", "stop reload-config agent-manifests update-agent-manifests reload-agent-manifests"),
             ("status", "server client"),
             ("config", "reset-keys"),

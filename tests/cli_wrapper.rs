@@ -3,7 +3,7 @@
 mod support;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -4300,6 +4300,258 @@ fn pane_shell_gets_zynk_socket_and_pane_env() {
     assert!(text.contains(&pane_id), "env file was: {text:?}");
 
     cleanup_spawned_zynk(zynk, base);
+}
+
+fn run_snapshot_cli_bounded(base: &Path, socket: &Path, args: &[&str]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zynk"))
+        .args(args)
+        .env_clear()
+        .env("HOME", base.join("cli-home"))
+        .env("XDG_CONFIG_HOME", base.join("cli-config"))
+        .env("XDG_DATA_HOME", base.join("cli-data"))
+        .env("XDG_CACHE_HOME", base.join("cli-cache"))
+        .env("XDG_RUNTIME_DIR", base.join("cli-runtime"))
+        .env("ZYNK_HOME", base.join("cli-db"))
+        .env("ZYNK_SQLITE_HOME", base.join("cli-sqlite"))
+        .env("ZYNK_SOCKET_PATH", socket)
+        .env(
+            "ZYNK_CLIENT_SOCKET_PATH",
+            base.join("cli-runtime/client.sock"),
+        )
+        .current_dir(base)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Drain both pipes while waiting so a complete snapshot can exceed pipe capacity.
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    thread::scope(|scope| {
+        let read = |mut pipe: Box<dyn Read + Send>| {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        };
+        let stdout = scope.spawn(move || read(Box::new(stdout)));
+        let stderr = scope.spawn(move || read(Box::new(stderr)));
+        let finished = wait_until(Duration::from_secs(3), Duration::from_millis(5), || {
+            child.try_wait().unwrap().is_some()
+        });
+        if !finished {
+            let _ = child.kill();
+        }
+        let status = child.wait().unwrap();
+        let output = std::process::Output {
+            status,
+            stdout: stdout.join().unwrap(),
+            stderr: stderr.join().unwrap(),
+        };
+        assert!(finished, "snapshot CLI exceeded 3s; child reaped");
+        output
+    })
+}
+
+#[test]
+fn m814_cli_snapshot_matches_live_read_only_projection() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket = runtime_dir.join("zynk.sock");
+    let zynk = spawn_zynk(&config_home, &runtime_dir, &socket);
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let created = send_request(
+        &socket,
+        &serde_json::json!({
+            "id": "create_snapshot_target", "method": "workspace.create",
+            "params": {"cwd": base, "focus": true}
+        })
+        .to_string(),
+    );
+    let workspace = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap();
+    let pane = format!("{workspace}:p1");
+    let listed = send_request(
+        &socket,
+        r#"{"id":"panes","method":"pane.list","params":{}}"#,
+    );
+    assert!(listed["result"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["pane_id"] == pane));
+    let ping = send_request(&socket, r#"{"id":"ping","method":"ping","params":{}}"#);
+    let db = config_home.join("sqlite/zynk.db");
+    let before = delivery_events_count(&db);
+    let output = run_snapshot_cli_bounded(&base, &socket, &["api", "snapshot"]);
+    assert!(
+        output.status.success(),
+        "api snapshot must exist: {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["id"], "cli:api:snapshot");
+    assert_eq!(response["result"]["type"], "session_snapshot");
+    let snapshot = &response["result"]["snapshot"];
+    assert_eq!(snapshot["panes"], listed["result"]["panes"]);
+    assert_eq!(snapshot["focused_pane_id"], pane);
+    assert_eq!(snapshot["protocol"], ping["result"]["protocol"]);
+    assert_eq!(snapshot["version"], ping["result"]["version"]);
+    assert_eq!(snapshot["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(delivery_events_count(&db), before);
+    cleanup_spawned_zynk(zynk, base);
+}
+
+struct SnapshotCliFixture {
+    base: PathBuf,
+}
+
+impl SnapshotCliFixture {
+    fn new() -> Self {
+        let base = unique_test_dir();
+        fs::create_dir_all(&base).unwrap();
+        Self { base }
+    }
+
+    fn assert_no_runtime_created(&self) {
+        for name in ["home", "config", "data", "cache", "runtime", "db", "sqlite"] {
+            assert!(
+                !self.base.join(format!("cli-{name}")).exists(),
+                "CLI created {name}"
+            );
+        }
+    }
+}
+
+impl Drop for SnapshotCliFixture {
+    fn drop(&mut self) {
+        cleanup_test_base(&self.base);
+    }
+}
+
+fn mock_snapshot_cli(
+    args: &[&str],
+    response: serde_json::Value,
+) -> (Option<serde_json::Value>, std::process::Output) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fixture = SnapshotCliFixture::new();
+    let socket = fixture.base.join("snapshot.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let done = AtomicBool::new(false);
+    let result = thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let started = Instant::now();
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if done.load(Ordering::Acquire)
+                            || started.elapsed() >= Duration::from_secs(3)
+                        {
+                            return None;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("snapshot mock accept: {err}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            writeln!(stream, "{response}").unwrap();
+            stream.flush().unwrap();
+            Some(request)
+        });
+        let output = run_snapshot_cli_bounded(&fixture.base, &socket, args);
+        done.store(true, Ordering::Release);
+        (server.join().unwrap(), output)
+    });
+    fixture.assert_no_runtime_created();
+    result
+}
+
+#[test]
+fn m814_cli_snapshot_sends_exact_request_and_preserves_complete_response() {
+    let response = serde_json::json!({
+        "id": "cli:api:snapshot",
+        "future_envelope": {"marker": "unchanged"},
+        "result": {"type": "session_snapshot", "snapshot": {
+            "panes": [{"pane_id": "observed:p8", "agent_session": {"value": "observation", "source": "hook"}}],
+            "agents": [{"pane_id": "observed:p8", "agent": "pi"}],
+            "future_payload": "x".repeat(128 * 1024)
+        }}
+    });
+    let (request, output) = mock_snapshot_cli(&["api", "snapshot"], response.clone());
+    assert_eq!(
+        request.unwrap(),
+        serde_json::json!({
+            "id": "cli:api:snapshot", "method": "session.snapshot", "params": {}
+        })
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        response
+    );
+    assert!(output.stdout.ends_with(b"\n"));
+}
+
+#[test]
+fn m814_cli_snapshot_preserves_server_error_and_exit_status() {
+    let response = serde_json::json!({
+        "id": "cli:api:snapshot", "future_envelope": "retained",
+        "error": {"code": "server_unavailable", "message": "server stopping", "data": {"retry": false}}
+    });
+    let (request, output) = mock_snapshot_cli(&["api", "snapshot"], response.clone());
+    assert!(request.is_some());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stderr).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn m814_cli_snapshot_refuses_arguments_before_connecting() {
+    for args in [
+        vec!["api", "snapshot", "extra"],
+        vec!["api", "snapshot", "--json"],
+        vec!["api", "snapshot", "--help"],
+        vec!["api", "snapshot", "--output", "snapshot.json"],
+    ] {
+        let (request, output) = mock_snapshot_cli(
+            &args,
+            serde_json::json!({
+                "id": "cli:api:snapshot", "result": {"type": "ok"}
+            }),
+        );
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert_eq!(request, None, "{args:?} must not connect");
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "usage: zynk api snapshot\n"
+        );
+    }
 }
 
 fn run_event_wait_cli_bounded(socket: &Path, pane: &str, timeout: &str) -> std::process::Output {
