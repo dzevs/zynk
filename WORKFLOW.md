@@ -135,3 +135,15 @@ Request review : zynk send <pane> --type request-review  --trace <id> -- "<spec/
 Approve        : zynk send <pane> --type approve          --trace <id> -- "APPROVE. <evidence: report/diff + file:line>"
 Request changes: zynk send <pane> --type request-changes  --trace <id> -- "REQUEST_CHANGES. <specifics>"
 ```
+
+## Recorded operator-gate deviation (2026-09-13)
+
+Codex pushed `port/linux-only-v0.8.2` at the M7-reviewed `f821af47` after
+interpreting the operator's repeated approval to finish the remaining port as
+also covering push. The retained instructions do not separately name push, so
+this was inferred authorization, not the explicit action gate required above.
+The deviation was surfaced directly to the operator. A reviewer accepting this
+record does not close it on the operator's behalf. `main`, tags, the installed
+binary and release state did not change. No rewind, remote deletion or force
+push is implied as a remedy. This note records the event without relaxing any
+gate; the matching append is in `docs/zynk/fork-patch-ledger.md`.

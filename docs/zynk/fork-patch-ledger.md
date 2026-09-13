@@ -3916,3 +3916,39 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   binary protocol (19), or caller-bound authorization change. The CLI command
   remains assigned to M8-14. **IMPLEMENTED / PENDING VERIFICATION** by exact-SHA
   checkpoint and whole-M8 gates, not completion of M8/M9.
+
+### M8/M9 Authority and Operator-Gate Record (2026-09-13)
+
+- Preserve the original M8 plan and 77-M8/31-M9 source assignment artifact.
+  Those assignment lists alone are not the completion predicate: reconcile
+  their union with every ledger-declared deferred arrival, including partial
+  hunks and controls. Full source patches and SHA-256 hashes now accompany
+  those arrivals in the author authority packet. Each pending remainder must
+  be adjudicated against its preserved patch, this ledger and the target
+  source before its arrival is implemented; preservation does not authorize
+  replaying already-landed hunks or claiming a whole source remains unported.
+- The companion explicitly names d4e0dd3d's token-demand selector and five
+  configuration-dependent controls at 5cfe5e5e, the DEFER ALL of 49e333ae at
+  that shared arrival, and e48d8306's whole feature/helper arrival at M9
+  2863b715. The twelve newly identified origin sources are not the full set
+  of outstanding controls: b76adc15, for example, is already landed but its
+  six future session-suite expectations still require reconciliation.
+- A draft archive mistakenly attached M5-22's gap/token controls to the
+  cluster's first source, 4cd1481a. Full-patch inspection showed that source
+  is palette-only; 7db744ab contains the gap fixtures and d2c317ad the
+  token-occurrence background assertions. The preserved corrected inventory
+  assigns both to the existing D-M5-4 arrival. The original draft remains
+  disclosed evidence, not execution authority; 4cd1481a is context-only.
+- a0678a38 is upstream website documentation, not CLI implementation. Adapt
+  its portable popup usage content into the fork's manual plugin/popup CLI
+  help when 2c7c8beb arrives; do not copy upstream website files. Read-only
+  snapshot projections remain observational at the later M8-14 CLI arrival.
+- **Operator-gate deviation:** Codex inferred push permission from repeated
+  instructions to finish M8/M9 and pushed the approved M7 port branch at
+  f821af47d6a1a25ea747dbea1c79b90d56f51eb7. No retained operator instruction
+  separately names push. This is not evidence of an explicit push gate; the
+  distinction was surfaced directly to the operator. `main` stayed at
+  246a901e78535c953ec9004e7b72d94b4e6afe35, and no tag, installed binary or
+  release changed. Reviewer acceptance of this disclosure is not operator
+  closure. No destructive remote remedy is proposed. WORKFLOW.md records
+  this same event in the same docs-only commit without changing its rules.
