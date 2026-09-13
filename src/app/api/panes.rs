@@ -2167,6 +2167,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_pane_send_keys_sends_shifted_punctuation_as_text_in_kitty_mode() {
+        let (mut app, pane_id, _) = app_with_send_key_runtime(1);
+        let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[>7u",
+                1,
+            );
+        app.state.workspaces[0].insert_test_runtime(internal_pane_id, runtime);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id,
+                keys: vec!["shift+?".into()],
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"?"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn api_pane_send_keys_preserves_shifted_modifiers_and_report_all() {
+        for (mode, key, expected) in [
+            (
+                b"\x1b[>7u".as_slice(),
+                "shift+1",
+                b"\x1b[49;2:1u".as_slice(),
+            ),
+            (b"\x1b[>7u", "ctrl+shift+!", b"\x1b[33;6:1u"),
+            (b"\x1b[>7u", "alt+shift+!", b"\x1b[33;4:1u"),
+            (b"\x1b[>7u", "super+shift+!", b"\x1b[33;10:1u"),
+            (b"\x1b[>15u", "shift+?", b"\x1b[63;2:1u"),
+        ] {
+            let (mut app, pane_id, _) = app_with_send_key_runtime(1);
+            let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let (runtime, mut rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80, 24, 0, mode, 1,
+                );
+            app.state.workspaces[0].insert_test_runtime(internal_pane_id, runtime);
+
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "modified-key".into(),
+                method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                    pane_id,
+                    keys: vec![key.into()],
+                }),
+            });
+
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(success.id, "modified-key");
+            assert_eq!(success.result, ResponseResult::Ok {});
+            assert_eq!(rx.try_recv().unwrap().as_ref(), expected, "{key} {mode:?}");
+            assert!(rx.try_recv().is_err(), "extra write for {key} {mode:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn api_pane_send_keys_accepts_control_navigation_chords() {
         let (mut app, pane_id, mut rx) = app_with_send_key_runtime(4);
 

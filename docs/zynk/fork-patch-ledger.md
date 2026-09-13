@@ -5110,3 +5110,51 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   concurrency setting, test population or production code changed for the rerun.
   Both runs remain evidence. I/O contention is consistent with the observation,
   not proof that the first failure could not expose a latent scheduling race.
+
+### M8-22 - Shifted-punctuation API remainder (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `d190c1f55e05419b299fc68f60ea0aabc1ff7379` (PORT).
+  Parent: `50f0de606c057198a26e666eaf13c7f0fec0a9b3`. Preserved patch SHA-256:
+  `d8d00f062dfe7bc0054f7e5cbcbbf167bb9649c8786bbe5bbcddb2f73ef0f4c6`.
+  Gate-1 `msg_b33eba60d06356e8` binds design `52552ffa`; checkpoint-10
+  Gate-2 `msg_818f90a350bedfb9` approves only the prior M8-20/21 range
+  `5e495b31..50f0de60` and releases that freeze, not this implementation.
+- M6-17 / fork `3eeaba2e0d43ae7329801314019aac4756d3b8dc` already consumed
+  this source's is_shifted_ascii_punctuation, shifted_text_char call and
+  encoder controls. Both helper bodies remain byte-identical to that commit.
+  No encoder hunk is reapplied. Preserve the M6 e7fc85bf report-all/release
+  ordering: flags=7 printable release is event-bearing CSI-u; flags=1 still
+  suppresses release. Do not resurrect the older upstream silent-release
+  assertion or import its Windows changelog claim into this Linux-only fork.
+- The one held upstream remainder is implemented by the specifically named
+  api_pane_send_keys_sends_shifted_punctuation_as_text_in_kitty_mode control.
+  It drives App request dispatch, public key-combo parsing, a real in-memory
+  VT seeded with ESC[>7u, the current runtime/encoder and the bounded receiver.
+  Preserve all four source assertion properties: request ID, Ok response,
+  exact question-mark byte and no second write. Adapt the fixture through
+  existing Workspace::insert_test_runtime, not an upstream-only helper.
+- Separately, api_pane_send_keys_preserves_shifted_modifiers_and_report_all
+  is a fork-added companion, NOT a second held upstream remainder. Its five
+  independent fixtures use literal byte expectations for shift+1, CTRL/ALT/
+  SUPER plus shifted punctuation, and report-all shift+?. No expectation is
+  computed by the encoder being tested. Two distinct new tests in an existing
+  binary, zero support-test recompilations; the source union remains 98 and
+  none of the 21 separately archived pending origins is consumed.
+- Parent characterization passes 61/61 selected encoder/API controls, including
+  both additions. This is expected because the behavior already landed in M6;
+  no missing-helper compile red or behavioral red-first is claimed. Three
+  compiled encoder mutants each run the same 61 controls: actual failures are
+  3, 7 and 5, with complete names and preserved mutant bytes. The new remainder
+  fails on CSI-u versus literal ?, the companion on CTRL+SHIFT+! losing its
+  modifiers and on report-all SHIFT+? becoming literal. These are actual byte
+  assertions, not setup/type/timeout failures. Shared crossings are disclosed,
+  not called selective. The original encoder is restored after every mutant.
+- The bounded source audit strips only the two additive test bodies and
+  reconstructs the complete previous panes.rs byte-for-byte, including the
+  M8-21 scroll controls. All other Rust and Cargo inputs remain unchanged;
+  no previous assertion/test is deleted or weakened. Full just check, gate,
+  normal hooks and committed-source verification precede exact-SHA Gate-2.
+  No new advisory comparison is owed without a dependency delta. CLI completion
+  reconciliation is a no-op: command, flag, value and alias sets are unchanged.
+  This adds coverage to existing behavior, not a new README/CHANGELOG feature.
+  No whole-M8, merge, push, install, tag, publish, release or cleanup approval.
