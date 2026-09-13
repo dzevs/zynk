@@ -77,6 +77,12 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Interactive terminal clients clear inherited mouse-reporting modes on setup,
+  transitions, and cleanup. Delayed SGR mouse tails no longer leak into pane
+  input; ordinary keys and bracketed paste retain their existing handling.
+  Active mouse capture uses a longer lone-Escape reassembly poll window.
+- Client stream EOF and I/O failures are reported as connection loss, while
+  malformed and oversized protocol frames remain protocol errors.
 - New tabs and new-tab layouts follow the focused pane's cached working
   directory when no runtime CWD is available, respecting the target workspace.
 - Normal server launches and live-handoff replacements create a separate POSIX

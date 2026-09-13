@@ -294,7 +294,14 @@ impl std::error::Error for ClientError {
 
 impl From<protocol::FramingError> for ClientError {
     fn from(err: protocol::FramingError) -> Self {
-        ClientError::Protocol(err)
+        match err {
+            protocol::FramingError::UnexpectedEof => ClientError::ConnectionLost(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "server closed connection",
+            )),
+            protocol::FramingError::Io(err) => ClientError::ConnectionLost(err),
+            err => ClientError::Protocol(err),
+        }
     }
 }
 
@@ -323,6 +330,7 @@ fn setup_terminal_with_capabilities(
     mouse_capture: bool,
 ) -> io::Result<TerminalGuard> {
     ratatui::init();
+    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     let host_color_scheme_reports =
         should_enable_host_color_scheme_reports(enable_client_protocols);
 
@@ -400,6 +408,7 @@ fn write_terminal_restore_postlude(
 }
 
 fn set_mouse_capture(enabled: bool) -> io::Result<()> {
+    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     if enabled {
         execute!(io::stdout(), EnableMouseCapture)
     } else {
@@ -426,6 +435,7 @@ fn restore_terminal_state(reset_modify_other_keys: bool, reset_host_color_scheme
         DisableBracketedPaste,
         DisableMouseCapture
     );
+    let _ = crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout());
     ratatui::restore();
     let _ = write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
 }
@@ -875,6 +885,10 @@ fn terminal_control_command_from_json(raw: &str) -> Result<ClientMessage, String
     }
 }
 
+fn initial_mouse_capture_active(direct_attach: bool, configured: bool) -> bool {
+    direct_attach || configured
+}
+
 fn run_client_with_mode(
     requested_encoding: RenderEncoding,
     attach_request: Option<(String, bool)>,
@@ -884,7 +898,9 @@ fn run_client_with_mode(
     init_logging();
 
     let loaded_config = crate::config::Config::load();
+    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     let mouse_capture = loaded_config.config.ui.mouse_capture;
+    let direct_attach = attach_escape.is_some();
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
     let direct_attach_requested = attach_request.is_some();
@@ -896,7 +912,7 @@ fn run_client_with_mode(
         mouse_scroll_lines,
         redraw_on_focus_gained,
         kitty_graphics_enabled,
-        mouse_capture_active: mouse_capture,
+        mouse_capture_active: initial_mouse_capture_active(direct_attach, mouse_capture),
         remote_image_paste_key,
     };
 
@@ -949,7 +965,6 @@ fn run_client_with_mode(
 
     // Now set up the terminal. This must happen AFTER the handshake succeeds,
     // so we don't leave the terminal in raw mode if the server rejects us.
-    let direct_attach = attach_escape.is_some();
     let terminal_guard = if direct_attach {
         setup_direct_attach_terminal()
     } else {
@@ -1054,6 +1069,7 @@ async fn run_client_loop(
         repaint_pending: false,
     };
     debug!(?negotiated_encoding, "client render encoding active");
+    let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
     // Width and height share one observation across the input and resize threads.
     let reported_cell_size = Arc::new(AtomicU64::new(0));
 
@@ -1067,12 +1083,14 @@ async fn run_client_loop(
         && host_cell_size_query_required(state.kitty_graphics_enabled);
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
+    let stdin_mouse_capture_active = host_mouse_capture_active.clone();
     std::thread::spawn(move || {
         input::stdin_reader_loop(
             stdin_tx,
             &stdin_quit,
             will_query_host_terminal_theme,
             will_query_host_cell_size,
+            stdin_mouse_capture_active,
         );
     });
 
@@ -1295,6 +1313,7 @@ async fn run_client_loop(
                     if desired != state.mouse_capture_active {
                         set_mouse_capture(desired).map_err(ClientError::ConnectionFailed)?;
                         state.mouse_capture_active = desired;
+                        host_mouse_capture_active.store(desired, Ordering::Release);
                     }
                 }
                 ServerMessage::Welcome { .. } => {
@@ -1792,6 +1811,51 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m810_initial_mouse_state_matches_direct_or_configured_setup() {
+        for (direct, configured, expected) in [
+            (false, false, false),
+            (false, true, true),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            assert_eq!(initial_mouse_capture_active(direct, configured), expected);
+        }
+    }
+
+    #[test]
+    fn m810_framing_eof_and_io_preserve_connection_loss_kind() {
+        for (error, kind) in [
+            (
+                protocol::FramingError::UnexpectedEof,
+                io::ErrorKind::UnexpectedEof,
+            ),
+            (
+                protocol::FramingError::Io(io::Error::from(io::ErrorKind::ConnectionReset)),
+                io::ErrorKind::ConnectionReset,
+            ),
+        ] {
+            let converted = ClientError::from(error);
+            assert!(
+                matches!(converted, ClientError::ConnectionLost(ref err) if err.kind() == kind),
+                "{converted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn m810_framing_malformed_and_oversized_stay_protocol_errors() {
+        let oversized = ClientError::from(protocol::FramingError::Oversized { claimed: 9, max: 8 });
+        assert!(matches!(
+            oversized,
+            ClientError::Protocol(protocol::FramingError::Oversized { claimed: 9, max: 8 })
+        ));
+        let malformed = ClientError::from(protocol::FramingError::Bincode("invalid frame".into()));
+        assert!(
+            matches!(malformed, ClientError::Protocol(protocol::FramingError::Bincode(ref message)) if message == "invalid frame")
+        );
+    }
     use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
 

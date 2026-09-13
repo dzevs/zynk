@@ -102,6 +102,8 @@ use crate::terminal_theme::{
 };
 
 const ESC: u8 = 0x1b;
+pub(crate) const RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS: i32 = 10;
+pub(crate) const MOUSE_ACTIVE_LONE_ESCAPE_FLUSH_TIMEOUT_MS: i32 = 150;
 pub(crate) const GHOSTTY_COLOR_SCHEME_DARK_REPORT: &[u8] = b"\x1b[?997;1n";
 pub(crate) const GHOSTTY_COLOR_SCHEME_LIGHT_REPORT: &[u8] = b"\x1b[?997;2n";
 pub(crate) const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -200,6 +202,7 @@ pub(crate) struct RawInputByteFramer {
     buffer: Vec<u8>,
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
+    lone_escape_recently_flushed: bool,
     host_color_replies_awaited: u16,
     host_cell_size_replies_awaited: u16,
     host_appearance_reply_awaited: bool,
@@ -210,6 +213,7 @@ pub(crate) struct RawInputByteFramer {
 
 const HOST_COLOR_QUERY_REPLIES: u16 = 258;
 const HOST_CELL_SIZE_QUERY_REPLIES: u16 = 1;
+const MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES: usize = 32;
 
 impl RawInputByteFramer {
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
@@ -256,11 +260,18 @@ impl RawInputByteFramer {
         !self.buffer.is_empty()
     }
 
+    pub(crate) fn has_pending_lone_escape(&self) -> bool {
+        self.buffer.as_slice() == [ESC]
+    }
+
     pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
         let mut chunks = self.drain_available_chunks();
 
         if let Some(family) = self.discard_until {
-            if family == ControlStringFamily::HostReplyCsi {
+            if matches!(
+                family,
+                ControlStringFamily::HostReplyCsi | ControlStringFamily::OrphanedSgrMouseTail
+            ) {
                 return chunks;
             }
             let keep_split_st = self.buffer.last() == Some(&ESC);
@@ -279,6 +290,14 @@ impl RawInputByteFramer {
         }
 
         if self.buffer.is_empty() {
+            return chunks;
+        }
+
+        if self.lone_escape_recently_flushed && self.buffer.starts_with(b"[<") {
+            self.discard_until = Some(ControlStringFamily::OrphanedSgrMouseTail);
+            self.discarded_tail_bytes = 0;
+            self.buffer.clear();
+            self.lone_escape_recently_flushed = false;
             return chunks;
         }
 
@@ -377,12 +396,14 @@ impl RawInputByteFramer {
                 bytes = ?self.buffer,
                 "flushing lone escape after input timeout; if this follows an alt chord or focus switch it may reach the pane as plain esc"
             );
+            self.lone_escape_recently_flushed = true;
             chunks.push(std::mem::take(&mut self.buffer));
             return chunks;
         }
 
         if let Ok(text) = std::str::from_utf8(&self.buffer) {
             if parse_terminal_key_sequence(text).is_some() {
+                self.lone_escape_recently_flushed = false;
                 chunks.push(std::mem::take(&mut self.buffer));
                 return chunks;
             }
@@ -400,6 +421,7 @@ impl RawInputByteFramer {
         }
 
         tracing::debug!(bytes = ?self.buffer, "dropping incomplete raw input buffer after timeout");
+        self.lone_escape_recently_flushed = false;
         self.buffer.clear();
         chunks
     }
@@ -408,7 +430,29 @@ impl RawInputByteFramer {
         let mut chunks = Vec::new();
 
         loop {
+            if self.lone_escape_recently_flushed {
+                if starts_with_incomplete_orphaned_sgr_mouse_tail(&self.buffer) {
+                    break;
+                }
+                if discard_complete_orphaned_sgr_mouse_tail(&mut self.buffer) {
+                    self.lone_escape_recently_flushed = false;
+                    continue;
+                }
+                self.lone_escape_recently_flushed = false;
+            }
+
             if let Some(family) = self.discard_until {
+                if family == ControlStringFamily::OrphanedSgrMouseTail {
+                    if discard_orphaned_sgr_mouse_tail(
+                        &mut self.buffer,
+                        &mut self.discarded_tail_bytes,
+                    ) {
+                        self.discard_until = None;
+                        self.discarded_tail_bytes = 0;
+                        continue;
+                    }
+                    break;
+                }
                 if family == ControlStringFamily::HostReplyCsi {
                     if discard_host_reply_csi_tail(&mut self.buffer, &mut self.discarded_tail_bytes)
                     {
@@ -485,7 +529,7 @@ fn plausible_control_string_tail(family: ControlStringFamily, buffer: &[u8]) -> 
                 )
         }),
         ControlStringFamily::StTerminated => buffer.last() == Some(&ESC),
-        ControlStringFamily::HostReplyCsi => false,
+        ControlStringFamily::HostReplyCsi | ControlStringFamily::OrphanedSgrMouseTail => false,
     }
 }
 
@@ -536,13 +580,15 @@ fn raw_input_reader_loop<R: Read + AsRawFd>(mut reader: R, tx: &mpsc::Sender<Raw
             Ok(n) => {
                 send_raw_input_events(framer.push(&scratch[..n]), tx, &mut pending_palette);
 
-                if stdin_read_ready(&reader, 10) == Some(false) {
+                if stdin_read_ready(&reader, RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS) == Some(false) {
                     let had_pending = framer.has_pending_input();
                     let events = framer.flush_timeout();
                     let held_escape = had_pending && events.is_empty();
                     send_raw_input_events(events, tx, &mut pending_palette);
                     flush_host_palette_events(tx, &mut pending_palette);
-                    if held_escape && stdin_read_ready(&reader, 10) == Some(false) {
+                    if held_escape
+                        && stdin_read_ready(&reader, RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS) == Some(false)
+                    {
                         send_raw_input_events(framer.flush_timeout(), tx, &mut pending_palette);
                         flush_host_palette_events(tx, &mut pending_palette);
                     }
@@ -750,6 +796,7 @@ enum ControlStringFamily {
     Osc,
     StTerminated,
     HostReplyCsi,
+    OrphanedSgrMouseTail,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -916,6 +963,64 @@ fn complete_escape_sequence_len(buffer: &[u8]) -> Option<usize> {
     Some(1 + escaped_char_width)
 }
 
+fn starts_with_incomplete_orphaned_sgr_mouse_tail(buffer: &[u8]) -> bool {
+    if buffer.len() > MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES {
+        return false;
+    }
+    buffer.len() < 3 && b"[<".starts_with(buffer)
+        || buffer.starts_with(b"[<")
+            && buffer[2..]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || *byte == b';')
+}
+
+fn discard_complete_orphaned_sgr_mouse_tail(buffer: &mut Vec<u8>) -> bool {
+    if !buffer.starts_with(b"[<") {
+        return false;
+    }
+    let Some(end) = buffer
+        .iter()
+        .take(MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES)
+        .position(|byte| matches!(*byte, b'M' | b'm'))
+    else {
+        return false;
+    };
+    let len = end + 1;
+    let mut sequence = [0; MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES + 1];
+    sequence[0] = ESC;
+    sequence[1..=len].copy_from_slice(&buffer[..len]);
+    let Ok(sequence) = std::str::from_utf8(&sequence[..=len]) else {
+        return false;
+    };
+    if parse_sgr_mouse(sequence).is_none() {
+        return false;
+    }
+    buffer.drain(..len);
+    true
+}
+
+fn discard_orphaned_sgr_mouse_tail(buffer: &mut Vec<u8>, discarded_tail_bytes: &mut usize) -> bool {
+    // Drain on every push, not only timeout, so an unterminated tail cannot accumulate.
+    let remaining = MAX_DISCARDED_CONTROL_TAIL_BYTES.saturating_sub(*discarded_tail_bytes);
+    let inspected = buffer.len().min(remaining);
+    for index in 0..inspected {
+        match buffer[index] {
+            b'0'..=b'9' | b';' => {}
+            b'M' | b'm' => {
+                buffer.drain(..=index);
+                return true;
+            }
+            _ => {
+                buffer.drain(..index);
+                return true;
+            }
+        }
+    }
+    buffer.drain(..inspected);
+    *discarded_tail_bytes = discarded_tail_bytes.saturating_add(inspected);
+    *discarded_tail_bytes >= MAX_DISCARDED_CONTROL_TAIL_BYTES
+}
+
 fn osc_string_terminator(buffer: &[u8]) -> Option<usize> {
     let st = find_subsequence(buffer, b"\x1b\\").map(|idx| idx + 2);
     let bel = buffer
@@ -965,7 +1070,7 @@ fn control_string_terminator_for_family(
     match family {
         ControlStringFamily::Osc => osc_string_terminator(buffer),
         ControlStringFamily::StTerminated => st_string_terminator(buffer),
-        ControlStringFamily::HostReplyCsi => None,
+        ControlStringFamily::HostReplyCsi | ControlStringFamily::OrphanedSgrMouseTail => None,
     }
 }
 
@@ -1882,6 +1987,186 @@ mod tests {
             KeyCode::Up,
             KeyModifiers::empty(),
         );
+    }
+
+    #[test]
+    fn m810_sgr_before_flush_preserves_mouse_coordinates_and_kind() {
+        for (report, kind) in [
+            (
+                b"\x1b[<0;43;26M".as_slice(),
+                MouseEventKind::Down(MouseButton::Left),
+            ),
+            (
+                b"\x1b[<0;43;26m".as_slice(),
+                MouseEventKind::Up(MouseButton::Left),
+            ),
+        ] {
+            for split in 1..report.len() {
+                let mut framer = RawInputFramer::default();
+                assert!(framer.push(&report[..split]).is_empty());
+                let events = framer.push(&report[split..]);
+                assert!(
+                    matches!(events.as_slice(), [RawInputEvent::Mouse(mouse)]
+                    if mouse.kind == kind && mouse.column == 42 && mouse.row == 25
+                        && mouse.modifiers.is_empty()),
+                    "split={split}: {events:?}"
+                );
+                assert!(framer.flush_timeout().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn m810_orphan_mouse_complete_tail_is_discarded_after_emitted_escape() {
+        for tail in [b"[<0;43;26M".as_slice(), b"[<0;43;26m".as_slice()] {
+            let mut framer = RawInputFramer::default();
+            assert!(framer.push(b"\x1b").is_empty());
+            let mut escape = framer.flush_timeout().into_iter();
+            assert_raw_key(escape.next().unwrap(), KeyCode::Esc, KeyModifiers::empty());
+            assert!(escape.next().is_none());
+            assert!(framer.push(tail).is_empty(), "tail={tail:?}");
+            assert!(framer.flush_timeout().is_empty());
+        }
+    }
+
+    #[test]
+    fn m810_orphan_mouse_complete_tail_preserves_following_input() {
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        assert_eq!(framer.push(b"[<65;43;26Mx"), vec![b"x".to_vec()]);
+        assert!(framer.flush_timeout().is_empty());
+    }
+
+    #[test]
+    fn m810_orphan_mouse_invalid_tail_is_released_byte_exact() {
+        for tail in [
+            b"[<x".as_slice(),
+            b"[<0;0;26M".as_slice(),
+            b"[<0;43;26;M".as_slice(),
+            b"[<0;43;26;7M".as_slice(),
+        ] {
+            let mut framer = RawInputByteFramer::default();
+            assert!(framer.push(b"\x1b").is_empty());
+            assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+            assert_eq!(framer.push(tail).concat(), tail);
+            assert_eq!(framer.push(b"[<0;43;26M").concat(), b"[<0;43;26M");
+        }
+    }
+
+    #[test]
+    fn m810_orphan_mouse_double_split_timeout_finishes_at_either_terminator() {
+        for last in [b"3;26Mx".as_slice(), b"3;26mx".as_slice()] {
+            let mut framer = RawInputByteFramer::default();
+            assert!(framer.push(b"\x1b").is_empty());
+            assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+            assert!(framer.push(b"[<0;4").is_empty());
+            assert!(framer.flush_timeout().is_empty());
+            assert_eq!(framer.push(last), vec![b"x".to_vec()]);
+            assert!(framer.discard_until.is_none());
+            assert!(framer.buffer.is_empty());
+        }
+    }
+
+    #[test]
+    fn m810_orphan_mouse_incremental_drain_has_a_continuous_budget() {
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        assert!(framer.push(b"[<0;").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        for _ in 0..MAX_DISCARDED_CONTROL_TAIL_BYTES {
+            assert!(framer.push(b"7").is_empty());
+            assert!(
+                framer.buffer.is_empty(),
+                "drained bytes must not accumulate"
+            );
+            let discarded = framer.discarded_tail_bytes;
+            assert!(framer.push(b"").is_empty());
+            assert_eq!(framer.discarded_tail_bytes, discarded);
+        }
+        assert!(
+            framer.discard_until.is_none(),
+            "budget must end without a timeout"
+        );
+        assert_eq!(framer.push(b"7"), vec![b"7".to_vec()]);
+    }
+
+    #[test]
+    fn m810_orphan_mouse_terminator_alone_ends_the_drain() {
+        for tail in [b"43;26M".as_slice(), b"43;26m".as_slice()] {
+            let mut framer = RawInputByteFramer::default();
+            assert!(framer.push(b"\x1b").is_empty());
+            assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+            assert!(framer.push(b"[<0;").is_empty());
+            assert!(framer.flush_timeout().is_empty());
+            assert!(framer.push(tail).is_empty());
+            assert!(framer.discard_until.is_none());
+            assert_eq!(framer.push(b"7"), vec![b"7".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn m810_orphan_mouse_invalid_continuation_preserves_new_escape() {
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        assert!(framer.push(b"[<0;").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(
+            framer.push(b"12x\x1b[A"),
+            vec![b"x".to_vec(), b"\x1b[A".to_vec()]
+        );
+        assert!(framer.discard_until.is_none());
+        assert_eq!(framer.push(b"M"), vec![b"M".to_vec()]);
+    }
+
+    #[test]
+    fn m810_orphan_mouse_recognition_is_bounded_at_32_bytes() {
+        for length in [32, 33] {
+            let mut tail = b"[<".to_vec();
+            tail.extend(vec![b'0'; length - b"[<;43;26M".len()]);
+            tail.extend_from_slice(b";43;26M");
+            assert_eq!(tail.len(), length);
+            let mut framer = RawInputByteFramer::default();
+            assert!(framer.push(b"\x1b").is_empty());
+            assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+            let emitted = framer.push(&tail).concat();
+            if length == 32 {
+                assert!(emitted.is_empty());
+            } else {
+                assert_eq!(emitted, tail);
+            }
+        }
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        let mut incomplete = b"[<".to_vec();
+        incomplete.extend([b'0'; 31]);
+        assert_eq!(framer.push(&incomplete).concat(), incomplete);
+        assert!(framer.buffer.is_empty());
+    }
+
+    #[test]
+    fn m810_orphan_mouse_paste_payload_is_never_filtered() {
+        let paste = b"\x1b[200~[<65;43;26M\x1b[201~";
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        assert!(framer.push(&paste[..15]).is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.push(&paste[15..]), vec![paste.to_vec()]);
+    }
+
+    #[test]
+    fn m810_orphan_mouse_marker_ends_when_ordinary_prefix_is_released() {
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        let mut ordinary = framer.push(b"[");
+        ordinary.extend(framer.flush_timeout());
+        assert_eq!(ordinary.concat(), b"[");
+        assert_eq!(framer.push(b"[<0;43;26M").concat(), b"[<0;43;26M");
     }
 
     #[test]

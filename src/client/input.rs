@@ -33,12 +33,14 @@ pub fn stdin_reader_loop(
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
     host_cell_size_query_sent: bool,
+    host_mouse_capture_active: Arc<AtomicBool>,
 ) {
     unix_stdin_reader_loop(
         event_tx,
         should_quit,
         host_color_query_sent,
         host_cell_size_query_sent,
+        host_mouse_capture_active,
     );
 }
 
@@ -47,6 +49,7 @@ fn unix_stdin_reader_loop(
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
     host_cell_size_query_sent: bool,
+    host_mouse_capture_active: Arc<AtomicBool>,
 ) {
     let stdin = io::stdin();
     unix_input_reader_loop(
@@ -55,6 +58,7 @@ fn unix_stdin_reader_loop(
         should_quit,
         host_color_query_sent,
         host_cell_size_query_sent,
+        host_mouse_capture_active,
     );
 }
 
@@ -64,6 +68,7 @@ fn unix_input_reader_loop<R: Read + AsRawFd>(
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
     host_cell_size_query_sent: bool,
+    host_mouse_capture_active: Arc<AtomicBool>,
 ) {
     let mut scratch = [0u8; 4096];
     let mut framer = crate::raw_input::RawInputByteFramer::default();
@@ -89,7 +94,11 @@ fn unix_input_reader_loop<R: Read + AsRawFd>(
                     return;
                 }
 
-                if stdin_read_ready(&reader, 10) == Some(false) {
+                let timeout_ms = idle_flush_timeout_ms(
+                    &framer,
+                    host_mouse_capture_active.load(Ordering::Acquire),
+                );
+                if stdin_read_ready(&reader, timeout_ms) == Some(false) {
                     let had_pending = framer.has_pending_input();
                     let chunks = framer.flush_timeout();
                     let held_escape = had_pending && chunks.is_empty();
@@ -99,7 +108,10 @@ fn unix_input_reader_loop<R: Read + AsRawFd>(
                         return;
                     }
                     if held_escape
-                        && stdin_read_ready(&reader, 10) == Some(false)
+                        && stdin_read_ready(
+                            &reader,
+                            crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS,
+                        ) == Some(false)
                         && !send_unix_input_chunks(
                             framer.flush_timeout(),
                             &event_tx,
@@ -117,6 +129,17 @@ fn unix_input_reader_loop<R: Read + AsRawFd>(
                 break;
             }
         }
+    }
+}
+
+fn idle_flush_timeout_ms(
+    framer: &crate::raw_input::RawInputByteFramer,
+    host_mouse_capture_active: bool,
+) -> i32 {
+    if host_mouse_capture_active && framer.has_pending_lone_escape() {
+        crate::raw_input::MOUSE_ACTIVE_LONE_ESCAPE_FLUSH_TIMEOUT_MS
+    } else {
+        crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
     }
 }
 
@@ -208,6 +231,86 @@ fn poll_read_ready(fd: i32, timeout_ms: i32) -> Option<bool> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn m810_mouse_poll_window_only_applies_to_active_lone_escape() {
+        let capture = Arc::new(AtomicBool::new(false));
+        for (bytes, active_timeout) in [
+            (b"".as_slice(), 10),
+            (b"\x1b".as_slice(), 150),
+            (b"\x1b[".as_slice(), 10),
+            (b"x".as_slice(), 10),
+            (b"\x1b[200~".as_slice(), 10),
+        ] {
+            let mut framer = crate::raw_input::RawInputByteFramer::default();
+            framer.push(bytes);
+            capture.store(false, Ordering::Release);
+            assert_eq!(
+                idle_flush_timeout_ms(&framer, capture.load(Ordering::Acquire)),
+                10
+            );
+            capture.store(true, Ordering::Release);
+            assert_eq!(
+                idle_flush_timeout_ms(&framer, capture.load(Ordering::Acquire)),
+                active_timeout
+            );
+            capture.store(false, Ordering::Release);
+            assert_eq!(
+                idle_flush_timeout_ms(&framer, capture.load(Ordering::Acquire)),
+                10
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn m810_input_reader_reassembles_bytewise_mouse_from_active_host() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        struct Bytewise(UnixStream);
+        impl Read for Bytewise {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                let len = bytes.len().min(1);
+                self.0.read(&mut bytes[..len])
+            }
+        }
+        impl AsRawFd for Bytewise {
+            fn as_raw_fd(&self) -> i32 {
+                self.0.as_raw_fd()
+            }
+        }
+
+        let (reader, mut host) = UnixStream::pair().unwrap();
+        host.write_all(b"\x1b[<0;43;26Mx").unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let reader_quit = should_quit.clone();
+        let thread = std::thread::spawn(move || {
+            unix_input_reader_loop(
+                Bytewise(reader),
+                tx,
+                &reader_quit,
+                false,
+                false,
+                Arc::new(AtomicBool::new(true)),
+            );
+        });
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            (rx.recv().await, rx.recv().await)
+        })
+        .await;
+        should_quit.store(true, Ordering::Release);
+        drop(host);
+        thread.join().unwrap();
+
+        let (mouse, key) =
+            received.expect("bytewise SGR input must finish without another host write");
+        assert!(
+            matches!(mouse, Some(ClientLoopEvent::StdinInput(data)) if data == b"\x1b[<0;43;26M")
+        );
+        assert!(matches!(key, Some(ClientLoopEvent::StdinInput(data)) if data == b"x"));
+        assert!(rx.recv().await.is_none());
+    }
+
     #[tokio::test]
     async fn input_reader_forwards_cell_report_without_swallowing_following_keys() {
         use std::io::Write;
@@ -218,7 +321,14 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let reader_quit = Arc::clone(&should_quit);
         let thread = std::thread::spawn(move || {
-            unix_input_reader_loop(reader, tx, &reader_quit, false, true);
+            unix_input_reader_loop(
+                reader,
+                tx,
+                &reader_quit,
+                false,
+                true,
+                Arc::new(AtomicBool::new(false)),
+            );
         });
         host.write_all(b"\x1b[6;21;10tx\x1b").unwrap();
         let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -253,7 +363,14 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let reader_quit = Arc::clone(&should_quit);
         let thread = std::thread::spawn(move || {
-            unix_input_reader_loop(reader, tx, &reader_quit, false, true);
+            unix_input_reader_loop(
+                reader,
+                tx,
+                &reader_quit,
+                false,
+                true,
+                Arc::new(AtomicBool::new(false)),
+            );
         });
         host.write_all(b"\x1b").unwrap();
         let received = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
@@ -277,7 +394,14 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let reader_quit = Arc::clone(&should_quit);
         let thread = std::thread::spawn(move || {
-            unix_input_reader_loop(reader, tx, &reader_quit, true, false);
+            unix_input_reader_loop(
+                reader,
+                tx,
+                &reader_quit,
+                true,
+                false,
+                Arc::new(AtomicBool::new(false)),
+            );
         });
         host.write_all(b"\x1b[I\x1b").unwrap();
         let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {

@@ -4281,3 +4281,125 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   all selected outcomes and byte-identical restoration hashes travel with the
   checkpoint. Full check/gate and reviews remain separate evidence and gates;
   no whole-M8, Gate-3 or operator integration/deployment approval is claimed.
+
+### M8-10 - Host Mouse Reset and Split SGR Input (2026-09-13)
+
+- Source: `aa0768b734d95a1f54df1719290d977df796068d`, pre-relicense PORT.
+  Gate-1 design c02e8e54 is approved by msg_b19dbcce7650ea7a; source work was
+  held until the creator correction approval msg_0e7d7ce90c5f6b83. The new
+  terminal_modes module gets no false post-relicense notice; existing notices
+  are retained. No additional forward creator is needed for these mouse hunks.
+- One writer helper clears modes 1006, 1016, 1015, 1005, 1003, 1002, 1000 in
+  that order and flushes. All eight production sites are enumerated: App's
+  sync_host_mouse_capture; client setup_terminal_with_capabilities,
+  set_mouse_capture, restore_terminal_state, run_client_with_mode; and main's
+  panic cleanup, monolithic setup and monolithic normal cleanup. Setup and
+  transitions propagate errors; existing best-effort cleanup stays best-effort.
+  The unchanged App-state early return still precedes reset. This is seven
+  named modes, not a claim to reset every terminal mode. JSON observe/control
+  entry points and output handling are byte-identical and emit no reset bytes.
+- Normal and second host-reply flush polls stay 10 ms; only the interactive
+  reader's first poll with active mouse capture and exactly one held Escape is
+  150 ms. These are poll arguments, not an end-to-end latency bound. One
+  Arc<AtomicBool> starts from actual installed mouse mode, flows through the
+  single production reader entry, and is read Acquire / updated Release after
+  a successful mouse transition. Fork consistency fix: direct interactive attach
+  always enables mouse, so its initial state is direct_attach OR configured,
+  not config alone. This does not change direct-session authority or JSON mode.
+- An actually emitted lone Escape marks the following plausible orphan SGR
+  tail. Recognition is bounded to 32 bytes and validates through parse_sgr_mouse
+  using a fixed 33-byte stack reconstruction, not an input-sized allocation.
+  Complete invalid tails remain ordinary input. Timed-out partial tails enter
+  a new drain family using HostReplyCsi's existing continuously bounded shape:
+  consume digits/semicolons, finish on M/m, preserve the first disqualifying
+  byte and later input, and stop at the existing 128-byte continuation budget.
+  Empty continuations scan nothing. HostReplyCsi itself remains byte-identical;
+  no claim is made to redesign all historical OSC/ST framing. Releasing an
+  ordinary held prefix clears the marker, preventing a later batch being
+  misclassified. Bracketed-paste payloads are not filtered as orphan tails.
+- FramingError::UnexpectedEof and Io map to ConnectionLost with their I/O kind
+  preserved. Oversized and Bincode remain Protocol; the design's generic
+  FrameTooLarge label means the existing Oversized variant, not a new wire tag.
+  The protocol-19 legacy-stream restart diagnostic remains byte-identical.
+  Cargo inputs, API/schema/caller, server transport/headless and protocol wire
+  are unchanged. No advisory delta exists without a dependency change. Manual
+  completion reconciliation finds no command, flag, value-set or alias change.
+- P7: no legacy test or assertion is removed. The three reader tests retain
+  their complete original bodies after accounting only for the added false
+  mouse flag. forwards_cell_report_without_swallowing_following_keys keeps
+  its cell-report/key/Escape property; releases_escape_when_cell_size_query_is_
+  unanswered keeps its unanswered-query timeout; releases_escape_without_
+  another_read_after_focus keeps its focus/query-release property. False keeps
+  each on the original non-mouse poll path, not a new mouse-active fixture.
+  Exact before/after bodies travel in m8-10-source-audit.json, along with the
+  eight reset locations, actual initialization/update sites and unchanged paths.
+  These text checks complement manual source review, not runtime proof of all
+  TTY lifecycle sites. The real UnixStream reader control drives bytewise input
+  with bounded receipt/owned teardown, not a sleep-based latency claim.
+- Evidence: twelve parent-executable controls select seven failures and five
+  existing-behavior positives before source edits. The seven are not seven
+  independent final-property demonstrations: drain/budget controls first fail
+  at missing prefix recognition, and the EOF/Io table first fails at EOF.
+  Seven additional controls are implementation-phase, not retrospective red
+  evidence. The last, terminator-alone, has no following disqualifying byte;
+  only terminator handling can end that drain. All nineteen additions plus
+  existing client/raw-input/transport/headless controls pass, 388/388 total.
+- Fifteen one-site mutations each exit100 with every selected outcome and
+  mutated source retained; every restoration hash equals its original. Mode
+  omission, flush omission, marker loss, complete-tail bypass, 32-byte bound,
+  terminator, 128-byte budget, disqualifying-byte loss, each poll constant,
+  direct initialization, EOF, Oversized, Io, and ordinary-prefix marker clearing
+  are independently changed. Shared marker/flush kills cross controls and are
+  recorded as such; bounds, terminator and byte preservation kill their own
+  controls. The first combined patch attempt matched hunks out of order and
+  applied nothing; corrected patches and all real red/green/mutation invocations
+  are retained. Full check/gate and exact-SHA reviews remain separate evidence.
+
+### M8/M9 Deferred Creator Corrections (2026-09-13)
+
+- Append-only correction to the approved arrival bindings, not a rewrite of
+  their authority. Gate-1 msg_0e7d7ce90c5f6b83 binds companions 4749257d and
+  54736c1c, creator overlay a4f75aef and generator 487c8259. Preserved plan,
+  source accounting, deferred-arrivals-v2 and original M9 archive stay intact.
+  The archive-derived population is all 21 pending M8 entries across nine
+  original arrival groups, plus one context-only entry. Every named creator
+  anchor is present at the source, absent in its parent and added in the diff;
+  the overlay records blob/file/parent/patch identities. Three negative controls
+  reject the mouse-slice keyboard binding and absent token-style definitions.
+  This proves named prerequisite creators, not hunk applicability or semantic
+  sufficiency of the chosen anchor. Per-arrival remainder preflight is mandatory.
+- `0bd445020ea19e0cea13f42a28212db7b2df196d` (D-M5-3) and
+  `e9222d1882effd62ddae9c4d81bc2d9390da7cac` (D-M6-1) move from M8-10 to
+  M8-50 `e7fc85bfdb51f89488430adbfe5bbced3be79c2f`, the actual creator of
+  set_host_kitty_keyboard_report_all. aa0768b7 creates only mouse reset, not
+  report-all negotiation. M8-50 owes both the report-all flag and app-stack
+  pop/push replacement: ESC[<1u ESC[>31u on enable, ESC[<1u ESC[>7u on disable
+  (spaces here are explanatory, not output). Consume alongside the existing
+  a5c69bea/d57cefb8/e536bd8b chain, reuse M7's VT scalar query, and omit the
+  regressive 17/18 protocol bumps. No dead keyboard placeholder lands at M8-10.
+- `d4e0dd3d903c50d2edb8c3cec71952a83989b310` still owes its plain-token
+  demand selector and all five config-dependent controls at M8-28 5cfe5e5e.
+  That creator has no Styled/SidebarTokenStyle/parts. The corresponding Styled
+  demand adaptation therefore arrives at M9-12
+  `b16465afbbf8e4e959076fceb7e84377f2ecc379`, preserving Branch/GitStatus demand.
+  `d2c317adc4b5fd73a7054d74f92d633a31069391` keeps basic token-row active/
+  inactive background at M8-28; its occurrence-style fg/bold/dim and separator
+  fixtures travel to M9-12, not falsely equivalent plain replacements. M8-69
+  title demand must use its then-available plain tokens; M9-12 reconciles the
+  then-live title predicate while preserving the M7-shaped title/PTY distinction.
+  Neither shared remainder is closed by this accounting correction.
+- M8 reconciliation remains 77 assigned union 21 deferred = 98; M9 is now
+  31 assigned union e48d8306/d4e0dd3d/d2c317ad = 34, each source once per
+  milestone. The M9-side companion m9-deferred-arrivals-v2.json (33eb2042)
+  derives the two shared entries and creator evidence from the approved overlay,
+  preserves the original one-entry archive (7c7466c1), and is the full M9
+  deferred-population authority. Its exclusive-create generator (04e2538b)
+  verifies all three patch hashes and carries the M8-69 title obligation.
+  Claude verified this required M9 item in msg_a0606db605be53f7; it is not an
+  implementation verdict. Both M8 and M9 artifacts travel in the next packet.
+- Harness disclosure: the first creator probe rejected the author's mistaken
+  claim that sync_terminal_titles was newly named at 350f0013. The retained
+  failed run proves no such creator; the successful v2 checks actual introduced
+  title APIs. The overlay does not overwrite the prior archive or claim the
+  human choice of each prerequisite is machine-proven. No whole-M8/M9,
+  Gate-3, merge, push, install, tag, publish or release approval is implied.

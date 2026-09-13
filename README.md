@@ -103,6 +103,13 @@ restart recommendation even when their version and protocol match. Existing
 restart/install confirmations still apply. After a remote connection drops,
 the client prints a reattach command; this is not a guarantee that its panes survived.
 
+Interactive terminal setup, mouse-mode transitions, and cleanup clear seven
+inherited mouse-reporting modes. With mouse capture active, the client uses a
+150 ms first poll for a pending lone Escape instead of the normal 10 ms, allowing
+split mouse reports to reassemble. These are poll windows, not total latency
+guarantees. Recognized delayed mouse tails are discarded without swallowing
+following keys or bracketed-paste text. JSON terminal streams emit no reset bytes.
+
 With `terminal.new_cwd = "follow"`, new tabs and new-tab layouts use the focused
 pane's runtime CWD, falling back to its cached CWD when needed. Explicit CWDs and
 other configured policies retain precedence. Automatic following requires an
