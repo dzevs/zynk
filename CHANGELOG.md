@@ -81,6 +81,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Local clients no longer read clipboard images for empty bracketed paste.
+  Remote clients keep this bridge even when the raw image-paste shortcut is disabled.
 - Interactive terminal clients clear inherited mouse-reporting modes on setup,
   transitions, and cleanup. Delayed SGR mouse tails no longer leak into pane
   input; ordinary keys and bracketed paste retain their existing handling.

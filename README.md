@@ -264,6 +264,11 @@ manifest_check = true            # background agent-detection manifest checks
 remote_image_paste = "ctrl+v"    # raw-key image paste, only in `zynk --remote`; "" disables it
 ```
 
+An empty bracketed paste can also request a local clipboard image in a remote
+client, even when `keys.remote_image_paste` is empty. Local clients pass empty
+paste through as ordinary input without reading the clipboard; nonempty text
+paste is never an image-paste trigger.
+
 `ui.agent_panel_scope` (3.0.x) is no longer supported: the agent panel shows all workspaces, and
 `ui.agent_panel_sort` controls ordering only. Custom keys and prefixes displace conflicting defaults.
 

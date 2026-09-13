@@ -1056,6 +1056,7 @@ async fn run_client_loop(
     negotiated_encoding: RenderEncoding,
     attach_escape: Option<AttachEscapeState>,
 ) -> Result<(), ClientError> {
+    let is_remote_client = is_remote_client_process();
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
         mouse_capture_active: config.mouse_capture_active,
@@ -1205,7 +1206,11 @@ async fn run_client_loop(
                     }
                     data
                 };
-                if should_bridge_clipboard_image_paste(&data, state.remote_image_paste_key) {
+                if should_bridge_clipboard_image_paste(
+                    &data,
+                    is_remote_client,
+                    state.remote_image_paste_key,
+                ) {
                     if let Some(image) = crate::platform::read_clipboard_image() {
                         if image.bytes.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
                             warn!(
@@ -1515,10 +1520,11 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
 
 fn should_bridge_clipboard_image_paste(
     data: &[u8],
+    is_remote_client: bool,
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
 ) -> bool {
     if data == b"\x1b[200~\x1b[201~" {
-        return true;
+        return is_remote_client;
     }
 
     let Some(remote_image_paste_key) = remote_image_paste_key else {
@@ -1917,23 +1923,108 @@ mod tests {
     }
 
     #[test]
+    fn m812_local_empty_paste_does_not_bridge_clipboard() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvVarsRemovedGuard::new(&[crate::remote::REMOTE_KEYBINDINGS_ENV_VAR]);
+        assert!(!is_remote_client_process());
+        assert!(!should_bridge_clipboard_image_paste(
+            b"\x1b[200~\x1b[201~",
+            is_remote_client_process(),
+            None
+        ));
+    }
+
+    #[test]
+    fn m812_empty_paste_uses_remote_context_not_shortcut() {
+        let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
+        for is_remote_client in [false, true] {
+            for shortcut in [None, Some(ctrl_v)] {
+                assert_eq!(
+                    should_bridge_clipboard_image_paste(
+                        b"\x1b[200~\x1b[201~",
+                        is_remote_client,
+                        shortcut,
+                    ),
+                    is_remote_client,
+                    "remote={is_remote_client}, shortcut={shortcut:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn m812_nonempty_paste_release_and_ordinary_input_never_bridge() {
+        let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
+        for is_remote_client in [false, true] {
+            for data in [
+                b"\x1b[200~text\x1b[201~".as_slice(),
+                b"\x1b[118;5:3u",
+                b"v",
+                b"x\x1b[200~\x1b[201~",
+                b"\x1b[200~\x1b[201~x",
+            ] {
+                assert!(
+                    !should_bridge_clipboard_image_paste(data, is_remote_client, Some(ctrl_v)),
+                    "remote={is_remote_client}, data={data:?}",
+                );
+            }
+            assert!(!should_bridge_clipboard_image_paste(
+                &[0x16],
+                is_remote_client,
+                None,
+            ));
+        }
+    }
+
+    #[test]
+    fn m812_remote_empty_paste_survives_disabled_shortcut() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvVarGuard::set(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR, "1");
+        let config = toml::from_str("[keys]\nremote_image_paste = ''\n").unwrap();
+        let shortcut = client_remote_image_paste_key(&config);
+        assert!(is_remote_client_process());
+        assert_eq!(shortcut, None);
+        assert!(should_bridge_clipboard_image_paste(
+            b"\x1b[200~\x1b[201~",
+            is_remote_client_process(),
+            shortcut,
+        ));
+        assert!(!should_bridge_clipboard_image_paste(
+            &[0x16],
+            is_remote_client_process(),
+            shortcut,
+        ));
+    }
+
+    #[test]
     fn clipboard_image_paste_bridge_triggers_on_configured_key_and_empty_paste() {
         let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
-        assert!(should_bridge_clipboard_image_paste(&[0x16], Some(ctrl_v)));
+        assert!(should_bridge_clipboard_image_paste(
+            &[0x16],
+            true,
+            Some(ctrl_v)
+        ));
         assert!(should_bridge_clipboard_image_paste(
             b"\x1b[118;5u",
+            true,
             Some(ctrl_v)
         ));
         assert!(should_bridge_clipboard_image_paste(
             b"\x1b[200~\x1b[201~",
+            true,
             None
         ));
         assert!(!should_bridge_clipboard_image_paste(
             b"\x1b[200~text\x1b[201~",
+            true,
             Some(ctrl_v)
         ));
-        assert!(!should_bridge_clipboard_image_paste(&[0x16], None));
-        assert!(!should_bridge_clipboard_image_paste(b"v", Some(ctrl_v)));
+        assert!(!should_bridge_clipboard_image_paste(&[0x16], true, None));
+        assert!(!should_bridge_clipboard_image_paste(
+            b"v",
+            true,
+            Some(ctrl_v)
+        ));
     }
 
     #[test]

@@ -4464,3 +4464,47 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   claim. Linux checks are not Windows, real-SSH, hard-deadline, or whole-M8
   evidence. Check/gate results and exact commit identity travel in checkpoint 05;
   no Gate-2/Gate-3 or operator action is authorized by this implementation row.
+
+### M8-12 - Remote-only empty image paste (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `6f148588dde3b330618981c344c12f400d74da7d` (PORT).
+  Parent: `807fd723f5aac41f2c018afd42a950a40ee85aa8`.
+  Preserved patch SHA-256: `3cc2422b8b052153bd0e1b7e17784d7b237846ecd9337095edf05ce68ac2071a`.
+  Gate-1: `msg_9e00a1c502d50f06`, design `73e699ee` (187 lines).
+  This source predates the relicense boundary; no new NOTICE entry is due.
+- The one production predicate/call and remote-environment helper already
+  exist. client/mod.rs is byte-identical between the Gate-1 base and this
+  parent; no missing creator or deferred remainder is consumed. Take the
+  Linux-applicable predicate/call/test hunks without Unix cfg branches.
+  Adapt upstream website/changelog intent into root README/CHANGELOG;
+  no docs/next file is copied.
+- Snapshot is_remote_client_process once before the client loop's state, and
+  pass it at the existing predicate call before read_clipboard_image. Only
+  the exact empty bracketed-paste envelope uses the flag: false locally,
+  true remotely even with the raw shortcut disabled. All other client
+  production bytes remain unchanged, including the configured-key parser,
+  remote-only shortcut source, image cap/fallback, ordinary raw forwarding,
+  JSON terminal paths and M8-10's input reader/atomic mouse state.
+- The environment flag is a desktop convenience selector, not authenticated
+  identity, proof of SSH transport, or authority to bypass input admission.
+  M7 pending/acquired controller fences, raw paste bounds, caller.rs, DB
+  behavior, schema/wire IDs and protocol 19 are untouched.
+- One parent-executable test under the removed-remote-env guard failed on
+  the local empty-paste predicate before source edits. Three later controls
+  pin both context values with Some/None shortcuts, nonempty/mixed text,
+  key release/unconfigured/ordinary negatives, and remote empty paste with
+  a disabled shortcut. They are implementation-phase, not parent-red claims.
+- The legacy six-assertion bridge test receives true at every old call;
+  raw/Kitty/empty positives and text/no-key/ordinary negatives retain their
+  original remote-case outcomes. Source audit `93b85cd4` compares the complete
+  legacy body after removing only those six arguments and formatting. No
+  legacy test or assertion is dropped or weakened.
+- Four one-site mutations each fail across all 389 affected input controls:
+  local-empty 2 failures, remote-empty 3, configured-key 1, text-paste 2.
+  Full pass/fail sets, mutant copies and byte-identical restorations remain.
+  These are predicate/environment/config controls plus structural call-site
+  evidence, not real clipboard-provider, terminal, or SSH integration tests.
+- No Cargo delta and no CLI command/flag/value/alias change: no advisory-delta
+  claim or completion-spec edit. Full check/gate and exact identity travel in
+  checkpoint 05; this row is not Gate-2/Gate-3 or whole-M8 approval and grants
+  no merge, push, install, tag, publish or release action.
