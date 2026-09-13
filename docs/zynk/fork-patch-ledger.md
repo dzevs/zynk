@@ -5221,3 +5221,54 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   pending origin arrives; the M8 source union remains 98. Earlier approvals
   cover only their exact ranges. No whole-M8, merge, push, install, tag,
   publish, release or cleanup approval follows.
+
+### M8-24 - API tab-rename cache refresh (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `010afe53055c338ee22d8598938aef32ee237d6f` (PORT).
+  Parent: `94523a74ef2d8e28b1e705c4f178acf841dedc4e`. Preserved patch SHA-256:
+  `1f8eecb0e579dc24fa8e0e5987b6d0776ac098bf662f686bb3a1f9ba315fb538`.
+  Gate-1 `msg_1e2148864a8c2308` binds unchanged design `7f342024`.
+  Execution preflight at this actual M8-23 tip records five whole-file
+  prerequisites unchanged from the preparation base. README, CHANGELOG and
+  the ledger append point were reread at this parent, not assumed unchanged.
+- In handle_tab_rename, refresh the existing tab-bar cache after the custom
+  name/logging update only when state.active == Some(ws_idx). An inactive tab
+  within that workspace still needs refresh. Do not compare workspace index
+  with tab_idx or broaden the guard to background workspaces. The adjacent
+  move handler supplies the guard precedent, not permission to copy its
+  tab_scroll_follow_active=true assignment. No new scroll policy is added.
+- Preserve name handling, request/response IDs, save scheduling, TabRenamed
+  event payload/order and focus. Reuse refresh_tab_bar_view unchanged; this
+  is one existing layout computation per active-workspace rename request,
+  not extra work per render, terminal byte, pane or client. No M9 tab-status
+  prerequisite, new helper in production or configurable title policy arrives.
+- Three distinct new controls in the existing binary, zero support-test
+  recompilations. The upstream-named api_tab_rename_reflows_active_tab_bar
+  captures immediate widths in two fresh fixtures, active tab 0 and inactive
+  tab 2 in active workspace 1, before asserting both grow. The valid compiled
+  parent red reports [(0, 8, 8), (2, 8, 8)]; neither row is left unreached.
+  Each row preserves its exact response/target/label, one full ordered event,
+  focus and scroll-follow assertions. Width capture does not manually refresh.
+- m824_background_tab_rename_preserves_active_cache and
+  m824_invalid_tab_rename_preserves_cache_name_and_focus pass at the parent
+  as characterization. Distinctive cached rectangles make an unnecessary
+  background recomputation observable; this does not claim an already-fresh
+  cache would differ after recomputation. The invalid target preserves names,
+  cache, focus and an empty event history. All three parent bodies are kept.
+- Focused green: 161/161. Three compiled mutants run the same 161 controls,
+  each 160 pass / 1 fail, exit 100. M01 omits refresh and M03 substitutes
+  tab_idx in the guard; both fail the immediate-width control. M02 removes
+  the guard and fails the background-cache assertion. Complete names,
+  summaries, preserved source copies and restored hashes accompany the logs;
+  no type/setup/timeout/abort failure is counted as a kill.
+- The bounded source audit strips only the one production block and additive
+  test region to reconstruct the entire old tabs.rs byte-for-byte. Every
+  other Rust path is unchanged, including both prior slices' controls and
+  the generic refresh helper. No removed assertions/tests or weakened checks.
+  README/CHANGELOG describe the immediate active-workspace refresh. Full check,
+  gate, normal hooks and exact-commit controls precede checkpoint-11 Gate-2.
+- No Cargo delta or advisory comparison claim. CLI completion reconciliation
+  is a no-op: command, flag, value and alias sets are unchanged. No pending
+  deferred origin arrives and the source union stays 98. No protocol, caller,
+  identity, receipt or DB policy change. No whole-M8 or operator-action
+  approval; M8-22/23/24 await their exact-range implementation verdict.

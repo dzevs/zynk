@@ -153,6 +153,10 @@ impl App {
         };
         tab.set_custom_name(params.label.clone());
         crate::logging::tab_renamed(&workspace_id, &tab_id);
+        if self.state.active == Some(ws_idx) {
+            // Refresh cached hit areas so the new label width takes effect immediately.
+            self.state.refresh_tab_bar_view();
+        }
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
             event: EventKind::TabRenamed,
@@ -328,6 +332,216 @@ mod tests {
             )
         }));
     }
+    fn m824_app_with_tabs() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("tabs");
+        workspace.tabs[0].set_custom_name("a".into());
+        workspace.test_add_tab(Some("b"));
+        workspace.test_add_tab(Some("c"));
+        app.state.workspaces = vec![Workspace::test_new("background"), workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.tab_scroll_follow_active = false;
+        app.state.view.tab_bar_rect = ratatui::layout::Rect::new(0, 0, 80, 1);
+        app.state.refresh_tab_bar_view();
+        app
+    }
+
+    #[test]
+    fn api_tab_rename_reflows_active_tab_bar() {
+        let mut observed_widths = Vec::new();
+        for tab_idx in [0, 2] {
+            let mut app = m824_app_with_tabs();
+            assert_ne!(tab_idx, 1, "workspace and tab indices must differ");
+            assert_eq!(app.state.workspaces[1].active_tab, 0);
+            let tab_id = app.public_tab_id(1, tab_idx).unwrap();
+            let workspace_id = app.public_workspace_id(1);
+            let focused_pane = app.state.workspaces[1].focused_pane_id();
+            let width_before = app.state.view.tab_hit_areas[tab_idx].width;
+            assert!(width_before > 0);
+            assert!(app.event_hub.events_after(0).is_empty());
+            let label = "a much longer custom tab label";
+
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "rename".into(),
+                method: crate::api::schema::Method::TabRename(TabRenameParams {
+                    tab_id: tab_id.clone(),
+                    label: label.into(),
+                }),
+            });
+
+            let width_after = app.state.view.tab_hit_areas[tab_idx].width;
+            observed_widths.push((tab_idx, width_before, width_after));
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::TabInfo { tab } = success.result else {
+                panic!("expected renamed tab info");
+            };
+            assert_eq!(success.id, "rename");
+            assert_eq!(tab.tab_id, tab_id);
+            assert_eq!(tab.workspace_id, workspace_id);
+            assert_eq!(tab.label, label);
+            assert_eq!(tab.focused, tab_idx == 0);
+            assert_eq!(app.state.active, Some(1));
+            assert_eq!(app.state.selected, 1);
+            assert_eq!(app.state.workspaces[1].active_tab, 0);
+            assert_eq!(app.state.workspaces[1].focused_pane_id(), focused_pane);
+            assert!(!app.state.tab_scroll_follow_active);
+            assert_eq!(app.state.tab_scroll, 0);
+            assert_eq!(
+                app.event_hub.events_after(0),
+                vec![(
+                    1,
+                    EventEnvelope {
+                        event: EventKind::TabRenamed,
+                        data: EventData::TabRenamed {
+                            tab_id,
+                            workspace_id,
+                            label: label.into(),
+                        },
+                    },
+                )]
+            );
+        }
+        assert_eq!(observed_widths.len(), 2);
+        assert!(
+            observed_widths
+                .iter()
+                .all(|(_, before, after)| after > before),
+            "tab bar must reflow immediately for active and inactive tabs: {observed_widths:?}"
+        );
+    }
+
+    #[test]
+    fn m824_background_tab_rename_preserves_active_cache() {
+        let mut app = m824_app_with_tabs();
+        app.state.view.tab_hit_areas = vec![ratatui::layout::Rect::new(11, 0, 7, 1); 3];
+        app.state.view.tab_scroll_left_hit_area = ratatui::layout::Rect::new(2, 0, 1, 1);
+        app.state.view.tab_scroll_right_hit_area = ratatui::layout::Rect::new(70, 0, 1, 1);
+        app.state.view.new_tab_hit_area = ratatui::layout::Rect::new(75, 0, 2, 1);
+        let cache = (
+            app.state.view.tab_hit_areas.clone(),
+            app.state.view.tab_scroll_left_hit_area,
+            app.state.view.tab_scroll_right_hit_area,
+            app.state.view.new_tab_hit_area,
+        );
+        let focused_pane = app.state.workspaces[1].focused_pane_id();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let workspace_id = app.public_workspace_id(0);
+        let label = "background tab renamed";
+
+        let response = app.handle_tab_rename(
+            "background".into(),
+            TabRenameParams {
+                tab_id: tab_id.clone(),
+                label: label.into(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::TabInfo { tab } = success.result else {
+            panic!("expected background tab info");
+        };
+        assert_eq!(success.id, "background");
+        assert_eq!(tab.tab_id, tab_id);
+        assert_eq!(tab.label, label);
+        assert!(!tab.focused);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some(label)
+        );
+        assert_eq!(
+            (
+                app.state.view.tab_hit_areas.clone(),
+                app.state.view.tab_scroll_left_hit_area,
+                app.state.view.tab_scroll_right_hit_area,
+                app.state.view.new_tab_hit_area,
+            ),
+            cache,
+            "background rename must not recompute the active cache"
+        );
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.workspaces[1].active_tab, 0);
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), focused_pane);
+        assert!(!app.state.tab_scroll_follow_active);
+        assert_eq!(app.state.tab_scroll, 0);
+        assert_eq!(
+            app.event_hub.events_after(0),
+            vec![(
+                1,
+                EventEnvelope {
+                    event: EventKind::TabRenamed,
+                    data: EventData::TabRenamed {
+                        tab_id,
+                        workspace_id,
+                        label: label.into(),
+                    },
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn m824_invalid_tab_rename_preserves_cache_name_and_focus() {
+        let mut app = m824_app_with_tabs();
+        let cache = (
+            app.state.view.tab_hit_areas.clone(),
+            app.state.view.tab_scroll_left_hit_area,
+            app.state.view.tab_scroll_right_hit_area,
+            app.state.view.new_tab_hit_area,
+        );
+        let focused_pane = app.state.workspaces[1].focused_pane_id();
+        let names: Vec<_> = app.state.workspaces[1]
+            .tabs
+            .iter()
+            .map(|tab| tab.custom_name.clone())
+            .collect();
+
+        let response = app.handle_tab_rename(
+            "invalid".into(),
+            TabRenameParams {
+                tab_id: "missing-tab".into(),
+                label: "must not rename anything".into(),
+            },
+        );
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.id, "invalid");
+        assert_eq!(error.error.code, "tab_not_found");
+        assert_eq!(
+            app.state.workspaces[1]
+                .tabs
+                .iter()
+                .map(|tab| tab.custom_name.clone())
+                .collect::<Vec<_>>(),
+            names
+        );
+        assert_eq!(
+            (
+                app.state.view.tab_hit_areas.clone(),
+                app.state.view.tab_scroll_left_hit_area,
+                app.state.view.tab_scroll_right_hit_area,
+                app.state.view.new_tab_hit_area,
+            ),
+            cache
+        );
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.workspaces[1].active_tab, 0);
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), focused_pane);
+        assert!(!app.state.tab_scroll_follow_active);
+        assert_eq!(app.state.tab_scroll, 0);
+        assert!(app.event_hub.events_after(0).is_empty());
+    }
+
     #[test]
     fn api_tab_close_clears_copy_mode_for_removed_panes() {
         let event_hub = crate::api::EventHub::default();

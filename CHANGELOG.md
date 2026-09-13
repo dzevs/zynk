@@ -97,6 +97,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- API-driven tab renames refresh label widths and click targets immediately,
+  including inactive tabs in the active workspace, without changing focus.
 - Explicit pane or agent API focus clears unseen attention even for an already
   focused target. Every unseen pane in that tab becomes seen, so an idle sibling
   stops reporting `done` even if it was not displayed; this is not viewing or

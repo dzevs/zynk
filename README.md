@@ -169,6 +169,10 @@ destination tab seen, including when the target is already focused. An idle sibl
 therefore stops reporting `done` even if it was not displayed. This is tab attention
 state, not proof of actual viewing, authenticated identity, or message receipt.
 
+API tab renames immediately resize labels and click targets in the active
+workspace, including its inactive tabs. Renaming a background workspace's tab
+does not change the active tab bar, focus, or scroll-follow policy.
+
 The socket API accepts `events.subscribe` with `{"subscriptions":[{"type":"layout.updated"}]}`.
 Updates contain the target tab's current pane/split geometry, focus, and zoom after the supported
 pane/layout and creation operations. This is not an exhaustive TUI redraw stream or a plugin hook.
