@@ -525,6 +525,7 @@ fn main() -> io::Result<()> {
         println!("       zynk server stop");
         println!("       zynk server reload-config");
         println!("       zynk api <subcommand> ...");
+        println!("       zynk completion <bash|elvish|fish|powershell|zsh>");
         println!("       zynk config <subcommand> ...");
         println!("       zynk channel <subcommand> ...");
         println!("       zynk workspace <subcommand> ...");

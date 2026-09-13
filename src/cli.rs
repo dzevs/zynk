@@ -10,6 +10,7 @@ use crate::api::schema::{
 
 mod agent;
 mod api;
+mod completion;
 mod integration;
 mod native;
 mod notification;
@@ -17,6 +18,7 @@ mod pane;
 mod plugin;
 mod server;
 mod skill;
+mod spec;
 mod status;
 mod tab;
 mod workspace;
@@ -67,6 +69,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     };
 
     let exit_code = match command {
+        "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "api" => api::run_api_command(&args[2..])?,
         "server" => {
             let Some(exit_code) = server::run_server_command(&args[2..])? else {

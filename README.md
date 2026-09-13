@@ -132,6 +132,9 @@ output, wait for state changes, and message each other. Start with [`SKILL.md`](
 `zynk api schema --json` exports the socket API's JSON schema, including native receipt methods,
 without a running server or database. Use `--output PATH` instead to write the schema to a file.
 
+`zynk completion <bash|elvish|fish|powershell|zsh>` prints an offline shell-completion script;
+`completions` is an alias. It does not install files, edit shell startup files, or contact the server.
+
 ## How it compares
 
 |                                       | tmux | gui managers | zynk |

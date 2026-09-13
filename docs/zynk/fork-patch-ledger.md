@@ -4010,3 +4010,57 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   its named control, with the other three bundle controls passing. Existing
   tests are not deleted, converted or weakened. Exact-SHA checkpoint and whole
   M8 gates remain pending; this is not M8/M9 completion or operator authority.
+
+### M8-05 - Offline Shell Completion (2026-09-13)
+
+- Source: `13cb5d9ae6aa314744ce5362b5d156182f06b503`, pre-relicense
+  EVALUATE resolved as PORT of the runtime generator and static specification,
+  adapted to the fork. Do not copy gitignored upstream website documentation.
+  The clap tree only generates scripts; the existing manual dispatchers still
+  execute every command. No clap parsing, API Method, wire ID or protocol change.
+- `completion` and `completions` print Bash, Elvish, Fish, PowerShell or Zsh
+  scripts. Help succeeds, missing/unknown shells and extra arguments return 2.
+  Generation does not open a DB/socket, start a server, resolve identities,
+  scan paths, install files or edit shell startup files. Generated scripts may
+  use ordinary shell path completion; offline generation is not a claim that
+  all five native interpreters were executed. Generate to memory before the
+  normal fallible stdout write; Zsh options retain space-separated values.
+- Forward preflight found semantic dependencies that compile as strings but
+  do not execute here: omit creation `--env` on workspace/tab create, agent
+  start and pane split, while retaining the real plugin pane open option.
+  Omit absent pane current/process-info and terminal title commands. Preserve
+  terminal session observe/control, the native message/retrieval/receipt/DB
+  and skill groups, contextual status/source values and both plugin log forms.
+  Integration target suggestions follow the current parser, including its
+  antigravity_cli alias. Legacy agent send has type but no trace; native send,
+  reply and pane send-text/run retain both. Do not suggest internal daemon or
+  handoff commands or promise a downloader in update/channel descriptions.
+- **Standing reconciliation obligation:** the completion specification is a
+  second surface requiring manual reconciliation whenever a CLI command,
+  flag, value set or alias changes; the hand-rolled dispatchers, not the clap
+  tree, are the execution authority. The explicit population and applicability
+  tables pin this arrival but cannot discover a future dispatcher change by
+  themselves. No shared registry or execution-path restructuring is implied.
+- Compatible 4.5 ranges resolve here to clap/clap_builder 4.6.6 and
+  clap_complete 4.6.9, plus clap_lex 1.1.0 and anstyle 1.0.14: five additions,
+  no existing package changed/removed. The locked generator's `generate`
+  implementation builds the static Command and writes to its supplied sink;
+  official contract: `https://docs.rs/clap_complete/4.6.9/clap_complete/`.
+  Both audits retain exit 1 with the same complete 3-vulnerability/8-warning
+  prior, advisory database revision and default Linux graph exposure. Preserve
+  exactly one libsqlite3-sys 0.30.1 node. No ignore rule or audit-clean claim.
+- One real CLI red control fails at the preceding binary with unknown
+  `completion`; only that control is parent red evidence. The remaining unit,
+  population and emitted-byte controls were added during implementation.
+  All 22 focused tests pass before mutation (16 feature controls and six
+  shared support tests). Three one-site mutations exit100: omitting db kills
+  both command population and the flags table's missing-owner assertion
+  (20 pass/2 fail, not a selective one-control claim); adding workspace create
+  --env kills only applicability (21/1); bypassing the Zsh normalization call
+  kills only the real CLI byte control (21/1). Mutated source copies and logs
+  are retained; no existing test is deleted, converted or weakened.
+- Harness disclosure: the first dependency-comparison command used a relative
+  external script path after the runner changed directory and exited 1 without
+  comparison. The retained v2 uses the absolute path and verifies the full
+  prior. Dependency resolution is not a candidate check. Exact-SHA checkpoint
+  and whole-M8 reviews remain separate from this implementation record.

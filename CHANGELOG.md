@@ -10,6 +10,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- `zynk completion` (alias `completions`) generates static scripts for Bash,
+  Elvish, Fish, PowerShell, and Zsh without a server, database, or file installation.
 - `zynk api schema` describes the socket API offline. `--json` prints its schema
   and `--output PATH` writes it to an explicit file, including fork-owned receipt
   methods without opening a server, configuration directory, or conversation DB.
