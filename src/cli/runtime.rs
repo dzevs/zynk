@@ -1,7 +1,9 @@
 use crate::api::schema::{
-    EmptyParams, Method, Request, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
-    WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget, WorktreeCreateParams,
-    WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
+    EmptyParams, Method, PaneFocusDirectionParams, PaneMoveParams, PaneRenameParams,
+    PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomParams, Request,
+    TabCreateParams, TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams,
+    WorkspaceRenameParams, WorkspaceTarget, WorktreeCreateParams, WorktreeListParams,
+    WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 fn print_method_response(id: &'static str, method: Method) -> std::io::Result<i32> {
@@ -85,4 +87,36 @@ pub(super) fn worktree_open(params: WorktreeOpenParams) -> std::io::Result<i32> 
 
 pub(super) fn worktree_remove(params: WorktreeRemoveParams) -> std::io::Result<i32> {
     print_method_response("cli:worktree:remove", Method::WorktreeRemove(params))
+}
+
+pub(super) fn pane_focus(params: PaneFocusDirectionParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:focus", Method::PaneFocusDirection(params))
+}
+
+pub(super) fn pane_resize(params: PaneResizeParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:resize", Method::PaneResize(params))
+}
+
+pub(super) fn pane_zoom(params: PaneZoomParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:zoom", Method::PaneZoom(params))
+}
+
+pub(super) fn pane_rename(params: PaneRenameParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:rename", Method::PaneRename(params))
+}
+
+pub(super) fn pane_split(params: PaneSplitParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:split", Method::PaneSplit(params))
+}
+
+pub(super) fn pane_swap(params: PaneSwapParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:swap", Method::PaneSwap(params))
+}
+
+pub(super) fn pane_move(params: PaneMoveParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:move", Method::PaneMove(params))
+}
+
+pub(super) fn pane_close(pane_id: String) -> std::io::Result<i32> {
+    print_method_response("cli:pane:close", Method::PaneClose(PaneTarget { pane_id }))
 }

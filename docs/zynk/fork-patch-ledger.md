@@ -4697,3 +4697,50 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   No Cargo delta or advisory-comparison claim. Server/App/auth/input paths,
   schema export, M8-13/14 and binary protocol 19 stay unchanged. Full check,
   gate and normal hooks accompany the commit; no whole-M8 or operator action.
+
+### M8-16 - Pane placement CLI adapters (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `1c606d4ff3df7ea7d641e6ad13bc30caf8082eaa` (PORT).
+  Parent: `06471b111ce12eb30dd11a48c9c2da43789880c3`.
+  Preserved patch SHA-256: `caa962487edc20c34452c266260db07b5290a34cf0c0598cf721a18430cd5376`.
+  Gate-1 `msg_298174c3bd0c4b25`, design `153ee2b8`. M8-15 at the parent
+  is implemented, not independently approved by this append. Both slices
+  travel together at checkpoint 07, not as a whole-M8 composition claim.
+- Actual-parent preflight confirms sixteen real runtime adapters, all
+  seventeen cli:pane request IDs and unchanged pane schema/parser source.
+  The runtime creator is exactly M8-15's preserved source; consume its
+  preimage before adding the eight adapters. No other forward creator,
+  deferred remainder, dependency, NOTICE or protocol change is taken.
+- Move only focus, resize, zoom, rename, split, swap, move and close.
+  Focus remains PaneFocusDirection, not PaneFocus. Nine pane requests stay
+  inline, as do reporting, direct observe/control and receipt paths. Total
+  adapters are now twenty-four, each with exactly one production caller.
+- M8-06's split environment read stays at its existing parser boundary:
+  --current is caller opt-in, explicit targets retain argument order, and
+  omitted split targets ignore populated caller env. Other pane --current
+  paths retain None/focus semantics. Preserve floats, labels/clear, all three
+  move destinations, raw cwd, focus defaults, validation and output unchanged.
+- Source audit `24810d39` records each old Request, new call and adapter;
+  entire pane.rs equals its parent after just those eight replacements.
+  Runtime equals the parent plus the exact preserved source hunks. Every
+  M8-15 adapter remains byte-identical, and the prior fixture/tests are an
+  unchanged prefix. This structural argument is primary, not inferred from
+  green tests; it is bounded text equality, not a general Rust AST proof.
+- Eight parent-green controls cover all eight leaves with twenty literal
+  request cases, each with full success/error passthrough, plus nine invalid
+  argument cases with no socket request. Explicit/current/omitted selection,
+  argument ordering, exact target spelling, direction, finite float values,
+  zoom modes, rename clear and three move destinations remain discriminating.
+  All eight passed before source edits; characterize extraction, not red-first.
+- Seven compiled one-site mutants independently remove/change focus direction,
+  resize amount, zoom mode, split target, swap target, move focus and close
+  target. Each kills only its named control; seven of eight remain green.
+  All mutant bytes/logs are retained and restoration hashes match. Forty-nine
+  targeted tests pass, including the unchanged twenty pane parser controls,
+  the new binary's eleven feature/six support tests, and twelve real CLI tests.
+- No pre-existing test body/assertion is removed or rewritten. README/help/
+  completion reconciliation requires no command, flag, value or alias edit.
+  Existing request/print/error helpers, M8-13/14, API schema/export, App/server,
+  authorization, paste/stop fences and protocol 19 remain unchanged. No Cargo
+  delta or advisory claim. Full check/gate/hooks accompany the exact commit;
+  no Gate-2/Gate-3, whole-M8 or merge/push/install/tag/publish/release approval.

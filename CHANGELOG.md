@@ -57,7 +57,7 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Changed**
 
-- CLI workspace, tab, and worktree requests share typed internal adapters;
+- CLI workspace, tab, worktree, and pane-placement requests share typed internal adapters;
   argument parsing, target selection, JSON responses, and exit statuses are unchanged.
 - New workspaces follow the source workspace's focused-pane CWD instead of its
   first-tab root. A named-workspace prompt rechecks that source's current focus

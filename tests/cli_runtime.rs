@@ -423,3 +423,87 @@ fn runtime_worktree_cli_contract() {
         fixture.assert_invalid(&args);
     }
 }
+
+#[test]
+fn runtime_pane_focus_contract() {
+    let fixture = Fixture::new();
+    fixture.assert_case(&["pane", "focus", "--direction", "left", "--pane", "chosen:p2"], json!({"id":"cli:pane:focus", "method":"pane.focus_direction", "params":{"pane_id":"chosen:p2", "direction":"left"}}));
+    fixture.assert_case(&["pane", "focus", "--direction", "up", "--pane", "discarded:p1", "--current"], json!({"id":"cli:pane:focus", "method":"pane.focus_direction", "params":{"direction":"up"}}));
+    fixture.assert_invalid(&["pane", "focus", "--direction", "diagonal"]);
+}
+
+#[test]
+fn runtime_pane_resize_contract() {
+    let fixture = Fixture::new();
+    fixture.assert_case(&["pane", "resize", "--direction", "down", "--amount", "0.125", "--pane", "chosen:p3"], json!({"id":"cli:pane:resize", "method":"pane.resize", "params":{"pane_id":"chosen:p3", "direction":"down", "amount":0.125}}));
+    fixture.assert_case(
+        &["pane", "resize", "--current", "--direction", "right"],
+        json!({"id":"cli:pane:resize", "method":"pane.resize", "params":{"direction":"right"}}),
+    );
+    fixture.assert_invalid(&["pane", "resize", "--direction", "right", "--amount", "NaN"]);
+}
+
+#[test]
+fn runtime_pane_zoom_contract() {
+    let fixture = Fixture::new();
+    fixture.assert_case(&["pane", "zoom", "chosen:p4", "--on"], json!({"id":"cli:pane:zoom", "method":"pane.zoom", "params":{"pane_id":"chosen:p4", "mode":"on"}}));
+    fixture.assert_case(
+        &["pane", "zoom", "--current", "--off"],
+        json!({"id":"cli:pane:zoom", "method":"pane.zoom", "params":{"mode":"off"}}),
+    );
+    fixture.assert_case(&["pane", "zoom", "discarded:p1", "--pane", "chosen:p5"], json!({"id":"cli:pane:zoom", "method":"pane.zoom", "params":{"pane_id":"chosen:p5", "mode":"toggle"}}));
+    fixture.assert_invalid(&["pane", "zoom", "--on", "--off"]);
+}
+
+#[test]
+fn runtime_pane_rename_contract() {
+    let fixture = Fixture::new();
+    fixture.assert_case(&["pane", "rename", "chosen:p6", "two", "words"], json!({"id":"cli:pane:rename", "method":"pane.rename", "params":{"pane_id":"chosen:p6", "label":"two words"}}));
+    fixture.assert_case(
+        &["pane", "rename", "chosen:p7", "--clear"],
+        json!({"id":"cli:pane:rename", "method":"pane.rename", "params":{"pane_id":"chosen:p7"}}),
+    );
+    fixture.assert_invalid(&["pane", "rename", "chosen:p6"]);
+}
+
+#[test]
+fn runtime_pane_split_contract() {
+    let fixture = Fixture::new();
+    fixture.assert_case(&["pane", "split", "discarded:p1", "--current", "--direction", "down", "--ratio", "0.25", "--cwd", "~/literal", "--no-focus", "--focus"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"target_pane_id":"caller:p9", "direction":"down", "ratio":0.25, "cwd":"~/literal", "focus":true}}));
+    fixture.assert_case(&["pane", "split", "--current", "--pane", "chosen:p8", "--direction", "right", "--focus", "--no-focus"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"target_pane_id":"chosen:p8", "direction":"right", "focus":false}}));
+    fixture.assert_case(&["pane", "split", "--direction", "right"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"direction":"right", "focus":false}}));
+    fixture.assert_case(&["pane", "split", "positional:p4", "--direction", "down"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"target_pane_id":"positional:p4", "direction":"down", "focus":false}}));
+    fixture.assert_invalid(&["pane", "split", "--direction", "right", "--ratio", "inf"]);
+    fixture.assert_invalid(&["pane", "split", "--direction", "right", "--env", "X=y"]);
+}
+
+#[test]
+fn runtime_pane_swap_contract() {
+    let fixture = Fixture::new();
+    fixture.assert_case(&["pane", "swap", "--source-pane", "source:p3", "--target-pane", "target:p8"], json!({"id":"cli:pane:swap", "method":"pane.swap", "params":{"source_pane_id":"source:p3", "target_pane_id":"target:p8"}}));
+    fixture.assert_case(&["pane", "swap", "--pane", "chosen:p9", "--direction", "right"], json!({"id":"cli:pane:swap", "method":"pane.swap", "params":{"pane_id":"chosen:p9", "direction":"right"}}));
+    fixture.assert_case(
+        &["pane", "swap", "--current", "--direction", "down"],
+        json!({"id":"cli:pane:swap", "method":"pane.swap", "params":{"direction":"down"}}),
+    );
+    fixture.assert_invalid(&["pane", "swap", "--source-pane", "source:p3"]);
+}
+
+#[test]
+fn runtime_pane_move_contract() {
+    let fixture = Fixture::new();
+    fixture.assert_case(&["pane", "move", "source:p1", "--tab", "w7:t2", "--target-pane", "target:p3", "--split", "down", "--ratio", "0.75", "--no-focus"], json!({"id":"cli:pane:move", "method":"pane.move", "params":{"pane_id":"source:p1", "destination":{"type":"tab", "tab_id":"w7:t2", "target_pane_id":"target:p3", "split":"down", "ratio":0.75}, "focus":false}}));
+    fixture.assert_case(&["pane", "move", "source:p2", "--new-tab", "--workspace", "w8", "--label", "new tab"], json!({"id":"cli:pane:move", "method":"pane.move", "params":{"pane_id":"source:p2", "destination":{"type":"new_tab", "workspace_id":"w8", "label":"new tab"}, "focus":true}}));
+    fixture.assert_case(&["pane", "move", "source:p3", "--new-workspace", "--label", "new workspace", "--tab-label", "new tab", "--no-focus", "--focus"], json!({"id":"cli:pane:move", "method":"pane.move", "params":{"pane_id":"source:p3", "destination":{"type":"new_workspace", "label":"new workspace", "tab_label":"new tab"}, "focus":true}}));
+    fixture.assert_invalid(&["pane", "move", "source:p1", "--new-workspace", "--new-tab"]);
+}
+
+#[test]
+fn runtime_pane_close_contract() {
+    let fixture = Fixture::new();
+    fixture.assert_case(
+        &["pane", "close", "chosen:p10"],
+        json!({"id":"cli:pane:close", "method":"pane.close", "params":{"pane_id":"chosen:p10"}}),
+    );
+    fixture.assert_invalid(&["pane", "close", "chosen:p10", "extra"]);
+}

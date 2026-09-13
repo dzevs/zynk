@@ -156,10 +156,7 @@ fn pane_focus(args: &[String]) -> std::io::Result<i32> {
         }
     };
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:pane:focus".into(),
-        method: Method::PaneFocusDirection(params),
-    })?)
+    super::runtime::pane_focus(params)
 }
 
 fn pane_resize(args: &[String]) -> std::io::Result<i32> {
@@ -171,10 +168,7 @@ fn pane_resize(args: &[String]) -> std::io::Result<i32> {
         }
     };
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:pane:resize".into(),
-        method: Method::PaneResize(params),
-    })?)
+    super::runtime::pane_resize(params)
 }
 
 fn parse_optional_current_pane_args(args: &[String]) -> Result<Option<String>, String> {
@@ -313,10 +307,7 @@ fn pane_zoom(args: &[String]) -> std::io::Result<i32> {
         }
     };
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:pane:zoom".into(),
-        method: Method::PaneZoom(params),
-    })?)
+    super::runtime::pane_zoom(params)
 }
 
 fn parse_pane_zoom_args(args: &[String]) -> Result<PaneZoomParams, String> {
@@ -391,13 +382,10 @@ fn pane_rename(args: &[String]) -> std::io::Result<i32> {
         Some(args[1..].join(" "))
     };
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:pane:rename".into(),
-        method: Method::PaneRename(PaneRenameParams {
-            pane_id: super::normalize_pane_id(raw_pane_id),
-            label,
-        }),
-    })?)
+    super::runtime::pane_rename(PaneRenameParams {
+        pane_id: super::normalize_pane_id(raw_pane_id),
+        label,
+    })
 }
 
 fn pane_read(args: &[String]) -> std::io::Result<i32> {
@@ -497,10 +485,7 @@ fn pane_split(args: &[String]) -> std::io::Result<i32> {
         }
     };
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:pane:split".into(),
-        method: Method::PaneSplit(params),
-    })?)
+    super::runtime::pane_split(params)
 }
 
 fn parse_pane_split_args(
@@ -600,10 +585,7 @@ fn pane_swap(args: &[String]) -> std::io::Result<i32> {
         }
     };
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:pane:swap".into(),
-        method: Method::PaneSwap(params),
-    })?)
+    super::runtime::pane_swap(params)
 }
 
 fn pane_move(args: &[String]) -> std::io::Result<i32> {
@@ -615,10 +597,7 @@ fn pane_move(args: &[String]) -> std::io::Result<i32> {
         }
     };
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:pane:move".into(),
-        method: Method::PaneMove(params),
-    })?)
+    super::runtime::pane_move(params)
 }
 
 fn parse_pane_move_args(args: &[String]) -> Result<PaneMoveParams, String> {
@@ -869,12 +848,7 @@ fn pane_close(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:pane:close".into(),
-        method: Method::PaneClose(PaneTarget {
-            pane_id: super::normalize_pane_id(raw_pane_id),
-        }),
-    })?)
+    super::runtime::pane_close(super::normalize_pane_id(raw_pane_id))
 }
 
 fn pane_send_text(args: &[String]) -> std::io::Result<i32> {
