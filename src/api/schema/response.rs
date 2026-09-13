@@ -16,6 +16,7 @@ use super::plugins::{
     PluginPaneInfo,
 };
 use super::server::ServerCapabilities;
+use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
@@ -41,6 +42,9 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
+    SessionSnapshot {
+        snapshot: Box<SessionSnapshot>,
+    },
     Pong {
         version: String,
         protocol: u32,

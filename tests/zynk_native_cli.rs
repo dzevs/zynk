@@ -361,6 +361,47 @@ fn delivery_events_count(fixture: &Fixture) -> i64 {
     })
 }
 
+#[test]
+fn native_session_snapshot_is_read_only_and_matches_live_topology() {
+    let _guard = test_lock();
+    let fixture = spawn_fixture();
+    let pane = create_root_pane(&fixture.socket_path, "session-snapshot");
+    report_agent_session(&fixture.socket_path, &pane, "kimi", "snapshot-session");
+    let before = delivery_events_count(&fixture);
+    let listed = send_json(
+        &fixture.socket_path,
+        r#"{"id":"panes","method":"pane.list","params":{}}"#,
+    );
+    let response = send_json(
+        &fixture.socket_path,
+        r#"{"id":"snapshot","method":"session.snapshot","params":{}}"#,
+    );
+    assert!(
+        response.get("error").is_none(),
+        "session.snapshot: {response}"
+    );
+    assert_eq!(response["id"], "snapshot");
+    assert_eq!(response["result"]["type"], "session_snapshot");
+    let snapshot = &response["result"]["snapshot"];
+    assert_eq!(snapshot["panes"], listed["result"]["panes"]);
+    assert_eq!(snapshot["focused_pane_id"], pane);
+    let ping = send_json(
+        &fixture.socket_path,
+        r#"{"id":"ping","method":"ping","params":{}}"#,
+    );
+    assert_eq!(snapshot["protocol"], ping["result"]["protocol"]);
+    assert_eq!(snapshot["version"], ping["result"]["version"]);
+    let observed = snapshot["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["pane_id"] == pane)
+        .unwrap();
+    assert_eq!(observed["agent_session"]["value"], "snapshot-session");
+    assert_eq!(delivery_events_count(&fixture), before);
+    fixture.cleanup();
+}
+
 /// Read the persisted (PURE) body of a message — to prove the header never pollutes
 /// the stored body.
 fn stored_body(fixture: &Fixture, message_id: &str) -> String {

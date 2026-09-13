@@ -4,12 +4,16 @@
 
 The **herdr v0.7.1 port** (36 upstream changes re-applied on top of the Zynk identity — see
 `docs/zynk/fork-patch-ledger.md`, *v0.7.1 PORT LEDGER*), subsequent Linux-only port work, and a hardened
-single public repo. The binary client input protocol advances to 19; JSON socket method IDs,
+single public repo. The binary client input protocol advances to 19; existing JSON socket method IDs,
 protocol-ID fields, and the delivery/receipt matrix are unchanged. Two documented config keys are
 removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 only.
 
 **Added**
 
+- The read-only `session.snapshot` socket method returns all workspace, tab,
+  pane, layout, and agent projections together with current focus and version
+  metadata. Agent projections are observations, not authenticated identity or
+  delivery-receipt evidence.
 - `zynk terminal session observe <target>` streams read-only terminal frames as
   NDJSON, while `terminal session control` adds an explicit single-controller
   stream with input, resize, scroll, release, and takeover commands. Observers

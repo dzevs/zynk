@@ -8,6 +8,7 @@ pub mod panes;
 pub mod plugins;
 pub mod response;
 pub mod server;
+pub mod session;
 pub mod tabs;
 pub mod workspaces;
 pub mod worktrees;
@@ -21,6 +22,7 @@ pub use panes::*;
 pub use plugins::*;
 pub use response::*;
 pub use server::*;
+pub use session::*;
 pub use tabs::*;
 pub use workspaces::*;
 pub use worktrees::*;
@@ -55,6 +57,8 @@ pub enum Method {
     ServerAgentManifests(EmptyParams),
     #[serde(rename = "server.reload_agent_manifests")]
     ServerReloadAgentManifests(EmptyParams),
+    #[serde(rename = "session.snapshot")]
+    SessionSnapshot(EmptyParams),
     #[serde(rename = "notification.show")]
     NotificationShow(NotificationShowParams),
     #[serde(rename = "client.window_title.set")]
@@ -737,6 +741,7 @@ mod tests {
         "server.reload_config",
         "server.agent_manifests",
         "server.reload_agent_manifests",
+        "session.snapshot",
         "notification.show",
         "client.window_title.set",
         "client.window_title.clear",

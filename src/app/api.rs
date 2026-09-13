@@ -10,6 +10,7 @@ mod layouts;
 mod panes;
 pub(crate) mod plugins;
 mod responses;
+mod session;
 mod tabs;
 mod workspaces;
 mod worktrees;
@@ -891,6 +892,9 @@ impl App {
         }
 
         let response = match request.method {
+            Method::SessionSnapshot(_) => {
+                return self.handle_session_snapshot(request.id);
+            }
             Method::ServerStop(_) => {
                 self.state.should_quit = true;
                 SuccessResponse {

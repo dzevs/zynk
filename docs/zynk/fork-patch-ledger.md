@@ -3885,3 +3885,34 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   No wire/protocol, CLI command, hook/receipt authority, or runtime ownership
   change. M8-01 is **IMPLEMENTED / PENDING VERIFICATION** by exact checkpoint
   and milestone gates; this is not completion of M8 or the remaining port.
+
+### M8-02: Read-Only Session Snapshot (2026-09-13)
+
+- **Source:** 9150ed6268874d1f2a314b1ddbf531b66df1e105, PORT. Adapt the
+  aggregate snapshot to the fork's existing projection helpers and exhaustive
+  method dispatcher. This pre-relicense source adds no modified-file notice.
+- `session.snapshot` returns current build/protocol metadata, optional current
+  focus IDs, and all workspaces, tabs, panes, layouts, and agent observations.
+  Focus uses `active_tab_index()` and stable public IDs; inactive tabs remain
+  included. The implementation takes `&self` and reuses the exact `pane.list`,
+  layout, workspace, tab, and agent projection helpers rather than creating
+  parallel identity or topology rules. The existing layout helper's visibility
+  is widened only to its parent API module.
+- The snapshot's agent/session fields have the same observational status as
+  `pane.list`. They are not authenticated caller/receiver identity or delivery
+  evidence; the later M8-14 CLI consumer must preserve that boundary. Reading
+  does not grant hook/receipt authority, write PTY bytes, or emit delivery events.
+- Five new controls failed before production implementation (exit100): four
+  could not deserialize the unsupported method, and the real-socket integration
+  received `invalid_request`. These are wire-admission REDs, not claims that the
+  absent handler executed. The implemented selection passed all five plus the
+  existing method-ID golden control. One-site mutations independently omit
+  inactive tabs, mis-map focus, and report the wrong protocol; each exits100 at
+  the corresponding topology/focus/metadata assertion and is restored afterward.
+- The native integration checks the existing pane-list projection and delivery
+  count; the unit controls also pin empty/missing focus, exact layout projections,
+  detection-only identity absence, unchanged terminal state and zero event/PTY
+  effects. Existing controls are neither removed nor weakened. No dependency,
+  binary protocol (19), or caller-bound authorization change. The CLI command
+  remains assigned to M8-14. **IMPLEMENTED / PENDING VERIFICATION** by exact-SHA
+  checkpoint and whole-M8 gates, not completion of M8/M9.

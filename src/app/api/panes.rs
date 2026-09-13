@@ -1792,7 +1792,11 @@ impl App {
         find_in_direction(source, direction.into(), &panes)
     }
 
-    fn pane_layout_snapshot(&self, ws_idx: usize, tab_idx: usize) -> Option<PaneLayoutSnapshot> {
+    pub(super) fn pane_layout_snapshot(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Option<PaneLayoutSnapshot> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab = ws.tabs.get(tab_idx)?;
         let area = self.state.view.terminal_area;
