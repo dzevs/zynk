@@ -10,6 +10,10 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- `zynk config check` prints full local configuration diagnostics without a
+  running server or config writes. It exits 0 for valid or missing config,
+  1 for diagnostics, and 2 for unsupported arguments; no JSON mode is provided.
+  Startup validation now reports inverted sidebar width bounds, as reload does.
 - Pane reads expose optional scroll offset, maximum offset, and viewport rows.
   The `pane.scroll_changed` subscription reports subsequent sampled changes;
   seed from `pane.get`, because it sends no initial event or lossless replay.
@@ -64,6 +68,10 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Changed**
 
+- Config banners now show the file basename, an optional TOML location, and
+  `zynk config check` instead of four warning excerpts plus an overflow count.
+  Desktop banners use the full frame; mobile banners keep the header clear.
+  Full diagnostics and partial-reload behavior remain available.
 - Follow-policy terminal creation prefers the source pane's foreground process-group
   leader CWD, with runtime and cached CWD fallbacks. Explicit CWDs and other policies
   keep precedence; public CWD reporting can still show a nonleader group member.

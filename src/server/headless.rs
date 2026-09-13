@@ -5833,6 +5833,68 @@ new_tab = "prefix+t"
     }
 
     #[test]
+    fn m826_client_keybinding_mode_preserves_config_banner_filtering() {
+        struct RestoreConfigPath(Option<std::ffi::OsString>);
+        impl Drop for RestoreConfigPath {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, value),
+                    None => std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR),
+                }
+            }
+        }
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let _restore = RestoreConfigPath(std::env::var_os(crate::config::CONFIG_PATH_ENV_VAR));
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, "/not-read/config.toml");
+        let key_warning =
+            "unsafe direct keybinding: keys.close_pane = \"x\" would intercept typing";
+        let mut observed = Vec::new();
+        for (diagnostics, transient) in [
+            (vec![key_warning], None),
+            (vec![key_warning, "theme warning"], None),
+            (vec!["theme warning"], None),
+            (vec![key_warning], Some("temporary reload refusal")),
+        ] {
+            let mut server = test_headless_server();
+            let diagnostics: Vec<_> = diagnostics.into_iter().map(str::to_string).collect();
+            let (full, without_keybindings) = server_config_diagnostic_summaries(&diagnostics);
+            server.server_config_diagnostic = full.clone();
+            server.server_config_diagnostic_without_keybindings = without_keybindings;
+            server.app.state.config_diagnostic = transient.map(str::to_string).or(full);
+            let mut states = Vec::new();
+            for (client_id, local) in [(1, true), (2, false)] {
+                let (writer, _control, _render) = test_client_writer();
+                let keybindings = local
+                    .then(|| Box::new(crate::config::Config::default().live_keybinds().unwrap()));
+                assert!(server.handle_server_event(ServerEvent::ClientConnected {
+                    client_id,
+                    cols: 80,
+                    rows: 24,
+                    cell_width_px: 0,
+                    cell_height_px: 0,
+                    render_encoding: RenderEncoding::SemanticFrame,
+                    keybindings,
+                    direct_attach_requested: false,
+                    writer,
+                }));
+                states.push(server.app.state.config_diagnostic.clone());
+            }
+            observed.push(states);
+        }
+        let compact = Some("config.toml; zynk config check".to_string());
+        let transient = Some("temporary reload refusal".to_string());
+        assert_eq!(
+            observed,
+            vec![
+                vec![None, compact.clone()],
+                vec![compact.clone(), compact.clone()],
+                vec![compact.clone(), compact],
+                vec![transient.clone(), transient],
+            ]
+        );
+    }
+
+    #[test]
     fn local_keybinding_client_keeps_local_keybindings_after_settings_save() {
         let path = std::env::temp_dir().join(format!(
             "zynk-headless-settings-{}-{}.toml",

@@ -277,7 +277,22 @@ zynk separates **config** from **data**:
 
 ```bash
 zynk --default-config   # print the full default config
+zynk config check      # print all diagnostics for the local config
 ```
+
+`config check` inspects the calling process's local config, including
+`ZYNK_CONFIG_PATH`; it does not query or reload a remote server. It prints
+`config: ok` and exits 0 when there are no diagnostics, or `config: issues found`
+followed by every full diagnostic and exits 1. A missing file uses valid defaults
+without creating a config. Unsupported arguments, including `--json`, exit 2.
+Inspection does not write config or start a server, but validation can inspect
+referenced sound files, so slow filesystems can delay it.
+
+The TUI shows a compact hint such as `config.toml:33:8; zynk config check` instead
+of full warning text. Line and column are best-effort hints when a TOML diagnostic
+contains a location; other warnings show the basename and command. Run the command
+locally to read the full messages. Reloading still keeps invalid sections at their
+previous settings while applying valid sections.
 
 Commonly tuned options (values shown are the defaults):
 

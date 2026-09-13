@@ -468,7 +468,12 @@ pub fn render_with_runtime_registry(
 fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) {
     let has_config_diagnostic = app.config_diagnostic.is_some();
     if let Some(message) = &app.config_diagnostic {
-        render_config_diagnostic(frame, terminal_area, message, &app.palette);
+        let diagnostic_area = if app.view.layout == ViewLayout::Mobile {
+            terminal_area
+        } else {
+            frame.area()
+        };
+        render_config_diagnostic(frame, diagnostic_area, message, &app.palette);
     }
     let mut copy_feedback_offset = u16::from(has_config_diagnostic);
     let mut toast_rect = None;
@@ -977,6 +982,103 @@ mod tests {
 
         assert!(row.contains("Keybinding syntax changed"));
         assert!(!row.contains("config warning"));
+
+        let with_overlay = buffer.clone();
+        app.mode = Mode::Terminal;
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let diagnostic_only = terminal.backend().buffer().clone();
+        app.config_diagnostic = None;
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let without_diagnostic = terminal.backend().buffer().clone();
+        let overlap = popup.intersection(Rect::new(
+            app.view.terminal_area.x,
+            app.view.terminal_area.y,
+            app.view.terminal_area.width,
+            2,
+        ));
+        assert!(overlap.width > 0 && overlap.height > 0);
+        assert!(
+            overlap.rows().any(|row| (row.x..row.right())
+                .any(|x| { diagnostic_only[(x, row.y)] != without_diagnostic[(x, row.y)] })),
+            "the diagnostic must actually paint cells under the popup"
+        );
+        app.mode = Mode::ProductAnnouncement;
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let reference = terminal.backend().buffer();
+        for row in overlap.rows() {
+            for x in row.x..row.right() {
+                assert_eq!(
+                    with_overlay[(x, row.y)],
+                    reference[(x, row.y)],
+                    "overlap cell {x},{}",
+                    row.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mobile_config_diagnostic_keeps_command_visible() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 44, 20);
+        compute_view(&mut app, area);
+        assert_eq!(app.view.layout, ViewLayout::Mobile);
+        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 44, 18));
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let reference = terminal.backend().buffer().clone();
+        app.config_diagnostic = Some("config.toml:100:10; zynk config check".into());
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer_row_text(buffer, area, 2).trim(),
+            "config.toml:100:10; zynk config check"
+        );
+        for y in 0..2 {
+            for x in 0..area.width {
+                assert_eq!(buffer[(x, y)], reference[(x, y)], "mobile header {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn m826_desktop_config_banner_uses_frame_area() {
+        let mut observed = Vec::new();
+        for position in [
+            crate::config::TabBarPositionConfig::Top,
+            crate::config::TabBarPositionConfig::Bottom,
+        ] {
+            let mut app = crate::app::state::AppState::test_new();
+            app.workspaces = vec![Workspace::test_new("one")];
+            app.active = Some(0);
+            app.selected = 0;
+            app.mode = Mode::Terminal;
+            app.tab_bar_position = position;
+            let area = Rect::new(0, 0, 100, 20);
+            compute_view(&mut app, area);
+            assert_eq!(app.view.layout, ViewLayout::Desktop);
+            assert!(app.view.sidebar_rect.width > 0);
+            app.config_diagnostic = Some("config.toml:100:10; zynk config check".into());
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal.draw(|frame| render(&app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            observed.push(
+                (61..100)
+                    .map(|x| buffer[(x, 0)].symbol())
+                    .collect::<String>(),
+            );
+        }
+        assert_eq!(
+            observed,
+            vec![
+                " config.toml:100:10; zynk config check ",
+                " config.toml:100:10; zynk config check "
+            ]
+        );
     }
 
     #[test]

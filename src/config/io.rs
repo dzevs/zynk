@@ -159,22 +159,36 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
-    const MAX_VISIBLE_DIAGNOSTICS: usize = 4;
-
     if diagnostics.is_empty() {
         return None;
     }
 
-    let mut lines: Vec<String> = diagnostics
+    let target = config_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml")
+        .to_string();
+    let location = diagnostics
         .iter()
-        .take(MAX_VISIBLE_DIAGNOSTICS)
-        .map(|diagnostic| diagnostic.split_whitespace().collect::<Vec<_>>().join(" "))
-        .collect();
-    let hidden = diagnostics.len().saturating_sub(MAX_VISIBLE_DIAGNOSTICS);
-    if hidden > 0 {
-        lines.push(format!("and {hidden} more config warnings"));
-    }
-    Some(lines.join("\n"))
+        .find_map(|diagnostic| toml_error_location(diagnostic))
+        .map(|(line, column)| format!("{target}:{line}:{column}"))
+        .unwrap_or_else(|| target.to_string());
+
+    Some(format!("{location}; zynk config check"))
+}
+
+fn toml_error_location(diagnostic: &str) -> Option<(usize, usize)> {
+    let marker = "TOML parse error at line ";
+    let start = diagnostic.find(marker)? + marker.len();
+    let rest = &diagnostic[start..];
+    let (line, rest) = rest.split_once(", column ")?;
+    let column = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or_default();
+    let line = line.parse().ok()?;
+    let column = column.parse().ok()?;
+    Some((line, column))
 }
 
 pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
@@ -806,7 +820,8 @@ mod tests {
     }
 
     #[test]
-    fn config_diagnostic_summary_keeps_multiple_warnings_visible() {
+    fn config_diagnostic_summary_uses_compact_actionable_banner() {
+        let _path = M826ConfigPath::new(Path::new("/not-read/config.toml"));
         let diagnostics = vec![
             "one".to_string(),
             "two".to_string(),
@@ -817,7 +832,145 @@ mod tests {
 
         assert_eq!(
             config_diagnostic_summary(&diagnostics).as_deref(),
-            Some("one\ntwo\nthree\nfour\nand 1 more config warnings")
+            Some("config.toml; zynk config check")
+        );
+    }
+
+    struct M826ConfigPath {
+        previous: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl M826ConfigPath {
+        fn new(path: &Path) -> Self {
+            let guard = crate::config::test_config_env_lock().lock().unwrap();
+            let previous = std::env::var_os(CONFIG_PATH_ENV_VAR);
+            std::env::set_var(CONFIG_PATH_ENV_VAR, path);
+            Self {
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for M826ConfigPath {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(CONFIG_PATH_ENV_VAR, value),
+                None => std::env::remove_var(CONFIG_PATH_ENV_VAR),
+            }
+        }
+    }
+
+    #[test]
+    fn config_diagnostic_summary_includes_toml_error_location() {
+        let _path = M826ConfigPath::new(Path::new("/not-read/config.toml"));
+        let diagnostics = vec![
+            "config parse error: TOML parse error at line 33, column 8\n   |\n33 | type = \"popup\"\n   |        ^^^^^^^\nunknown variant `popup`; using defaults".to_string(),
+        ];
+        assert_eq!(
+            config_diagnostic_summary(&diagnostics).as_deref(),
+            Some("config.toml:33:8; zynk config check")
+        );
+    }
+
+    #[test]
+    fn config_diagnostic_summary_finds_location_after_warning() {
+        let _path = M826ConfigPath::new(Path::new("/not-read/config.toml"));
+        let diagnostics = vec![
+            "unknown config section [toast]; did you mean [ui.toast]? ignoring section".to_string(),
+            "config parse error: TOML parse error at line 7, column 4".to_string(),
+        ];
+        assert_eq!(
+            config_diagnostic_summary(&diagnostics).as_deref(),
+            Some("config.toml:7:4; zynk config check")
+        );
+    }
+
+    #[test]
+    fn m826_config_banner_edge_cases() {
+        use std::os::unix::ffi::OsStringExt;
+        let _path = M826ConfigPath::new(Path::new("/not-read/custom.toml"));
+        assert_eq!(config_diagnostic_summary(&[]), None);
+        let cases = [
+            (vec!["warning"], "custom.toml; zynk config check"),
+            (vec![""], "custom.toml; zynk config check"),
+            (
+                vec!["TOML parse error at line bad, column 7"],
+                "custom.toml; zynk config check",
+            ),
+            (
+                vec!["TOML parse error at line 1, column x"],
+                "custom.toml; zynk config check",
+            ),
+            (
+                vec!["TOML parse error at line 1 column 2"],
+                "custom.toml; zynk config check",
+            ),
+            (
+                vec!["TOML parse error at line 999999999999999999999999999999, column 2"],
+                "custom.toml; zynk config check",
+            ),
+            (
+                vec!["TOML parse error at line 1, column 999999999999999999999999999999"],
+                "custom.toml; zynk config check",
+            ),
+            (
+                vec![
+                    "TOML parse error at line bad, column 1",
+                    "TOML parse error at line 12, column 3\nmore",
+                    "TOML parse error at line 9, column 4",
+                ],
+                "custom.toml:12:3; zynk config check",
+            ),
+        ];
+        let observed: Vec<_> = cases
+            .iter()
+            .map(|(messages, _)| {
+                config_diagnostic_summary(
+                    &messages
+                        .iter()
+                        .map(|message| (*message).to_string())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let expected: Vec<_> = cases
+            .iter()
+            .map(|(_, expected)| Some((*expected).to_string()))
+            .collect();
+        assert_eq!(observed, expected);
+        for path in [
+            std::ffi::OsString::from("/"),
+            std::ffi::OsString::from_vec(b"/not-read/\xff.toml".to_vec()),
+        ] {
+            std::env::set_var(CONFIG_PATH_ENV_VAR, path);
+            assert_eq!(
+                config_diagnostic_summary(&["warning".into()]).as_deref(),
+                Some("config.toml; zynk config check")
+            );
+        }
+    }
+
+    #[test]
+    fn m826_startup_sidebar_bounds_diagnostics() {
+        let observed: Vec<_> = [(18, 36), (30, 30), (0, 0), (50, 30)]
+            .into_iter()
+            .map(|(min, max)| {
+                let mut config = Config::default();
+                config.ui.sidebar_min_width = min;
+                config.ui.sidebar_max_width = max;
+                config.collect_diagnostics()
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            vec![
+                Vec::<String>::new(),
+                Vec::new(),
+                Vec::new(),
+                vec!["ui.sidebar_min_width (50) is greater than sidebar_max_width (30)".into(),]
+            ]
         );
     }
 

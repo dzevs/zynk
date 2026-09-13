@@ -5365,3 +5365,99 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   no-op because command/flag/value/alias sets do not change. No new schema,
   protocol, caller, receipt, platform or DB surface. No whole-M8, merge, push,
   install, tag, publish, release or shared-cleanup approval follows.
+
+### M8-26 - Config diagnostic delivery (IMPLEMENTED / PENDING VERIFICATION)
+
+- Assigned source: `3e8f9df14e6dd08a8d80d920b923870a80649f0b` (PORT), patch
+  SHA-256 `bbd697b9ad20f108a4d5829122f4da132514a525dbbbd1746e979bd608986f44`.
+  Parent: `08bd6f65ed783f7a47acc4b605815fb5847629df`. Gate-1
+  `msg_c91f94c626da35e9` approves design `8dc2f23a`; preflight `00f2393e`
+  binds the actual parent, eleven cited anchors and 27 named files.
+  Source patch reproduces its upstream object. Checkpoint-12 approval and its
+  corrections remain separate from that immutable packet. Documentation anchors
+  were reread at this parent. No prior implementation approval transfers.
+- Assigned-source-only: neither creator overlay nor v2 deferred list binds a
+  primary or secondary remainder here. Twenty other archived origins remain;
+  the historical archive, creator overlay and unions 98 M8 / 34 M9 are unchanged.
+  D-M5-4 will remain open after M8-28 at M8-33 for a0678a38 and at M9-12 for
+  secondary adaptations of d4e0dd3d and d2c317ad. This slice discharges none of them.
+- Add the manual local `config check` leaf and matching completion child. Use
+  Config::load unchanged; print every diagnostic in order, including multiline
+  messages, unknown/removed keys and read errors. Missing files retain valid
+  defaults without creation. Exits are 0/1/2 for clean/issues/arguments; no JSON
+  mode, server request, reload, DB or delivery event. Existing sound validation
+  can inspect referenced paths; no config-only-I/O or wall-clock bound is claimed.
+- Arguments precede loading. Preserve the fork's group-level leaf-help guard:
+  `config check --help` and `-h` show group help; bare `help` reaches leaf usage.
+  Upstream's helper flag-help arms are unreachable through this front door while
+  that guard intercepts them. A future reordering or narrowing of the guard must
+  re-evaluate their reachability and the observable help contract, not assume
+  today's interception persists. No opportunistic guard change lands here.
+- Collect invalid sidebar bounds at startup through a shared diagnostic method;
+  reload appends its existing keeping-previous-UI action. Preserve the exact
+  validated_sidebar_bounds predicate, App::new fallback, entire-invalid-UI skip,
+  section-wise reload, unknown-key handling and model. No second loader/parser.
+- Replace the summary's four-visible-plus-overflow policy deliberately, not as
+  claimed preservation of that presentation. Full messages move to CLI output;
+  the banner shows a basename and optional first extractable TOML line/column,
+  then the command. The parser is a best-effort display hint over existing String
+  diagnostics, with checked integer parsing, not an error identity. Pinned local
+  toml/toml_edit source establishes the display format; failed browser retrieval
+  is disclosed rather than cited as evidence. No Cargo or dependency delta.
+- Rendering drops only the warning prefix and chooses frame area on desktop or
+  terminal area on mobile. Styling, padding, clipping, height cap, copy/toast
+  offsets and interactive-overlay order remain intact. No new render-time I/O,
+  terminal lock or pane/client loop; no performance improvement is claimed.
+  Headless production filtering and client-mode synchronization are untouched.
+- Thirteen distinct new controls in existing targets: six CLI, four config I/O,
+  two UI and one headless. No new integration binary or support recompilation.
+  Corrected parent selection is 51: thirteen new failing tests plus 38 existing
+  passing controls, including six already-existing completion support controls.
+  The desktop top-row absence is red; the bottom-tab-bar suffix already passes.
+  CLI syntax/bounds and headless mode rows are accumulated before comparison.
+  In the multi-warning control both CLI calls execute, but the parent fails its
+  valid-config assertion before reaching the full-warning assertion. Later
+  basename-fallback and mobile-header assertions are also unreached at the parent;
+  no passing or red-first evidence is claimed for unreached assertions.
+- Eight presentation conversions are explicit. The renamed summary control
+  retires the old layout; six reload controls move full details to diagnostics
+  while retaining all prior state/status checks and adding exact compact banners.
+  The unknown-key sibling control is fork-only. The real-client startup control
+  preserves server/handshake/version/timeouts/cleanup and checks basename, location
+  and command in the decoded frame, retaining the last frame on failure.
+- Keep the old mixed key/theme control byte-identical; its equal compact summaries
+  no longer discriminate filtering. The new key-only ClientConnected row does.
+  Preserve both announcement assertions and add positive overlap/reference-cell
+  checks so the now-vacuous removed-prefix negative is not treated as proof.
+  Completion population adds check without changing the other command rows.
+  The six legacy protocol-19 assertions in cli_wrapper.rs remain for M8-65.
+- Focused green is 51/51. Sixteen compiled one-site mutants run the same 51
+  controls, all exit 100; failure counts M01-M16 are
+  3/3/1/2/2/3/12/5/2/1/1/1/2/1/1/1. Full pass/fail names, intended diagnostic
+  excerpts, mutant bytes and restored hashes accompany the logs; no disjointness
+  is claimed. M03 reaches the previously unreached full-warning assertion: eight
+  diagnostics expected, four observed, with exit 1 and empty stderr unchanged.
+  That is targeted mutation evidence, not retroactive parent red.
+- M15 fails only the new key-only local-mode row while the old mixed control
+  passes. M16 fails the old announcement-title assertion before the new buffer
+  comparisons; no claim that it exercises those later assertions. M13's second
+  crossing fails positive overlap reachability after moving the banner. M15/M16
+  perturb unchanged shared production boundaries as preservation controls only.
+- Two instrument faults are retained: parent desktop v1 expected trailing padding
+  from a trim_end helper, corrected to exact buffer cells before production edits;
+  mutation v1 diagnostic extraction missed qualified unit-test names at M05.
+  M05 compiled and failed the intended assertion, but the outer extractor failed.
+  V2 rereads all five completed logs without rerunning/changing outcomes, then
+  runs M06-M16. Both source snapshots and failed harness logs remain. No Rust
+  change was needed for the extractor correction; exit 100 alone is not evidence
+  of an intended assertion, so diagnostic sites are checked separately.
+- Source audit v1 left an added separator line when removing the announcement
+  extension. Its boundary now includes that separator; the failed log and script
+  are retained. This third instrument correction changes no Rust bytes.
+- The bounded audit reverses enumerated additions/substitutions to reconstruct
+  all ten old Rust files raw, including every incidental converted-test byte.
+  Four new/replaced production functions match branded upstream bodies. This is
+  checkpoint evidence, not a general parser or an installed future invariant.
+  Full check, gate, normal hooks and committed-source verification precede
+  exact-SHA Gate-2. No release build, Zig verification, whole-M8 approval or
+  merge/push/install/tag/publish/release/shared-cleanup authorization follows.

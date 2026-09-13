@@ -271,6 +271,7 @@ fn run_config_command(args: &[String]) -> std::io::Result<i32> {
     }
 
     match subcommand {
+        "check" => config_check(&args[1..]),
         "reset-keys" => config_reset_keys(&args[1..]),
         "help" | "--help" | "-h" => {
             print_config_help();
@@ -281,6 +282,32 @@ fn run_config_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn config_check(args: &[String]) -> std::io::Result<i32> {
+    match args {
+        [] => {}
+        [flag] if matches!(flag.as_str(), "help" | "--help" | "-h") => {
+            eprintln!("usage: zynk config check");
+            return Ok(0);
+        }
+        _ => {
+            eprintln!("usage: zynk config check");
+            return Ok(2);
+        }
+    }
+
+    let diagnostics = crate::config::Config::load().diagnostics;
+    if diagnostics.is_empty() {
+        println!("config: ok");
+    } else {
+        println!("config: issues found");
+        for diagnostic in &diagnostics {
+            println!("{diagnostic}");
+        }
+    }
+
+    Ok(i32::from(!diagnostics.is_empty()))
 }
 
 fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {
@@ -1136,6 +1163,7 @@ fn print_session_error(code: &str, message: &str) {
 
 fn print_config_help() {
     eprintln!("zynk config commands:");
+    eprintln!("  zynk config check  validate config.toml and print diagnostics");
     eprintln!("  zynk config reset-keys  back up config.toml and remove custom keybindings");
 }
 

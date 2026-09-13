@@ -347,6 +347,231 @@ fn run_named_cli(config_home: &Path, runtime_dir: &Path, args: &[&str]) -> std::
     run_named_cli_with_socket_override(config_home, runtime_dir, args, None)
 }
 
+struct ConfigCheckFixture {
+    base: PathBuf,
+}
+
+impl ConfigCheckFixture {
+    fn new() -> Self {
+        let base = unique_test_dir();
+        fs::create_dir(&base).unwrap();
+        Self { base }
+    }
+
+    fn config_path(&self) -> PathBuf {
+        self.base
+            .join("config")
+            .join(app_dir_name())
+            .join("config.toml")
+    }
+
+    fn write_config(&self, content: &str) {
+        let path = self.config_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    fn snapshot(&self) -> Vec<(PathBuf, &'static str, Vec<u8>)> {
+        fn visit(base: &Path, dir: &Path, entries: &mut Vec<(PathBuf, &'static str, Vec<u8>)>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let relative = path.strip_prefix(base).unwrap().to_path_buf();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    entries.push((relative, "directory", Vec::new()));
+                    visit(base, &path, entries);
+                } else if kind.is_symlink() {
+                    entries.push((
+                        relative,
+                        "symlink",
+                        fs::read_link(path)
+                            .unwrap()
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .to_vec(),
+                    ));
+                } else {
+                    entries.push((relative, "file", fs::read(path).unwrap()));
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        visit(&self.base, &self.base, &mut entries);
+        entries.sort();
+        entries
+    }
+
+    fn run(&self, args: &[&str], override_path: Option<&Path>) -> std::process::Output {
+        let before = self.snapshot();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+        command
+            .args(args)
+            .env_clear()
+            .env("HOME", self.base.join("home"))
+            .env("XDG_CONFIG_HOME", self.base.join("config"))
+            .env("XDG_DATA_HOME", self.base.join("data"))
+            .env("XDG_CACHE_HOME", self.base.join("cache"))
+            .env("XDG_STATE_HOME", self.base.join("state"))
+            .env("XDG_RUNTIME_DIR", self.base.join("runtime"))
+            .env("ZYNK_HOME", self.base.join("db"))
+            .env("ZYNK_SQLITE_HOME", self.base.join("sqlite"))
+            .env("ZYNK_SOCKET_PATH", self.base.join("runtime/s.sock"))
+            .env("ZYNK_CLIENT_SOCKET_PATH", self.base.join("runtime/c.sock"))
+            .current_dir(&self.base);
+        if let Some(path) = override_path {
+            command.env("ZYNK_CONFIG_PATH", path);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(
+            self.snapshot(),
+            before,
+            "config inspection changed private files: {args:?}"
+        );
+        for name in ["home", "data", "cache", "state", "runtime", "db", "sqlite"] {
+            assert!(
+                !self.base.join(name).exists(),
+                "config inspection created {name}"
+            );
+        }
+        output
+    }
+}
+
+impl Drop for ConfigCheckFixture {
+    fn drop(&mut self) {
+        cleanup_test_base(&self.base);
+    }
+}
+
+fn config_check_outcome(output: std::process::Output) -> (Option<i32>, String, String) {
+    (
+        output.status.code(),
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+#[test]
+fn config_check_reports_invalid_config_without_server() {
+    let fixture = ConfigCheckFixture::new();
+    let outcomes: Vec<_> = [
+        "[keys\nnew_workspace = \"g\"\n",
+        "[ui]\nsidebar_min_width = 50\nsidebar_max_width = 30\n",
+    ]
+    .into_iter()
+    .map(|content| {
+        fixture.write_config(content);
+        config_check_outcome(fixture.run(&["config", "check"], None))
+    })
+    .collect();
+    assert_eq!(outcomes, vec![
+        (Some(1), "config: issues found\nconfig parse error: TOML parse error at line 1, column 6\n  |\n1 | [keys\n  |      ^\ninvalid table header\nexpected `.`, `]`\n; using defaults\n".into(), String::new()),
+        (Some(1), "config: issues found\nui.sidebar_min_width (50) is greater than sidebar_max_width (30)\n".into(), String::new()),
+    ]);
+}
+
+#[test]
+fn config_check_reports_ok_when_config_is_missing() {
+    let fixture = ConfigCheckFixture::new();
+    assert_eq!(
+        config_check_outcome(fixture.run(&["config", "check"], None)),
+        (Some(0), "config: ok\n".into(), String::new())
+    );
+    assert!(fixture.snapshot().is_empty());
+}
+
+#[test]
+fn config_check_rejects_json_output() {
+    let fixture = ConfigCheckFixture::new();
+    assert_eq!(
+        config_check_outcome(fixture.run(&["config", "check", "--json"], None)),
+        (Some(2), String::new(), "usage: zynk config check\n".into())
+    );
+}
+
+#[test]
+fn m826_config_check_preserves_all_diagnostics_read_only() {
+    let fixture = ConfigCheckFixture::new();
+    fixture.write_config("onboarding = false\n[ui]\nmouse_capture = false\n");
+    let valid = config_check_outcome(fixture.run(&["config", "check"], None));
+    fixture.write_config("[keys]\nnew_tabb = \"prefix+t\"\n[ui]\nagent_panel_scope = \"workspace\"\nalpha = 1\nbravo = 2\ncharlie = 3\ndelta = 4\nmouse_captur = false\n[zynk]\nsqlite_hmoe = \"unused\"\n");
+    let issues = config_check_outcome(fixture.run(&["config", "check"], None));
+    assert_eq!(valid, (Some(0), "config: ok\n".into(), String::new()));
+    assert_eq!(issues, (Some(1), concat!(
+        "config: issues found\n",
+        "ui.agent_panel_scope is no longer supported (removed in 3.1.0); the agent panel shows all workspaces. ui.agent_panel_sort controls ordering only and does not restore current-workspace filtering; ignoring key\n",
+        "unknown config key keys.new_tabb; ignoring key\n",
+        "unknown config key ui.alpha; ignoring key\n",
+        "unknown config key ui.bravo; ignoring key\n",
+        "unknown config key ui.charlie; ignoring key\n",
+        "unknown config key ui.delta; ignoring key\n",
+        "unknown config key ui.mouse_captur; ignoring key\n",
+        "unknown config key zynk.sqlite_hmoe; ignoring key\n",
+    ).into(), String::new()));
+}
+
+#[test]
+fn m826_config_check_help_and_argument_errors() {
+    let fixture = ConfigCheckFixture::new();
+    fixture.write_config("[keys\n");
+    let group_help = concat!(
+        "zynk config commands:\n",
+        "  zynk config check  validate config.toml and print diagnostics\n",
+        "  zynk config reset-keys  back up config.toml and remove custom keybindings\n",
+    );
+    let cases = [
+        (
+            vec!["config", "check", "help"],
+            0,
+            "usage: zynk config check\n",
+        ),
+        (vec!["config", "check", "--help"], 0, group_help),
+        (vec!["config", "check", "-h"], 0, group_help),
+        (vec!["config", "unknown", "--help"], 0, group_help),
+        (
+            vec!["config", "check", "extra"],
+            2,
+            "usage: zynk config check\n",
+        ),
+        (
+            vec!["config", "check", "help", "extra"],
+            2,
+            "usage: zynk config check\n",
+        ),
+    ];
+    let observed: Vec<_> = cases
+        .iter()
+        .map(|(args, _, _)| config_check_outcome(fixture.run(args, None)))
+        .collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(_, code, stderr)| (Some(*code), String::new(), (*stderr).into()))
+        .collect();
+    assert_eq!(observed, expected);
+}
+
+#[test]
+fn m826_config_check_honors_override_and_read_errors() {
+    let fixture = ConfigCheckFixture::new();
+    fixture.write_config("[keys\n");
+    let custom = fixture.base.join("custom.toml");
+    fs::write(&custom, "onboarding = false\n").unwrap();
+    let directory = fixture.base.join("directory.toml");
+    fs::create_dir(&directory).unwrap();
+    let link = fixture.base.join("loop.toml");
+    std::os::unix::fs::symlink("loop.toml", &link).unwrap();
+    let observed: Vec<_> = [&custom, &directory, &link]
+        .into_iter()
+        .map(|path| config_check_outcome(fixture.run(&["config", "check"], Some(path))))
+        .collect();
+    assert_eq!(observed, vec![
+        (Some(0), "config: ok\n".into(), String::new()),
+        (Some(1), "config: issues found\nconfig read error: Is a directory (os error 21); using defaults\n".into(), String::new()),
+        (Some(1), "config: issues found\nconfig read error: Too many levels of symbolic links (os error 40); using defaults\n".into(), String::new()),
+    ]);
+}
+
 fn run_named_cli_with_socket_override(
     config_home: &Path,
     runtime_dir: &Path,

@@ -118,6 +118,7 @@ fn status_command() -> Command {
 fn config_command() -> Command {
     Command::new("config")
         .about("Manage local configuration")
+        .subcommand(Command::new("check").about("Validate config.toml and print diagnostics"))
         .subcommand(Command::new("reset-keys").about("Reset custom keybindings"))
 }
 
@@ -969,7 +970,7 @@ mod tests {
             ("api", "schema snapshot"),
             ("server", "stop reload-config agent-manifests update-agent-manifests reload-agent-manifests"),
             ("status", "server client"),
-            ("config", "reset-keys"),
+            ("config", "check reset-keys"),
             ("channel", "show set"),
             ("workspace", "list create get focus rename close"),
             ("worktree", "list create open remove"),
