@@ -619,9 +619,10 @@ impl App {
             event: EventKind::PaneCreated,
             data: EventData::PaneCreated { pane: root_pane },
         });
+        self.emit_layout_updated_event(ws_idx, 0);
     }
 
-    /// Emit `TabCreated` + `PaneCreated` plugin lifecycle events for a tab added to an
+    /// Emit `TabCreated` + `PaneCreated` and a layout update for a tab added to an
     /// existing workspace (no `WorkspaceCreated`, unlike `emit_workspace_open_events`).
     pub(crate) fn emit_tab_created_events(&mut self, ws_idx: usize, tab_idx: usize) {
         let Some(tab) = self.tab_info(ws_idx, tab_idx) else {
@@ -638,6 +639,7 @@ impl App {
             event: EventKind::PaneCreated,
             data: EventData::PaneCreated { pane: root_pane },
         });
+        self.emit_layout_updated_event(ws_idx, tab_idx);
     }
 
     fn emit_workspace_updated(&mut self, ws_idx: usize) {
@@ -1068,6 +1070,24 @@ mod tests {
                 .any(|(_, e)| matches!(e.data, EventData::PaneCreated { .. })),
             "ui create_workspace should emit PaneCreated"
         );
+        assert_eq!(
+            after_workspace.last().unwrap().1.data,
+            EventData::LayoutUpdated {
+                layout: app.pane_layout_snapshot(0, 0).unwrap(),
+            }
+        );
+        assert_eq!(
+            after_workspace
+                .iter()
+                .map(|(_, e)| e.event)
+                .collect::<Vec<_>>(),
+            vec![
+                EventKind::WorkspaceCreated,
+                EventKind::TabCreated,
+                EventKind::PaneCreated,
+                EventKind::LayoutUpdated,
+            ]
+        );
 
         // UI new-tab flow on the existing workspace emits TabCreated + PaneCreated,
         // and NOT a second WorkspaceCreated.
@@ -1091,6 +1111,20 @@ mod tests {
                 .iter()
                 .any(|(_, e)| matches!(e.data, EventData::WorkspaceCreated { .. })),
             "ui create_tab on an existing workspace should not emit WorkspaceCreated"
+        );
+        assert_eq!(
+            after_tab.last().unwrap().1.data,
+            EventData::LayoutUpdated {
+                layout: app.pane_layout_snapshot(0, 1).unwrap(),
+            }
+        );
+        assert_eq!(
+            after_tab.iter().map(|(_, e)| e.event).collect::<Vec<_>>(),
+            vec![
+                EventKind::TabCreated,
+                EventKind::PaneCreated,
+                EventKind::LayoutUpdated,
+            ]
         );
 
         for (_, runtime) in app.terminal_runtimes.drain() {

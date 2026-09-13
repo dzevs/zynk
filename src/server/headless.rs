@@ -5152,6 +5152,7 @@ mod tests {
                 api::schema::EventKind::WorkspaceCreated,
                 api::schema::EventKind::TabCreated,
                 api::schema::EventKind::PaneCreated,
+                api::schema::EventKind::LayoutUpdated,
             ]
         );
         shutdown_test_runtimes(&mut server);
@@ -5202,6 +5203,7 @@ mod tests {
             vec![
                 api::schema::EventKind::TabCreated,
                 api::schema::EventKind::PaneCreated,
+                api::schema::EventKind::LayoutUpdated,
             ]
         );
         let tab_created = events

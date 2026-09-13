@@ -4508,3 +4508,83 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   claim or completion-spec edit. Full check/gate and exact identity travel in
   checkpoint 05; this row is not Gate-2/Gate-3 or whole-M8 approval and grants
   no merge, push, install, tag, publish or release action.
+
+### M8-13 - Layout change subscriptions (IMPLEMENTED / PENDING VERIFICATION)
+
+- Source: `15cab964f3494b77159caaea289e17e1596e0720` (PORT).
+  Parent: `edb48d359bcd24cb170b3f58e11cc260b2eab658`.
+  Preserved patch SHA-256: `fdbd5350c1a90a244c4d8d6e3047d3e9460d41dbc6af7000098056dbd3e5f144`.
+  Gate-1: `msg_007d1865306c7e11`, design `d3eb9709` (236 lines), qualified
+  by M8-LAYOUT-SNAPSHOT-DESIGN-CLARIFICATION.md (`ebb4f6d`). Both artifacts
+  remain preserved; `msg_89def99622fc39e3` confirms the corrected Eq boundary.
+  Checkpoint 05's three-commit range is separately approved at this parent by
+  `msg_6a168973de9028bc`; that verdict does not approve this new slice.
+- All consumed creators exist at the parent. Reuse PaneLayoutSnapshot,
+  EventHub, ActiveSubscription, dynamic JsonSchema and existing mutation
+  handlers. No deferred remainder arrives here. This is a pre-relicense source;
+  no new NOTICE entry. Do not copy upstream docs/next generated schema/website
+  files or create its absent KNOWN_EVENT_KINDS registry.
+- Gate-1 count correction: emit_workspace_open_events has FOUR production
+  callers (api/workspaces, two api/worktrees paths, api/worktrees/deferred)
+  plus TWO cfg(test) creation wrappers; emit_tab_created_events has ONE
+  production caller (api/tabs) plus ONE cfg(test) creation wrapper. The original
+  six/two production claim counted test wrappers despite saying otherwise.
+  No production path was missed, but wrapper-based evidence must not be called
+  evidence of a separate production route. Shared-emitter controls and real
+  headless deferred-creation controls are distinguished in the packet.
+- Subscription type is layout.updated; event/data types are layout_updated.
+  Extend the existing ordered event characterization from 19 to 20, leaving
+  all old IDs and ordering intact. No Method, EventMatch or binary message
+  addition; protocol stays 19. Only EventData and its containing EventEnvelope
+  lose Eq because layouts contain f32 ratios. Independent subscription event
+  envelope/data types retain Eq, pinned by a compiler-checked test.
+- Layout subscriptions use the existing event poller with last_sequence zero
+  and no App enqueue. Retained history and later updates preserve the complete
+  payload; the real LocalStream control owns and reaps its connection and uses
+  bounded reads. The existing shared outer stop fence rejects before setup;
+  its mutation kills all three special-method controls plus the new layout
+  control while the ordinary inner-fence control still passes.
+- Emit after successful split, changed resize/swap, both surviving move
+  layouts in source-then-target order, and changed-or-focus-changed zoom.
+  Surviving close reports after PaneClosed; confirmation refusal and removed
+  tabs are silent. PaneDied reports after overlay restoration, never on the
+  RespawnShell early return. Apply emits after committed replacement and final
+  layout resolution; failed second-spawn rollback is silent. Ratio changes
+  preserve their existing success semantics. Reuse computed response snapshots
+  where present; pane_layout_snapshot itself is byte-identical.
+- Append snapshots after existing shared workspace/tab lifecycle events.
+  The three plugin completion callers keep their signature/calls unchanged:
+  overlay, split (including zoom), and tab. Resolve the created pane's actual
+  tab, not global focus. Background split/tab, zoom and overlay controls compare
+  final snapshots and preserve focus policy. The plugin hook allowlist remains
+  byte-identical: layout hooks warn and never execute, while a positive allowed
+  pane.created hook executes and produces its expected output.
+- EventHub retains 512 records, not a byte budget or durable log. No lossless
+  replay, atomic snapshot/subscribe, exhaustive TUI redraw, per-render or per-PTY
+  emission claim. Consumers refresh session.snapshot after reconnect/staleness.
+  These observations grant no principal or delivery receipt. Production API
+  server, App module and headless bodies, worker/DB placement, caller.rs, raw
+  input/paste/controller fences, socket credentials and binary wire are unchanged.
+- Two parent behavioral reds reach successful resize/surviving-exit state and
+  fail on absent serialized layout emission. Seventeen other new tests and
+  additions to legacy tests are implementation-phase, not retrospective reds.
+  Five existing ordered event vectors retain their exact old subsequence after
+  removing only added LayoutUpdated entries. Old state/ID/focus/copy-mode and
+  rollback assertions remain. No legacy test is removed, weakened or rerouted.
+- Twenty distinct one-site mutants are killed. M01-M14 ran over 276 controls;
+  M15-M20 over 277 after adding a stronger focused-overlay fixture. All mutated
+  file hashes match restored final source. The first M15 run killed two unfocused
+  controls but survived the predicted focused two-pane control: raw removal had
+  already yielded that fixture's final state. Retain that failed matrix, then
+  pin restored focus AND prior zoom with a three-pane focused overlay. Its rerun
+  kills all three discriminating controls. This is not a selective-kill claim.
+- Harness disclosures: new test imports and invalid area/plugin-selector
+  fixtures were corrected without changing production policy. The focused
+  fixture's attempted TileLayout/Node clone did not compile; neither production
+  type gained Clone. Two mutation-selector drafts failed preflight before any
+  source write; final M12 selects only the emission guard, not the earlier
+  existing focus/mode guard. Preserve failures and successful reruns separately.
+  Source/P7 audit `440c60af` complements manual review, not an AST proof.
+- No Cargo delta or CLI command/flag/value/alias change, so no advisory-delta
+  claim or completion-spec edit. Exact check/gate/commit evidence travels with
+  checkpoint 06. This row is not Gate-2/Gate-3, whole-M8 or operator approval.

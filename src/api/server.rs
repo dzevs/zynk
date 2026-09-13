@@ -869,6 +869,93 @@ mod tests {
         }
     }
 
+    fn layout_subscription_connection(
+        stopped: bool,
+    ) -> (
+        EventWaitConnection,
+        EventHub,
+        mpsc::UnboundedReceiver<ApiRequestMessage>,
+    ) {
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        let event_hub = EventHub::default();
+        let server_hub = event_hub.clone();
+        let (mut client, server, path) = local_stream_pair("layout-sub");
+        let request = Request {
+            id: "layout-subscription".into(),
+            method: Method::EventsSubscribe(crate::api::schema::EventsSubscribeParams {
+                subscriptions: vec![crate::api::schema::Subscription::LayoutUpdated {}],
+            }),
+        };
+        writeln!(client, "{}", serde_json::to_string(&request).unwrap()).unwrap();
+        client.flush().unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = running.clone();
+        let server = std::thread::spawn(move || {
+            handle_connection_with_stop(
+                server,
+                &api_tx,
+                &server_hub,
+                &server_running,
+                None,
+                Some(&Arc::new(AtomicBool::new(stopped))),
+            )
+        });
+        (
+            EventWaitConnection {
+                client: Some(client),
+                running,
+                requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                server: Some(server),
+                responder: None,
+                path,
+            },
+            event_hub,
+            api_rx,
+        )
+    }
+
+    #[test]
+    fn m813_layout_subscription_delivers_exact_event_over_local_stream() {
+        let (mut connection, event_hub, mut api_rx) = layout_subscription_connection(false);
+        // Read the acknowledgement before publishing: the bounded reader owns one line.
+        assert_eq!(
+            connection.response(),
+            serde_json::json!({
+                "id": "layout-subscription", "result": {"type": "subscription_started"}
+            })
+        );
+        let event: crate::api::schema::EventEnvelope = serde_json::from_value(serde_json::json!({
+            "event": "layout_updated",
+            "data": {"type": "layout_updated", "layout": {
+                "workspace_id": "w7", "tab_id": "w7:t3", "focused_pane_id": "w7:9",
+                "area": {"x": 3, "y": 4, "width": 97, "height": 23},
+                "zoomed": true, "panes": [], "splits": []
+            }}
+        }))
+        .unwrap();
+        event_hub.push(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorkspaceClosed,
+            data: crate::api::schema::EventData::WorkspaceClosed {
+                workspace_id: "other".into(),
+            },
+        });
+        event_hub.push(event.clone());
+        assert_eq!(connection.response(), serde_json::to_value(event).unwrap());
+        assert!(
+            api_rx.try_recv().is_err(),
+            "layout subscription must not enqueue App work"
+        );
+    }
+
+    #[test]
+    fn m813_stopped_layout_subscription_rejects_before_setup() {
+        let (mut connection, _, mut api_rx) = layout_subscription_connection(true);
+        let response = connection.response();
+        assert_eq!(response["id"], "layout-subscription");
+        assert_eq!(response["error"]["code"], "server_unavailable");
+        assert!(api_rx.try_recv().is_err());
+    }
+
     fn event_wait_params(timeout_ms: Option<u64>) -> crate::api::schema::EventsWaitParams {
         crate::api::schema::EventsWaitParams {
             match_event: crate::api::schema::EventMatch::PaneAgentStatusChanged {

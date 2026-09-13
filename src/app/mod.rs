@@ -5144,6 +5144,7 @@ mod tests {
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.workspaces.len(), 2);
+        assert!(app.event_hub.events_after(0).is_empty());
     }
 
     #[test]

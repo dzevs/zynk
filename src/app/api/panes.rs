@@ -112,6 +112,7 @@ impl App {
             event: EventKind::PaneCreated,
             data: EventData::PaneCreated { pane: pane.clone() },
         });
+        self.emit_layout_updated_event(ws_idx, target_tab_idx);
 
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
@@ -413,6 +414,9 @@ impl App {
             return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
         };
         let focused_pane_id = layout.focused_pane_id.clone();
+        if changed {
+            self.emit_layout_updated_snapshot(layout.clone());
+        }
 
         encode_success(
             id,
@@ -582,6 +586,9 @@ impl App {
             return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
         };
         let focused_pane_id = layout.focused_pane_id.clone();
+        if changed {
+            self.emit_layout_updated_snapshot(layout.clone());
+        }
 
         encode_success(
             id,
@@ -1039,6 +1046,11 @@ impl App {
             },
         });
 
+        if let Some(source_layout) = &move_result.source_layout {
+            self.emit_layout_updated_snapshot((**source_layout).clone());
+        }
+        self.emit_layout_updated_snapshot((*move_result.target_layout).clone());
+
         encode_success(id, ResponseResult::PaneMove { move_result })
     }
 
@@ -1287,6 +1299,9 @@ impl App {
             return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
         };
         let focused_pane_id = layout.focused_pane_id.clone();
+        if outcome.changed || outcome.focus_changed {
+            self.emit_layout_updated_snapshot(layout.clone());
+        }
 
         encode_success(
             id,
@@ -1637,6 +1652,7 @@ impl App {
             return pane_not_found(id, &target.pane_id);
         };
         let workspace_id = self.public_workspace_id(ws_idx);
+        let layout_update_target = self.layout_update_target_after_pane_removal(ws_idx, pane_id);
         if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
             && self.state.confirm_implicit_worktree_group_close(ws_idx)
         {
@@ -1680,6 +1696,9 @@ impl App {
                     workspace_id,
                 },
             });
+            if let Some((ws_idx, tab_idx)) = layout_update_target {
+                self.emit_layout_updated_event(ws_idx, tab_idx);
+            }
         }
 
         encode_success(id, ResponseResult::Ok {})
@@ -1839,6 +1858,30 @@ impl App {
             splits,
         })
     }
+
+    pub(super) fn emit_layout_updated_event(&mut self, ws_idx: usize, tab_idx: usize) {
+        if let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) {
+            self.emit_layout_updated_snapshot(layout);
+        }
+    }
+
+    pub(super) fn emit_layout_updated_snapshot(&mut self, layout: PaneLayoutSnapshot) {
+        self.emit_event(EventEnvelope {
+            event: EventKind::LayoutUpdated,
+            data: EventData::LayoutUpdated { layout },
+        });
+    }
+
+    pub(super) fn layout_update_target_after_pane_removal(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> Option<(usize, usize)> {
+        let workspace = self.state.workspaces.get(ws_idx)?;
+        let tab_idx = workspace.find_tab_index_for_pane(pane_id)?;
+        let tab = workspace.tabs.get(tab_idx)?;
+        (tab.layout.pane_count() > 1).then_some((ws_idx, tab_idx))
+    }
 }
 
 impl From<PaneDirection> for NavDirection {
@@ -1975,6 +2018,116 @@ mod tests {
             is_linked_worktree: true,
         });
         app
+    }
+
+    fn layout_updates(app: &App) -> Vec<PaneLayoutSnapshot> {
+        app.event_hub
+            .events_after(0)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                EventData::LayoutUpdated { layout } => Some(layout),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn m813_split_reports_background_target_after_pane_created() {
+        let mut app = app_with_linked_worktree();
+        app.state.workspaces.push(Workspace::test_new("target"));
+        let tab_idx = app.state.workspaces[1].test_add_tab(Some("target-tab"));
+        let target = app.state.workspaces[1].tabs[tab_idx].root_pane;
+        seed_terminal_states(&mut app);
+        app.state.active = Some(0);
+        let response = app.handle_pane_split(
+            "split".into(),
+            PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: app.public_pane_id(1, target),
+                direction: SplitDirection::Down,
+                ratio: Some(0.65),
+                focus: false,
+                cwd: Some(std::env::temp_dir().display().to_string()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected split: {response}");
+        };
+        assert_eq!(pane.workspace_id, app.public_workspace_id(1));
+        assert_eq!(app.state.active, Some(0));
+        let layout = app.pane_layout_snapshot(1, tab_idx).unwrap();
+        assert_eq!(layout.panes.len(), 2);
+        assert!(layout
+            .panes
+            .iter()
+            .any(|entry| entry.pane_id == pane.pane_id));
+        assert_eq!(layout_updates(&app), vec![layout]);
+        assert_eq!(
+            app.event_hub
+                .events_after(0)
+                .into_iter()
+                .map(|(_, e)| e.event)
+                .collect::<Vec<_>>(),
+            vec![EventKind::PaneCreated, EventKind::LayoutUpdated]
+        );
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    #[test]
+    fn m813_resize_noop_and_error_do_not_emit_layout() {
+        let mut app = app_with_linked_worktree();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let before = app.pane_layout_snapshot(0, 0).unwrap();
+        let response = app.handle_pane_resize(
+            "noop".into(),
+            PaneResizeParams {
+                pane_id: app.public_pane_id(0, root),
+                direction: PaneDirection::Left,
+                amount: Some(0.1),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneResize { resize } = success.result else {
+            panic!("expected resize");
+        };
+        assert!(!resize.changed);
+        assert_eq!(resize.layout, before);
+        assert!(layout_updates(&app).is_empty());
+        let response = app.handle_pane_resize(
+            "error".into(),
+            PaneResizeParams {
+                pane_id: Some("absent".into()),
+                direction: PaneDirection::Left,
+                amount: Some(0.1),
+            },
+        );
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "pane_not_found");
+        assert_eq!(app.pane_layout_snapshot(0, 0).unwrap(), before);
+        assert!(layout_updates(&app).is_empty());
+    }
+
+    #[test]
+    fn m813_close_last_pane_does_not_report_the_next_tab() {
+        let mut app = app_with_linked_worktree();
+        let closing = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].test_add_tab(Some("survivor"));
+        let survivor = app.state.workspaces[0].tabs[1].root_pane;
+        seed_terminal_states(&mut app);
+        let response = app.handle_pane_close(
+            "close".into(),
+            PaneTarget {
+                pane_id: app.public_pane_id(0, closing).unwrap(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::Ok {}));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, survivor);
+        assert!(layout_updates(&app).is_empty());
     }
 
     fn app_with_send_key_runtime(
@@ -3372,6 +3525,7 @@ mod tests {
         assert_eq!(success.id, "req");
         assert_eq!(app.state.request_remove_linked_worktree, None);
         assert!(app.state.workspaces.is_empty());
+        assert!(layout_updates(&app).is_empty());
     }
 
     #[test]
@@ -3405,6 +3559,13 @@ mod tests {
         assert!(app.state.copy_mode.is_none());
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(survivor));
         app.state.assert_invariants_for_test();
+        assert_eq!(
+            layout_updates(&app),
+            vec![app.pane_layout_snapshot(0, 0).unwrap()]
+        );
+        let events = app.event_hub.events_after(0);
+        assert_eq!(events[0].1.event, EventKind::PaneClosed);
+        assert_eq!(events[1].1.event, EventKind::LayoutUpdated);
     }
 
     #[test]
@@ -3438,6 +3599,7 @@ mod tests {
         assert_eq!(swap.layout.focused_pane_id, swap.source_pane_id);
         assert_eq!(swap.layout.panes.len(), 2);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(source));
+        assert_eq!(layout_updates(&app), vec![swap.layout]);
     }
 
     #[test]
@@ -3500,6 +3662,7 @@ mod tests {
         assert_eq!(swap.source_pane_id, source_public);
         assert_eq!(swap.target_pane_id, None);
         assert_eq!(swap.layout.panes.len(), 1);
+        assert!(layout_updates(&app).is_empty());
     }
 
     #[test]
@@ -3526,6 +3689,7 @@ mod tests {
         assert_eq!(swap.source_pane_id, source_public);
         assert_eq!(swap.target_pane_id, Some("missing-pane".into()));
         assert_eq!(swap.layout.panes.len(), 1);
+        assert!(layout_updates(&app).is_empty());
     }
 
     #[test]
@@ -3907,7 +4071,20 @@ mod tests {
             .iter()
             .map(|(_, envelope)| envelope.event)
             .collect();
-        assert_eq!(events, vec![EventKind::TabCreated, EventKind::PaneMoved]);
+        assert_eq!(
+            events,
+            vec![
+                EventKind::TabCreated,
+                EventKind::PaneMoved,
+                EventKind::LayoutUpdated,
+                EventKind::LayoutUpdated
+            ]
+        );
+        assert!(matches!(&envelopes[2].1.data,
+            EventData::LayoutUpdated { layout }
+                if Some(layout) == move_result.source_layout.as_deref()));
+        assert!(matches!(&envelopes[3].1.data,
+            EventData::LayoutUpdated { layout } if layout == move_result.target_layout.as_ref()));
         match &envelopes[0].1.data {
             EventData::TabCreated { tab } => assert!(tab.focused),
             other => panic!("expected tab created event, got {other:?}"),
@@ -4028,8 +4205,11 @@ mod tests {
                 EventKind::WorkspaceCreated,
                 EventKind::TabCreated,
                 EventKind::PaneMoved,
+                EventKind::LayoutUpdated,
             ]
         );
+        assert!(matches!(&envelopes[5].1.data,
+            EventData::LayoutUpdated { layout } if layout == move_result.target_layout.as_ref()));
         match &envelopes[2].1.data {
             EventData::WorkspaceCreated { workspace } => assert!(workspace.focused),
             other => panic!("expected workspace created event, got {other:?}"),
@@ -4069,6 +4249,7 @@ mod tests {
         assert!(!move_result.changed);
         assert_eq!(move_result.reason, Some(PaneMoveReason::SameTab));
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert!(layout_updates(&app).is_empty());
     }
 
     #[test]
@@ -4445,6 +4626,8 @@ mod tests {
         assert_eq!(zoom.focused_pane_id, zoom.pane_id);
         assert!(zoom.zoomed);
         assert!(zoom.layout.zoomed);
+        let first_layout = zoom.layout;
+        assert_eq!(layout_updates(&app), vec![first_layout.clone()]);
 
         let response = app.handle_pane_zoom("req".into(), PaneZoomParams::default());
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -4456,6 +4639,7 @@ mod tests {
         assert!(!zoom.focus_changed);
         assert!(!zoom.zoomed);
         assert!(!zoom.layout.zoomed);
+        assert_eq!(layout_updates(&app), vec![first_layout, zoom.layout]);
     }
 
     #[test]
@@ -4565,6 +4749,7 @@ mod tests {
         assert_eq!(zoom.pane_id, root_public);
         assert!(!zoom.zoomed);
         assert!(!app.state.workspaces[0].tabs[0].zoomed);
+        assert!(layout_updates(&app).is_empty());
     }
 
     #[test]
@@ -4673,6 +4858,31 @@ mod tests {
         assert_eq!(zoom.reason, Some(PaneZoomReason::AlreadyZoomed));
         assert!(zoom.zoomed);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(right));
+        assert_eq!(layout_updates(&app), vec![zoom.layout]);
+    }
+
+    #[test]
+    fn m813_repeated_zoom_does_not_emit_an_unchanged_layout() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].zoomed = true;
+        let before = app.pane_layout_snapshot(0, 0).unwrap();
+        let response = app.handle_pane_zoom(
+            "noop".into(),
+            PaneZoomParams {
+                pane_id: None,
+                mode: PaneZoomMode::On,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneZoom { zoom } = success.result else {
+            panic!("expected zoom response");
+        };
+        assert!(!zoom.changed);
+        assert!(!zoom.focus_changed);
+        assert_eq!(zoom.layout, before);
+        assert!(layout_updates(&app).is_empty());
     }
 
     #[test]
@@ -4780,6 +4990,47 @@ mod tests {
         assert!(edges.right);
         assert!(edges.up);
         assert!(edges.down);
+    }
+
+    #[test]
+    fn m813_resize_emits_current_layout() {
+        let mut app = app_with_linked_worktree();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(right);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 100, 20));
+        let before = app.event_hub.current_sequence();
+        let response = app.handle_pane_resize(
+            "layout-resize".into(),
+            PaneResizeParams {
+                pane_id: app.public_pane_id(0, root),
+                direction: PaneDirection::Right,
+                amount: Some(0.1),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneResize { resize } = success.result else {
+            panic!("resize must succeed before checking emission");
+        };
+        assert!(resize.changed);
+        assert_eq!(resize.layout.panes.len(), 2);
+        assert!((resize.layout.splits[0].ratio - 0.6).abs() < f32::EPSILON);
+        let events: Vec<_> = app
+            .event_hub
+            .events_after(before)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .collect();
+        let update = events
+            .iter()
+            .find(|event| event["event"] == "layout_updated")
+            .expect("changed resize must emit layout_updated");
+        assert_eq!(update["data"]["type"], "layout_updated");
+        assert_eq!(
+            update["data"]["layout"],
+            serde_json::to_value(resize.layout).unwrap()
+        );
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(right));
     }
 
     #[test]

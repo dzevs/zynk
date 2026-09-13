@@ -252,6 +252,14 @@ impl App {
             event: crate::api::schema::EventKind::PaneCreated,
             data: crate::api::schema::EventData::PaneCreated { pane: pane.clone() },
         });
+        if let Some(tab_idx) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.find_tab_index_for_pane(new_pane.pane_id))
+        {
+            self.emit_layout_updated_event(ws_idx, tab_idx);
+        }
         encode_success(
             id,
             ResponseResult::PluginPaneOpened {

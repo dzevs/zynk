@@ -218,6 +218,7 @@ impl App {
         let Some(layout) = self.layout_description(ws_idx, new_tab_idx) else {
             return encode_error(id, "layout_apply_failed", "new layout unavailable");
         };
+        self.emit_layout_updated_event(ws_idx, new_tab_idx);
         encode_success(id, ResponseResult::LayoutApply { layout })
     }
 
@@ -250,6 +251,7 @@ impl App {
         let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
             return encode_error(id, "layout_not_found", "layout unavailable");
         };
+        self.emit_layout_updated_event(ws_idx, tab_idx);
         encode_success(id, ResponseResult::LayoutSplitRatioSet { layout })
     }
 
@@ -619,6 +621,19 @@ mod tests {
         app
     }
 
+    fn assert_layout_event(app: &App) {
+        let layouts: Vec<_> = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                EventData::LayoutUpdated { layout } => Some(layout),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(layouts, vec![app.pane_layout_snapshot(0, 0).unwrap()]);
+    }
+
     #[test]
     fn layout_export_returns_portable_tree() {
         let mut app = app_with_workspace();
@@ -694,6 +709,7 @@ mod tests {
             panic!("expected split layout root");
         };
         assert!((ratio - 0.72).abs() < f32::EPSILON);
+        assert_layout_event(&app);
     }
 
     #[test]
@@ -712,6 +728,7 @@ mod tests {
 
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "split_not_found");
+        assert!(app.event_hub.events_after(0).is_empty());
     }
 
     #[tokio::test]
@@ -782,6 +799,12 @@ mod tests {
             second_pane.command,
             Some(vec!["sh".into(), "-c".into(), "true".into()])
         );
+        assert_layout_event(&app);
+        let events = app.event_hub.events_after(0);
+        assert_eq!(events.last().unwrap().1.event, EventKind::LayoutUpdated);
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     #[tokio::test]
@@ -935,6 +958,53 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_layout");
         assert_eq!(app.state.workspaces[0].tabs.len(), original_tab_count);
+        assert!(app.event_hub.events_after(0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn m813_layout_apply_failed_second_spawn_rolls_back_without_events() {
+        let mut app = app_with_workspace();
+        let before = app.pane_layout_snapshot(0, 0).unwrap();
+        let terminal_count = app.state.terminals.len();
+        let response = app.handle_layout_apply(
+            "rollback".into(),
+            LayoutApplyParams {
+                workspace_id: Some(app.public_workspace_id(0)),
+                tab_id: None,
+                tab_label: Some("failed".into()),
+                focus: false,
+                root: LayoutNode::Split {
+                    direction: SplitDirection::Right,
+                    ratio: 0.7,
+                    first: Box::new(LayoutNode::Pane {
+                        pane: LayoutPane {
+                            command: Some(vec!["/bin/sh".into()]),
+                            ..Default::default()
+                        },
+                    }),
+                    second: Box::new(LayoutNode::Pane {
+                        pane: LayoutPane {
+                            command: Some(vec!["/__zynk_missing_layout_executable__".into()]),
+                            ..Default::default()
+                        },
+                    }),
+                },
+            },
+        );
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "layout_apply_failed");
+        assert!(
+            error
+                .error
+                .message
+                .contains("__zynk_missing_layout_executable__"),
+            "must fail at the second spawn: {response}"
+        );
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.pane_layout_snapshot(0, 0).unwrap(), before);
+        assert_eq!(app.state.terminals.len(), terminal_count);
+        assert_eq!(app.terminal_runtimes.len(), 0);
+        assert!(app.event_hub.events_after(0).is_empty());
     }
 
     #[test]

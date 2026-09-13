@@ -239,6 +239,62 @@ mod tests {
     }
 
     #[test]
+    fn m813_layout_event_and_subscription_preserve_canonical_wire_shapes() {
+        let request = serde_json::json!({
+            "id": "layout-sub", "method": "events.subscribe",
+            "params": {"subscriptions": [{"type": "layout.updated"}]}
+        });
+        let decoded: Request = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), request);
+        let event = serde_json::json!({
+            "event": "layout_updated",
+            "data": {"type": "layout_updated", "layout": {
+                "workspace_id": "w7", "tab_id": "w7:t3", "zoomed": true,
+                "area": {"x": 3, "y": 4, "width": 97, "height": 23},
+                "focused_pane_id": "w7:p8", "panes": [{
+                    "pane_id": "w7:p8", "focused": true,
+                    "rect": {"x": 3, "y": 4, "width": 97, "height": 23}
+                }], "splits": [{"id": "split_0_root", "direction": "right",
+                    "ratio": 0.625, "rect": {"x": 3, "y": 4, "width": 97, "height": 23}}]
+            }}
+        });
+        let decoded: EventEnvelope = serde_json::from_value(event.clone()).unwrap();
+        assert_eq!(decoded.event, EventKind::LayoutUpdated);
+        assert_eq!(decoded.event.dot_name(), "layout.updated");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), event);
+        assert!(!plugin_hook_event_names().contains(&"layout.updated"));
+        assert!(plugin_hook_event_names().contains(&"pane.created"));
+        fn requires_eq<T: Eq>() {}
+        requires_eq::<SubscriptionEventEnvelope>();
+        requires_eq::<SubscriptionEventData>();
+    }
+
+    #[test]
+    fn m813_dynamic_schema_includes_layout_event_and_snapshot_fields() {
+        let document = export::protocol_schema_document();
+        let definitions = &document["schemas"]["event"]["$defs"];
+        assert!(definitions["EventKind"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("layout_updated")));
+        assert!(definitions["EventData"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|variant| variant.pointer("/properties/type/const")
+                == Some(&serde_json::json!("layout_updated"))
+                && variant["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("layout"))));
+        assert!(definitions["PaneLayoutSnapshot"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("focused_pane_id")));
+        assert_eq!(document["protocol"], crate::protocol::PROTOCOL_VERSION);
+    }
+
+    #[test]
     fn api_schema_bundle_metadata_uses_current_protocol() {
         let document = export::protocol_schema_document();
         assert_eq!(document["protocol"], crate::protocol::PROTOCOL_VERSION);
@@ -1011,6 +1067,7 @@ mod tests {
             "pane_agent_status_changed",
             "pane.agent_status_changed",
         ),
+        (EventKind::LayoutUpdated, "layout_updated", "layout.updated"),
     ];
 
     /// The ids `serde` itself reports as acceptable for an [`EventKind`], taken
@@ -1062,12 +1119,17 @@ mod tests {
             .collect();
         let expected_hook_dot_names: Vec<&str> = EVENT_KIND_WIRE_IDS
             .iter()
-            .filter(|(kind, _, _)| !matches!(kind, EventKind::PaneOutputChanged))
+            .filter(|(kind, _, _)| {
+                !matches!(
+                    kind,
+                    EventKind::PaneOutputChanged | EventKind::LayoutUpdated
+                )
+            })
             .map(|(_, _, dot_name)| *dot_name)
             .collect();
         assert_eq!(
             hook_dot_names, expected_hook_dot_names,
-            "plugin event hooks must cover every event kind except pane.output_changed"
+            "plugin event hooks must exclude pane.output_changed and layout.updated"
         );
     }
 

@@ -10,6 +10,10 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- The `layout.updated` socket subscription reports layout snapshots after pane,
+  layout, workspace/tab creation, and plugin-pane changes. It is not a plugin
+  hook or a lossless redraw stream; reconnecting consumers should refresh with
+  `session.snapshot` rather than rely on retained event history.
 - `events.wait` now handles pane agent-status matches at the socket layer with
   server-owned timeouts. `wait agent-status` uses it without changing its event
   JSON output; the fork's `agent wait` still accepts Idle or Done. These status

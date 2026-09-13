@@ -1437,6 +1437,7 @@ mod tests {
                 crate::api::schema::EventKind::WorkspaceCreated,
                 crate::api::schema::EventKind::TabCreated,
                 crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::LayoutUpdated,
             ]
         );
         shutdown_test_runtimes(&mut app);

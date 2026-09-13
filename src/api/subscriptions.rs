@@ -176,6 +176,10 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::PaneAgentDetected,
                 last_sequence: 0,
             })),
+            Subscription::LayoutUpdated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::LayoutUpdated,
+                last_sequence: 0,
+            })),
             Subscription::PaneOutputMatched {
                 pane_id,
                 source,
@@ -566,6 +570,58 @@ mod tests {
                 state_labels: HashMap::new(),
             },
         }
+    }
+
+    #[test]
+    fn m813_layout_subscription_filters_and_replays_without_app_requests() {
+        let hub = EventHub::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let make_event = |tab_id: &str| EventEnvelope {
+            event: EventKind::LayoutUpdated,
+            data: EventData::LayoutUpdated {
+                layout: crate::api::schema::PaneLayoutSnapshot {
+                    workspace_id: "w3".into(),
+                    tab_id: tab_id.into(),
+                    zoomed: false,
+                    area: crate::api::schema::PaneLayoutRect {
+                        x: 2,
+                        y: 3,
+                        width: 80,
+                        height: 20,
+                    },
+                    focused_pane_id: "w3:p2".into(),
+                    panes: vec![],
+                    splits: vec![],
+                },
+            },
+        };
+        let first = make_event("w3:t2");
+        hub.push(status_event(Some("unrelated")));
+        hub.push(first.clone());
+        let mut subscription =
+            ActiveSubscription::new(Subscription::LayoutUpdated {}, "layout", 0, &tx, &hub)
+                .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "layout setup must not enqueue an App request"
+        );
+        assert_eq!(
+            subscription.poll(&tx, &hub),
+            Some(serde_json::to_value(first).unwrap())
+        );
+        assert!(subscription.poll(&tx, &hub).is_none());
+        let later = make_event("w3:t5");
+        hub.push(status_event(Some("still unrelated")));
+        hub.push(later.clone());
+        assert_eq!(
+            subscription.poll(&tx, &hub),
+            Some(serde_json::to_value(later).unwrap())
+        );
+        assert!(subscription.poll(&tx, &hub).is_none());
+        assert!(
+            rx.try_recv().is_err(),
+            "layout polling must not enqueue an App request"
+        );
     }
 
     #[test]

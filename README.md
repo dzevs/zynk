@@ -160,6 +160,13 @@ An already matching status wins even at timeout zero. Timeouts include setup and
 between bounded requests/polls, not as a hard wall-clock deadline. Status fields are observations,
 not authenticated identity or receipt evidence; `agent wait` retains its Idle-or-Done behavior.
 
+The socket API accepts `events.subscribe` with `{"subscriptions":[{"type":"layout.updated"}]}`.
+Updates contain the target tab's current pane/split geometry, focus, and zoom after the supported
+pane/layout and creation operations. This is not an exhaustive TUI redraw stream or a plugin hook.
+Subscriptions can replay matching entries from the existing 512-record history; reconnect with a
+fresh `session.snapshot` because replay is neither lossless nor atomic with snapshot acquisition.
+Layout and agent projections are observations, not identity or delivery-receipt authority.
+
 `zynk api schema --json` exports the socket API's JSON schema, including native receipt methods,
 without a running server or database. Use `--output PATH` instead to write the schema to a file.
 

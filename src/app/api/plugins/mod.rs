@@ -2311,6 +2311,204 @@ command = ["sh", "-c", "echo ok"]
         let _ = std::fs::remove_dir_all(root);
     }
 
+    struct LayoutPluginRoot(std::path::PathBuf);
+
+    impl Drop for LayoutPluginRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn assert_plugin_layout(placement: PluginPanePlacement) {
+        let root = LayoutPluginRoot(unique_temp_path("layout-plugin"));
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("foreground"),
+            crate::workspace::Workspace::test_new("background"),
+        ];
+        let target_tab = app.state.workspaces[1].test_add_tab(Some("target"));
+        let target = app.state.workspaces[1].tabs[target_tab].root_pane;
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 101, 23));
+        write_manifest_content(
+            &root.0,
+            r#"
+id = "example.layout"
+name = "Layout Plugin"
+version = "0.1.0"
+min_zynk_version = "0.6.10"
+platforms = ["linux"]
+[[panes]]
+id = "view"
+title = "Layout"
+command = ["sh", "-c", "true"]
+"#,
+        );
+        link_manifest(&mut app, &root.0);
+        let before = app.event_hub.current_sequence();
+        let response = app.handle_api_request(Request {
+            id: "plugin-layout".into(),
+            method: Method::PluginPaneOpen(PluginPaneOpenParams {
+                plugin_id: "example.layout".into(),
+                entrypoint: "view".into(),
+                placement: Some(placement),
+                workspace_id: (placement == PluginPanePlacement::Tab)
+                    .then(|| app.public_workspace_id(1)),
+                target_pane_id: matches!(
+                    placement,
+                    PluginPanePlacement::Split | PluginPanePlacement::Zoomed
+                )
+                .then(|| app.public_pane_id(1, target).unwrap()),
+                direction: None,
+                cwd: None,
+                focus: false,
+                env: std::collections::HashMap::new(),
+            }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response)
+            .unwrap_or_else(|error| panic!("plugin setup failed: {error}: {response}"));
+        let ResponseResult::PluginPaneOpened { plugin_pane } = success.result else {
+            panic!("expected plugin pane");
+        };
+        let (ws_idx, pane_id) = app.parse_pane_id(&plugin_pane.pane.pane_id).unwrap();
+        let tab_idx = app.state.workspaces[ws_idx]
+            .find_tab_index_for_pane(pane_id)
+            .unwrap();
+        assert_eq!(
+            ws_idx,
+            if placement == PluginPanePlacement::Overlay {
+                0
+            } else {
+                1
+            }
+        );
+        if matches!(
+            placement,
+            PluginPanePlacement::Split | PluginPanePlacement::Tab
+        ) {
+            assert_eq!(app.state.active, Some(0));
+            assert_ne!(Some(ws_idx), app.state.active);
+        }
+        let expected = app.pane_layout_snapshot(ws_idx, tab_idx).unwrap();
+        assert_eq!(
+            expected.zoomed,
+            matches!(
+                placement,
+                PluginPanePlacement::Overlay | PluginPanePlacement::Zoomed
+            )
+        );
+        assert!(expected
+            .panes
+            .iter()
+            .any(|pane| pane.pane_id == plugin_pane.pane.pane_id));
+        let events = app.event_hub.events_after(before);
+        let layouts: Vec<_> = events
+            .iter()
+            .filter_map(|(_, event)| match &event.data {
+                crate::api::schema::EventData::LayoutUpdated { layout } => Some(layout.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(layouts, vec![expected]);
+        let created = events
+            .iter()
+            .position(|(_, e)| e.event == crate::api::schema::EventKind::PaneCreated)
+            .unwrap();
+        let updated = events
+            .iter()
+            .position(|(_, e)| e.event == crate::api::schema::EventKind::LayoutUpdated)
+            .unwrap();
+        assert!(created < updated);
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn m813_plugin_overlay_layout_includes_final_zoom() {
+        assert_plugin_layout(PluginPanePlacement::Overlay);
+    }
+
+    #[tokio::test]
+    async fn m813_plugin_split_layout_uses_background_target() {
+        assert_plugin_layout(PluginPanePlacement::Split);
+    }
+
+    #[tokio::test]
+    async fn m813_plugin_zoomed_layout_includes_final_focus() {
+        assert_plugin_layout(PluginPanePlacement::Zoomed);
+    }
+
+    #[tokio::test]
+    async fn m813_plugin_tab_layout_uses_background_target() {
+        assert_plugin_layout(PluginPanePlacement::Tab);
+    }
+
+    #[test]
+    fn m813_layout_hook_warns_and_never_runs_but_allowed_hook_executes() {
+        let root = LayoutPluginRoot(unique_temp_path("layout-hook"));
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("hook")];
+        app.state.ensure_test_terminals();
+        write_manifest_content(
+            &root.0,
+            r#"
+id = "example.layout-hook"
+name = "Layout Hook"
+version = "0.1.0"
+min_zynk_version = "0.6.10"
+[[events]]
+on = "layout.updated"
+command = ["sh", "-c", "printf forbidden"]
+[[events]]
+on = "pane.created"
+command = ["sh", "-c", "printf allowed"]
+"#,
+        );
+        let response = app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.0.display().to_string(),
+                enabled: true,
+                source: None,
+            }),
+        });
+        let ResponseResult::PluginLinked { plugin } = response_result(&response) else {
+            panic!("expected linked plugin");
+        };
+        let warned = plugin
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("layout.updated"));
+        assert!(!plugin
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("pane.created")));
+        app.emit_layout_updated_event(0, 0);
+        let forbidden_started = !app.state.plugin_command_logs.is_empty();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.emit_event(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::PaneCreated,
+            data: crate::api::schema::EventData::PaneCreated {
+                pane: app.pane_info(0, pane_id).unwrap(),
+            },
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.state.plugin_commands_in_flight > 0 && std::time::Instant::now() < deadline {
+            app.drain_all_internal_events();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(app.state.plugin_commands_in_flight, 0);
+        assert!(warned, "layout hooks must remain warning-only");
+        assert!(!forbidden_started, "layout hook must not execute");
+        assert_eq!(app.state.plugin_command_logs.len(), 1);
+        let log = &app.state.plugin_command_logs[0];
+        assert_eq!(log.event.as_deref(), Some("pane.created"));
+        assert_eq!(log.stdout.as_deref(), Some("allowed"));
+        assert_eq!(log.exit_code, Some(0));
+    }
+
     #[test]
     fn output_changed_event_hooks_do_not_run_even_if_event_is_emitted() {
         let mut app = test_app();

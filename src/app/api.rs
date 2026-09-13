@@ -212,6 +212,14 @@ impl App {
             }
         }
 
+        let pane_exit_layout_target = if let AppEvent::PaneDied { pane_id } = &ev {
+            self.find_pane(*pane_id).and_then(|(ws_idx, _)| {
+                self.layout_update_target_after_pane_removal(ws_idx, *pane_id)
+            })
+        } else {
+            None
+        };
+
         let released_agent = if let AppEvent::HookAgentReleased {
             pane_id,
             known_agent,
@@ -311,6 +319,9 @@ impl App {
                 was_overlay_focused_in_tab,
                 tab_zoomed_before_exit,
             );
+        }
+        if let Some((ws_idx, tab_idx)) = pane_exit_layout_target {
+            self.emit_layout_updated_event(ws_idx, tab_idx);
         }
 
         if self.local_terminal_notifications
@@ -1267,6 +1278,7 @@ fn agent_manifest_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::schema::{EventData, EventKind};
     use crate::detect::{Agent, AgentState};
 
     fn init_repo(path: &std::path::Path) {
@@ -1894,6 +1906,51 @@ mod tests {
     }
 
     #[test]
+    fn m813_pane_exit_emits_post_removal_layout() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("exit-layout");
+        let survivor = workspace.tabs[0].root_pane;
+        let dead = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 100, 20));
+        let before = app.event_hub.current_sequence();
+
+        app.handle_internal_event(AppEvent::PaneDied { pane_id: dead });
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(survivor));
+        let events: Vec<_> = app
+            .event_hub
+            .events_after(before)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .collect();
+        let exited = events
+            .iter()
+            .position(|event| event["event"] == "pane_exited")
+            .expect("exit must be reported before checking the layout update");
+        let updated = events
+            .iter()
+            .position(|event| event["event"] == "layout_updated")
+            .expect("surviving tab must emit layout_updated after removal");
+        assert!(exited < updated);
+        assert_eq!(events[updated]["data"]["type"], "layout_updated");
+        assert_eq!(
+            events[updated]["data"]["layout"],
+            serde_json::to_value(app.pane_layout_snapshot(0, 0).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
     fn overlay_exit_preserves_focus_changed_before_exit() {
         let mut workspace = crate::workspace::Workspace::test_new("overlay");
         let previous_focus = workspace.tabs[0].root_pane;
@@ -1912,6 +1969,7 @@ mod tests {
         assert_eq!(overlay_tab.layout.focused(), previous_focus);
         assert!(overlay_tab.zoomed);
         assert!(app.overlay_panes.is_empty());
+        assert_exit_layout(&app, 0, 0);
     }
 
     #[test]
@@ -1932,6 +1990,7 @@ mod tests {
         assert_eq!(tab.layout.focused(), previous_focus);
         assert!(tab.zoomed);
         assert!(app.overlay_panes.is_empty());
+        assert_exit_layout(&app, 0, 0);
     }
 
     #[test]
@@ -1951,6 +2010,69 @@ mod tests {
         assert_eq!(tab.layout.focused(), previous_focus);
         assert!(!tab.zoomed);
         assert!(app.overlay_panes.is_empty());
+        assert_exit_layout(&app, 0, 0);
+    }
+
+    fn assert_exit_layout(app: &App, ws_idx: usize, tab_idx: usize) {
+        let events = app.event_hub.events_after(0);
+        let layouts: Vec<_> = events
+            .iter()
+            .filter_map(|(_, event)| match &event.data {
+                EventData::LayoutUpdated { layout } => Some(layout.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            layouts,
+            vec![app.pane_layout_snapshot(ws_idx, tab_idx).unwrap()]
+        );
+        let exited = events
+            .iter()
+            .position(|(_, event)| event.event == EventKind::PaneExited)
+            .unwrap();
+        let updated = events
+            .iter()
+            .position(|(_, event)| event.event == EventKind::LayoutUpdated)
+            .unwrap();
+        assert!(exited < updated);
+    }
+
+    #[test]
+    fn m813_focused_overlay_reports_restored_focus_and_prior_zoom() {
+        let mut workspace = crate::workspace::Workspace::test_new("focused-overlay");
+        let previous_focus = workspace.tabs[0].root_pane;
+        let _sibling = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let overlay = workspace.test_split(ratatui::layout::Direction::Vertical);
+        assert_eq!(workspace.tabs[0].layout.focused(), overlay);
+        assert_ne!(overlay, previous_focus);
+        workspace.tabs[0].zoomed = true;
+        let mut app = app_with_overlay(workspace, overlay, previous_focus, true);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 103, 27));
+        app.handle_internal_event(AppEvent::PaneDied { pane_id: overlay });
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(tab.layout.pane_count(), 2);
+        assert_eq!(tab.layout.focused(), previous_focus);
+        assert!(tab.zoomed);
+        assert!(app.overlay_panes.is_empty());
+        assert_exit_layout(&app, 0, 0);
+    }
+
+    #[test]
+    fn m813_last_pane_exit_does_not_report_a_vanished_tab() {
+        let mut workspace = crate::workspace::Workspace::test_new("vanished");
+        let dead = workspace.tabs[0].root_pane;
+        workspace.test_add_tab(Some("survivor"));
+        let survivor = workspace.tabs[1].root_pane;
+        let mut app = app_with_overlay(workspace, dead, survivor, false);
+        app.overlay_panes.clear();
+        app.handle_internal_event(AppEvent::PaneDied { pane_id: dead });
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, survivor);
+        assert!(app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .all(|(_, event)| event.event != EventKind::LayoutUpdated));
     }
 
     #[tokio::test]
@@ -1996,6 +2118,12 @@ mod tests {
         assert!(!terminal.respawn_shell_on_exit);
         assert!(terminal.persisted_agent_session.is_none());
         assert!(terminal.agent_name.is_none());
+
+        assert!(app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .all(|(_, event)| event.event != EventKind::LayoutUpdated));
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
