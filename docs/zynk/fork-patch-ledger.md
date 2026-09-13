@@ -5461,3 +5461,96 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   Full check, gate, normal hooks and committed-source verification precede
   exact-SHA Gate-2. No release build, Zig verification, whole-M8 approval or
   merge/push/install/tag/publish/release/shared-cleanup authorization follows.
+
+### M8-27 - Linux initial-request polling (IMPLEMENTED / PENDING VERIFICATION)
+
+- Assigned source: `d64cf40ca3b7c9551da0b63abeb24cb89874db27` (SPLIT), patch
+  SHA-256 `70e99b79f0458c16679918963df70498836ac762e82092a8c9cacd71dabfafa9`.
+  Parent: `accc18811e03acc26a2ac56f4d8541b15d568867`. Gate-1
+  `msg_c13cf368c44dc9bf` approves design `6f3d8d20`; companion `cf6dd87a`
+  adds M14, accepted by `msg_33d534ee342d3775`, without rewriting the design.
+  Preflight `10cf0899` binds the actual parent, source bodies, locked crate
+  sources, all thirty old named tests and the preserved fuller source patch.
+  Checkpoint-13 verdict and its evidence corrections remain separate records.
+- Assigned-source-only: no primary or secondary remainder binds here in either
+  archive or creator overlay. Twenty archived origins remain; unions 98 M8 /
+  34 M9 and all three authority files are unchanged. D-M5-4 remains due after
+  M8-28 at M8-33 for a0678a38 and at M9-12 for the secondary adaptations of
+  d4e0dd3d and d2c317ad. M8-65's six protocol-19 updates remain due; their
+  preservation through checkpoint 13 is not discharge. M8-37's inherited
+  pane_get error-mapping fix and required control conversion remain due.
+- Retain LocalStreamRead and the two crate-private polling functions in ipc.rs.
+  Take the Unix bodies unconditionally: zero read maps to Closed, positive to
+  Data, WouldBlock to Pending, every other read error propagates unchanged.
+  Keep the independent peer-closed probe, including its different Interrupted
+  treatment, and all credential, ownership, permissions and error classifiers.
+- In api/server.rs retain the initial-reader entry and add its timeout/limit
+  delegation. The one-byte loop uses only the new IPC read and mode functions;
+  normal loop outcomes pass through one final blocking-mode reset. Enabling
+  failure returns directly; reset failure retains precedence over loop results.
+  Strict UTF-8 conversion now precedes that reset, so intermediate timing is
+  not claimed identical. The default budgets and caller capture are unchanged.
+- Preserve first-line newline and unread tail, EOF-to-None even after partial
+  input, exact size/timeout errors and the inherited newline-before-size check.
+  Exactly max_bytes non-newline bytes plus newline remain accepted; the returned
+  line can exceed that named threshold by its newline. Deadlines are checked
+  only on Pending; already queued data can drain after the deadline. No hard
+  wall-clock guarantee, arbitrary incoming-mode restoration or multi-byte Data
+  count is introduced. The production buffer is nonempty and one byte.
+- Exclude the Windows no-op polling branch, named-pipe available-byte read arm,
+  probe_stream_closed delegation, complete windows_named_pipe_available helper
+  with PeekNamedPipe, and its closed-error classifier reference. Exclude the
+  Windows test module gate and its fixture bodies; adapt the five actual stream
+  properties in the existing Linux harness. Exclude the Windows changelog claim.
+  Both touched Rust files remain free of platform gates, including test gates.
+  No Windows backend, dependency, defect attribution or execution claim.
+- Seven new parent tests pass before production changes; all are characterization,
+  not Linux reds borrowed from upstream's Windows defect. Five further controls
+  require the new private interfaces; missing-helper compile failure is not
+  behavioral evidence. Twelve distinct tests, ten server and two IPC, in the
+  existing binary test harness; zero support recompilation. Focused green is
+  42/42: thirty old controls plus twelve new. All thirty old bodies and the seven
+  new parent bodies remain raw-identical. Only the old test Read import moves.
+- The real handler fixture owns its acquired socket and joins its worker on
+  Drop; direct fixtures use owned unnamed streams. T06 streams the literal
+  1 MiB boundary through an owned joined writer with a real send timeout, not a
+  blocking prefill. T05 retains the real five-second budget; private timeout and
+  limit controls supplement it. Matching runner durations are not timing parity.
+  The source call chain and literal assertions identify the default-budget test.
+  T08/T09 use a valid owned unconnected AF_UNIX fd, observing EINVAL on this
+  Linux kernel; this is generic error-exit evidence, not an accepted-peer route.
+- Fourteen compiled one-site mutants, all exit 100, with complete pass/fail
+  names, diagnostics, mutant bytes and restored hashes. Failure counts M01-M14
+  are 5/1/1/1/10/4/2/1/4/2/1/6/1/1. M02/M03/M04 run T07 alone; M14 runs T04
+  alone; the other ten run all 42. No independent-killer claim. Every one of the
+  twelve planned control pairings reaches its intended assertion or result
+  expectation; no unmatched control is passed off as discrimination evidence.
+- M02/M03 fail EOF/Data classification after the flag passes; M04 fails the flag
+  before a read could block. M13 reports both collected EOF rows as Some rather
+  than None. M14 returns the correct first line, then fails exact tail equality
+  after consuming one extra byte. Its later mode assertion is unreached, not
+  passing; normal green and separate mode mutants exercise that property.
+- All fourteen runs are checked for T06 crossings. M01/M09 reach only the writer
+  safety assertion with WouldBlock, not the size table. M05/M12 fail outgoing
+  mode fields; M06 fails accepted line bytes/length. M07 alone targets its size
+  boundary comparison and also kills the small-boundary control. No writer
+  safety, compiler, abort or harness-timeout crossing is counted as an intended
+  kill; all intended diagnostics are checked separately from exit codes.
+- Mutation validator V1 incorrectly required T01's panic inside its test body;
+  the intended idle-completion assertion is in the named assert_pending method.
+  V2 validates that method and T01's call, retaining M01's exact valid run without
+  rerun, then executes M02-M14. No Rust correction or test relaxation. Original
+  script, failed validator log and result record remain as instrument evidence.
+- The bounded source audit reconstructs both old modules and thirty old test
+  bodies raw. Reader functions match upstream; IPC bodies match its unwrapped
+  Unix branches. The route audit is load-bearing: behavioral parity alone could
+  not reject an equivalent inline bypass of the extraction. This is checkpoint
+  evidence, not a general Rust parser or an installed future invariant.
+- README and completion reconciliation are no-ops: no public command, flag,
+  help, JSON or user contract changes. Documentation was reread at this parent;
+  CHANGELOG records the internal refactor. Source predates upstream relicensing;
+  existing notice/header bytes remain unchanged. No guidance, release metadata,
+  wire, DB, detection or remote-transport edit. Full check, content gates, normal
+  hooks and exact-SHA verification precede Gate-2. No release build, Zig check,
+  whole-M8 approval or operator merge/push/install/tag/publish/release/cleanup
+  authorization follows.

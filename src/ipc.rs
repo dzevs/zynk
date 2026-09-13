@@ -8,6 +8,12 @@ use interprocess::local_socket::traits::Stream as _;
 pub(crate) type LocalListener = interprocess::local_socket::Listener;
 pub(crate) type LocalStream = interprocess::local_socket::Stream;
 
+pub(crate) enum LocalStreamRead {
+    Data,
+    Pending,
+    Closed,
+}
+
 /// Kernel-reported credentials of the peer on an accepted API connection
 /// (ADR 0014).
 ///
@@ -122,6 +128,22 @@ pub(crate) fn local_stream_peer_closed(stream: &mut LocalStream) -> io::Result<b
     status
 }
 
+pub(crate) fn set_local_stream_polling(stream: &mut LocalStream, enabled: bool) -> io::Result<()> {
+    stream.set_nonblocking(enabled)
+}
+
+pub(crate) fn poll_local_stream_read(
+    stream: &mut LocalStream,
+    buf: &mut [u8],
+) -> io::Result<LocalStreamRead> {
+    match stream.read(buf) {
+        Ok(0) => Ok(LocalStreamRead::Closed),
+        Ok(_) => Ok(LocalStreamRead::Data),
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(LocalStreamRead::Pending),
+        Err(err) => Err(err),
+    }
+}
+
 pub(crate) fn is_connection_closed_error(err: &io::Error) -> bool {
     matches!(
         err.kind(),
@@ -172,6 +194,66 @@ pub(crate) fn restrict_socket_permissions(path: &Path, mode: u32) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn m827_is_nonblocking(stream: &LocalStream) -> bool {
+        use std::os::fd::AsRawFd;
+        let LocalStream::UdSocket(socket) = stream;
+        // SAFETY: the borrowed socket owns this live descriptor throughout the query.
+        let flags = unsafe { libc::fcntl(socket.inner().as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0, "F_GETFL failed: {}", io::Error::last_os_error());
+        flags & libc::O_NONBLOCK != 0
+    }
+
+    #[test]
+    fn m827_polling_mode_and_read_outcomes() {
+        use std::io::Write;
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut server = LocalStream::UdSocket(server.into());
+        set_local_stream_polling(&mut server, true).unwrap();
+        assert!(m827_is_nonblocking(&server));
+        let mut byte = [0; 1];
+        assert!(matches!(
+            poll_local_stream_read(&mut server, &mut byte).unwrap(),
+            LocalStreamRead::Pending
+        ));
+        client.write_all(b"xy").unwrap();
+        for expected in b"xy" {
+            assert!(matches!(
+                poll_local_stream_read(&mut server, &mut byte).unwrap(),
+                LocalStreamRead::Data
+            ));
+            assert_eq!(byte[0], *expected);
+        }
+        assert!(matches!(
+            poll_local_stream_read(&mut server, &mut byte).unwrap(),
+            LocalStreamRead::Pending
+        ));
+        drop(client);
+        assert!(matches!(
+            poll_local_stream_read(&mut server, &mut byte).unwrap(),
+            LocalStreamRead::Closed
+        ));
+        set_local_stream_polling(&mut server, false).unwrap();
+        assert!(!m827_is_nonblocking(&server));
+    }
+
+    #[test]
+    fn m827_polling_preserves_non_pending_read_error() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        // SAFETY: socket returns a new descriptor, which is checked and owned below.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0, "socket failed: {}", io::Error::last_os_error());
+        // SAFETY: this successful socket descriptor has no other owner.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut stream = LocalStream::UdSocket(std::os::unix::net::UnixStream::from(owned).into());
+        set_local_stream_polling(&mut stream, true).unwrap();
+        assert!(m827_is_nonblocking(&stream));
+        let error = poll_local_stream_read(&mut stream, &mut [0; 1])
+            .err()
+            .expect("an unconnected stream must preserve its read error");
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+        assert!(m827_is_nonblocking(&stream));
+    }
 
     #[test]
     fn m811_api_peer_probe_distinguishes_idle_extra_bytes_and_closed() {

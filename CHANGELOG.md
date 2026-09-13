@@ -68,6 +68,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Changed**
 
+- Initial API request reads share explicit Unix polling helpers, preserving
+  existing framing, size, timeout, and error behavior.
 - Config banners now show the file basename, an optional TOML location, and
   `zynk config check` instead of four warning excerpts plus an overflow count.
   Desktop banners use the full frame; mobile banners keep the header clear.

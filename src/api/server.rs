@@ -1,6 +1,6 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,7 +22,8 @@ use crate::api::{
 };
 use crate::ipc::{
     bind_local_listener, is_connection_closed_error, local_stream_peer_closed,
-    remove_socket_file_if_owned, socket_file_identity, LocalStream, SocketFileIdentity,
+    poll_local_stream_read, remove_socket_file_if_owned, set_local_stream_polling,
+    socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
 };
 
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -496,49 +497,60 @@ fn api_response_outcome(response: &str) -> &'static str {
 }
 
 fn read_initial_request_line(stream: &mut LocalStream) -> std::io::Result<Option<String>> {
-    stream.set_nonblocking(true)?;
-    let deadline = Instant::now() + INITIAL_REQUEST_TIMEOUT;
+    read_initial_request_line_with_timeout(stream, INITIAL_REQUEST_TIMEOUT)
+}
+
+fn read_initial_request_line_with_timeout(
+    stream: &mut LocalStream,
+    timeout: Duration,
+) -> std::io::Result<Option<String>> {
+    read_initial_request_line_with_limits(stream, timeout, MAX_INITIAL_REQUEST_BYTES)
+}
+
+fn read_initial_request_line_with_limits(
+    stream: &mut LocalStream,
+    timeout: Duration,
+    max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+    set_local_stream_polling(stream, true)?;
+    let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
     let mut byte = [0u8; 1];
 
-    loop {
-        match stream.read(&mut byte) {
-            Ok(0) => {
-                stream.set_nonblocking(false)?;
-                return Ok(None);
-            }
-            Ok(_) => {
+    let result = loop {
+        let read = match poll_local_stream_read(stream, &mut byte) {
+            Ok(read) => read,
+            Err(err) => break Err(err),
+        };
+        match read {
+            LocalStreamRead::Closed => break Ok(None),
+            LocalStreamRead::Data => {
                 bytes.push(byte[0]);
                 if byte[0] == b'\n' {
-                    stream.set_nonblocking(false)?;
-                    return String::from_utf8(bytes)
+                    break String::from_utf8(bytes)
                         .map(Some)
                         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
                 }
-                if bytes.len() > MAX_INITIAL_REQUEST_BYTES {
-                    stream.set_nonblocking(false)?;
-                    return Err(io::Error::new(
+                if bytes.len() > max_bytes {
+                    break Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "api request line is too large",
                     ));
                 }
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+            LocalStreamRead::Pending => {
                 if Instant::now() >= deadline {
-                    stream.set_nonblocking(false)?;
-                    return Err(io::Error::new(
+                    break Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "timed out reading api request",
                     ));
                 }
                 std::thread::sleep(CONNECTION_POLL_INTERVAL);
             }
-            Err(err) => {
-                stream.set_nonblocking(false)?;
-                return Err(err);
-            }
         }
-    }
+    };
+    set_local_stream_polling(stream, false)?;
+    result
 }
 
 fn stream_subscriptions(
@@ -712,7 +724,7 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
 mod tests {
     use super::*;
     use interprocess::local_socket::traits::Listener as _;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::sync::{Mutex, OnceLock};
@@ -760,6 +772,316 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, path)
+    }
+
+    fn m827_socket_pair() -> (LocalStream, LocalStream) {
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        (
+            LocalStream::UdSocket(client.into()),
+            LocalStream::UdSocket(server.into()),
+        )
+    }
+
+    fn m827_queued_stream(bytes: &[u8]) -> LocalStream {
+        let (mut client, server) = m827_socket_pair();
+        client.write_all(bytes).unwrap();
+        drop(client);
+        server
+    }
+
+    fn m827_is_nonblocking(stream: &LocalStream) -> bool {
+        use std::os::fd::AsRawFd;
+        let LocalStream::UdSocket(socket) = stream;
+        // SAFETY: the borrowed socket owns this live descriptor throughout the query.
+        let flags = unsafe { libc::fcntl(socket.inner().as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0, "F_GETFL failed: {}", io::Error::last_os_error());
+        flags & libc::O_NONBLOCK != 0
+    }
+
+    fn m827_unconnected_stream() -> LocalStream {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        // SAFETY: socket returns a new descriptor, which is checked and owned below.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0, "socket failed: {}", io::Error::last_os_error());
+        // SAFETY: this successful socket descriptor has no other owner.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        LocalStream::UdSocket(std::os::unix::net::UnixStream::from(owned).into())
+    }
+
+    struct M827InitialConnection {
+        client: Option<LocalStream>,
+        worker: Option<std::thread::JoinHandle<()>>,
+        done: std::sync::mpsc::Receiver<io::Result<()>>,
+        requests: mpsc::UnboundedReceiver<ApiRequestMessage>,
+        hub: EventHub,
+        path: PathBuf,
+    }
+
+    impl M827InitialConnection {
+        fn start() -> Self {
+            let (client, server, path) = local_stream_pair("m827-initial");
+            let (api_tx, requests) = mpsc::unbounded_channel();
+            let (done_tx, done) = std::sync::mpsc::channel();
+            let (ready_tx, ready) = std::sync::mpsc::channel();
+            let mut connection = Self {
+                client: Some(client),
+                worker: None,
+                done,
+                requests,
+                hub: EventHub::default(),
+                path,
+            };
+            connection
+                .client
+                .as_ref()
+                .unwrap()
+                .set_nonblocking(true)
+                .unwrap();
+            server
+                .set_recv_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let hub = connection.hub.clone();
+            connection.worker = Some(std::thread::spawn(move || {
+                let _ = ready_tx.send(());
+                let result = handle_connection_with_stop(
+                    server,
+                    &api_tx,
+                    &hub,
+                    &Arc::new(AtomicBool::new(true)),
+                    None,
+                    None,
+                );
+                let _ = done_tx.send(result);
+            }));
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            connection
+        }
+
+        fn assert_pending(&self, phase: &str, duration: Duration) {
+            match self.done.recv_timeout(duration) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                observed => panic!("{phase}: initial handler completed early: {observed:?}"),
+            }
+        }
+
+        fn response(&mut self) -> serde_json::Value {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut bytes = Vec::new();
+            loop {
+                let mut buffer = [0; 1024];
+                match self.client.as_mut().unwrap().read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("initial response read failed: {error}"),
+                }
+                assert!(bytes.len() <= 65536, "oversized initial response");
+                if bytes.contains(&b'\n') {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "initial response did not arrive");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            serde_json::from_slice(&bytes).expect("initial response must be JSON")
+        }
+    }
+
+    impl Drop for M827InitialConnection {
+        fn drop(&mut self) {
+            if let Some(LocalStream::UdSocket(socket)) = self.client.take() {
+                let _ = socket.inner().shutdown(std::net::Shutdown::Both);
+            }
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn m827_delayed_partial_initial_request_returns_pong() {
+        let mut connection = M827InitialConnection::start();
+        connection.assert_pending("idle peer", Duration::from_millis(300));
+        connection
+            .client
+            .as_mut()
+            .unwrap()
+            .write_all(br#"{"id":"m827-partial","method":"ping","params":{}}"#)
+            .unwrap();
+        connection.assert_pending("partial request", Duration::from_millis(150));
+        connection
+            .client
+            .as_mut()
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        let response = connection.response();
+        let outcome = connection
+            .done
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(outcome.is_ok(), "initial handler failed: {outcome:?}");
+        assert_eq!(response["id"], "m827-partial");
+        assert_eq!(response["result"]["type"], "pong");
+        assert!(connection.requests.try_recv().is_err());
+        assert_eq!(connection.hub.current_sequence(), 0);
+        assert!(connection.hub.events_after(0).is_empty());
+    }
+
+    #[test]
+    fn m827_disconnected_initial_request_returns_promptly() {
+        let mut observations = Vec::new();
+        for input in [b"".as_slice(), b"partial without newline".as_slice()] {
+            let mut server = m827_queued_stream(input);
+            let started = Instant::now();
+            let result = read_initial_request_line(&mut server);
+            observations.push((
+                input.len(),
+                result.unwrap(),
+                m827_is_nonblocking(&server),
+                started.elapsed() < Duration::from_secs(2),
+            ));
+        }
+        assert_eq!(
+            observations,
+            vec![(0, None, false, true), (23, None, false, true)]
+        );
+    }
+
+    #[test]
+    fn m827_initial_request_rejects_invalid_utf8() {
+        let mut server = m827_queued_stream(&[0xff, b'\n']);
+        let error = read_initial_request_line(&mut server).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!m827_is_nonblocking(&server));
+    }
+
+    #[test]
+    fn m827_initial_request_preserves_first_line_and_unread_tail() {
+        let mut server = m827_queued_stream(b"first line\nuntouched tail\n");
+        let first = read_initial_request_line(&mut server).unwrap();
+        assert_eq!(first.as_deref(), Some("first line\n"));
+        let mut tail = Vec::new();
+        server.read_to_end(&mut tail).unwrap();
+        assert_eq!(tail, b"untouched tail\n");
+        assert!(!m827_is_nonblocking(&server));
+    }
+
+    #[test]
+    fn m827_idle_initial_request_honors_default_timeout() {
+        let (_client, mut server) = m827_socket_pair();
+        let started = Instant::now();
+        let error = read_initial_request_line(&mut server).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "timed out reading api request");
+        assert!(started.elapsed() >= Duration::from_secs(5));
+        assert!(!m827_is_nonblocking(&server));
+    }
+
+    #[test]
+    fn m827_initial_request_enforces_default_size_and_newline_boundary() {
+        let mut observations = Vec::new();
+        for (non_newline_bytes, newline) in
+            [(1_048_576, true), (1_048_577, false), (1_048_577, true)]
+        {
+            let mut payload = vec![b'x'; non_newline_bytes];
+            if newline {
+                payload.push(b'\n');
+            }
+            let (mut client, mut server) = m827_socket_pair();
+            let (result, writer_result) = std::thread::scope(|scope| {
+                let writer = scope.spawn(|| client.write_all(&payload));
+                let result = read_initial_request_line(&mut server);
+                (result, writer.join().unwrap())
+            });
+            assert!(
+                writer_result.is_ok(),
+                "fixture write failed: {writer_result:?}"
+            );
+            // Keep byte equality while bounding the diagnostic for the 1 MiB row.
+            let observation = match result {
+                Ok(Some(line)) => (line.as_bytes() == payload, line.len(), None),
+                Ok(None) => (false, 0, None),
+                Err(error) => (false, 0, Some((error.kind(), error.to_string()))),
+            };
+            observations.push((observation, m827_is_nonblocking(&server)));
+        }
+        let size_error = Some((
+            io::ErrorKind::InvalidData,
+            "api request line is too large".to_string(),
+        ));
+        assert_eq!(
+            observations,
+            vec![
+                ((true, 1_048_577, None), false),
+                ((false, 0, size_error.clone()), false),
+                ((false, 0, size_error), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn m827_initial_request_read_error_restores_blocking() {
+        let mut server = m827_unconnected_stream();
+        let error = read_initial_request_line(&mut server).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+        assert!(!m827_is_nonblocking(&server));
+    }
+
+    #[test]
+    fn m827_zero_timeout_still_drains_queued_line() {
+        let mut server = m827_queued_stream(b"queued line\n");
+        let line = read_initial_request_line_with_limits(&mut server, Duration::ZERO, 64).unwrap();
+        assert_eq!(line.as_deref(), Some("queued line\n"));
+        assert!(!m827_is_nonblocking(&server));
+    }
+
+    #[test]
+    fn m827_idle_initial_request_honors_private_timeout() {
+        let (_client, mut server) = m827_socket_pair();
+        let started = Instant::now();
+        let error = read_initial_request_line_with_timeout(&mut server, Duration::from_millis(50))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "timed out reading api request");
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(!m827_is_nonblocking(&server));
+    }
+
+    #[test]
+    fn m827_initial_request_honors_private_size_boundary() {
+        let mut observations = Vec::new();
+        for (input, limit) in [
+            (b"1234\n".as_slice(), 4),
+            (b"12345".as_slice(), 4),
+            (b"12345\n".as_slice(), 4),
+            (b"\n".as_slice(), 0),
+        ] {
+            let mut server = m827_queued_stream(input);
+            let result =
+                read_initial_request_line_with_limits(&mut server, Duration::from_secs(1), limit)
+                    .map_err(|error| (error.kind(), error.to_string()));
+            observations.push((result, m827_is_nonblocking(&server)));
+        }
+        let size_error = (
+            io::ErrorKind::InvalidData,
+            "api request line is too large".to_string(),
+        );
+        assert_eq!(
+            observations,
+            vec![
+                (Ok(Some("1234\n".to_string())), false),
+                (Err(size_error.clone()), false),
+                (Err(size_error), false),
+                (Ok(Some("\n".to_string())), false),
+            ]
+        );
     }
 
     struct EventWaitConnection {
