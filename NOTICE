@@ -160,6 +160,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/terminal/id.rs
 - src/terminal/runtime.rs
 - src/terminal/state.rs
+- src/terminal/title.rs
 - src/terminal_theme.rs
 - src/ui.rs
 - src/ui/dialogs.rs

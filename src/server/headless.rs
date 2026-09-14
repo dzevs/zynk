@@ -439,6 +439,8 @@ impl HeadlessServer {
                 crate::render_prof::event("render.request.signal");
             }
 
+            self.app.sync_terminal_titles();
+
             // 2. Drain a bounded internal-event batch. API handlers perform an
             // exhaustive forwarding-aware drain before reading pane/runtime state.
             if self.drain_internal_events_with_forwarding() {
@@ -4726,6 +4728,97 @@ mod tests {
             serde_json::from_str(&app.handle_api_request(request)).unwrap();
         assert_eq!(response["result"]["type"], "pane_info");
         response["result"]["pane"].clone()
+    }
+
+    #[tokio::test]
+    async fn headless_api_reads_latest_title_without_spinner_event_flooding() {
+        let read = |server: &mut HeadlessServer| {
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            let changed = server.handle_api_request_with_shutdown_check_inner(
+                api::ApiRequestMessage {
+                    request: serde_json::from_value(serde_json::json!({
+                        "id": "m828c-headless", "method": "pane.list", "params": {}
+                    }))
+                    .unwrap(),
+                    respond_to,
+                    caller: api::ApiCaller::default(),
+                },
+                true,
+            );
+            let response: serde_json::Value =
+                serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
+                    .unwrap();
+            assert_eq!(response["id"], "m828c-headless");
+            (changed, response)
+        };
+        for (shutting_down, should_quit) in [(false, false), (true, false), (false, true)] {
+            let mut fixture = m828a_headless_fixture();
+            let server = fixture.server.as_mut().unwrap();
+            let workspace = crate::workspace::Workspace::test_new("title observation");
+            let pane = workspace.tabs[0].root_pane;
+            let terminal = workspace.terminal_id(pane).cloned().unwrap();
+            server.app.state.workspaces = vec![workspace];
+            server.app.state.active = Some(0);
+            server.app.state.ensure_test_terminals();
+            server.app.terminal_runtimes.insert(
+                terminal.clone(),
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+            );
+            let runtime = server.app.terminal_runtimes.get(&terminal).unwrap();
+            runtime.test_process_pty_bytes(b"\x1b]2;pending-title\x07");
+            assert_eq!(runtime.agent_osc_title(), "pending-title");
+            assert_eq!(server.app.state.terminals[&terminal].revision, 0);
+            server.shutting_down = shutting_down;
+            server.should_quit.store(should_quit, Ordering::Release);
+            if shutting_down || should_quit {
+                let sequence = server.app.event_hub.current_sequence();
+                let (changed, response) = read(server);
+                assert!(!changed);
+                assert_eq!(response["error"]["code"], "server_unavailable");
+                assert_eq!(server.app.state.terminals[&terminal].revision, 0);
+                assert!(server.app.event_hub.events_after(sequence).is_empty());
+                continue;
+            }
+            for (raw, stripped, revision, emits) in [
+                ("\u{25d0} compiling", Some("compiling"), 1, true),
+                ("\u{25d1} compiling", Some("compiling"), 1, false),
+                ("finished", Some("finished"), 2, true),
+                ("", None, 3, true),
+            ] {
+                server
+                    .app
+                    .terminal_runtimes
+                    .get(&terminal)
+                    .unwrap()
+                    .test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
+                let sequence = server.app.event_hub.current_sequence();
+                let (_, response) = read(server);
+                assert!(response.get("error").is_none(), "{response}");
+                assert_eq!(response["result"]["panes"].as_array().unwrap().len(), 1);
+                let info = &response["result"]["panes"][0];
+                assert_eq!(
+                    info["terminal_title"].as_str(),
+                    (!raw.is_empty()).then_some(raw)
+                );
+                assert_eq!(info["terminal_title_stripped"].as_str(), stripped);
+                assert_eq!(info["revision"], revision);
+                let events: Vec<_> = server
+                    .app
+                    .event_hub
+                    .events_after(sequence)
+                    .into_iter()
+                    .map(|(_, event)| serde_json::to_value(event).unwrap())
+                    .collect();
+                let expected = if emits {
+                    vec![serde_json::json!({
+                        "event": "pane_updated", "data": {"type": "pane_updated", "pane": info}
+                    })]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(events, expected, "raw={raw:?}");
+            }
+        }
     }
 
     #[test]

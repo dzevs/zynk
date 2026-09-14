@@ -20,6 +20,8 @@ pub(crate) struct HandoffRuntimeState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_state: Option<crate::pane::InputState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_history_ansi: Option<String>,
 }
 
@@ -39,6 +41,48 @@ pub(crate) struct ImportedHandoffRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m828c_handoff_title_defaults_round_trips_and_remaps() {
+        let old = serde_json::json!({
+            "pane_id": 3, "child_pid": 4242, "child_start_time": 900,
+            "rows": 24, "cols": 80, "cell_width_px": 8, "cell_height_px": 16,
+            "keyboard_protocol_flags": 5, "keyboard_protocol_ansi": "\u{1b}[>5u",
+            "initial_history_ansi": "retained-history"
+        });
+        for title in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("\u{25d0} compiling")),
+        ] {
+            let mut input = old.clone();
+            let mut expected = old.clone();
+            if let Some(title) = title {
+                input["terminal_title"] = title.clone();
+                if !title.is_null() {
+                    expected["terminal_title"] = title;
+                }
+            }
+            let decoded: HandoffRuntimeState = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), expected, "{input}");
+            let remapped = decoded.with_pane_id(crate::layout::PaneId::from_raw(88));
+            expected["pane_id"] = serde_json::json!(88);
+            assert_eq!(serde_json::to_value(remapped).unwrap(), expected);
+        }
+        for title in [
+            serde_json::json!(true),
+            serde_json::json!(7),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let mut input = old.clone();
+            input["terminal_title"] = title;
+            assert!(
+                serde_json::from_value::<HandoffRuntimeState>(input.clone()).is_err(),
+                "{input}"
+            );
+        }
+    }
 
     #[test]
     fn a_handoff_from_a_server_without_the_start_time_field_still_parses() {
@@ -71,6 +115,7 @@ mod tests {
             keyboard_protocol_flags: 0,
             keyboard_protocol_ansi: None,
             input_state: None,
+            terminal_title: None,
             initial_history_ansi: None,
         };
         let round_tripped: HandoffRuntimeState =

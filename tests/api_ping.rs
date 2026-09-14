@@ -2531,6 +2531,99 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
 }
 
 #[test]
+fn m828c_socket_observes_title_updates_without_intervening_reads() {
+    let _lock = test_lock();
+    let mut fixture = FollowCwdServer {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let socket = fixture.base.join("runtime/zynk.sock");
+    fixture.server = Some(spawn_zynk(
+        &fixture.base.join("config"),
+        &fixture.base.join("runtime"),
+        &socket,
+    ));
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let call = |method: &str, params: serde_json::Value| {
+        let response = send_request(
+            &socket,
+            &serde_json::json!({"id": "m828c-socket", "method": method, "params": params})
+                .to_string(),
+        );
+        assert!(response.get("error").is_none(), "{response}");
+        response["result"].clone()
+    };
+    let raw = "\u{25d0} socket-first";
+    let script = r#"printf '\033]2;%s\007\nC_TITLE_READY\n' "$1"; while IFS= read -r command; do case "$command" in next) printf '\033]2;socket-next\007\nC_TITLE_NEXT\n';; esac; done"#;
+    let started = call(
+        "agent.start",
+        serde_json::json!({"name": "title-observer", "cwd": fixture.base,
+            "argv": ["/bin/sh", "-c", script, "title-fixture", raw]}),
+    );
+    assert_eq!(started["type"], "agent_started");
+    let pane_id = started["agent"]["pane_id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let read = call(
+            "pane.read",
+            serde_json::json!({"pane_id": pane_id, "source": "visible"}),
+        );
+        if read["read"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("C_TITLE_READY")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "title-producing child setup timed out: {read}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let before = call("pane.get", serde_json::json!({"pane_id": pane_id}));
+    assert_eq!(before["pane"]["terminal_title"], raw);
+    assert_eq!(before["pane"]["terminal_title_stripped"], "socket-first");
+    assert_eq!(before["pane"]["revision"], 1);
+    let mut reader = open_subscription(
+        &socket,
+        &serde_json::json!({"id": "m828c-sub", "method": "events.subscribe",
+            "params": {"subscriptions": [{"type": "pane.updated"}]}})
+        .to_string(),
+    );
+    let ack = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(ack["id"], "m828c-sub");
+    assert_eq!(ack["result"]["type"], "subscription_started", "{ack}");
+    let initial = wait_for_event_matching(
+        &mut reader,
+        "pane_updated",
+        Duration::from_secs(3),
+        |event| event["data"]["pane"]["pane_id"] == pane_id,
+    );
+    assert_eq!(initial["data"]["pane"]["terminal_title"], raw);
+    assert_eq!(initial["data"]["pane"]["revision"], 1);
+    let sent = call(
+        "pane.send_input",
+        serde_json::json!({"pane_id": pane_id, "text": "next", "keys": ["Enter"]}),
+    );
+    assert_eq!(sent["type"], "ok");
+    // No App request after the title-producing input can synchronize this observation.
+    let updated = wait_for_event_matching(
+        &mut reader,
+        "pane_updated",
+        Duration::from_secs(3),
+        |event| event["data"]["pane"]["pane_id"] == pane_id,
+    );
+    assert_eq!(updated["data"]["type"], "pane_updated");
+    assert_eq!(updated["data"]["pane"]["terminal_title"], "socket-next");
+    assert_eq!(
+        updated["data"]["pane"]["terminal_title_stripped"],
+        "socket-next"
+    );
+    assert_eq!(updated["data"]["pane"]["revision"], 2);
+}
+
+#[test]
 fn m828b_pane_subscription_observes_timer_expiry_without_read_requests() {
     let _lock = test_lock();
     let mut fixture = FollowCwdServer {

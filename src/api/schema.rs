@@ -219,6 +219,139 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn m828c_terminal_title_json_defaults_and_schema() {
+        for (raw, stripped) in [
+            (None, None),
+            (Some(serde_json::Value::Null), Some(serde_json::Value::Null)),
+            (Some(serde_json::json!("  \u{25d0} compiling  ")), None),
+            (None, Some(serde_json::json!("compiling"))),
+            (
+                Some(serde_json::json!("  \u{25d0} compiling  ")),
+                Some(serde_json::json!("compiling")),
+            ),
+        ] {
+            let mut input = m828b_pane_json();
+            let mut expected = m828b_pane_json();
+            for (field, value) in [
+                ("terminal_title", raw),
+                ("terminal_title_stripped", stripped),
+            ] {
+                if let Some(value) = value {
+                    input[field] = value.clone();
+                    if !value.is_null() {
+                        expected[field] = value;
+                    }
+                }
+            }
+            let pane: PaneInfo = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(pane).unwrap(),
+                expected,
+                "pane {input}"
+            );
+            let agent: AgentInfo = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(agent).unwrap(),
+                expected,
+                "agent {input}"
+            );
+        }
+        for field in ["terminal_title", "terminal_title_stripped"] {
+            for value in [
+                serde_json::json!(true),
+                serde_json::json!(7),
+                serde_json::json!([]),
+                serde_json::json!({}),
+            ] {
+                let mut input = m828b_pane_json();
+                input[field] = value;
+                assert!(
+                    serde_json::from_value::<PaneInfo>(input.clone()).is_err(),
+                    "pane {input}"
+                );
+                assert!(
+                    serde_json::from_value::<AgentInfo>(input.clone()).is_err(),
+                    "agent {input}"
+                );
+            }
+        }
+        let document = export::protocol_schema_document();
+        for (schema, definition) in [
+            ("event", "PaneInfo"),
+            ("success_response", "PaneInfo"),
+            ("success_response", "AgentInfo"),
+        ] {
+            let object = &document["schemas"][schema]["$defs"][definition];
+            let required = object["required"].as_array().unwrap();
+            assert!(required.contains(&serde_json::json!("pane_id")));
+            for field in ["terminal_title", "terminal_title_stripped"] {
+                assert_eq!(
+                    object["properties"][field]["type"],
+                    serde_json::json!(["string", "null"]),
+                    "{schema}/{definition}/{field}"
+                );
+                assert!(
+                    !required.contains(&serde_json::json!(field)),
+                    "{schema}/{definition}/{field}"
+                );
+            }
+        }
+        let request_defs = document["schemas"]["request"]["$defs"].as_object().unwrap();
+        assert!(request_defs["PaneReportMetadataParams"]["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("title"));
+        for (name, definition) in request_defs {
+            if let Some(properties) = definition
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            {
+                assert!(!properties.contains_key("terminal_title"), "{name}");
+                assert!(
+                    !properties.contains_key("terminal_title_stripped"),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn m828c_titles_flow_through_existing_pane_events() {
+        let mut pane = m828b_pane_json();
+        pane["terminal_title"] = serde_json::json!("\u{25d0} compiling");
+        pane["terminal_title_stripped"] = serde_json::json!("compiling");
+        pane["tokens"] = serde_json::json!({"build": "ok"});
+        for (wire, dot) in [
+            ("pane_created", "pane.created"),
+            ("pane_updated", "pane.updated"),
+        ] {
+            let event = serde_json::json!({"event": wire, "data": {"type": wire, "pane": pane}});
+            let decoded: EventEnvelope = serde_json::from_value(event.clone()).unwrap();
+            assert_eq!(decoded.event.dot_name(), dot);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), event, "{wire}");
+        }
+        for result in [
+            serde_json::json!({"type": "pane_info", "pane": pane}),
+            serde_json::json!({"type": "pane_list", "panes": [pane]}),
+            serde_json::json!({"type": "agent_info", "agent": pane}),
+            serde_json::json!({"type": "agent_list", "agents": [pane]}),
+        ] {
+            let response = serde_json::json!({"id": "titles", "result": result});
+            let decoded: SuccessResponse = serde_json::from_value(response.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), response);
+        }
+        let kinds = serde_declared_event_kind_wire_ids();
+        assert_eq!(kinds.len(), 22);
+        let created = kinds
+            .iter()
+            .position(|name| name == "pane_created")
+            .unwrap();
+        assert_eq!(kinds[created + 1], "pane_updated");
+        assert!(!plugin_hook_event_names().contains(&"pane.updated"));
+        assert!(plugin_hook_event_names().contains(&"pane.created"));
+    }
+
     fn m828b_pane_json() -> serde_json::Value {
         serde_json::json!({
             "pane_id": "w7:p2", "terminal_id": "term_metadata", "workspace_id": "w7",
@@ -1090,6 +1223,8 @@ mod tests {
                     label: None,
                     agent: None,
                     title: None,
+                    terminal_title: None,
+                    terminal_title_stripped: None,
                     display_agent: None,
                     agent_status: AgentStatus::Unknown,
                     custom_status: None,
@@ -1143,6 +1278,8 @@ mod tests {
                     label: None,
                     agent: None,
                     title: None,
+                    terminal_title: None,
+                    terminal_title_stripped: None,
                     display_agent: None,
                     agent_status: AgentStatus::Unknown,
                     custom_status: None,

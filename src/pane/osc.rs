@@ -460,14 +460,24 @@ pub(super) struct AgentOscStateTracker {
     collector: OscStreamCollector,
     latest_title: Option<String>,
     latest_progress: Option<String>,
+    terminal_title: Option<String>,
 }
 
 impl AgentOscStateTracker {
+    pub(super) fn terminal_title(&self) -> Option<&str> {
+        self.terminal_title.as_deref()
+    }
+
+    pub(super) fn seed_terminal_title(&mut self, title: Option<String>) {
+        self.terminal_title = title;
+    }
+
     pub(super) fn observe(&mut self, bytes: &[u8]) {
-        let (collector, latest_title, latest_progress) = (
+        let (collector, latest_title, latest_progress, terminal_title) = (
             &mut self.collector,
             &mut self.latest_title,
             &mut self.latest_progress,
+            &mut self.terminal_title,
         );
         collector.observe(bytes, |body| {
             let Some((command, payload)) = parse_agent_osc_body(body) else {
@@ -477,6 +487,7 @@ impl AgentOscStateTracker {
                 b"0" | b"2" => {
                     *latest_title = (!payload.is_empty())
                         .then(|| sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS));
+                    *terminal_title = latest_title.clone().filter(|title| !title.is_empty());
                 }
                 b"9" => {
                     *latest_progress =
@@ -932,6 +943,109 @@ mod tests {
     // -----------------------------------------------------------------------
     // AgentOscStateTracker tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn clearing_agent_evidence_preserves_the_terminal_title() {
+        let mut tracker = AgentOscStateTracker::default();
+        tracker.observe("\x1b]2;✳ 修复🙂标题\x1b\\".as_bytes());
+
+        tracker.clear_retained();
+
+        assert_eq!(tracker.latest_title(), "");
+        assert_eq!(tracker.terminal_title(), Some("✳ 修复🙂标题"));
+    }
+
+    #[test]
+    fn handoff_seed_does_not_restore_agent_detection_evidence() {
+        let mut tracker = AgentOscStateTracker::default();
+
+        tracker.seed_terminal_title(Some("✳ restored title".into()));
+
+        assert_eq!(tracker.terminal_title(), Some("✳ restored title"));
+        assert_eq!(tracker.latest_title(), "");
+    }
+
+    #[test]
+    fn m828c_observed_titles_respect_stream_sanitization_and_limits() {
+        let title = "\u{25d0} Unicode \u{00e9}\u{1f642}";
+        for command in ["0", "2"] {
+            for terminator in ["\x07", "\x1b\\"] {
+                let sequence = format!("\x1b]{command};{title}{terminator}");
+                for split in 0..=sequence.len() {
+                    let mut tracker = AgentOscStateTracker::default();
+                    tracker.observe(&sequence.as_bytes()[..split]);
+                    tracker.observe(&sequence.as_bytes()[split..]);
+                    assert_eq!(tracker.terminal_title(), Some(title), "{command}/{split}");
+                    assert_eq!(tracker.latest_title(), title);
+                }
+            }
+        }
+        let mut tracker = AgentOscStateTracker::default();
+        let long = "\u{1f642}".repeat(300);
+        tracker.observe(format!("\x1b]2;{long}\x07").as_bytes());
+        let expected = "\u{1f642}".repeat(256);
+        assert_eq!(tracker.terminal_title(), Some(expected.as_str()));
+        assert_eq!(tracker.terminal_title().unwrap().chars().count(), 256);
+        assert_eq!(tracker.latest_title(), expected);
+        tracker.observe(b"\x1b]2;before\x01\xffafter\x07");
+        assert_eq!(tracker.terminal_title(), Some("before\u{fffd}after"));
+        assert_eq!(tracker.latest_title(), "before\u{fffd}after");
+        tracker.observe(b"\x1b]2;\x01\x02\x07");
+        assert_eq!(tracker.terminal_title(), None);
+        assert_eq!(tracker.latest_title.as_deref(), Some(""));
+        tracker.observe(b"\x1b]2; \t \x07");
+        assert_eq!(tracker.terminal_title(), Some("  "));
+        for command in ["0", "2"] {
+            tracker.observe(format!("\x1b]{command};before-clear\x07").as_bytes());
+            assert_eq!(tracker.terminal_title(), Some("before-clear"));
+            assert_eq!(tracker.latest_title(), "before-clear");
+            tracker.observe(format!("\x1b]{command};\x07").as_bytes());
+            assert_eq!(tracker.terminal_title(), None);
+            assert_eq!(tracker.latest_title, None);
+        }
+        for terminator in ["\x07", "\x1b\\"] {
+            tracker.observe(b"\x1b]0;retained\x07");
+            let oversized = format!("\x1b]2;{}{terminator}", "x".repeat(4097));
+            tracker.observe(oversized.as_bytes());
+            assert_eq!(tracker.terminal_title(), Some("retained"));
+            tracker.observe(b"\x1b]2;recovered\x07");
+            assert_eq!(tracker.terminal_title(), Some("recovered"));
+        }
+        for intro in *b"P_^X" {
+            tracker.observe(&[0x1b, intro]);
+            tracker.observe(b"ignored\x1b]2;embedded\x07\x1b\\");
+            assert_eq!(tracker.terminal_title(), Some("recovered"), "{intro}");
+        }
+        tracker.observe(b"\x1b]9;4;3;\x07\x1b]4;1;rgb:aa/bb/cc\x07\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(tracker.terminal_title(), Some("recovered"));
+        assert_eq!(tracker.latest_progress(), "4;3;");
+    }
+
+    #[test]
+    fn m828c_title_seed_and_detection_clear_preserve_inflight_collection() {
+        let mut tracker = AgentOscStateTracker::default();
+        tracker.observe(b"\x1b]2;detected\x07\x1b]9;4;3;\x07\x1b]2;part");
+        tracker.seed_terminal_title(Some("restored".into()));
+        assert_eq!(tracker.terminal_title(), Some("restored"));
+        assert_eq!(tracker.latest_title(), "detected");
+        assert_eq!(tracker.latest_progress(), "4;3;");
+        tracker.observe(b"ial\x1b\\");
+        assert_eq!(tracker.terminal_title(), Some("partial"));
+        assert_eq!(tracker.latest_title(), "partial");
+        assert_eq!(tracker.latest_progress(), "4;3;");
+        tracker.observe(b"\x1b]0;col");
+        tracker.clear_retained();
+        assert_eq!(tracker.terminal_title(), Some("partial"));
+        assert_eq!(tracker.latest_title(), "");
+        assert_eq!(tracker.latest_progress(), "");
+        tracker.observe(b"lected\x07");
+        assert_eq!(tracker.terminal_title(), Some("collected"));
+        assert_eq!(tracker.latest_title(), "collected");
+        tracker.seed_terminal_title(None);
+        assert_eq!(tracker.terminal_title(), None);
+        assert_eq!(tracker.latest_title(), "collected");
+        assert_eq!(tracker.latest_progress(), "");
+    }
 
     #[test]
     fn agent_osc_ignores_embedded_titles_inside_other_control_strings() {

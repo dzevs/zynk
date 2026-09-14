@@ -648,6 +648,228 @@ mod tests {
     use crate::app::state;
     use crate::workspace::Workspace;
 
+    fn m828c_wrapper_request(
+        app: &mut App,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: serde_json::from_value(
+                serde_json::json!({"id": "m828c", "method": method, "params": params}),
+            )
+            .unwrap(),
+            respond_to,
+            caller: crate::api::ApiCaller::default(),
+        });
+        let response: serde_json::Value =
+            serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
+                .unwrap();
+        assert_eq!(response["id"], "m828c");
+        assert!(response.get("error").is_none(), "{response}");
+        response
+    }
+
+    #[tokio::test]
+    async fn m828c_monolithic_request_wrapper_syncs_observed_titles() {
+        let (mut app, pane) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        let target = app.public_pane_id(0, pane).unwrap();
+        let terminal = app.state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let raw = "\u{25d0} compiling";
+        app.state.terminals.get_mut(&terminal).unwrap().agent_name = Some("m828c-fixture".into());
+        app.terminal_runtimes.insert(
+            terminal.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        let runtime = app.terminal_runtimes.get(&terminal).unwrap();
+        runtime.test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
+        assert_eq!(runtime.agent_osc_title(), raw);
+        assert_eq!(app.state.terminals[&terminal].revision, 0);
+        let sequence = app.event_hub.current_sequence();
+        let first =
+            m828c_wrapper_request(&mut app, "pane.get", serde_json::json!({"pane_id": target}));
+        let expected = first["result"]["pane"].clone();
+        assert_eq!(expected["terminal_title"], raw);
+        assert_eq!(expected["terminal_title_stripped"], "compiling");
+        assert_eq!(expected["revision"], 1);
+        let events: Vec<_> = app
+            .event_hub
+            .events_after(sequence)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": expected}})
+            ]
+        );
+        let sequence = app.event_hub.current_sequence();
+        for (method, params, pointer) in [
+            ("pane.list", serde_json::json!({}), "/result/panes/0"),
+            (
+                "agent.get",
+                serde_json::json!({"target": target}),
+                "/result/agent",
+            ),
+            ("agent.list", serde_json::json!({}), "/result/agents/0"),
+        ] {
+            let response = m828c_wrapper_request(&mut app, method, params);
+            let info = response.pointer(pointer).unwrap();
+            assert_eq!(info["terminal_title"], raw, "{method}");
+            assert_eq!(info["terminal_title_stripped"], "compiling", "{method}");
+            assert_eq!(info["revision"], 1, "{method}");
+        }
+        let spinner = "\u{25d1} compiling";
+        app.terminal_runtimes
+            .get(&terminal)
+            .unwrap()
+            .test_process_pty_bytes(format!("\x1b]2;{spinner}\x07").as_bytes());
+        let response =
+            m828c_wrapper_request(&mut app, "pane.get", serde_json::json!({"pane_id": target}));
+        assert_eq!(response["result"]["pane"]["terminal_title"], spinner);
+        assert_eq!(response["result"]["pane"]["revision"], 1);
+        assert!(app.event_hub.events_after(sequence).is_empty());
+    }
+
+    #[tokio::test]
+    async fn m828c_token_and_title_writers_share_revision_without_substitution() {
+        let (mut app, pane) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        let target = app.public_pane_id(0, pane).unwrap();
+        let terminal = app.state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        app.state.terminals.get_mut(&terminal).unwrap().agent_name = Some("m828c-fixture".into());
+        app.terminal_runtimes.insert(
+            terminal.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        let updates = |app: &App, sequence| {
+            app.event_hub
+                .events_after(sequence)
+                .into_iter()
+                .map(|(_, event)| serde_json::to_value(event).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let sequence = app.event_hub.current_sequence();
+        let result = m828c_wrapper_request(
+            &mut app,
+            "pane.report_metadata",
+            serde_json::json!({"pane_id": target, "source": "user:history", "seq": 1, "tokens": {"build": "ready"}}),
+        );
+        assert_eq!(result["result"]["type"], "ok");
+        assert_eq!(app.state.terminals[&terminal].revision, 1);
+        assert_eq!(app.agent_metadata_deadline, None);
+        let first = serde_json::to_value(app.pane_info(0, pane).unwrap()).unwrap();
+        assert_eq!(first["tokens"]["build"], "ready");
+        assert!(first.get("terminal_title").is_none());
+        assert_eq!(
+            updates(&app, sequence),
+            vec![
+                serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": first}})
+            ]
+        );
+
+        for (raw, emits) in [("\u{25d0} compiling", true), ("\u{25d1} compiling", false)] {
+            let sequence = app.event_hub.current_sequence();
+            app.terminal_runtimes
+                .get(&terminal)
+                .unwrap()
+                .test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
+            let response =
+                m828c_wrapper_request(&mut app, "pane.get", serde_json::json!({"pane_id": target}));
+            let info = &response["result"]["pane"];
+            assert_eq!(info["revision"], 2, "{raw}");
+            assert_eq!(info["terminal_title"], raw);
+            assert_eq!(info["terminal_title_stripped"], "compiling");
+            assert_eq!(info["tokens"]["build"], "ready");
+            assert_eq!(app.agent_metadata_deadline, None);
+            let expected = if emits {
+                vec![
+                    serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": info}}),
+                ]
+            } else {
+                vec![]
+            };
+            assert_eq!(updates(&app, sequence), expected);
+        }
+        let sequence = app.event_hub.current_sequence();
+        let earliest = Instant::now() + Duration::from_secs(30);
+        m828c_wrapper_request(
+            &mut app,
+            "pane.report_metadata",
+            serde_json::json!({"pane_id": target, "source": "user:history", "seq": 2, "ttl_ms": 30_000, "tokens": {"build": "ready"}}),
+        );
+        let latest = Instant::now() + Duration::from_secs(30);
+        let deadline = app.state.terminals[&terminal]
+            .metadata_tokens
+            .next_expiry()
+            .unwrap();
+        assert!(deadline >= earliest && deadline <= latest);
+        assert_eq!(app.agent_metadata_deadline, Some(deadline));
+        assert_eq!(app.state.terminals[&terminal].revision, 3);
+        let info = serde_json::to_value(app.pane_info(0, pane).unwrap()).unwrap();
+        assert_eq!(info["tokens"]["build"], "ready");
+        assert_eq!(info["terminal_title"], "\u{25d1} compiling");
+        assert_eq!(
+            updates(&app, sequence),
+            vec![
+                serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": info}})
+            ]
+        );
+        let sequence = app.event_hub.current_sequence();
+        app.expire_metadata_at(deadline, deadline);
+        assert_eq!(app.state.terminals[&terminal].revision, 4);
+        assert!(app.state.terminals[&terminal]
+            .metadata_tokens
+            .values()
+            .is_empty());
+        assert_eq!(app.agent_metadata_deadline, None);
+        let info = serde_json::to_value(app.pane_info(0, pane).unwrap()).unwrap();
+        assert_eq!(
+            updates(&app, sequence),
+            vec![
+                serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": info}})
+            ]
+        );
+        let sequence = app.event_hub.current_sequence();
+        app.terminal_runtimes
+            .get(&terminal)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b]2;finished\x07");
+        let response =
+            m828c_wrapper_request(&mut app, "pane.get", serde_json::json!({"pane_id": target}));
+        let info = &response["result"]["pane"];
+        assert_eq!(info["terminal_title"], "finished");
+        assert_eq!(info["terminal_title_stripped"], "finished");
+        assert_eq!(info["revision"], 5);
+        assert_eq!(
+            updates(&app, sequence),
+            vec![
+                serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": info}})
+            ]
+        );
+        let sequence = app.event_hub.current_sequence();
+        let agent =
+            m828c_wrapper_request(&mut app, "agent.get", serde_json::json!({"target": target}));
+        assert_eq!(agent["result"]["agent"]["revision"], info["revision"]);
+        assert_eq!(agent["result"]["agent"]["terminal_title"], "finished");
+        for (method, params) in [
+            (
+                "pane.read",
+                serde_json::json!({"pane_id": target, "source": "visible"}),
+            ),
+            (
+                "agent.read",
+                serde_json::json!({"target": target, "source": "visible"}),
+            ),
+        ] {
+            let response = m828c_wrapper_request(&mut app, method, params);
+            assert_eq!(response["result"]["read"]["revision"], 0, "{method}");
+        }
+        assert!(app.event_hub.events_after(sequence).is_empty());
+    }
+
     #[test]
     fn m828b_pane_expiry_sweeps_at_now_and_preserves_workspace_and_presentation_order() {
         use crate::api::schema::{EventData, EventKind};

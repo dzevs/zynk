@@ -2107,6 +2107,50 @@ mod tests {
         app
     }
 
+    #[test]
+    fn m828c_observation_names_remain_ignored_in_metadata_reports() {
+        let mut app = m828b_app();
+        let target = m828b_target(&app, 0);
+        assert_eq!(app.terminal_runtimes.len(), 0);
+        let input = serde_json::json!({"id": "ignored-observations", "method": "pane.report_metadata", "params": {
+            "pane_id": target, "source": "legacy presentation", "title": "real presentation",
+            "terminal_title": "forged observation", "terminal_title_stripped": {"invalid": "still ignored"}
+        }});
+        let request: crate::api::schema::Request = serde_json::from_value(input).unwrap();
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(serialized["params"]["title"], "real presentation");
+        assert!(serialized["params"].get("terminal_title").is_none());
+        assert!(serialized["params"]
+            .get("terminal_title_stripped")
+            .is_none());
+        let sequence = app.event_hub.current_sequence();
+        let response: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(request)).unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"id": "ignored-observations", "result": {"type": "ok"}})
+        );
+        let info = m828b_info(&app, &target);
+        assert_eq!(info["title"], "real presentation");
+        assert_eq!(info["revision"], 0);
+        assert!(info.get("terminal_title").is_none());
+        assert!(info.get("terminal_title_stripped").is_none());
+        assert!(m828b_terminal(&app, &target)
+            .agent_metadata
+            .contains_key("legacy presentation"));
+        let events: Vec<_> = app
+            .event_hub
+            .events_after(sequence)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], "pane_agent_status_changed");
+        assert_eq!(events[0]["data"]["title"], "real presentation");
+        assert!(events[0]["data"].get("terminal_title").is_none());
+        assert!(events[0]["data"].get("terminal_title_stripped").is_none());
+    }
+
     fn m828b_target(app: &App, workspace: usize) -> String {
         app.public_pane_id(workspace, app.state.workspaces[workspace].tabs[0].root_pane)
             .unwrap()

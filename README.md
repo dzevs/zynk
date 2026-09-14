@@ -243,13 +243,14 @@ change presentation, tokens or admission state, but an ordinary request can firs
 
 `pane.get/list`, `agent.get/list` and live `session.snapshot` expose nonempty token maps.
 Subscribe with `{"subscriptions":[{"type":"pane.updated"}]}` for full pane snapshots after
-token value/deadline changes and scheduled expiry; envelope/data tags use `pane_updated`.
+token value/deadline changes, scheduled expiry, and stripped terminal-title changes described
+below; envelope/data tags use `pane_updated`.
 True no-ops do not emit. Identical queued payloads are not deduplicated by the server subscription.
 There is no initial snapshot, new lossless history, plugin hook or `events.wait` selector for this kind.
 Seed from `pane.get`; snapshot acquisition and subscription are not atomic.
 
-Token changes introduce the first increments of the existing pane/agent info `revision` field.
-It counts changed token patches and expiry, including TTL-only changes, rather than terminal output.
+The existing pane/agent info `revision` field counts changed token patches and expiry, including
+TTL-only changes, and changes to the stripped terminal title. It does not count terminal output.
 The same pane's `pane.read`, `agent.read` and `pane.wait_for_output` read-result revisions retain
 their existing zero values. This is not a content-revision implementation or an equality guarantee
 across those surfaces. The info counter is not persisted and starts at zero in reconstructed state;
@@ -261,6 +262,34 @@ cold restore drops both, and older snapshots without token-source accounting def
 Clearing or expiring values, or respawning within the same terminal state, does not free admission
 slots or erase replay fences. Respawn adds no token-value reset. Configurable rendering remains staged
 separately; reporting tokens does not change lifecycle state, hook identity or receipt authority.
+
+Pane/agent info also exposes optional `terminal_title` and `terminal_title_stripped` observations,
+including in live `session.snapshot` and full `pane.updated` snapshots. They are omitted when absent
+and are independent of reported presentation `title`, display-agent, status, and hook identity.
+They are read-only: metadata report parameters do not set these observations.
+
+The raw observation is the latest completed OSC 0 or OSC 2 title, decoded with invalid UTF-8
+replacement, control characters removed, and at most 256 Unicode scalars. It is not otherwise
+trimmed; an empty sanitized title clears it. The stripped form trims edge whitespace and removes
+one leading recognized activity glyph only when followed by whitespace or the end of the title.
+Recognition includes braille spinner frames and the supported star/quarter-circle frames; an
+empty stripped result is absent. Raw-only spinner changes retain the newest observation without
+a title-caused revision increment or event. Changed stripped text, including a clear, advances
+the saturating info revision and emits `pane.updated`; identical observations do neither.
+
+Synchronization polls the latest runtime value through common API dispatch and the main loops.
+Intermediate OSC values may coalesce; this is not an event for every title frame or an atomic
+snapshot across panes. Detection clearing does not erase the independent observation. No new
+title-specific redraw request or configurable sidebar title rendering is included here.
+
+Cold session restore drops title observations and starts the info revision at zero. Live runtime
+handoff carries the observation separately from saved session state, but not its revision. On the
+replacement's first synchronization, a retained nonempty stripped title advances fresh revision
+zero to one and emits an initialization `pane.updated`. A retained raw title with no stripped
+text does not cause that increment or event. Delivery still depends on the existing bounded
+512-envelope history across all event kinds, not a lossless replay guarantee. Normal handoff
+exports the captured value; imported title fields have no separate 256-scalar validator beyond
+the existing private handoff transport. These observations grant no identity or receipt authority.
 
 The socket API accepts `events.subscribe` with `{"subscriptions":[{"type":"layout.updated"}]}`.
 Updates contain the target tab's current pane/split geometry, focus, and zoom after the supported

@@ -358,6 +358,12 @@ pub struct PaneInfo {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Latest observed OSC 0/2 title, separate from reported agent presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title: Option<String>,
+    /// Observed title without one recognized leading activity glyph and edge whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title_stripped: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,

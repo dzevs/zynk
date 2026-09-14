@@ -1555,6 +1555,7 @@ impl PaneRuntime {
             },
             keyboard_protocol_ansi: self.terminal.kitty_keyboard_state_ansi(),
             input_state: self.input_state(),
+            terminal_title: self.terminal_title(),
             initial_history_ansi: None,
         }
     }
@@ -1757,6 +1758,7 @@ impl PaneRuntime {
             keyboard_protocol_flags,
             keyboard_protocol_ansi,
             input_state,
+            terminal_title,
             initial_history_ansi,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
@@ -1778,6 +1780,7 @@ impl PaneRuntime {
         let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         let _ = pane_terminal.apply_host_terminal_appearance(host_terminal_appearance);
+        pane_terminal.seed_terminal_title(terminal_title);
         if let Some(input_state) = input_state {
             pane_terminal.seed_handoff_input_state(input_state);
         }
@@ -2631,6 +2634,10 @@ impl PaneRuntime {
         self.terminal.detection_unwrapped_text()
     }
 
+    pub fn terminal_title(&self) -> Option<String> {
+        self.terminal.terminal_title()
+    }
+
     pub fn agent_osc_title(&self) -> String {
         self.terminal.agent_osc_title()
     }
@@ -3322,6 +3329,7 @@ mod tests {
                 keyboard_protocol_flags: 0,
                 keyboard_protocol_ansi: None,
                 input_state: None,
+                terminal_title: None,
                 initial_history_ansi: None,
             },
         };
@@ -3914,6 +3922,91 @@ mod tests {
                 color_scheme_reporting: true,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn handoff_runtime_state_captures_terminal_input_and_title_state() {
+        let runtime = PaneRuntime::test_with_screen_bytes(
+            80,
+            24,
+            b"\x1b[>5u\x1b[>4;2m\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h\x1b[?2031h",
+        );
+        let title = "\u{25d0} compiling \u{00e9}";
+        runtime.test_process_pty_bytes(format!("\x1b]2;{title}\x07").as_bytes());
+        assert_eq!(runtime.agent_osc_title(), title);
+        runtime.terminal.clear_agent_osc_state();
+        assert_eq!(runtime.agent_osc_title(), "");
+        assert_eq!(runtime.agent_osc_progress(), "");
+        let pane = runtime.handoff_runtime_state(12);
+        assert_eq!(pane.pane_id, 12);
+        assert_eq!(pane.keyboard_protocol_flags, 5);
+        assert_eq!(
+            pane.input_state,
+            Some(InputState {
+                alternate_screen: false,
+                application_cursor: true,
+                bracketed_paste: true,
+                focus_reporting: true,
+                mouse_protocol_mode: crate::input::MouseProtocolMode::ButtonMotion,
+                mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
+                mouse_alternate_scroll: true,
+                modify_other_keys: true,
+                color_scheme_reporting: true,
+            })
+        );
+        assert_eq!(serde_json::to_value(pane).unwrap()["terminal_title"], title);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn m828c_imported_runtime_seeds_title_without_detection_evidence() {
+        use std::os::{fd::IntoRawFd, unix::net::UnixStream};
+
+        let (socket, peer) = UnixStream::pair().unwrap();
+        let pid = std::process::id();
+        let title = "\u{25d0} imported \u{00e9}";
+        let state: crate::handoff_runtime::HandoffRuntimeState =
+            serde_json::from_value(serde_json::json!({
+                "pane_id": 7, "child_pid": pid,
+                "child_start_time": crate::platform::process_start_time(pid).unwrap(),
+                "rows": 24, "cols": 80, "cell_width_px": 9, "cell_height_px": 18,
+                "keyboard_protocol_flags": 5, "terminal_title": title
+            }))
+            .unwrap();
+        let (events, _rx) = mpsc::channel(32);
+        let mut runtime = PaneRuntime::from_handoff_fd(
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: socket.into_raw_fd(),
+                state,
+            },
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+        let imported_preservation = runtime.preserve_processes_on_drop;
+        runtime.preserve_processes_on_drop = true;
+        assert!(
+            imported_preservation,
+            "fixture must never own the test process"
+        );
+        assert_eq!(runtime.agent_osc_title(), "");
+        assert_eq!(runtime.agent_osc_progress(), "");
+        let exported = serde_json::to_value(runtime.handoff_runtime_state(7)).unwrap();
+        assert_eq!(exported["keyboard_protocol_flags"], 5);
+        assert_eq!(exported["rows"], 24);
+        assert_eq!(exported["cols"], 80);
+        assert_eq!(exported["terminal_title"], title);
+        runtime.terminal.clear_agent_osc_state();
+        assert_eq!(
+            serde_json::to_value(runtime.handoff_runtime_state(7)).unwrap()["terminal_title"],
+            title
+        );
+        assert_eq!(runtime.agent_osc_title(), "");
+        drop(runtime);
+        drop(peer);
     }
 
     #[test]

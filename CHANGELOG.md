@@ -10,6 +10,14 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- Pane/agent info exposes read-only raw and stripped OSC terminal-title observations,
+  independently of reported presentation and agent detection. Stripping handles the
+  supported braille, star and quarter-circle activity frames. Semantic title changes
+  advance the info revision and emit `pane.updated`; spinner-only changes retain the
+  latest raw title without that increment or event. Cold restore drops observations;
+  live handoff retains them and may emit initialization events on first synchronization
+  for nonempty stripped titles. Revisions are not transferred. This adds no configurable
+  sidebar rendering, lossless title-frame stream, or content-revision implementation.
 - `pane.report_metadata` and `zynk pane report-metadata` accept bounded display-only
   token patches, exposed by pane/agent reads and `pane.updated` subscriptions.
   Value or TTL changes and expiry emit full snapshots; true no-ops do not.

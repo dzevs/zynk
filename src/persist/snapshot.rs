@@ -608,6 +608,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn m828c_persisted_capture_omits_title_while_runtime_export_keeps_it() {
+        let mut state = state_with_workspaces(&["title-capture"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        runtimes.insert(id.clone(), runtime);
+        let before =
+            serde_json::to_value(capture_from_state_with_runtimes(&state, &runtimes)).unwrap();
+        let raw = "\u{25d0} never-persist-observed-title";
+        let runtime = runtimes.get(&id).unwrap();
+        runtime.test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
+        assert_eq!(runtime.terminal_title().as_deref(), Some(raw));
+        let terminal = state.terminals.get_mut(&id).unwrap();
+        let change = terminal.set_terminal_title(Some(raw.into()));
+        assert!(change.raw_changed && change.stripped_changed);
+        assert_eq!(terminal.terminal_title(), Some(raw));
+        assert_eq!(
+            terminal.terminal_title_stripped().as_deref(),
+            Some("never-persist-observed-title")
+        );
+        assert_eq!(terminal.revision, 1);
+        let source = terminal.clone();
+
+        let captured = capture_from_state_with_runtimes(&state, &runtimes);
+        let encoded = serde_json::to_value(&captured).unwrap();
+        assert_eq!(encoded, before);
+        let saved_panes = encoded["workspaces"][0]["tabs"][0]["panes"]
+            .as_object()
+            .unwrap();
+        assert_eq!(saved_panes.len(), 1);
+        for saved in saved_panes.values() {
+            for field in ["terminal_title", "terminal_title_stripped", "revision"] {
+                assert!(saved.get(field).is_none(), "{field}: {saved}");
+            }
+        }
+        let serialized = serde_json::to_string(&captured).unwrap();
+        assert!(!serialized.contains("never-persist-observed-title"));
+        let exported = serde_json::to_value(runtime.handoff_runtime_state(pane.raw())).unwrap();
+        assert_eq!(exported["terminal_title"], raw);
+        assert_eq!(runtime.terminal_title().as_deref(), Some(raw));
+        let terminal = &state.terminals[&id];
+        assert_eq!(terminal.terminal_title(), source.terminal_title());
+        assert_eq!(
+            terminal.terminal_title_stripped(),
+            source.terminal_title_stripped()
+        );
+        assert_eq!(terminal.revision, source.revision);
+        assert_eq!(terminal.agent_metadata, source.agent_metadata);
+        assert_eq!(terminal.metadata_tokens, source.metadata_tokens);
+        assert_eq!(terminal.state, source.state);
+        assert_eq!(terminal.detected_agent, source.detected_agent);
+        assert_eq!(terminal.hook_authority, source.hook_authority);
+    }
+
+    #[tokio::test]
     async fn m828b_capture_preserves_token_fences_but_not_values() {
         use std::time::{Duration, Instant};
 

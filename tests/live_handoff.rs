@@ -2750,6 +2750,221 @@ impl Drop for M828bHandoffFixture {
 }
 
 #[test]
+fn m828c_live_handoff_preserves_observation_without_persisting_metadata() {
+    let _lock = test_lock();
+    let mut fixture = M828bHandoffFixture {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let runtime = fixture.base.join("runtime");
+    let socket = runtime.join("zynk.sock");
+    fixture.server = Some(spawn_server_without_peer_trust(
+        &fixture.base.join("config"),
+        &runtime,
+        &socket,
+    ));
+    register_runtime_dir(&runtime);
+    wait_for_socket(&socket, Duration::from_secs(10));
+    let old_pid = fixture.server.as_ref().unwrap().child.process_id().unwrap();
+    let titles = [
+        ("\u{25d0} handoff-first", Some("handoff-first")),
+        ("\u{25d1} handoff-second", Some("handoff-second")),
+        ("\u{280b}   ", None),
+    ];
+    let script = r#"printf '\033]2;%s\007\n%s\n' "$1" "$2"; while IFS= read -r command; do case "$command" in next) printf '\033]2;handoff-next\007\nC_HANDOFF_NEXT\n';; esac; done"#;
+    let mut old_panes = Vec::new();
+    for (index, (raw, _)) in titles.iter().enumerate() {
+        let marker = format!("C_HANDOFF_READY_{index}");
+        let started = fixture.request(
+            "agent.start",
+            serde_json::json!({"name": format!("title-{index}"), "cwd": fixture.base,
+                "argv": ["/bin/sh", "-c", script, "handoff-title", raw, marker]}),
+        );
+        assert_eq!(started["result"]["type"], "agent_started", "{started}");
+        let pane_id = started["result"]["agent"]["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let read = fixture.request(
+                "pane.read",
+                serde_json::json!({"pane_id": pane_id, "source": "visible"}),
+            );
+            assert_eq!(read["result"]["type"], "pane_read", "{read}");
+            if read["result"]["read"]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&marker)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "title child {index} setup timed out: {read}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let reported = fixture.request(
+            "pane.report_metadata",
+            serde_json::json!({"pane_id": pane_id, "source": "user:title-handoff", "seq": 1,
+                "tokens": {"temporary": format!("ephemeral-{index}")}}),
+        );
+        assert_eq!(reported["result"]["type"], "ok", "{reported}");
+        old_panes.push(pane_id);
+    }
+    let before: Vec<_> = old_panes
+        .iter()
+        .map(|pane| {
+            let response = fixture.request("pane.get", serde_json::json!({"pane_id": pane}));
+            assert_eq!(response["result"]["type"], "pane_info", "{response}");
+            response["result"]["pane"].clone()
+        })
+        .collect();
+    for (index, (raw, stripped)) in titles.iter().enumerate() {
+        assert_eq!(before[index]["terminal_title"], *raw);
+        assert_eq!(before[index]["terminal_title_stripped"].as_str(), *stripped);
+        assert_eq!(
+            before[index]["tokens"]["temporary"],
+            format!("ephemeral-{index}")
+        );
+    }
+
+    let handoff = fixture.request("server.live_handoff", serde_json::json!({}));
+    assert_eq!(handoff["result"]["type"], "ok", "{handoff}");
+    register_replacement(&runtime, Some(old_pid));
+    drop(fixture.server.take());
+    // Replacement discovery is process inspection; no App request precedes this subscription.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut stream = loop {
+        match UnixStream::connect(&socket) {
+            Ok(stream) => break stream,
+            Err(err) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "replacement subscription connect: {err}"
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({"id": "m828c-replacement-sub",
+        "method": "events.subscribe", "params": {"subscriptions": [{"type": "pane.updated"}]}})
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream);
+    let ack = m828c_handoff_event(&mut reader, Duration::from_secs(5)).expect("subscription ack");
+    assert_eq!(ack["id"], "m828c-replacement-sub");
+    assert_eq!(ack["result"]["type"], "subscription_started", "{ack}");
+    // Replay requires polling each envelope before 512 later events of all kinds evict it.
+    let mut initial = [None, None];
+    for _ in 0..2 {
+        let event = m828c_handoff_event(&mut reader, Duration::from_secs(5))
+            .expect("initial title envelope");
+        assert_eq!(event["event"], "pane_updated");
+        assert_eq!(event["data"]["type"], "pane_updated");
+        let pane = &event["data"]["pane"];
+        let index = titles[..2]
+            .iter()
+            .position(|(raw, _)| pane["terminal_title"] == *raw)
+            .unwrap_or_else(|| panic!("unexpected initial title envelope: {event}"));
+        assert!(
+            initial[index].is_none(),
+            "duplicate initialization: {event}"
+        );
+        assert_eq!(pane["terminal_title_stripped"].as_str(), titles[index].1);
+        assert_eq!(pane["revision"], 1);
+        assert!(pane.get("tokens").is_none());
+        initial[index] = Some(pane.clone());
+    }
+    assert!(m828c_handoff_event(&mut reader, Duration::from_millis(200)).is_none());
+    assert_ne!(
+        initial[0].as_ref().unwrap()["pane_id"],
+        initial[1].as_ref().unwrap()["pane_id"]
+    );
+
+    let mut current_panes = Vec::new();
+    for (index, old_pane) in old_panes.iter().enumerate() {
+        let response = fixture.request("pane.get", serde_json::json!({"pane_id": old_pane}));
+        assert_eq!(response["result"]["type"], "pane_info", "{response}");
+        let pane = &response["result"]["pane"];
+        assert_eq!(pane["terminal_title"], titles[index].0);
+        assert_eq!(pane["terminal_title_stripped"].as_str(), titles[index].1);
+        assert_eq!(pane["revision"], if index < 2 { 1 } else { 0 });
+        assert!(pane.get("tokens").is_none());
+        if index < 2 {
+            assert_eq!(pane["pane_id"], initial[index].as_ref().unwrap()["pane_id"]);
+        } else {
+            assert!(pane.get("terminal_title_stripped").is_none());
+        }
+        current_panes.push(pane["pane_id"].as_str().unwrap().to_owned());
+    }
+    let sent = fixture.request(
+        "pane.send_input",
+        serde_json::json!({"pane_id": current_panes[0], "text": "next", "keys": ["Enter"]}),
+    );
+    assert_eq!(sent["result"]["type"], "ok", "{sent}");
+    let updated = m828c_handoff_event(&mut reader, Duration::from_secs(5))
+        .expect("post-handoff semantic title update");
+    assert_eq!(updated["event"], "pane_updated");
+    assert_eq!(updated["data"]["type"], "pane_updated");
+    assert_eq!(updated["data"]["pane"]["pane_id"], current_panes[0]);
+    assert_eq!(updated["data"]["pane"]["terminal_title"], "handoff-next");
+    assert_eq!(
+        updated["data"]["pane"]["terminal_title_stripped"],
+        "handoff-next"
+    );
+    assert_eq!(updated["data"]["pane"]["revision"], 2);
+    assert!(updated["data"]["pane"].get("tokens").is_none());
+    for (index, pane_id) in current_panes.iter().enumerate() {
+        let response = fixture.request("pane.get", serde_json::json!({"pane_id": pane_id}));
+        let pane = &response["result"]["pane"];
+        let expected_raw = if index == 0 {
+            "handoff-next"
+        } else {
+            titles[index].0
+        };
+        assert_eq!(pane["terminal_title"], expected_raw);
+        assert_eq!(pane["revision"], [2, 1, 0][index]);
+        assert!(pane.get("tokens").is_none());
+    }
+}
+
+fn m828c_handoff_event(
+    reader: &mut BufReader<UnixStream>,
+    timeout: Duration,
+) -> Option<serde_json::Value> {
+    reader.get_mut().set_read_timeout(Some(timeout)).unwrap();
+    let mut line = String::new();
+    match reader.take(256 * 1024).read_line(&mut line) {
+        Ok(0) => panic!("replacement subscription closed"),
+        Ok(_) => {
+            assert!(line.ends_with('\n'), "incomplete subscription envelope");
+            Some(serde_json::from_str(&line).unwrap())
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            assert!(
+                line.is_empty(),
+                "partial subscription envelope at timeout: {line:?}"
+            );
+            None
+        }
+        Err(err) => panic!("replacement subscription read: {err}"),
+    }
+}
+
+#[test]
 fn m828b_live_handoff_keeps_token_sequence_and_admission_limits() {
     let _lock = test_lock();
     let mut fixture = M828bHandoffFixture {

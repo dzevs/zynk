@@ -442,6 +442,12 @@ pub struct TerminalStateMutation {
     pub session_ref_changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct TerminalTitleChange {
+    pub(crate) raw_changed: bool,
+    pub(crate) stripped_changed: bool,
+}
+
 /// Pure state for a server-owned terminal.
 ///
 /// During the migration this is still one-to-one with a pane-backed PTY, but
@@ -460,6 +466,7 @@ pub struct TerminalState {
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
+    terminal_title: Option<String>,
     // A replacement needs a process observation after this anchor/import boundary.
     // Copying an existing anchor on detector retirement must not advance it.
     session_owner_epoch: Option<Instant>,
@@ -510,6 +517,7 @@ impl TerminalState {
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             persisted_agent_session: None,
+            terminal_title: None,
             session_owner_epoch: None,
             manual_label: None,
             agent_name: None,
@@ -526,6 +534,32 @@ impl TerminalState {
             launch_argv: None,
             respawn_shell_on_exit: false,
             pending_agent_resume_plan: None,
+        }
+    }
+
+    pub(crate) fn terminal_title(&self) -> Option<&str> {
+        self.terminal_title.as_deref()
+    }
+
+    pub(crate) fn terminal_title_stripped(&self) -> Option<String> {
+        self.terminal_title
+            .as_deref()
+            .and_then(super::stripped_terminal_title)
+    }
+
+    pub(crate) fn set_terminal_title(&mut self, title: Option<String>) -> TerminalTitleChange {
+        if self.terminal_title == title {
+            return TerminalTitleChange::default();
+        }
+        let previous_stripped = self.terminal_title_stripped();
+        self.terminal_title = title;
+        let stripped_changed = previous_stripped != self.terminal_title_stripped();
+        if stripped_changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+        TerminalTitleChange {
+            raw_changed: true,
+            stripped_changed,
         }
     }
 
@@ -2986,6 +3020,96 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn m828c_title_state_separates_raw_stripped_and_revision() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "zynk:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            Some("hook message".into()),
+            Some(7),
+        );
+        terminal.set_agent_metadata(AgentMetadataReport {
+            source: "legacy presentation".into(),
+            agent_label: None,
+            applies_to_source: None,
+            title: Some("metadata title".into()),
+            display_agent: Some("Builder".into()),
+            custom_status: Some("legacy status".into()),
+            state_labels: HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_custom_status: false,
+            clear_state_labels: false,
+            ttl: None,
+            seq: Some(9),
+        });
+        assert!(terminal.metadata_tokens.patch(
+            HashMap::from([("build".into(), Some("ready".into()))]),
+            None,
+            Instant::now(),
+        ));
+        let before = terminal.clone();
+        assert!(before.hook_authority.is_some());
+        assert!(!before.agent_metadata.is_empty());
+        assert_eq!(terminal.revision, 0);
+        assert_eq!(terminal.terminal_title(), None);
+        assert_eq!(terminal.terminal_title_stripped(), None);
+        for (raw, stripped, raw_changed, stripped_changed, revision) in [
+            (Some("\u{25d0} compiling"), Some("compiling"), true, true, 1),
+            (
+                Some("\u{25d0} compiling"),
+                Some("compiling"),
+                false,
+                false,
+                1,
+            ),
+            (
+                Some("\u{25d1} compiling"),
+                Some("compiling"),
+                true,
+                false,
+                1,
+            ),
+            (Some("finished"), Some("finished"), true, true, 2),
+            (None, None, true, true, 3),
+            (None, None, false, false, 3),
+            (Some(" \t "), None, true, false, 3),
+            (Some("\u{280b}   "), None, true, false, 3),
+            (Some(""), None, true, false, 3),
+            (None, None, true, false, 3),
+        ] {
+            let changed = terminal.set_terminal_title(raw.map(str::to_owned));
+            assert_eq!(
+                changed,
+                TerminalTitleChange {
+                    raw_changed,
+                    stripped_changed
+                },
+                "{raw:?}"
+            );
+            assert_eq!(terminal.terminal_title(), raw);
+            assert_eq!(terminal.terminal_title_stripped().as_deref(), stripped);
+            assert_eq!(terminal.revision, revision);
+            assert_eq!(terminal.metadata_tokens, before.metadata_tokens);
+            assert_eq!(terminal.agent_metadata, before.agent_metadata);
+            assert_eq!(terminal.state, before.state);
+            assert_eq!(terminal.detected_agent, before.detected_agent);
+            assert_eq!(terminal.hook_authority, before.hook_authority);
+            assert_eq!(terminal.hook_identity, before.hook_identity);
+            assert_eq!(terminal.hook_report_sequences, before.hook_report_sequences);
+            assert_eq!(
+                terminal.metadata_report_sequences,
+                before.metadata_report_sequences
+            );
+            assert_eq!(
+                terminal.metadata_token_sequence_sources,
+                before.metadata_token_sequence_sources
+            );
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod runtime_mutations;
 mod session;
 pub mod state;
 mod terminal_targets;
+mod terminal_titles;
 mod theme_sync;
 mod worktrees;
 
@@ -868,6 +869,8 @@ impl App {
             if self.render_dirty.is_pending() {
                 needs_render = true;
             }
+
+            self.sync_terminal_titles();
 
             // Drain a bounded internal-event batch for responsiveness. API handlers
             // perform an exhaustive drain before reading pane/runtime state.

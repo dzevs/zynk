@@ -410,6 +410,8 @@ impl App {
             label: terminal.manual_label.clone(),
             agent: terminal.effective_agent_label().map(str::to_string),
             title: presentation.title,
+            terminal_title: terminal.terminal_title().map(str::to_string),
+            terminal_title_stripped: terminal.terminal_title_stripped(),
             display_agent: presentation.display_agent,
             agent_status: pane_agent_status(terminal.state, pane.seen),
             custom_status: presentation.custom_status,

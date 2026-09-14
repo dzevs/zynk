@@ -922,6 +922,8 @@ impl App {
             }
         }
 
+        self.sync_terminal_titles();
+
         let response = match request.method {
             Method::SessionSnapshot(_) => {
                 return self.handle_session_snapshot(request.id);
@@ -1303,6 +1305,68 @@ mod tests {
     use super::*;
     use crate::api::schema::{EventData, EventKind};
     use crate::detect::{Agent, AgentState};
+
+    #[tokio::test]
+    async fn m828c_caller_refusal_precedes_title_sync() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("caller-title")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let target = app.public_pane_id(0, pane).unwrap();
+        let terminal = app.state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        app.terminal_runtimes.insert(
+            terminal.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        let runtime = app.terminal_runtimes.get(&terminal).unwrap();
+        runtime.test_process_pty_bytes(b"\x1b]2;pending-title\x07");
+        assert_eq!(runtime.agent_osc_title(), "pending-title");
+        let sequence = app.event_hub.current_sequence();
+        let refused = serde_json::from_value(serde_json::json!({"id": "refused", "method": "pane.report_agent", "params": {"pane_id": target, "source": "zynk:claude", "agent": "claude", "state": "working"}})).unwrap();
+        let response: serde_json::Value = serde_json::from_str(
+            &app.handle_api_request_after_internal_events_drained_from_socket(
+                refused,
+                crate::api::ApiCaller::default(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(response["error"]["code"], "caller_outside_pane");
+        assert_eq!(app.state.terminals[&terminal].revision, 0);
+        assert!(app.event_hub.events_after(sequence).is_empty());
+        assert!(app.state.terminals[&terminal].hook_authority.is_none());
+        let allowed = serde_json::from_value(serde_json::json!({"id": "allowed", "method": "pane.get", "params": {"pane_id": target}})).unwrap();
+        let response: serde_json::Value = serde_json::from_str(
+            &app.handle_api_request_after_internal_events_drained_from_socket(
+                allowed,
+                crate::api::ApiCaller::default(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(response["id"], "allowed");
+        let info = &response["result"]["pane"];
+        assert_eq!(info["terminal_title"], "pending-title");
+        assert_eq!(info["terminal_title_stripped"], "pending-title");
+        assert_eq!(info["revision"], 1);
+        let events: Vec<_> = app
+            .event_hub
+            .events_after(sequence)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": info}})
+            ]
+        );
+    }
 
     fn init_repo(path: &std::path::Path) {
         let mut command = std::process::Command::new("git");

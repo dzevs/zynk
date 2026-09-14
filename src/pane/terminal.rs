@@ -490,6 +490,10 @@ impl PaneTerminal {
             .maybe_restore_host_terminal_theme(pane_id, shell_pid)
     }
 
+    pub fn terminal_title(&self) -> Option<String> {
+        self.ghostty.terminal_title()
+    }
+
     #[allow(dead_code)] // exposed for Stage C (detection loop wiring)
     pub fn agent_osc_title(&self) -> String {
         self.ghostty.agent_osc_title()
@@ -1122,6 +1126,19 @@ impl GhosttyPaneTerminal {
             alternate_screen,
             foreground_job.as_ref(),
         )
+    }
+
+    pub fn terminal_title(&self) -> Option<String> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| core.agent_osc_state.terminal_title().map(str::to_string))
+    }
+
+    pub fn seed_terminal_title(&self, title: Option<String>) {
+        if let Ok(mut core) = self.core.lock() {
+            core.agent_osc_state.seed_terminal_title(title);
+        }
     }
 
     /// Returns the latest OSC 0/2 title retained for agent detection, or `""`

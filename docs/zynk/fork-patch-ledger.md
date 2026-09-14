@@ -5866,3 +5866,215 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   Gate-2. Source is pre-relicense by ancestry; existing license notices remain.
   No release build, Zig verification, whole-M8 approval, C-E approval or operator
   merge/push/install/tag/publish/release/cleanup authorization follows.
+
+### M8-28C - Terminal title observation (IMPLEMENTED / PENDING VERIFICATION)
+
+- Partial assigned source `5cfe5e5e730246948b0c9428ad876b6938590aad` (PORT),
+  plus the entire title-only `49e333ae87a57952fc82ba479a55c35b975ff3cc`
+  +12/-2 delta under D-M6-3. Parent `09e520d5e53f8d04457f626672baa9248beb5c80`.
+  Effective Gate-1 is design `3fcdcc2c`, handoff-event companion `4252f696`
+  and controls-v2 `afdd5918`, approved by `msg_85b89436aa9467aa`. The original
+  omission, request-changes and bounded companion remain in native history.
+- C includes the creator's title grammar/capture/state/projection/sync/handoff
+  content AND 49e's four activity glyphs and regression rows. The later
+  platform presentation helper visible in 49e's context is not inherited;
+  C retains the creator's direct trim. These are two source arrivals in one
+  file, not a claim that the assigned 75-path source has been exhausted.
+- The all-path disposition pass revalidates 75 paths and 665 hunks, with 47
+  C/mixed notes, including rows labelled elsewhere. Six C-bearing paths lacked
+  C in the earlier map, two already identified in B. Fixture disposition is
+  separate from actual fork edits; optional/defaulted JSON consumers remain
+  selected preservation controls, not assumed insensitive to field additions.
+- Twenty origins and unions 98 M8 / 34 M9 remain open; A, B and C discharge
+  nothing here. D retains five D-M5-4 primaries: 5b91dae1, cc9fa475, d4e0dd3d,
+  7db744ab and d2c317ad. D-M5-4 ALSO remains at M8-33 for a0678a38 and M9-12
+  for d4e0dd3d/d2c317ad secondaries. The 4cd1481a palette is retained context.
+  M8-37, M8-65, N1/N3 and the operator deviation remain open. D/E require
+  their own executable Gate-1 with cross-path hunk re-derivation; whole-M8
+  Gate-2 and fresh independent Gate-3 still precede integration.
+- Sixteen production paths, seven additional test-only Rust paths and four
+  documentation/provenance paths define C's boundary. Two Rust modules are
+  new. No CLI, dependency, config, detection manifest, database, platform
+  implementation, protocol bump or public method/subscription/kind is added.
+  D's sidebar guard, overrides, render and redraw consequences remain in D,
+  including the D-specific responsibilities inside the shared source test.
+- Extend the existing OSC collector with a separate observation, preserving
+  the old detection assignment including Some(empty). Normal completed OSC 0/2
+  titles keep lossy UTF-8, control filtering and the 256-scalar cap; empty
+  sanitized values clear only the observation's own value. Oversized-frame
+  rejection/recovery remains. Detection clear leaves observation and in-flight
+  collector state intact; seed changes observation without changing detection.
+- Stripping trims edges and removes exactly one supported leading glyph only
+  at whitespace/end. Braille U+2800..U+28FF, six creator glyphs and four 49e
+  quarter-circle glyphs are covered; infix, unrecognized and undelimited
+  symbols remain. Empty stripped output is None. Unicode rows are retained
+  intentionally because they are the grammar, not decorative test text.
+- Narrow runtime getters take one core lock and clone only the optional title;
+  no input/screen aggregate, process lookup or filesystem operation is added.
+  Existing lock-failure-to-None behavior remains. Runtime handoff carries the
+  defaulted, None-skipped field through remapping, export and pre-reader import
+  seed. Existing input/history/keyboard/geometry fields remain preserved.
+- Handoff seed is assignment, not an independent sanitizer. Normal export
+  supplies the captured value; arbitrary typed/decoded handoff title fields
+  are not independently normalized. Existing private transport and line limit
+  stay unchanged, with no new authentication or hardening claim. The exporter
+  checks the importer's token before sending; token possession is not evidence
+  of an ability to fabricate a manifest. The withdrawn contrary argument is
+  retained only as corrected conversation history.
+- TerminalState stores newest raw observation; identical raw values are no-ops.
+  The flags distinguish raw change from stripped change. C adds the third
+  post-initialization revision writer, in TerminalState's setter, using
+  saturating_add like B's preserved App-layer token-patch and expiry writers.
+  Only stripped changes advance this writer. B's parent-scoped enumeration
+  remains historically true; C extends it without rewriting B's packet.
+- PaneInfo/AgentInfo gain defaulted, None-skipped raw/stripped read-only fields.
+  Existing revision projection expressions remain raw with title-driven values.
+  Pane/agent read results and output-match forwarding retain zero revisions;
+  unsupported output-event waits remain refused. No content counter or
+  cross-handoff monotonicity is promised. Metadata params still ignore the
+  observation names; T24 stores a positive legacy presentation independently.
+- Sync visits every attached pane occurrence across workspaces/tabs, skips
+  missing runtime/state, collects observations, applies state then publishes
+  current-coordinate full PaneUpdated snapshots for stripped changes. Raw-only
+  spinner changes retain snapshots without a title-caused bump/event. Its bool
+  reports raw change. Polling can coalesce intermediate values; there is no
+  per-OSC queue, new runtime deduplication or atomic global snapshot guarantee.
+- Add bare calls after common caller refusal and at two post-render-dirty,
+  pre-internal-drain loop sites. Discarding the ordinary bool adds no temporary
+  unconditional redraw, D guard, lint exception or title-specific render flag.
+  Existing dirty/wakeup behavior remains; no claim that title bytes suppress
+  existing redraws. Private/intercepted handlers are not all covered by the
+  common request path; the named headless shutdown wrapper remains distinct.
+- C's call-plus-blank additions reconstruct the prior three enclosing paths.
+  Eleven retained A/B wrapper/expiry bodies remain raw, including prior-toast
+  capture, presentation refresh before emission, pane/workspace sweeps and
+  final deadline resync. Outcome equality does not prove multiplicity/order;
+  this source accounting is separate from behavioral controls.
+- Cold capture/restore stores neither title value nor revision. Live transfer
+  seeds runtime observation, not reconstructed TerminalState. First sync of
+  nonempty stripped text therefore advances fresh revision 0->1 and emits
+  PaneUpdated; raw Some with stripped None does neither. T21 performs a real
+  three-child handoff, subscribes before replacement App requests, observes
+  two initialization envelopes and a glyph-only decoy at revision zero, then
+  a bounded 200 ms no-extra window. Replay requires fewer than 512 later
+  envelopes of all kinds; emission and delivery are distinct observations.
+- Twenty-six new controls comprise twelve parent-compatible plus fourteen
+  post-interface bodies. Preservation is separate: all 86 B-selected controls
+  plus 29 older consumers, total 115. Child/restored selections are 141 exact
+  names, 141 passing with 4090 skipped, catalog 4231. Growth is 26, not 141.
+  B's token-only socket body stays raw; totals alone do not attribute a writer.
+- The initial test-only parent record contains eleven failures and T24 passing,
+  plus 115 old passes. Removing twelve new bodies and two helpers reconstructs
+  nine parent files. Actual diagnostics and unreached groups are per ID. Two
+  original reds, T17/T18, were later found confounded: screen-byte construction
+  occurred before the OSC collector existed. They are not valid absence-before
+  observations. T16's later guard fixture and T20's agent fixture also changed.
+- Retain all four original bodies and the supplemental parent-copy observations.
+  The isolated copy reconstructs genuine parent production, but this supplement
+  ran AFTER C production edits began and does not satisfy the original timing
+  order. T16/T17/T18 positively observe capture before their supplemental red;
+  T20's stimulus route is source-bound without a pre-failure getter assertion.
+  Eight parent bodies remain raw; four require audited-diff binding. Neither
+  observation/construction labels nor harness names replace body/helper/outcome
+  evidence. No new assertion was added merely to make a prior sentence true.
+- Child evidence binds 29 parent-unreached groups to 31 execution statements
+  over twelve rows. Its basis is audited straight-line/visible nonempty rows,
+  not branch tracing or poll iteration counts. T19's real socket segment has
+  no request between title-producing input and subscription observation. T11
+  virtual capture/export, T13 imported descriptors, T22 capture wrappers and
+  T23 actual cold restore retain their distinct limits rather than substituting
+  for T21's real replacement. Source nonmutation checks are field-specific;
+  serialization sentinels detect verbatim, not transformed, leakage.
+- The absence audit covers all 26 controls, distinguishing observation from
+  detection subjects. T07's second clear initially inherited None; a per-row
+  populated observation/detection prefix repairs that vacuity. Its predecessor
+  is retained. T06 gained three trailing-whitespace rows before any mutant ran:
+  recognized-glyph paths re-trimmed downstream and masked the initial trim
+  mutation. Removing only the eight-line block reconstructs the earlier body.
+- Forty compiled mutants each execute all 141 controls, total 5640 outcomes.
+  All forty intended properties fail at bound assertions; 39 original exact
+  locators match, while M32 is a declared post-execution correction. All variant
+  source hashes restore and no test body is mutated. No narrowed population,
+  disjointness or exhaustive fault model is claimed. Seven controls without
+  dedicated mutants retain only their actual, narrower crossing evidence.
+- The 208 crossings split into 190 C-new and 18 preservation: 40 intended
+  assertions, 161 incidental assertion sites, five bounded receive panics,
+  one unexpected-event membership guard and one timing-sensitive pre-sweep
+  assertion left unattributed. M13/A30 reads a 1 ms legacy presentation TTL
+  before scheduled expiry; no report-to-getter elapsed time or mutation cause
+  is measured. It is not discrimination. Earlier failures never inherit later
+  normal-green groups, including T21's real-handoff group. M19/M39/M40 mutate
+  preserved sites and do not automatically evidence C-changed machinery.
+- Retain three mutation-instrument corrections: M01 summary duplicates required
+  exact binary/name deduplication with identical repetition checks; M27's
+  nonexistent accessor caused E0599 and zero tests, then effective_title
+  expresses the same fault without production changes; M32 first failed the
+  pane.get comparison at runtime.rs:693, not the later loop locator :720.
+  Original logs/preflights/scripts remain. M32 re-extracts the completed log,
+  with all 31 previously accepted structures identical; no rerun or pre-run
+  prediction success is claimed. Compatibility does not exclude shared errors.
+- Source/P7 audit covers 23 Rust paths +1982/-1: 1071 old bodies, 1067 raw and
+  four default-field adapters, all old test attributes preserved, per-file
+  assertion totals nondecreasing (+348 aggregate). The only removed line is
+  the production OSC closure tuple extension, not an assertion or test marker.
+  Twenty-eight whole files and the full Method82/Subscription23/EventKind22
+  ordered populations stay raw, including all six protocol-19 literals.
+- Adapter lineage is explicit: worktree_request_and_response_round_trip carries
+  A's workspace token field, B's pane token field and C's two None title fields;
+  create_response_round_trips_with_root_pane is B+C; the input-handoff and
+  imported-runtime fixtures are C-only. Removing only C fields reconstructs B,
+  not the batch base. All earlier lineage hashes remain linked. Five source
+  controls are raw; three new source-derived controls declare their adaptations.
+- Ten retained production regions match upstream raw; the setter's single
+  wrapping-to-saturating expression is declared separately. Whole-file reverse
+  edits, old-body/adaptation audit, new-control removal, exclusion inventory and
+  platform-gate comparison answer distinct questions. No new platform gate or
+  discarded D assertion is hidden by source byte fidelity.
+- Retain all earlier instruments: temporary production rustfmt changes restored
+  byte-exactly before any parent build, compile-only fixture faults, NUL-producing
+  Rust escape setup, corrected collector/agent fixtures, rejected patch/JS
+  invocations and evidence locator/selector failures. None counts as a kill;
+  no original log is fabricated where only tool output existed.
+- The first full check stops in clippy on T21's useless two-element Vec, before
+  its test phase. Replace only vec![None, None] with [None, None], preserving
+  both slots, every indexed use, assertion, helper and line number. The failed
+  log and prior body remain. Final normal runs bind that corrected body; the
+  forty-mutant run retains its original T21 body with an explicit audited-diff
+  bridge, not a claim that it executed the final array form. T21 has no dedicated
+  mutant. Against
+  the original parent, final C has seven raw new bodies plus the four earlier
+  fixture corrections and this one collection-only correction. Old-body
+  preservation and its four adapters are unaffected. No lint allow or gate
+  bypass is introduced; full checks must restart after this correction.
+- The next full check stops at T15's redundant as_deref on Option<&str>. Remove
+  that call, retaining the getter, expected value and comparison. A fmt-check
+  stop is retained before applying the required four-to-one-line formatting;
+  unchanged lint then passes. Earlier source +1985/-1 becomes +1982/-1 without
+  changing an assertion count. The matrix predates this correction as well:
+  38 intended control-body instances stay raw; M30/M31 use audited T15 bodies
+  and stop before this changed comparison. Every recorded T15 crossing is
+  earlier. Later T14 lines shift by three but its body stays raw. Original
+  matrix line spaces and hashes remain, with explicit final mappings rather
+  than a claim of re-execution. Production and all old bodies stay unchanged.
+- Release-mode fixed-geometry probes pass. Sync-only 1/15 stable medians are
+  471/7444 ns (15.8047x); changing medians 2154/75962 ns (35.2656x). At fifteen
+  changing panes, p95/max are 102321/292226 ns. The changing ratio is retained
+  for review, not called linear or harmless. One changing pane emits 273 total
+  envelopes, fifteen emits 4095 and first reaches the preserved 512-entry
+  Vec/front-drain boundary at measured call18. This source-derived regime
+  difference is a plausible contribution, not an isolated causal time share.
+- Existing render median deltas at 1/15/50 are +1/+2/+6 us for background
+  workspaces and +8/+5/+5 us for active panes. Captured versions, five env values,
+  runner and justfile agree, not all environment/load inputs. Render does not
+  measure sync, and absent parent helper means no parent helper timing delta.
+  No wall-clock threshold, arbitrary-workload latency claim, cache, EventHub
+  rewrite, coverage reduction or performance approval follows from these runs.
+- README/CHANGELOG document observations, lifetimes, initialization events,
+  revision asymmetry and no D rendering promise. New terminal/title.rs has
+  the modified-file header and NOTICE entry for the post-relicense 49e content;
+  app/terminal_titles.rs comes from the pre-relicense creator, without a new
+  NOTICE entry. Existing license records are retained. Full check/content
+  gates, normal hooks and exact-SHA checks precede Gate-2. Release-mode test
+  execution is not release artifact certification or an install. No whole-M8
+  approval, D/E approval or operator merge/push/install/tag/publish/release/
+  cleanup authorization is implied.

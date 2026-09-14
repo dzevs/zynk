@@ -419,6 +419,8 @@ impl App {
             name: terminal.agent_name.clone(),
             agent: pane.agent,
             title: pane.title,
+            terminal_title: pane.terminal_title,
+            terminal_title_stripped: pane.terminal_title_stripped,
             display_agent: pane.display_agent,
             agent_status: pane.agent_status,
             screen_detection_skipped: terminal.full_lifecycle_hook_authority_active(),

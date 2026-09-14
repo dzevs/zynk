@@ -969,6 +969,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn m828c_cold_restore_starts_without_observed_title_or_revision() {
+        struct RestoredRuntimes(HashMap<TerminalId, TerminalRuntime>);
+        impl Drop for RestoredRuntimes {
+            fn drop(&mut self) {
+                for (_, runtime) in self.0.drain() {
+                    runtime.shutdown();
+                }
+            }
+        }
+
+        let mut state = crate::app::AppState::test_new();
+        state.workspaces = vec![Workspace::test_new("cold-title")];
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let mut source_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let runtime = TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        let raw = "\u{25d0} cold-title-sentinel";
+        runtime.test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
+        assert_eq!(runtime.terminal_title().as_deref(), Some(raw));
+        source_runtimes.insert(id.clone(), runtime);
+        let source = state.terminals.get_mut(&id).unwrap();
+        let change = source.set_terminal_title(Some(raw.into()));
+        assert!(change.raw_changed && change.stripped_changed);
+        assert_eq!(source.terminal_title(), Some(raw));
+        assert_eq!(
+            source.terminal_title_stripped().as_deref(),
+            Some("cold-title-sentinel")
+        );
+        assert_eq!(source.revision, 1);
+        let snapshot = crate::persist::capture(
+            &state.workspaces,
+            &state.terminals,
+            &source_runtimes,
+            state.active,
+            state.selected,
+            state.sidebar_width,
+            state.sidebar_section_split,
+            state.collapsed_space_keys.clone(),
+        );
+        let (events, _rx) = mpsc::channel(32);
+        let (workspaces, terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let runtimes = RestoredRuntimes(runtimes);
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(runtimes.0.len(), 1);
+        let terminal = terminals.values().next().unwrap();
+        assert_eq!(terminal.terminal_title(), None);
+        assert_eq!(terminal.terminal_title_stripped(), None);
+        assert_eq!(terminal.revision, 0);
+        assert_eq!(runtimes.0.get(&terminal.id).unwrap().terminal_title(), None);
+        assert_eq!(state.terminals[&id].terminal_title(), Some(raw));
+        assert_eq!(state.terminals[&id].revision, 1);
+        assert_eq!(
+            source_runtimes
+                .get(&id)
+                .unwrap()
+                .terminal_title()
+                .as_deref(),
+            Some(raw)
+        );
+    }
+
+    #[tokio::test]
     async fn m828b_handoff_preserves_token_admission_and_cold_restore_resets_it() {
         struct RestoredRuntimes(HashMap<TerminalId, TerminalRuntime>);
         impl Drop for RestoredRuntimes {
