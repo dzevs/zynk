@@ -1667,7 +1667,7 @@ fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
 
 fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: zynk pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
+        eprintln!("usage: zynk pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
         return Ok(2);
     };
 
@@ -1683,6 +1683,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let mut clear_display_agent = false;
     let mut clear_custom_status = false;
     let mut clear_state_labels = false;
+    let mut tokens = std::collections::HashMap::new();
     let mut seq = None;
     let mut ttl_ms = None;
 
@@ -1773,6 +1774,29 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
                 clear_state_labels = true;
                 index += 1;
             }
+            "--token" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --token");
+                    return Ok(2);
+                };
+                let (key, value) = match super::parse_token_assignment(value) {
+                    Ok(token) => token,
+                    Err(message) => {
+                        eprintln!("{message}");
+                        return Ok(2);
+                    }
+                };
+                tokens.insert(key, value);
+                index += 2;
+            }
+            "--clear-token" => {
+                let Some(key) = args.get(index + 1) else {
+                    eprintln!("missing value for --clear-token");
+                    return Ok(2);
+                };
+                tokens.insert(key.clone(), None);
+                index += 2;
+            }
             "--seq" => {
                 let Some(value) = args.get(index + 1) else {
                     eprintln!("missing value for --seq");
@@ -1826,6 +1850,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
         && !clear_display_agent
         && !clear_custom_status
         && !clear_state_labels
+        && tokens.is_empty()
     {
         eprintln!("missing metadata field to set or clear");
         return Ok(2);
@@ -1844,6 +1869,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
         clear_display_agent,
         clear_custom_status,
         clear_state_labels,
+        tokens,
         seq,
         ttl_ms,
     }))
@@ -1879,7 +1905,7 @@ fn print_pane_help() {
     eprintln!("  zynk pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  zynk pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  zynk pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
-    eprintln!("  zynk pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
+    eprintln!("  zynk pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  zynk pane run <pane_id> [--type T] [--trace <id|inherit>] [--] <command>");
 }
 

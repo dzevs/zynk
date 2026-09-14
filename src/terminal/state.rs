@@ -1,6 +1,6 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 #[cfg(test)]
 use std::time::Duration;
@@ -284,6 +284,9 @@ pub struct HookRetirementSnapshot {
     /// counter is monotonic across a handoff, which is the whole point of a handoff.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata_sequences: Vec<(String, u64)>,
+    /// Sequenced token producers retain their admission slots across a live handoff.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_token_sequence_sources: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suppressed: Vec<SuppressedHookReportSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -455,6 +458,7 @@ pub struct TerminalState {
     pub hook_authority: Option<HookAuthority>,
     pub hook_identity: Option<HookIdentity>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
+    pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     // A replacement needs a process observation after this anchor/import boundary.
     // Copying an existing anchor on detector retirement must not advance it.
@@ -483,6 +487,7 @@ pub struct TerminalState {
     suppressed_hook_reports: HashMap<String, SuppressedHookReport>,
     stale_hook_sessions: HashMap<String, Vec<StaleHookSession>>,
     metadata_report_sequences: HashMap<String, u64>,
+    metadata_token_sequence_sources: HashSet<String>,
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
     pub revision: u64,
@@ -503,6 +508,7 @@ impl TerminalState {
             hook_authority: None,
             hook_identity: None,
             agent_metadata: HashMap::new(),
+            metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             persisted_agent_session: None,
             session_owner_epoch: None,
             manual_label: None,
@@ -513,6 +519,7 @@ impl TerminalState {
             suppressed_hook_reports: HashMap::new(),
             stale_hook_sessions: HashMap::new(),
             metadata_report_sequences: HashMap::new(),
+            metadata_token_sequence_sources: HashSet::new(),
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
             revision: 0,
@@ -1258,6 +1265,12 @@ impl TerminalState {
             .map(|(source, seq)| (source.clone(), *seq))
             .collect();
         metadata_sequences.sort();
+        let mut metadata_token_sequence_sources: Vec<String> = self
+            .metadata_token_sequence_sources
+            .iter()
+            .cloned()
+            .collect();
+        metadata_token_sequence_sources.sort();
         let mut suppressed: Vec<SuppressedHookReportSnapshot> = self
             .suppressed_hook_reports
             .iter()
@@ -1328,6 +1341,7 @@ impl TerminalState {
                 });
         let empty = sequences.is_empty()
             && metadata_sequences.is_empty()
+            && metadata_token_sequence_sources.is_empty()
             && suppressed.is_empty()
             && stale.is_empty()
             && hook_identity.is_none()
@@ -1335,6 +1349,7 @@ impl TerminalState {
         (!empty).then_some(HookRetirementSnapshot {
             sequences,
             metadata_sequences,
+            metadata_token_sequence_sources,
             suppressed,
             stale,
             hook_identity,
@@ -1358,6 +1373,8 @@ impl TerminalState {
         for (source, seq) in snapshot.metadata_sequences {
             self.metadata_report_sequences.insert(source, seq);
         }
+        self.metadata_token_sequence_sources
+            .extend(snapshot.metadata_token_sequence_sources);
         for suppressed in snapshot.suppressed {
             let source = suppressed.source.clone();
             self.suppress_hook_report_with_session_ref(
@@ -2969,6 +2986,128 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn m828b_token_admission_round_trips_without_values() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        assert!(terminal.export_hook_retirement(now).is_none());
+        let empty: HookRetirementSnapshot = serde_json::from_str("{}").unwrap();
+        assert!(empty.metadata_token_sequence_sources.is_empty());
+        assert_eq!(serde_json::to_value(&empty).unwrap(), serde_json::json!({}));
+        let old: HookRetirementSnapshot = serde_json::from_value(serde_json::json!({
+            "sequences": [["hook", 5]],
+            "metadata_sequences": [["legacy source", 7]],
+            "suppressed": [{"source":"retired", "agent_label":"codex",
+                "reason":"hook_clear", "observed_age_ms":10}],
+            "stale": [{"source":"retired", "agent_label":"codex",
+                "session_ref":{"kind":"id", "value":"old-session"},
+                "retired_age_ms":10}],
+            "hook_identity": {"source":"hook", "agent_label":"codex",
+                "session_ref":{"kind":"id", "value":"live-session"},
+                "reported_age_ms":5},
+            "unanswered_exit": {"source":"retired", "agent_label":"codex", "age_ms":8}
+        }))
+        .unwrap();
+        assert!(old.metadata_token_sequence_sources.is_empty());
+        terminal.restore_hook_retirement(old, now);
+        // Keep the source fixture independent of the replacement's replay-map restore.
+        terminal
+            .metadata_report_sequences
+            .insert("legacy source".into(), 7);
+        let before = terminal.export_hook_retirement(now).unwrap();
+        let before_json = serde_json::to_value(&before).unwrap();
+        for field in [
+            "sequences",
+            "metadata_sequences",
+            "suppressed",
+            "stale",
+            "hook_identity",
+            "unanswered_exit",
+        ] {
+            assert!(
+                before_json.get(field).is_some(),
+                "missing legacy fixture field {field}"
+            );
+        }
+        for index in (0..32).rev() {
+            assert_eq!(
+                terminal.accept_metadata_report(&format!("token-{index:02}"), Some(1), true),
+                Ok(true)
+            );
+        }
+        assert!(terminal.metadata_tokens.patch(
+            HashMap::from([("build".into(), Some("ephemeral-build".into()))]),
+            Some(Duration::from_secs(30)),
+            now,
+        ));
+        let snapshot = terminal.export_hook_retirement(now).unwrap();
+        let expected_sources: Vec<String> =
+            (0..32).map(|index| format!("token-{index:02}")).collect();
+        assert_eq!(snapshot.metadata_token_sequence_sources, expected_sources);
+        assert_eq!(snapshot.sequences, before.sequences);
+        assert_eq!(snapshot.suppressed, before.suppressed);
+        assert_eq!(snapshot.stale, before.stale);
+        assert_eq!(snapshot.hook_identity, before.hook_identity);
+        assert_eq!(snapshot.unanswered_exit, before.unanswered_exit);
+        let mut expected_sequences = before.metadata_sequences.clone();
+        expected_sequences.extend(expected_sources.iter().map(|source| (source.clone(), 1)));
+        expected_sequences.sort();
+        assert_eq!(snapshot.metadata_sequences, expected_sequences);
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        let mut old_fields = encoded.clone();
+        old_fields
+            .as_object_mut()
+            .unwrap()
+            .remove("metadata_token_sequence_sources");
+        old_fields["metadata_sequences"] = before_json["metadata_sequences"].clone();
+        assert_eq!(old_fields, before_json);
+        for absent in [
+            "tokens",
+            "metadata_tokens",
+            "expires_at",
+            "ttl",
+            "revision",
+            "agent_metadata",
+        ] {
+            assert!(
+                encoded.get(absent).is_none(),
+                "unexpected persisted field {absent}"
+            );
+        }
+        assert!(!encoded.to_string().contains("ephemeral-build"));
+        let decoded: HookRetirementSnapshot = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, snapshot);
+        let mut restored = test_terminal();
+        restored.restore_hook_retirement(decoded, now);
+        assert!(restored.metadata_tokens.values().is_empty());
+        assert_eq!(restored.metadata_tokens.next_expiry(), None);
+        assert!(restored.agent_metadata.is_empty());
+        assert_eq!(
+            restored.metadata_report_sequences,
+            terminal.metadata_report_sequences
+        );
+        assert_eq!(
+            restored.metadata_token_sequence_sources,
+            terminal.metadata_token_sequence_sources
+        );
+        assert_eq!(
+            restored.accept_metadata_report("token-00", Some(1), true),
+            Ok(false)
+        );
+        assert_eq!(
+            restored.accept_metadata_report("token-00", Some(2), true),
+            Ok(true)
+        );
+        assert_eq!(
+            restored.accept_metadata_report("new-source", Some(1), true),
+            Err(())
+        );
+        assert_eq!(
+            restored.accept_metadata_report("legacy source", Some(7), false),
+            Ok(false)
+        );
     }
 
     fn test_session_path(name: &str) -> String {
@@ -8122,6 +8261,7 @@ mod tests {
             HookRetirementSnapshot {
                 sequences: Vec::new(),
                 metadata_sequences: Vec::new(),
+                metadata_token_sequence_sources: Vec::new(),
                 suppressed: Vec::new(),
                 stale: Vec::new(),
                 hook_identity: None,

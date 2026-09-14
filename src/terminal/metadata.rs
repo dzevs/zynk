@@ -60,29 +60,43 @@ impl EffectivePresentation {
 }
 
 impl TerminalState {
-    fn accept_metadata_report(&mut self, source: &str, seq: Option<u64>) -> bool {
+    pub(crate) fn metadata_report_sequence_is_fresh(&self, source: &str, seq: Option<u64>) -> bool {
+        crate::metadata_tokens::sequence_is_fresh(&self.metadata_report_sequences, source, seq)
+    }
+
+    pub(crate) fn accept_metadata_report(
+        &mut self,
+        source: &str,
+        seq: Option<u64>,
+        includes_tokens: bool,
+    ) -> Result<bool, ()> {
         let Some(seq) = seq else {
-            return true;
+            return Ok(true);
         };
-
-        if self
-            .metadata_report_sequences
-            .get(source)
-            .is_some_and(|last_seq| seq <= *last_seq)
-        {
-            return false;
+        if !self.metadata_report_sequence_is_fresh(source, Some(seq)) {
+            return Ok(false);
         }
-
+        if includes_tokens
+            && !self.metadata_token_sequence_sources.contains(source)
+            && self.metadata_token_sequence_sources.len()
+                >= crate::metadata_tokens::MAX_SEQUENCE_SOURCES
+        {
+            return Err(());
+        }
         self.metadata_report_sequences
             .insert(source.to_string(), seq);
-        true
+        if includes_tokens {
+            self.metadata_token_sequence_sources
+                .insert(source.to_string());
+        }
+        Ok(true)
     }
 
     pub fn set_agent_metadata(
         &mut self,
         report: AgentMetadataReport,
     ) -> Option<TerminalStateMutation> {
-        if !self.accept_metadata_report(&report.source, report.seq) {
+        if self.accept_metadata_report(&report.source, report.seq, false) != Ok(true) {
             return None;
         }
 
@@ -511,6 +525,89 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn presentation_sequences_remain_unbounded_while_token_sequences_are_bounded() {
+        let mut terminal = test_terminal();
+        assert_eq!(crate::metadata_tokens::MAX_SEQUENCE_SOURCES, 32);
+        for index in 0..40 {
+            let source = format!("legacy source {index}");
+            terminal.set_agent_metadata(AgentMetadataReport {
+                source: source.clone(),
+                agent_label: None,
+                applies_to_source: None,
+                title: Some(format!("title-{index}")),
+                display_agent: None,
+                custom_status: None,
+                state_labels: HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_custom_status: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(0),
+            });
+            assert_eq!(terminal.metadata_report_sequences.get(&source), Some(&0));
+            assert_eq!(
+                terminal.agent_metadata[&source].title,
+                Some(format!("title-{index}"))
+            );
+        }
+        assert_eq!(terminal.metadata_report_sequences.len(), 40);
+        assert!(terminal.metadata_token_sequence_sources.is_empty());
+        for index in 0..32 {
+            let source = format!("token-{index}");
+            assert!(terminal.metadata_report_sequence_is_fresh(&source, Some(0)));
+            assert_eq!(
+                terminal.accept_metadata_report(&source, Some(0), true),
+                Ok(true)
+            );
+            assert_eq!(terminal.metadata_report_sequences.get(&source), Some(&0));
+            assert!(terminal.metadata_token_sequence_sources.contains(&source));
+        }
+        assert_eq!(terminal.metadata_report_sequences.len(), 72);
+        assert_eq!(terminal.metadata_token_sequence_sources.len(), 32);
+        let sequences = terminal.metadata_report_sequences.clone();
+        let sources = terminal.metadata_token_sequence_sources.clone();
+        assert_eq!(
+            terminal.accept_metadata_report("overflow", Some(0), true),
+            Err(())
+        );
+        assert_eq!(terminal.metadata_report_sequences, sequences);
+        assert_eq!(terminal.metadata_token_sequence_sources, sources);
+        assert_eq!(
+            terminal.accept_metadata_report("token-0", Some(1), true),
+            Ok(true)
+        );
+        assert_eq!(terminal.metadata_report_sequences.get("token-0"), Some(&1));
+        for seq in [0, 1] {
+            assert!(!terminal.metadata_report_sequence_is_fresh("token-0", Some(seq)));
+            assert_eq!(
+                terminal.accept_metadata_report("token-0", Some(seq), true),
+                Ok(false)
+            );
+        }
+        let sequences = terminal.metadata_report_sequences.clone();
+        for source in ["token-0", "unsequenced-new"] {
+            assert!(terminal.metadata_report_sequence_is_fresh(source, None));
+            assert_eq!(
+                terminal.accept_metadata_report(source, None, true),
+                Ok(true)
+            );
+            assert_eq!(terminal.metadata_report_sequences, sequences);
+            assert_eq!(terminal.metadata_token_sequence_sources, sources);
+        }
+        assert_eq!(
+            terminal.accept_metadata_report("legacy-after-cap", Some(7), false),
+            Ok(true)
+        );
+        assert_eq!(
+            terminal.metadata_report_sequences.get("legacy-after-cap"),
+            Some(&7)
+        );
+        assert_eq!(terminal.metadata_token_sequence_sources, sources);
+        assert!(terminal.metadata_tokens.values().is_empty());
     }
 
     fn set_metadata_custom_status(

@@ -992,6 +992,11 @@ impl AppState {
             .values()
             .filter_map(|terminal| terminal.next_agent_metadata_expiry())
             .chain(
+                self.terminals
+                    .values()
+                    .filter_map(|terminal| terminal.metadata_tokens.next_expiry()),
+            )
+            .chain(
                 self.workspaces
                     .iter()
                     .filter_map(|workspace| workspace.metadata_tokens.next_expiry()),
@@ -999,14 +1004,46 @@ impl AppState {
             .min()
     }
 
-    pub(crate) fn expire_metadata_tokens(&mut self, now: std::time::Instant) -> Vec<usize> {
-        self.workspaces
+    pub(crate) fn expire_metadata_tokens(
+        &mut self,
+        now: std::time::Instant,
+    ) -> (Vec<(usize, PaneId)>, Vec<usize>) {
+        let pane_terminals = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, workspace)| {
+                workspace.tabs.iter().flat_map(move |tab| {
+                    tab.layout
+                        .pane_ids()
+                        .into_iter()
+                        .filter_map(move |pane_id| {
+                            workspace
+                                .pane_state(pane_id)
+                                .map(|pane| (ws_idx, pane_id, pane.attached_terminal_id.clone()))
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+        let changed_panes = pane_terminals
+            .into_iter()
+            .filter_map(|(ws_idx, pane_id, terminal_id)| {
+                let terminal = self.terminals.get_mut(&terminal_id)?;
+                terminal.metadata_tokens.expire_at(now).then(|| {
+                    terminal.revision = terminal.revision.saturating_add(1);
+                    (ws_idx, pane_id)
+                })
+            })
+            .collect();
+        let changed_workspaces = self
+            .workspaces
             .iter_mut()
             .enumerate()
             .filter_map(|(ws_idx, workspace)| {
                 workspace.metadata_tokens.expire_at(now).then_some(ws_idx)
             })
-            .collect()
+            .collect();
+        (changed_panes, changed_workspaces)
     }
 
     pub(crate) fn expire_agent_metadata_at(

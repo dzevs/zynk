@@ -4720,6 +4720,93 @@ mod tests {
         value["result"]["workspace"].clone()
     }
 
+    fn m828b_headless_pane_snapshot(app: &mut crate::app::App, target: &str) -> serde_json::Value {
+        let request = serde_json::from_value(serde_json::json!({"id": "m828b-snapshot", "method": "pane.get", "params": {"pane_id": target}})).unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(request)).unwrap();
+        assert_eq!(response["result"]["type"], "pane_info");
+        response["result"]["pane"].clone()
+    }
+
+    #[test]
+    fn m828b_headless_api_read_expires_pane_tokens_after_shutdown_guard() {
+        for (shutting_down, should_quit) in [(false, false), (true, false), (false, true)] {
+            let mut fixture = m828a_headless_fixture();
+            let server = fixture.server.as_mut().unwrap();
+            server.app.state.workspaces =
+                vec![crate::workspace::Workspace::test_new("pane tokens")];
+            server.app.state.active = Some(0);
+            server.app.state.ensure_test_terminals();
+            let target = format!("{}:p1", server.app.state.workspaces[0].id);
+            let report = serde_json::from_value(serde_json::json!({"id": "m828b-seed", "method": "pane.report_metadata",
+                "params": {"pane_id": target, "source": "user:headless", "title": "due", "ttl_ms": 20, "tokens": {"status": "due"}}})).unwrap();
+            let response: serde_json::Value =
+                serde_json::from_str(&server.app.handle_api_request(report)).unwrap();
+            assert_eq!(response["result"]["type"], "ok");
+            assert_eq!(
+                m828b_headless_pane_snapshot(&mut server.app, &target)["tokens"]["status"],
+                "due"
+            );
+            let deadline = server.app.agent_metadata_deadline.expect("pane deadline");
+            let limit = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                assert!(Instant::now() < limit, "pane deadline wait exceeded bound");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let before = m828b_headless_pane_snapshot(&mut server.app, &target);
+            assert_eq!(before["tokens"]["status"], "due");
+            let sequence = server.app.event_hub.current_sequence();
+            server.shutting_down = shutting_down;
+            server.should_quit.store(should_quit, Ordering::Release);
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            let changed = server.handle_api_request_with_shutdown_check_inner(api::ApiRequestMessage {
+                request: serde_json::from_value(serde_json::json!({"id": "m828b-read", "method": "pane.get", "params": {"pane_id": target}})).unwrap(),
+                respond_to,
+                caller: api::ApiCaller::default(),
+            }, true);
+            let response: serde_json::Value =
+                serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
+                    .unwrap();
+            assert_eq!(response["id"], "m828b-read");
+            if shutting_down || should_quit {
+                assert!(!changed);
+                assert_eq!(response["error"]["code"], "server_unavailable");
+                assert_eq!(
+                    m828b_headless_pane_snapshot(&mut server.app, &target),
+                    before
+                );
+                assert_eq!(server.app.agent_metadata_deadline, Some(deadline));
+                assert!(server.app.event_hub.events_after(sequence).is_empty());
+            } else {
+                assert!(changed);
+                assert_eq!(response["result"]["type"], "pane_info");
+                assert!(
+                    response["result"]["pane"].get("tokens").is_none(),
+                    "{response}"
+                );
+                assert_eq!(
+                    response["result"]["pane"]["revision"].as_u64(),
+                    Some(before["revision"].as_u64().unwrap() + 1)
+                );
+                assert_eq!(server.app.agent_metadata_deadline, None);
+                let updates = server
+                    .app
+                    .event_hub
+                    .events_after(sequence)
+                    .into_iter()
+                    .map(|(_, event)| serde_json::to_value(event).unwrap())
+                    .filter(|event| event["event"] == "pane_updated")
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    updates,
+                    vec![
+                        serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": response["result"]["pane"]}})
+                    ]
+                );
+            }
+        }
+    }
+
     #[test]
     fn m828a_headless_scheduled_expiry_removes_workspace_tokens() {
         let mut fixture = m828a_headless_fixture();

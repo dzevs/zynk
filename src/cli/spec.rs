@@ -542,6 +542,8 @@ fn report_metadata_command() -> Command {
         .arg(flag("clear-custom-status"))
         .arg(option("state-label", "STATUS=TEXT"))
         .arg(flag("clear-state-labels"))
+        .arg(repeatable_option("token", "NAME=VALUE"))
+        .arg(repeatable_option("clear-token", "NAME"))
         .arg(option("seq", "N"))
         .arg(option("ttl-ms", "N"))
 }
@@ -973,6 +975,46 @@ mod tests {
         let mut items = items.into_iter().collect::<Vec<_>>();
         items.sort_unstable();
         items
+    }
+
+    #[test]
+    fn m828b_pane_token_completion_preserves_legacy_flags() {
+        let mut cmd = super::command();
+        cmd.build();
+        let report = command_path(&cmd, &["pane", "report-metadata"]);
+        assert_eq!(
+            sorted(report.get_arguments().filter_map(|arg| arg.get_long())),
+            [
+                "agent",
+                "applies-to-source",
+                "clear-custom-status",
+                "clear-display-agent",
+                "clear-state-labels",
+                "clear-title",
+                "clear-token",
+                "custom-status",
+                "display-agent",
+                "seq",
+                "source",
+                "state-label",
+                "title",
+                "token",
+                "ttl-ms"
+            ]
+        );
+        let positional = report.get_positionals().collect::<Vec<_>>();
+        assert_eq!(positional.len(), 1);
+        assert!(positional[0].is_required_set());
+        for name in ["token", "clear-token"] {
+            let arg = report
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some(name))
+                .unwrap();
+            assert!(
+                matches!(arg.get_action(), clap::ArgAction::Append),
+                "{name}"
+            );
+        }
     }
 
     #[test]

@@ -21,7 +21,8 @@ use crate::layout::{find_in_direction, NavDirection, PaneId};
 
 use super::super::api_helpers::{
     detect_state_from_api, encode_api_keys, encode_api_text, normalize_custom_status,
-    normalize_reported_agent_label,
+    normalize_metadata_source, normalize_metadata_tokens, normalize_metadata_ttl,
+    normalize_reported_agent_label, MAX_METADATA_TOKEN_KEYS_PER_RESOURCE,
 };
 use super::responses::{encode_error, encode_success};
 
@@ -1467,7 +1468,7 @@ impl App {
         id: String,
         params: PaneReportMetadataParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let agent_label = match params.agent.as_deref() {
@@ -1477,14 +1478,38 @@ impl App {
             },
             None => None,
         };
-        let Some(source) = normalize_optional_text(Some(params.source)) else {
-            return encode_error(id, "invalid_metadata_request", "missing metadata source");
+        let includes_tokens = !params.tokens.is_empty();
+        let source = if includes_tokens {
+            match normalize_metadata_source(params.source) {
+                Ok(source) => source,
+                Err(message) => return encode_error(id, "invalid_metadata_source", message),
+            }
+        } else {
+            let Some(source) = normalize_optional_text(Some(params.source)) else {
+                return encode_error(id, "invalid_metadata_request", "missing metadata source");
+            };
+            source
         };
         let raw_title_set = params.title.is_some();
         let raw_display_agent_set = params.display_agent.is_some();
         let raw_custom_status_set = params.custom_status.is_some();
         let raw_state_labels_set = !params.state_labels.is_empty();
-        let ttl = params.ttl_ms.map(std::time::Duration::from_millis);
+        let ttl = if includes_tokens {
+            match normalize_metadata_ttl(params.ttl_ms) {
+                Ok(ttl) => ttl,
+                Err(message) => return encode_error(id, "invalid_metadata_ttl", message),
+            }
+        } else {
+            params.ttl_ms.map(std::time::Duration::from_millis)
+        };
+        let tokens = if includes_tokens {
+            match normalize_metadata_tokens(params.tokens) {
+                Ok(tokens) => Some(tokens),
+                Err(message) => return encode_error(id, "invalid_metadata_token", message),
+            }
+        } else {
+            None
+        };
         let title = normalize_presentation_text(params.title);
         let display_agent = normalize_presentation_text(params.display_agent);
         let custom_status = normalize_custom_status(params.custom_status);
@@ -1527,6 +1552,7 @@ impl App {
             && display_agent.is_none()
             && custom_status.is_none()
             && state_labels.is_empty()
+            && tokens.is_none()
             && !params.clear_title
             && !params.clear_display_agent
             && !params.clear_custom_status
@@ -1538,22 +1564,87 @@ impl App {
                 "missing metadata field to set or clear",
             );
         }
-        self.handle_internal_event(crate::events::AppEvent::HookMetadataReported {
-            pane_id,
-            source,
-            agent_label,
-            applies_to_source,
-            title,
-            display_agent,
-            custom_status,
-            state_labels,
-            clear_title: params.clear_title,
-            clear_display_agent: params.clear_display_agent,
-            clear_custom_status: params.clear_custom_status,
-            clear_state_labels: params.clear_state_labels,
-            seq: params.seq,
-            ttl,
-        });
+        let presentation_requested = title.is_some()
+            || display_agent.is_some()
+            || custom_status.is_some()
+            || !state_labels.is_empty()
+            || params.clear_title
+            || params.clear_display_agent
+            || params.clear_custom_status
+            || params.clear_state_labels;
+        let token_changed = if let Some(tokens) = tokens {
+            let Some(terminal_id) = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|workspace| workspace.pane_state(pane_id))
+                .map(|pane| pane.attached_terminal_id.clone())
+            else {
+                return pane_not_found(id, &params.pane_id);
+            };
+            let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+                return pane_not_found(id, &params.pane_id);
+            };
+            if !terminal.metadata_report_sequence_is_fresh(&source, params.seq) {
+                return encode_success(id, ResponseResult::Ok {});
+            }
+            if terminal.metadata_tokens.key_count_after_patch(&tokens)
+                > MAX_METADATA_TOKEN_KEYS_PER_RESOURCE
+            {
+                return encode_error(
+                    id,
+                    "metadata_token_limit",
+                    format!(
+                        "pane metadata may contain at most {MAX_METADATA_TOKEN_KEYS_PER_RESOURCE} tokens"
+                    ),
+                );
+            }
+            match terminal.accept_metadata_report(&source, params.seq, true) {
+                Ok(true) => {}
+                Ok(false) => return encode_success(id, ResponseResult::Ok {}),
+                Err(()) => {
+                    return encode_error(
+                        id,
+                        "metadata_sequence_source_limit",
+                        format!(
+                            "pane metadata may track at most {} sequenced sources",
+                            crate::metadata_tokens::MAX_SEQUENCE_SOURCES
+                        ),
+                    );
+                }
+            }
+            let changed = terminal
+                .metadata_tokens
+                .patch(tokens, ttl, std::time::Instant::now());
+            if changed {
+                terminal.revision = terminal.revision.saturating_add(1);
+            }
+            changed
+        } else {
+            false
+        };
+        if presentation_requested {
+            self.handle_internal_event(crate::events::AppEvent::HookMetadataReported {
+                pane_id,
+                source,
+                agent_label,
+                applies_to_source,
+                title,
+                display_agent,
+                custom_status,
+                state_labels,
+                clear_title: params.clear_title,
+                clear_display_agent: params.clear_display_agent,
+                clear_custom_status: params.clear_custom_status,
+                clear_state_labels: params.clear_state_labels,
+                seq: if includes_tokens { None } else { params.seq },
+                ttl,
+            });
+        }
+        if token_changed {
+            self.sync_agent_metadata_deadline();
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -2000,6 +2091,822 @@ mod tests {
         config::Config,
         workspace::Workspace,
     };
+
+    fn m828b_app() -> App {
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("active"), Workspace::test_new("target")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.next_resize_poll = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        app
+    }
+
+    fn m828b_target(app: &App, workspace: usize) -> String {
+        app.public_pane_id(workspace, app.state.workspaces[workspace].tabs[0].root_pane)
+            .unwrap()
+    }
+
+    fn m828b_dispatch(app: &mut App, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let request = serde_json::from_value::<crate::api::schema::Request>(serde_json::json!({
+            "id": "m828b-request", "method": method, "params": params
+        }));
+        assert!(request.is_ok(), "{method} JSON refused: {request:?}");
+        serde_json::from_str(&app.handle_api_request(request.unwrap())).unwrap()
+    }
+
+    fn m828b_report(app: &mut App, params: serde_json::Value) -> serde_json::Value {
+        m828b_dispatch(app, "pane.report_metadata", params)
+    }
+
+    fn m828b_ok(response: serde_json::Value) {
+        assert_eq!(
+            response,
+            serde_json::json!({"id": "m828b-request", "result": {"type": "ok"}})
+        );
+    }
+
+    fn m828b_info(app: &App, target: &str) -> serde_json::Value {
+        let (workspace, pane) = app.parse_pane_id(target).unwrap();
+        serde_json::to_value(app.pane_info(workspace, pane).unwrap()).unwrap()
+    }
+
+    fn m828b_tokens(app: &App, target: &str) -> serde_json::Value {
+        m828b_info(app, target)
+            .get("tokens")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+
+    fn m828b_terminal<'a>(app: &'a App, target: &str) -> &'a crate::terminal::TerminalState {
+        let (workspace, pane) = app.parse_pane_id(target).unwrap();
+        let terminal_id = &app.state.workspaces[workspace]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id;
+        &app.state.terminals[terminal_id]
+    }
+
+    #[test]
+    fn m828b_token_revisions_events_and_deadlines_follow_store_changes() {
+        use std::time::{Duration, Instant};
+
+        let mut app = m828b_app();
+        let target = m828b_target(&app, 1);
+        assert_eq!(m828b_terminal(&app, &target).revision, 0);
+        for (index, (patch, ttl, revision, changed)) in [
+            (serde_json::json!({"build":"ready"}), None, 1, true),
+            (serde_json::json!({"build":"ready"}), None, 1, false),
+            (serde_json::json!({"build":"ready"}), Some(10_000), 2, true),
+            (serde_json::json!({"build":"ready"}), Some(20_000), 3, true),
+            (serde_json::json!({"missing":null}), None, 3, false),
+            (serde_json::json!({"build":null}), None, 4, true),
+            (serde_json::json!({"build":null}), None, 4, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let before = m828b_info(&app, &target);
+            let before_deadline = m828b_terminal(&app, &target).metadata_tokens.next_expiry();
+            let sequence = app.event_hub.current_sequence();
+            let started = Instant::now();
+            m828b_ok(m828b_report(
+                &mut app,
+                serde_json::json!({
+                    "pane_id":target, "source":"user:revision", "seq":index + 1, "tokens":patch, "ttl_ms":ttl
+                }),
+            ));
+            let terminal = m828b_terminal(&app, &target);
+            assert_eq!(terminal.revision, revision, "revision row {index}");
+            assert_eq!(
+                app.agent_metadata_deadline,
+                terminal.metadata_tokens.next_expiry(),
+                "deadline row {index}"
+            );
+            assert!(terminal.agent_metadata.is_empty());
+            assert_eq!(
+                terminal
+                    .export_hook_retirement(started)
+                    .unwrap()
+                    .metadata_sequences,
+                vec![("user:revision".into(), index as u64 + 1)]
+            );
+            let after = m828b_info(&app, &target);
+            if let Some(ttl) = ttl {
+                assert_eq!(before["tokens"], after["tokens"], "TTL-only row {index}");
+                assert_ne!(before["revision"], after["revision"]);
+                let duration = Duration::from_millis(ttl);
+                assert!(app
+                    .agent_metadata_deadline
+                    .is_some_and(|deadline| deadline >= started + duration
+                        && deadline <= Instant::now() + duration));
+                if let Some(previous) = before_deadline {
+                    assert!(app
+                        .agent_metadata_deadline
+                        .is_some_and(|deadline| deadline > previous));
+                }
+            }
+            if !changed {
+                assert_eq!(after, before, "no-op row {index}");
+                assert_eq!(app.agent_metadata_deadline, before_deadline);
+            }
+            let events: Vec<_> = app
+                .event_hub
+                .events_after(sequence)
+                .into_iter()
+                .map(|(_, event)| serde_json::to_value(event).unwrap())
+                .collect();
+            let expected = if changed {
+                vec![
+                    serde_json::json!({"event":"pane_updated", "data":{"type":"pane_updated", "pane":after}}),
+                ]
+            } else {
+                vec![]
+            };
+            assert_eq!(events, expected, "event row {index}");
+        }
+        assert!(m828b_terminal(&app, &target)
+            .metadata_tokens
+            .values()
+            .is_empty());
+        assert_eq!(app.agent_metadata_deadline, None);
+    }
+
+    #[test]
+    fn m828b_pane_token_sequence_slots_survive_clear_expiry_and_respawn() {
+        let mut app = m828b_app();
+        let target = m828b_target(&app, 1);
+        for index in 0..32 {
+            m828b_ok(m828b_report(
+                &mut app,
+                serde_json::json!({
+                    "pane_id":target, "source":format!("producer-{index}"), "seq":1, "tokens":{"kept":"value"}
+                }),
+            ));
+        }
+        let terminal_id = m828b_terminal(&app, &target).id.clone();
+        for (index, stage) in ["clear", "expiry", "respawn"].into_iter().enumerate() {
+            let patch = if stage == "clear" {
+                serde_json::json!({"kept":null})
+            } else {
+                serde_json::json!({"kept":stage})
+            };
+            let ttl = if stage == "expiry" {
+                Some(10_000)
+            } else {
+                None
+            };
+            m828b_ok(m828b_report(
+                &mut app,
+                serde_json::json!({
+                    "pane_id":target, "source":"producer-0", "seq":index + 2, "tokens":patch, "ttl_ms":ttl
+                }),
+            ));
+            if stage == "expiry" {
+                let deadline = app.agent_metadata_deadline.unwrap();
+                app.expire_metadata_at(deadline, deadline + std::time::Duration::from_millis(1));
+            } else if stage == "respawn" {
+                app.state
+                    .terminals
+                    .get_mut(&terminal_id)
+                    .unwrap()
+                    .clear_agent_runtime_identity_after_respawn();
+            }
+            let terminal = m828b_terminal(&app, &target);
+            if stage == "respawn" {
+                assert_eq!(
+                    terminal.metadata_tokens.values(),
+                    std::collections::HashMap::from([("kept".into(), "respawn".into())])
+                );
+            } else {
+                assert!(terminal.metadata_tokens.values().is_empty(), "{stage}");
+            }
+            let now = std::time::Instant::now();
+            let fences = terminal.export_hook_retirement(now).unwrap();
+            assert_eq!(
+                fences.metadata_sequences.len(),
+                32,
+                "replay slots after {stage}"
+            );
+            assert_eq!(
+                fences.metadata_token_sequence_sources.len(),
+                32,
+                "token slots after {stage}"
+            );
+            let before = m828b_info(&app, &target);
+            let sequence = app.event_hub.current_sequence();
+            m828b_ok(m828b_report(
+                &mut app,
+                serde_json::json!({
+                    "pane_id":target, "source":"producer-0", "seq":1, "tokens":{"replay":"refused"}
+                }),
+            ));
+            let response = m828b_report(
+                &mut app,
+                serde_json::json!({
+                    "pane_id":target, "source":"overflow", "seq":1, "tokens":{"extra":"refused"}
+                }),
+            );
+            assert_eq!(
+                response["error"]["code"], "metadata_sequence_source_limit",
+                "{stage}"
+            );
+            assert_eq!(m828b_info(&app, &target), before);
+            assert_eq!(
+                m828b_terminal(&app, &target)
+                    .export_hook_retirement(now)
+                    .unwrap(),
+                fences
+            );
+            assert!(app.event_hub.events_after(sequence).is_empty());
+        }
+    }
+
+    #[test]
+    fn pane_metadata_tokens_patch_and_clear_through_dispatcher() {
+        let mut app = m828b_app();
+        let target = m828b_target(&app, 1);
+        let decoy = m828b_target(&app, 0);
+        let start = app.event_hub.current_sequence();
+        let mut snapshots = Vec::new();
+        for (index, (patch, expected)) in [
+            (
+                serde_json::json!({"branch": "main"}),
+                serde_json::json!({"branch": "main"}),
+            ),
+            (
+                serde_json::json!({"build": "ok"}),
+                serde_json::json!({"branch": "main", "build": "ok"}),
+            ),
+            (
+                serde_json::json!({"branch": null}),
+                serde_json::json!({"build": "ok"}),
+            ),
+            (serde_json::json!({"build": null}), serde_json::json!({})),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut params = serde_json::json!({"pane_id": target, "source": "user:tokens", "tokens": patch, "seq": index + 1});
+            if index == 0 {
+                params["source"] = serde_json::json!("user:presentation");
+                params["title"] = serde_json::json!("kept title");
+            }
+            m828b_ok(m828b_report(&mut app, params));
+            assert_eq!(m828b_tokens(&app, &target), expected, "patch row {index}");
+            let info = m828b_info(&app, &target);
+            assert_eq!(info["title"], "kept title");
+            assert_eq!(info["revision"], index + 1);
+            snapshots.push(serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": info}}));
+        }
+        let updates = app
+            .event_hub
+            .events_after(start)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .filter(|event| event["event"] == "pane_updated")
+            .collect::<Vec<_>>();
+        assert_eq!(updates, snapshots);
+        assert!(!snapshots[3]["data"]["pane"]
+            .as_object()
+            .unwrap()
+            .contains_key("tokens"));
+        assert!(!m828b_terminal(&app, &target)
+            .agent_metadata
+            .contains_key("user:tokens"));
+        assert_eq!(m828b_terminal(&app, &target).agent_metadata.len(), 1);
+        assert_eq!(m828b_tokens(&app, &decoy), serde_json::json!({}));
+        assert_eq!(m828b_info(&app, &decoy)["revision"], 0);
+        assert_eq!(app.state.active, Some(0));
+    }
+
+    #[test]
+    fn m828b_legacy_empty_tokens_preserve_presentation_admission() {
+        for empty_tokens in [false, true] {
+            for source in [
+                " legacy/source ".to_string(),
+                "legacy source".to_string(),
+                "s".repeat(81),
+            ] {
+                for ttl in [None, Some(0_u64), Some(86_400_001)] {
+                    let mut app = m828b_app();
+                    let target = m828b_target(&app, 1);
+                    let mut params = serde_json::json!({"pane_id": target, "source": source, "title": "legacy title", "seq": 7});
+                    if empty_tokens {
+                        params["tokens"] = serde_json::json!({});
+                    }
+                    if let Some(ttl) = ttl {
+                        params["ttl_ms"] = serde_json::json!(ttl);
+                    }
+                    m828b_ok(m828b_report(&mut app, params.clone()));
+                    let terminal = m828b_terminal(&app, &target);
+                    let stored = &terminal.agent_metadata[source.trim()];
+                    assert_eq!(stored.title.as_deref(), Some("legacy title"));
+                    assert_eq!(stored.ttl, ttl.map(std::time::Duration::from_millis));
+                    assert_eq!(terminal.revision, 0);
+                    let fence = serde_json::to_value(
+                        terminal.export_hook_retirement(std::time::Instant::now()),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        fence["metadata_sequences"],
+                        serde_json::json!([[source.trim(), 7]])
+                    );
+                    assert!(fence.get("metadata_token_sequence_sources").is_none());
+                    params["title"] = serde_json::json!("stale title");
+                    m828b_ok(m828b_report(&mut app, params));
+                    assert_eq!(
+                        m828b_terminal(&app, &target).agent_metadata[source.trim()]
+                            .title
+                            .as_deref(),
+                        Some("legacy title")
+                    );
+                    assert_eq!(m828b_tokens(&app, &target), serde_json::json!({}));
+                }
+            }
+        }
+        let mut app = m828b_app();
+        let workspace = app.public_workspace_id(1);
+        let response = m828b_dispatch(
+            &mut app,
+            "workspace.report_metadata",
+            serde_json::json!({"workspace_id": workspace, "source": "user:empty", "tokens": {}}),
+        );
+        assert_eq!(response["error"]["code"], "invalid_metadata_token");
+        assert_eq!(
+            response["error"]["message"],
+            "missing token to set or clear"
+        );
+    }
+
+    #[test]
+    fn m828b_recognized_tokens_reject_previously_ignored_invalid_payloads() {
+        let mut observations = Vec::new();
+        for tokens in [
+            serde_json::json!(42),
+            serde_json::json!([]),
+            serde_json::json!("value"),
+            serde_json::json!(null),
+            serde_json::json!({"key": true}),
+            serde_json::json!({"key": 42}),
+        ] {
+            let mut app = m828b_app();
+            let target = m828b_target(&app, 1);
+            let request = serde_json::from_value::<crate::api::schema::Request>(
+                serde_json::json!({
+                    "id": "ignored-token", "method": "pane.report_metadata",
+                    "params": {"pane_id": target, "source": "user:ignored", "title": "previously accepted", "tokens": tokens}
+                }),
+            );
+            let decoded = request.is_ok();
+            let response = request.ok().map(|request| {
+                serde_json::from_str::<serde_json::Value>(&app.handle_api_request(request)).unwrap()
+            });
+            observations.push(serde_json::json!({"tokens": tokens, "decoded": decoded, "response": response, "title": m828b_info(&app, &target).get("title")}));
+        }
+        eprintln!(
+            "recognized-token observations: {}",
+            serde_json::json!(observations)
+        );
+        for (index, observed) in observations.iter().enumerate() {
+            assert_eq!(
+                observed["decoded"], false,
+                "malformed token row {index}: {observed}"
+            );
+            assert!(observed["response"].is_null());
+            assert!(observed["title"].is_null());
+        }
+    }
+
+    #[test]
+    fn m828b_token_reports_validate_strictly_and_atomically() {
+        let mut app = m828b_app();
+        let target = m828b_target(&app, 1);
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:atomic", "seq": 1, "title": "original", "tokens": {"kept": "original"}}),
+        ));
+        let seventeen = (0..17)
+            .map(|i| (format!("k{i}"), serde_json::json!("x")))
+            .collect::<serde_json::Map<_, _>>();
+        let invalid = [
+            ("source", serde_json::json!(" "), "invalid_metadata_source"),
+            (
+                "source",
+                serde_json::json!("s".repeat(81)),
+                "invalid_metadata_source",
+            ),
+            (
+                "source",
+                serde_json::json!("bad/source"),
+                "invalid_metadata_source",
+            ),
+            (
+                "source",
+                serde_json::json!("bad source"),
+                "invalid_metadata_source",
+            ),
+            (
+                "source",
+                serde_json::json!("u\u{e9}"),
+                "invalid_metadata_source",
+            ),
+            ("ttl_ms", serde_json::json!(0), "invalid_metadata_ttl"),
+            (
+                "ttl_ms",
+                serde_json::json!(86_400_001),
+                "invalid_metadata_ttl",
+            ),
+            (
+                "tokens",
+                serde_json::json!(seventeen),
+                "invalid_metadata_token",
+            ),
+            (
+                "tokens",
+                serde_json::json!({"": "x"}),
+                "invalid_metadata_token",
+            ),
+            (
+                "tokens",
+                serde_json::json!({"a.b": "x"}),
+                "invalid_metadata_token",
+            ),
+            (
+                "tokens",
+                serde_json::json!({"k".repeat(33): "x"}),
+                "invalid_metadata_token",
+            ),
+            (
+                "tokens",
+                serde_json::json!({"\u{e9}": "x", "kept": "must not apply"}),
+                "invalid_metadata_token",
+            ),
+            ("agent", serde_json::json!(" "), "invalid_agent"),
+            (
+                "applies_to_source",
+                serde_json::json!(" "),
+                "invalid_metadata_request",
+            ),
+            (
+                "state_labels",
+                serde_json::json!({"not-a-state": "x"}),
+                "invalid_state_label",
+            ),
+            (
+                "clear_title",
+                serde_json::json!(true),
+                "invalid_metadata_request",
+            ),
+            (
+                "clear_display_agent",
+                serde_json::json!(true),
+                "invalid_metadata_request",
+            ),
+            (
+                "clear_custom_status",
+                serde_json::json!(true),
+                "invalid_metadata_request",
+            ),
+            (
+                "clear_state_labels",
+                serde_json::json!(true),
+                "invalid_metadata_request",
+            ),
+        ];
+        for (index, (field, value, code)) in invalid.into_iter().enumerate() {
+            let before_info = m828b_info(&app, &target);
+            let before_presentation = m828b_terminal(&app, &target).agent_metadata.clone();
+            let now = std::time::Instant::now();
+            let before_fences =
+                serde_json::to_value(m828b_terminal(&app, &target).export_hook_retirement(now))
+                    .unwrap();
+            let event_sequence = app.event_hub.current_sequence();
+            let mut params = serde_json::json!({"pane_id": target, "source": "user:atomic", "seq": index + 2,
+                "title": "must not apply", "display_agent": "must not apply", "custom_status": "must not apply",
+                "state_labels": {"working": "must not apply"}, "tokens": {"kept": "must not apply"}});
+            params[field] = value;
+            let response = m828b_report(&mut app, params);
+            assert_eq!(
+                response["error"]["code"], code,
+                "invalid row {index}: {response}"
+            );
+            assert_eq!(m828b_info(&app, &target), before_info, "info row {index}");
+            assert_eq!(
+                m828b_terminal(&app, &target).agent_metadata,
+                before_presentation,
+                "presentation row {index}"
+            );
+            assert_eq!(
+                serde_json::to_value(m828b_terminal(&app, &target).export_hook_retirement(now))
+                    .unwrap(),
+                before_fences,
+                "fences row {index}"
+            );
+            assert!(
+                app.event_hub.events_after(event_sequence).is_empty(),
+                "event row {index}"
+            );
+            let replacement = format!("retry-{index}");
+            m828b_ok(m828b_report(
+                &mut app,
+                serde_json::json!({"pane_id": target, "source": "user:atomic", "seq": index + 2, "title": replacement, "tokens": {"kept": replacement}}),
+            ));
+            assert_eq!(
+                m828b_tokens(&app, &target)["kept"],
+                replacement,
+                "same-seq retry row {index}"
+            );
+            assert_eq!(m828b_info(&app, &target)["title"], replacement);
+        }
+        let stale_invalid = m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:atomic", "seq": 0, "tokens": {"bad.key": "x"}}),
+        );
+        assert_eq!(stale_invalid["error"]["code"], "invalid_metadata_token");
+        let sixteen = (0..16)
+            .map(|i| (format!("legal_{i}-"), serde_json::json!("x")))
+            .collect::<serde_json::Map<_, _>>();
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": " A:z.0_- ", "ttl_ms": 86_400_000, "tokens": sixteen}),
+        ));
+        for i in 0..16 {
+            assert_eq!(m828b_tokens(&app, &target)[format!("legal_{i}-")], "x");
+        }
+        let long_key = "k".repeat(32);
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "s".repeat(80), "tokens": {long_key.clone(): format!(" \n{}\t ", "\u{e9}".repeat(90)), "kept": " \n\t "}}),
+        ));
+        assert_eq!(m828b_tokens(&app, &target)[long_key], "\u{e9}".repeat(80));
+        assert!(m828b_tokens(&app, &target).get("kept").is_none());
+        let now = std::time::Instant::now();
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:min", "ttl_ms": 1, "tokens": {"min": "x"}}),
+        ));
+        assert!(app
+            .agent_metadata_deadline
+            .is_some_and(|deadline| deadline >= now
+                && deadline <= std::time::Instant::now() + std::time::Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn m828b_token_resource_cap_counts_net_patch_and_precedes_admission() {
+        let mut app = m828b_app();
+        let target = m828b_target(&app, 1);
+        for batch in 0..2 {
+            let patch = (batch * 16..(batch + 1) * 16)
+                .map(|i| (format!("k{i}"), serde_json::json!("kept")))
+                .collect::<serde_json::Map<_, _>>();
+            m828b_ok(m828b_report(
+                &mut app,
+                serde_json::json!({"pane_id": target, "source": "user:cap", "seq": batch + 1, "title": "cap", "tokens": patch}),
+            ));
+        }
+        assert_eq!(m828b_tokens(&app, &target).as_object().unwrap().len(), 32);
+        let before = m828b_info(&app, &target);
+        let now = std::time::Instant::now();
+        let fence = serde_json::to_value(m828b_terminal(&app, &target).export_hook_retirement(now))
+            .unwrap();
+        let sequence = app.event_hub.current_sequence();
+        let rejected = m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "new:producer", "seq": 3, "title": "must not apply", "tokens": {"extra": "x"}}),
+        );
+        assert_eq!(rejected["error"]["code"], "metadata_token_limit");
+        assert_eq!(m828b_info(&app, &target), before);
+        assert_eq!(
+            serde_json::to_value(m828b_terminal(&app, &target).export_hook_retirement(now))
+                .unwrap(),
+            fence
+        );
+        assert!(app.event_hub.events_after(sequence).is_empty());
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "new:producer", "seq": 3, "tokens": {"k0": null, "extra": "retry"}}),
+        ));
+        let after = m828b_tokens(&app, &target);
+        assert_eq!(after.as_object().unwrap().len(), 32);
+        assert!(after.get("k0").is_none());
+        assert_eq!(after["extra"], "retry");
+        let before_stale = m828b_info(&app, &target);
+        let sequence = app.event_hub.current_sequence();
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:cap", "seq": 2, "tokens": {"overflow": "stale"}}),
+        ));
+        assert_eq!(m828b_info(&app, &target), before_stale);
+        assert!(app.event_hub.events_after(sequence).is_empty());
+    }
+
+    #[test]
+    fn pane_tokens_are_independent_from_presentation_guards() {
+        for guard in [
+            serde_json::json!({"agent": "codex"}),
+            serde_json::json!({"applies_to_source": " legacy/source "}),
+        ] {
+            let mut app = m828b_app();
+            let target = m828b_target(&app, 1);
+            let terminal_id = m828b_terminal(&app, &target).id.clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(
+                    Some(crate::detect::Agent::Claude),
+                    crate::detect::AgentState::Working,
+                );
+            let mut params = serde_json::json!({"pane_id": target, "source": "user:guarded", "seq": 1, "title": "hidden", "custom_status": "hidden", "tokens": {"summary": "global"}});
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(guard.as_object().unwrap().clone());
+            m828b_ok(m828b_report(&mut app, params));
+            assert_eq!(
+                m828b_tokens(&app, &target),
+                serde_json::json!({"summary": "global"})
+            );
+            let info = m828b_info(&app, &target);
+            assert_eq!(info["agent"], "claude");
+            assert!(info.get("title").is_none());
+            assert!(info.get("custom_status").is_none());
+            assert!(info.get("agent_session").is_none());
+            let terminal = m828b_terminal(&app, &target);
+            assert!(terminal.hook_authority.is_none());
+            assert!(terminal.hook_identity.is_none());
+            assert!(terminal.persisted_agent_session.is_none());
+            assert_eq!(
+                terminal.agent_metadata["user:guarded"].title.as_deref(),
+                Some("hidden")
+            );
+            if guard.get("applies_to_source").is_some() {
+                assert_eq!(
+                    terminal.agent_metadata["user:guarded"]
+                        .applies_to_source
+                        .as_deref(),
+                    Some("legacy/source")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pane_metadata_uses_one_sequence_for_presentation_and_tokens() {
+        let mut app = m828b_app();
+        let target = m828b_target(&app, 1);
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:shared", "seq": 10, "title": "legacy"}),
+        ));
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:shared", "seq": 9, "title": "stale", "tokens": {"summary": "stale"}}),
+        ));
+        assert_eq!(m828b_tokens(&app, &target), serde_json::json!({}));
+        assert_eq!(m828b_info(&app, &target)["title"], "legacy");
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:shared", "seq": 11, "title": "mixed", "tokens": {"summary": "mixed"}}),
+        ));
+        assert_eq!(
+            m828b_tokens(&app, &target),
+            serde_json::json!({"summary": "mixed"})
+        );
+        assert_eq!(m828b_info(&app, &target)["title"], "mixed");
+        for seq in [10, 11] {
+            for tokens in [false, true] {
+                let before = m828b_info(&app, &target);
+                let sequence = app.event_hub.current_sequence();
+                let mut params = serde_json::json!({"pane_id": target, "source": "user:shared", "seq": seq, "title": "must not apply"});
+                if tokens {
+                    params["tokens"] = serde_json::json!({"summary": "must not apply"});
+                }
+                m828b_ok(m828b_report(&mut app, params));
+                assert_eq!(m828b_info(&app, &target), before);
+                assert!(app.event_hub.events_after(sequence).is_empty());
+            }
+        }
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:shared", "seq": 12, "tokens": {"summary": "token-only"}}),
+        ));
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:shared", "seq": 12, "title": "same-seq legacy"}),
+        ));
+        assert_eq!(m828b_info(&app, &target)["title"], "mixed");
+        for tokens in [false, true] {
+            let now = std::time::Instant::now();
+            let fence =
+                serde_json::to_value(m828b_terminal(&app, &target).export_hook_retirement(now))
+                    .unwrap();
+            let mut params = serde_json::json!({"pane_id": target, "source": "user:shared", "title": "unsequenced"});
+            if tokens {
+                params["tokens"] = serde_json::json!({"summary": "unsequenced"});
+            }
+            m828b_ok(m828b_report(&mut app, params));
+            assert_eq!(
+                serde_json::to_value(m828b_terminal(&app, &target).export_hook_retirement(now))
+                    .unwrap(),
+                fence
+            );
+            assert_eq!(m828b_info(&app, &target)["title"], "unsequenced");
+            let before = m828b_info(&app, &target);
+            m828b_ok(m828b_report(
+                &mut app,
+                serde_json::json!({"pane_id": target, "source": "user:shared", "seq": 12, "title": "replay", "tokens": {"summary": "replay"}}),
+            ));
+            assert_eq!(m828b_info(&app, &target), before);
+        }
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:shared", "seq": 13, "title": "advanced"}),
+        ));
+        assert_eq!(m828b_info(&app, &target)["title"], "advanced");
+        assert_eq!(
+            m828b_tokens(&app, &target),
+            serde_json::json!({"summary": "unsequenced"})
+        );
+    }
+
+    #[test]
+    fn m828b_tokens_follow_attached_terminal_across_pane_move() {
+        let mut app = m828b_app();
+        let target = m828b_target(&app, 1);
+        let decoy = m828b_target(&app, 0);
+        let terminal_id = m828b_terminal(&app, &target).id.clone();
+        let destination_workspace = app.public_workspace_id(0);
+        let destination_tab = app.public_tab_id(0, 0).unwrap();
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": decoy, "source": "user:decoy", "title": "decoy", "tokens": {"summary": "decoy"}}),
+        ));
+        m828b_ok(m828b_report(
+            &mut app,
+            serde_json::json!({"pane_id": target, "source": "user:moved", "title": "target", "ttl_ms": 10_000, "tokens": {"summary": "target"}}),
+        ));
+        assert_eq!(
+            m828b_tokens(&app, &target),
+            serde_json::json!({"summary": "target"})
+        );
+        assert_eq!(
+            m828b_tokens(&app, &decoy),
+            serde_json::json!({"summary": "decoy"})
+        );
+        assert_eq!(app.state.active, Some(0));
+        let deadline = app.agent_metadata_deadline.expect("pane token deadline");
+        let moved = m828b_dispatch(
+            &mut app,
+            "pane.move",
+            serde_json::json!({"pane_id": target, "focus": false,
+            "destination": {"type": "tab", "tab_id": destination_tab, "target_pane_id": decoy, "split": "down"}}),
+        );
+        assert_eq!(moved["result"]["type"], "pane_move", "{moved}");
+        let result = &moved["result"]["move_result"];
+        assert_eq!(result["changed"], true);
+        let moved_id = result["pane"]["pane_id"].as_str().unwrap().to_string();
+        assert_ne!(moved_id, target);
+        assert_eq!(result["pane"]["terminal_id"], terminal_id.to_string());
+        assert_eq!(result["pane"]["workspace_id"], destination_workspace);
+        assert_eq!(result["pane"]["tab_id"], destination_tab);
+        assert_eq!(
+            result["pane"]["tokens"],
+            serde_json::json!({"summary": "target"})
+        );
+        assert_eq!(m828b_terminal(&app, &moved_id).id, terminal_id);
+        let sequence = app.event_hub.current_sequence();
+        assert!(app.handle_scheduled_tasks(deadline + std::time::Duration::from_millis(1), false));
+        assert_eq!(m828b_tokens(&app, &moved_id), serde_json::json!({}));
+        assert_eq!(
+            m828b_tokens(&app, &decoy),
+            serde_json::json!({"summary": "decoy"})
+        );
+        let updates = app
+            .event_hub
+            .events_after(sequence)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .filter(|event| event["event"] == "pane_updated")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            updates,
+            vec![
+                serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": m828b_info(&app, &moved_id)}})
+            ]
+        );
+        assert_eq!(
+            updates[0]["data"]["pane"]["workspace_id"],
+            destination_workspace
+        );
+        assert_eq!(app.agent_metadata_deadline, None);
+    }
 
     fn app_with_linked_worktree() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

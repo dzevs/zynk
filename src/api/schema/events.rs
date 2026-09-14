@@ -41,6 +41,8 @@ pub enum Subscription {
     TabMoved {},
     #[serde(rename = "pane.created")]
     PaneCreated {},
+    #[serde(rename = "pane.updated")]
+    PaneUpdated {},
     #[serde(rename = "pane.closed")]
     PaneClosed {},
     #[serde(rename = "pane.focused")]
@@ -194,6 +196,7 @@ pub enum EventKind {
     TabMoved,
     TabFocused,
     PaneCreated,
+    PaneUpdated,
     PaneClosed,
     PaneFocused,
     PaneMoved,
@@ -220,6 +223,7 @@ impl EventKind {
             EventKind::TabMoved => "tab.moved",
             EventKind::TabFocused => "tab.focused",
             EventKind::PaneCreated => "pane.created",
+            EventKind::PaneUpdated => "pane.updated",
             EventKind::PaneClosed => "pane.closed",
             EventKind::PaneFocused => "pane.focused",
             EventKind::PaneMoved => "pane.moved",
@@ -376,6 +380,9 @@ pub enum EventData {
         workspace_id: String,
     },
     PaneCreated {
+        pane: PaneInfo,
+    },
+    PaneUpdated {
         pane: PaneInfo,
     },
     PaneClosed {

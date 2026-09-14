@@ -2691,6 +2691,179 @@ fn handoff_pane_with_pi_session(api_socket: &Path, seq: u64, session: &str) -> S
     pane_id
 }
 
+fn m828b_handoff_exchange(
+    socket: &Path,
+    request: serde_json::Value,
+    timeout: Duration,
+) -> std::io::Result<serde_json::Value> {
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    writeln!(stream, "{request}")?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .take(256 * 1024)
+        .read_line(&mut line)?;
+    serde_json::from_str(&line).map_err(std::io::Error::other)
+}
+
+struct M828bHandoffFixture {
+    base: PathBuf,
+    server: Option<SpawnedZynk>,
+}
+
+impl M828bHandoffFixture {
+    fn request(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        m828b_handoff_exchange(
+            &self.base.join("runtime/zynk.sock"),
+            serde_json::json!({"id": "m828b-handoff", "method": method, "params": params}),
+            Duration::from_secs(30),
+        )
+        .unwrap_or_else(|err| panic!("{method}: {err}"))
+    }
+}
+
+impl Drop for M828bHandoffFixture {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            if let Some(server) = self.server.as_mut() {
+                eprintln!(
+                    "pane-token handoff status probe: {:?}",
+                    server.child.try_wait()
+                );
+            }
+        }
+        let _ = m828b_handoff_exchange(
+            &self.base.join("runtime/zynk.sock"),
+            serde_json::json!({"id": "m828b-stop", "method": "server.stop", "params": {}}),
+            Duration::from_secs(1),
+        );
+        if let Some(server) = self.server.as_mut() {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while matches!(server.child.try_wait(), Ok(None)) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        drop(self.server.take());
+        cleanup_test_base(&self.base);
+    }
+}
+
+#[test]
+fn m828b_live_handoff_keeps_token_sequence_and_admission_limits() {
+    let _lock = test_lock();
+    let mut fixture = M828bHandoffFixture {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let runtime = fixture.base.join("runtime");
+    let socket = runtime.join("zynk.sock");
+    fixture.server = Some(spawn_server_without_peer_trust(
+        &fixture.base.join("config"),
+        &runtime,
+        &socket,
+    ));
+    register_runtime_dir(&runtime);
+    wait_for_socket(&socket, Duration::from_secs(10));
+    let old_pid = fixture
+        .server
+        .as_ref()
+        .unwrap()
+        .child
+        .process_id()
+        .expect("owned server pid");
+    let created = fixture.request(
+        "workspace.create",
+        serde_json::json!({"cwd": fixture.base, "focus": true}),
+    );
+    assert_eq!(created["result"]["type"], "workspace_created", "{created}");
+    let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    for producer in 0..32 {
+        let response = fixture.request("pane.report_metadata", serde_json::json!({"pane_id": pane_id,
+            "source": format!("user:producer-{producer}"), "seq": 1, "title": "ephemeral presentation",
+            "tokens": {"summary": format!("producer-{producer}")}}));
+        assert_eq!(
+            response["result"]["type"], "ok",
+            "producer {producer}: {response}"
+        );
+    }
+    let before = fixture.request("pane.get", serde_json::json!({"pane_id": pane_id}));
+    assert_eq!(
+        before["result"]["pane"]["tokens"],
+        serde_json::json!({"summary": "producer-31"})
+    );
+    assert_eq!(before["result"]["pane"]["revision"], 32);
+    let handoff = fixture.request("server.live_handoff", serde_json::json!({}));
+    assert_eq!(handoff["result"]["type"], "ok", "{handoff}");
+    register_replacement(&runtime, Some(old_pid));
+    drop(fixture.server.take());
+    let limit = Instant::now() + Duration::from_secs(10);
+    loop {
+        let ping = m828b_handoff_exchange(
+            &socket,
+            serde_json::json!({"id": "m828b-ping", "method": "ping", "params": {}}),
+            Duration::from_secs(1),
+        );
+        if ping
+            .as_ref()
+            .is_ok_and(|response| response.get("result").is_some())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < limit,
+            "replacement did not answer: {ping:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let restored = fixture.request("pane.get", serde_json::json!({"pane_id": pane_id}));
+    assert!(
+        restored["result"]["pane"].get("tokens").is_none(),
+        "{restored}"
+    );
+    assert!(restored["result"]["pane"].get("title").is_none());
+    assert_eq!(restored["result"]["pane"]["revision"], 0);
+    let stale = fixture.request(
+        "pane.report_metadata",
+        serde_json::json!({"pane_id": pane_id,
+        "source": "user:producer-0", "seq": 1, "tokens": {"summary": "replay"}}),
+    );
+    assert_eq!(stale["result"]["type"], "ok", "{stale}");
+    let after_stale = fixture.request("pane.get", serde_json::json!({"pane_id": pane_id}));
+    assert!(after_stale["result"]["pane"].get("tokens").is_none());
+    assert_eq!(after_stale["result"]["pane"]["revision"], 0);
+    let fresh = fixture.request(
+        "pane.report_metadata",
+        serde_json::json!({"pane_id": pane_id,
+        "source": "user:producer-0", "seq": 2, "tokens": {"summary": "fresh"}}),
+    );
+    assert_eq!(fresh["result"]["type"], "ok", "{fresh}");
+    let after_fresh = fixture.request("pane.get", serde_json::json!({"pane_id": pane_id}));
+    assert_eq!(
+        after_fresh["result"]["pane"]["tokens"],
+        serde_json::json!({"summary": "fresh"})
+    );
+    assert_eq!(after_fresh["result"]["pane"]["revision"], 1);
+    let full = fixture.request(
+        "pane.report_metadata",
+        serde_json::json!({"pane_id": pane_id,
+        "source": "user:producer-32", "seq": 1, "tokens": {"summary": "must not apply"}}),
+    );
+    assert_eq!(
+        full["error"]["code"], "metadata_sequence_source_limit",
+        "{full}"
+    );
+    let after_full = fixture.request("pane.get", serde_json::json!({"pane_id": pane_id}));
+    assert_eq!(
+        after_full["result"]["pane"]["tokens"],
+        after_fresh["result"]["pane"]["tokens"]
+    );
+    assert_eq!(
+        after_full["result"]["pane"]["revision"],
+        after_fresh["result"]["pane"]["revision"]
+    );
+}
+
 #[test]
 fn live_handoff_keeps_a_released_session_retired() {
     // Gate-3 arbiter finding (msg_24fa384d30dfa9af): the snapshot carried the pane's

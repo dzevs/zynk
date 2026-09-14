@@ -607,6 +607,144 @@ mod tests {
         state
     }
 
+    #[tokio::test]
+    async fn m828b_capture_preserves_token_fences_but_not_values() {
+        use std::time::{Duration, Instant};
+
+        for projected in [false, true] {
+            let mut state = state_with_workspaces(&["token-capture"]);
+            let pane = state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = state.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+            terminal
+                .set_agent_session_ref_for_session_start(
+                    "zynk:hermes".into(),
+                    "hermes".into(),
+                    crate::agent_resume::AgentSessionRef::id("capture-session"),
+                    Some(10),
+                    Some("startup".into()),
+                )
+                .expect("hook identity");
+            terminal.set_agent_metadata(crate::terminal::state::AgentMetadataReport {
+                source: "legacy source".into(),
+                agent_label: None,
+                applies_to_source: None,
+                title: Some("never-persist-title".into()),
+                display_agent: None,
+                custom_status: None,
+                state_labels: HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_custom_status: false,
+                clear_state_labels: false,
+                ttl: Some(Duration::from_secs(30)),
+                seq: Some(7),
+            });
+            for index in (0..32).rev() {
+                assert_eq!(
+                    terminal.accept_metadata_report(&format!("token-{index:02}"), Some(1), true),
+                    Ok(true)
+                );
+            }
+            assert!(terminal.metadata_tokens.patch(
+                HashMap::from([("build".into(), Some("never-persist-token".into()))]),
+                Some(Duration::from_secs(30)),
+                Instant::now(),
+            ));
+            let before_tokens = terminal.metadata_tokens.clone();
+            let before_presentation = terminal.agent_metadata.clone();
+            let before_fences = terminal.export_hook_retirement(Instant::now()).unwrap();
+            let mut runtimes = TerminalRuntimeRegistry::new();
+            runtimes.insert(
+                terminal_id.clone(),
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tx.try_send(crate::events::AppEvent::UpdateReady {
+                version: "capture-decoy".into(),
+                install_command: String::new(),
+            })
+            .unwrap();
+            let publish = runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .test_publish_process_exit(tx, pane, crate::detect::Agent::Hermes, Instant::now());
+            tokio::pin!(publish);
+            if projected {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(10), &mut publish)
+                        .await
+                        .is_err()
+                );
+            }
+            assert_eq!(
+                runtimes
+                    .get(&terminal_id)
+                    .unwrap()
+                    .pending_process_exits()
+                    .is_empty(),
+                !projected
+            );
+            let snapshot = capture_from_state_with_runtimes(&state, &runtimes);
+            let saved = &snapshot.workspaces[0].tabs[0].panes[&pane.raw()];
+            let retirement = saved.hook_retirement.as_ref().unwrap();
+            assert_eq!(
+                retirement.metadata_sequences,
+                before_fences.metadata_sequences
+            );
+            assert_eq!(
+                retirement.metadata_token_sequence_sources,
+                before_fences.metadata_token_sequence_sources
+            );
+            assert_eq!(retirement.metadata_token_sequence_sources.len(), 32);
+            assert_eq!(retirement.hook_identity.is_none(), projected);
+            assert_eq!(
+                retirement
+                    .suppressed
+                    .iter()
+                    .any(|report| report.source == "zynk:hermes"
+                        && report.reason
+                            == crate::terminal::state::HookSuppressionReason::ProcessExit),
+                projected
+            );
+            let encoded = serde_json::to_value(saved).unwrap();
+            for field in [
+                "tokens",
+                "metadata_tokens",
+                "agent_metadata",
+                "ttl",
+                "expires_at",
+                "revision",
+            ] {
+                assert!(encoded.get(field).is_none(), "{field}: {encoded}");
+            }
+            let text = encoded.to_string();
+            assert!(!text.contains("never-persist-token"));
+            assert!(!text.contains("never-persist-title"));
+            assert_eq!(state.terminals[&terminal_id].metadata_tokens, before_tokens);
+            assert_eq!(
+                state.terminals[&terminal_id].agent_metadata,
+                before_presentation
+            );
+            assert!(state.terminals[&terminal_id]
+                .confirmed_hook_owner()
+                .is_some());
+            assert_eq!(
+                state.terminals[&terminal_id]
+                    .export_hook_retirement(Instant::now())
+                    .unwrap()
+                    .metadata_sequences,
+                before_fences.metadata_sequences
+            );
+            rx.recv().await.unwrap();
+            if projected {
+                publish.await;
+            }
+        }
+    }
+
     fn capture_from_state(state: &AppState) -> SessionSnapshot {
         let terminal_runtimes = TerminalRuntimeRegistry::new();
         capture_from_state_with_runtimes(state, &terminal_runtimes)

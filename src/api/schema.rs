@@ -219,6 +219,126 @@ mod tests {
 
     use super::*;
 
+    fn m828b_pane_json() -> serde_json::Value {
+        serde_json::json!({
+            "pane_id": "w7:p2", "terminal_id": "term_metadata", "workspace_id": "w7",
+            "tab_id": "w7:t1", "focused": false, "agent_status": "unknown", "revision": 7
+        })
+    }
+
+    #[test]
+    fn m828b_pane_token_json_and_schema_contract() {
+        let value = serde_json::json!({
+            "id": "pane-token-schema", "method": "pane.report_metadata",
+            "params": {"pane_id": "w7:p2", "source": "user:build", "seq": 0,
+                "ttl_ms": 86_400_000, "tokens": {"build": "ok", "old": null},
+                "clear_title": false, "clear_display_agent": false,
+                "clear_custom_status": false, "clear_state_labels": false}
+        });
+        let decoded: Request = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        for missing in ["pane_id", "source"] {
+            let mut invalid = value.clone();
+            invalid["params"].as_object_mut().unwrap().remove(missing);
+            assert!(
+                serde_json::from_value::<Request>(invalid).is_err(),
+                "{missing}"
+            );
+        }
+        for tokens in [
+            serde_json::json!(42),
+            serde_json::json!([]),
+            serde_json::json!("ignored before B"),
+            serde_json::json!({"build": true}),
+            serde_json::json!({"build": 42}),
+        ] {
+            let mut invalid = value.clone();
+            invalid["params"]["tokens"] = tokens.clone();
+            assert!(
+                serde_json::from_value::<Request>(invalid).is_err(),
+                "{tokens}"
+            );
+        }
+        for ttl in [0, 86_400_001] {
+            let mut legacy = value.clone();
+            legacy["params"].as_object_mut().unwrap().remove("tokens");
+            legacy["params"]["ttl_ms"] = serde_json::json!(ttl);
+            let decoded: Request = serde_json::from_value(legacy.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+        }
+        for tokens in [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"build": "ok"})),
+        ] {
+            let mut pane = m828b_pane_json();
+            if let Some(tokens) = &tokens {
+                pane["tokens"] = tokens.clone();
+            }
+            let mut expected = m828b_pane_json();
+            if tokens
+                .as_ref()
+                .is_some_and(|t| !t.as_object().unwrap().is_empty())
+            {
+                expected["tokens"] = tokens.unwrap();
+            }
+            let decoded: PaneInfo = serde_json::from_value(pane.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+            let decoded: AgentInfo = serde_json::from_value(pane).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
+        let document = export::protocol_schema_document();
+        let params = &document["schemas"]["request"]["$defs"]["PaneReportMetadataParams"];
+        assert_eq!(params["required"], serde_json::json!(["pane_id", "source"]));
+        let tokens = &params["properties"]["tokens"];
+        assert_eq!(tokens["maxProperties"], 16);
+        assert_eq!(tokens["propertyNames"]["pattern"], "^[A-Za-z0-9_-]{1,32}$");
+        assert_eq!(
+            tokens["additionalProperties"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        let optional_u64 = serde_json::to_value(schemars::schema_for!(Option<u64>)).unwrap();
+        for key in ["type", "format", "minimum", "maximum"] {
+            assert_eq!(
+                params["properties"]["ttl_ms"][key], optional_u64[key],
+                "{key}"
+            );
+        }
+        let workspace = &document["schemas"]["request"]["$defs"]["WorkspaceReportMetadataParams"];
+        assert_eq!(workspace["properties"]["ttl_ms"]["minimum"], 1);
+        assert_eq!(workspace["properties"]["ttl_ms"]["maximum"], 86_400_000);
+        for name in ["PaneInfo", "AgentInfo"] {
+            let values =
+                &document["schemas"]["success_response"]["$defs"][name]["properties"]["tokens"];
+            assert_eq!(values["maxProperties"], 32, "{name}");
+            assert_eq!(values["additionalProperties"]["type"], "string", "{name}");
+        }
+    }
+
+    #[test]
+    fn m828b_pane_updated_event_contract_and_plugin_exclusion() {
+        let subscription = serde_json::json!({"type": "pane.updated"});
+        let decoded = serde_json::from_value::<Subscription>(subscription.clone());
+        assert!(
+            decoded.is_ok(),
+            "pane subscription JSON refused: {decoded:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(decoded.unwrap()).unwrap(),
+            subscription
+        );
+        let mut pane = m828b_pane_json();
+        pane["tokens"] = serde_json::json!({"build": "ok"});
+        let event = serde_json::json!({"event": "pane_updated", "data": {
+            "type": "pane_updated", "pane": pane
+        }});
+        let decoded: EventEnvelope = serde_json::from_value(event.clone()).unwrap();
+        assert_eq!(decoded.event.dot_name(), "pane.updated");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), event);
+        assert!(!plugin_hook_event_names().contains(&"pane.updated"));
+        assert!(plugin_hook_event_names().contains(&"pane.created"));
+    }
+
     fn m828a_workspace_json() -> serde_json::Value {
         serde_json::json!({
             "workspace_id": "w7", "number": 2, "label": "background", "focused": false,
@@ -974,6 +1094,7 @@ mod tests {
                     agent_status: AgentStatus::Unknown,
                     custom_status: None,
                     state_labels: HashMap::new(),
+                    tokens: HashMap::new(),
                     agent_session: None,
                     scroll: None,
                     revision: 0,
@@ -1026,6 +1147,7 @@ mod tests {
                     agent_status: AgentStatus::Unknown,
                     custom_status: None,
                     state_labels: HashMap::new(),
+                    tokens: HashMap::new(),
                     agent_session: None,
                     scroll: None,
                     revision: 0,
@@ -1252,6 +1374,7 @@ mod tests {
         (EventKind::TabMoved, "tab_moved", "tab.moved"),
         (EventKind::TabFocused, "tab_focused", "tab.focused"),
         (EventKind::PaneCreated, "pane_created", "pane.created"),
+        (EventKind::PaneUpdated, "pane_updated", "pane.updated"),
         (EventKind::PaneClosed, "pane_closed", "pane.closed"),
         (EventKind::PaneFocused, "pane_focused", "pane.focused"),
         (EventKind::PaneMoved, "pane_moved", "pane.moved"),
@@ -1329,13 +1452,14 @@ mod tests {
                     EventKind::PaneOutputChanged
                         | EventKind::LayoutUpdated
                         | EventKind::WorkspaceMetadataUpdated
+                        | EventKind::PaneUpdated
                 )
             })
             .map(|(_, _, dot_name)| *dot_name)
             .collect();
         assert_eq!(
             hook_dot_names, expected_hook_dot_names,
-            "plugin event hooks must exclude pane.output_changed and layout.updated"
+            "plugin event hooks must exclude pane.output_changed, layout.updated, workspace.metadata_updated and pane.updated"
         );
     }
 

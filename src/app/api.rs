@@ -555,6 +555,15 @@ impl App {
         true
     }
 
+    pub(crate) fn emit_pane_updated(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
+        if let Some(pane) = self.pane_info(ws_idx, pane_id) {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneUpdated,
+                data: crate::api::schema::EventData::PaneUpdated { pane },
+            });
+        }
+    }
+
     pub(crate) fn emit_pane_state_update(&mut self, update: &crate::app::actions::PaneStateUpdate) {
         let Some(pane_id) = self.public_pane_id(update.ws_idx, update.pane_id) else {
             return;

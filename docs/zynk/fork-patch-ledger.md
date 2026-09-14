@@ -5709,3 +5709,160 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   check/content gates/hooks and exact-SHA verification precede Gate-2. No release
   build, Zig verification, whole-M8 approval, B-E approval or operator merge,
   push, install, tag, publish, release or shared-cleanup authorization follows.
+
+### M8-28B - Pane metadata reporting (IMPLEMENTED / PENDING VERIFICATION)
+
+- Partial assigned source `5cfe5e5e730246948b0c9428ad876b6938590aad` (PORT),
+  fuller patch SHA-256
+  `c2bc7452af1883eedefd670eee30dc7fb250b35e86845fd098408780f7123208`.
+  Parent `bc8cc50a166e1fdb100569b60fece1925af1c3f6`. Corrected Gate-1 design
+  `8c7d79dd` approved by `msg_d6d1feb26e56eb09`; original `30c67de0` and its
+  request-changes remain immutable. The correction declares the existing
+  revision wire-field behavior separately from recognizing the tokens field.
+- B implements pane reporting, admission, projections, subscription and shared
+  expiry in fifteen production paths; seven additional Rust paths are test-only.
+  A's workspace implementation and completed T27/presentation-order evidence
+  are preservation obligations, not unfinished A work. No C title observation,
+  D rendering/gap/group placement or E custom-status retirement is included.
+- The cross-path source-hunk pass re-derived B relevance even in paths assigned
+  elsewhere. The original E-only rows for terminal/metadata.rs,
+  api/schema/agents.rs and app/agents.rs omitted B admission/projection hunks;
+  B's companion corrects those dispositions without rewriting A's inventory.
+  Fork-only capture/restore controls are dependencies, not omitted upstream
+  hunks. PaneSnapshot already carries the nested retirement type; adding its
+  seventh field requires no production change in persist/snapshot.rs.
+- B discharges no origin. Twenty remain; unions stay 98 M8 / 34 M9 and all
+  authority payloads remain unchanged. C retains 49e333ae under D-M6-3; D
+  retains 5b91dae1, cc9fa475, d4e0dd3d, 7db744ab and d2c317ad under D-M5-4.
+  The already-landed 4cd1481a palette row remains context-only, not another
+  discharge. D must preserve the fork glyph grammar and broader palette
+  behavior; C-E each need their own executable cross-path Gate-1.
+- D-M5-4 also stays open at M8-33 for a0678a38 and at M9-12 for d4e0dd3d /
+  d2c317ad secondary adaptations. M8-37 error fidelity, M8-65 protocol updates,
+  N1/N3 and the operator deviation remain open. All six protocol-19 literals
+  in cli_wrapper.rs survive unchanged; preservation is not the M8-65 update.
+- Recognizing tokens changes previously accepted raw inputs: old serde ignored
+  that key, whereas malformed map/value types now fail decode and valid patches
+  have effects. T27 collects all six old malformed-input outcomes before its
+  first expected-refusal assertion; normal child runs execute all six refusals.
+  This is a concrete input behavior change, not a claim about every added field.
+- Absent/empty pane tokens keep the legacy route, source grammar and unsigned
+  TTL limits, including zero. Nonempty patches, including all-null clears, use
+  A's strict source/key/value/TTL normalization. The three distinct limits are
+  16 keys per request, 32 net stored keys, and 32 sequenced token producers.
+  Mixed-report callers may need source/TTL migration. A's validators, workspace
+  empty-patch refusal and patch/value schemas are unchanged; pane TTL schema
+  remains unsigned without misleading unconditional strict bounds.
+- No-token source/TTL branches and forwarding reconstruct the old handler.
+  Token syntax and legacy presentation conflicts precede terminal admission;
+  attached-terminal resolution uses the requested pane's current placement.
+  Freshness peek precedes net capacity; capacity precedes sequence consumption.
+  Refusal preserves presentation, tokens, revision, fresh event suffix, replay
+  map and token-source set. This is handler-level atomicity: an ordinary request
+  wrapper may independently sweep previously due metadata before handler entry.
+- Legacy presentation and token reports share one unbounded replay map. The
+  bounded source set counts only sequenced nonempty-token reports; None neither
+  allocates a slot nor alters a fence. Known sources advance at capacity. Clear,
+  expiry and respawn preserve both structures; no new respawn value reset.
+  Sources confer no key ownership or authority. Presentation guards do not
+  gate token storage, and old applies-to-source grammar remains permissive.
+- Mixed reports consume once, then forward presentation with seq=None through
+  the existing event path. None itself means unsequenced acceptance, not prior
+  admission; source ordering carries the caller's predecessor obligation.
+  set_agent_metadata's single internal admission call passes false; its public
+  signature, old callers, custom-status and lifecycle/identity code stay raw.
+- Add defaulted, empty-skipped, sorted metadata_token_sequence_sources as the
+  seventh HookRetirementSnapshot field. All six prior fields and export/restore
+  ordering remain. Live handoff carries replay and source-cap accounting;
+  cold restore ignores both. Older snapshots default the absent set to empty.
+  Values, deadlines, presentation payloads and revision are not persisted.
+  A's workspace values AND sequence slots remain ephemeral across handoff.
+- Token patches and expiry introduce the first post-initialization production
+  revision increments at this parent, using saturating_add only on store change.
+  Existing PaneInfo/AgentInfo schema types and projection expressions stay raw
+  but their wire values now vary. Pane/agent read results retain literal zero;
+  output-wait forwards that zero. No output emitter, min_revision wait support,
+  content-revision contract or cross-handoff monotonicity is introduced. T18
+  observes equal nonzero pane/agent revisions and both read zeros over sockets;
+  T24 uses a fresh nonsaturated fixture to pin TTL/value changes versus no-ops.
+- PaneUpdated extends Subscription 22->23 and EventKind 21->22, with old names
+  retained in order; Method remains 82. Dot spelling is pane.updated, envelope
+  and data spelling pane_updated. The dedicated ordinary stream has no initial
+  probe or payload dedupe. T23 uses an unrelated-kind decoy and two identical
+  queued payloads. The plugin hook allowlist is raw; its context match merely
+  gains the required exhaustive arm. No EventMatch selector or new registry.
+- Extend expiry's result to pane/workspace vectors. Collect current attached
+  terminal IDs, sweep at actual now and increment changed terminals. A's entire
+  workspace loop reconstructs exactly. The driver retains prior-toast capture,
+  old presentation expiry, per-update refresh before state emission, then emits
+  pane-token events, workspace-token events and resynchronizes last. All two
+  request-wrapper and three scheduled/main-loop caller bodies remain raw.
+  Outcome equality is not call multiplicity/order evidence; reconstruction is
+  separate. The named headless wrapper keeps shutdown refusal before its sweep.
+- Manual CLI and completion add repeatable token/clear-token flags, first-equals
+  parsing and last-key-wins/null clear, retaining old flags and leaf-help guard.
+  The pane adapter keeps existing silent success and complete API-error output;
+  it does not adopt A's workspace envelope or claim the broader F4 contract.
+- Twenty-seven distinct additions: twenty parent-compatible and seven private
+  interface controls. Parent evidence assembles retained increments, not one
+  run: nineteen new failures, T04 characterization passing, and 59 old passes.
+  Most parent failures stop before later properties; the report names each
+  actual diagnostic and unreached group. Old pass populations are not growth.
+- Child V2 and restored runs select all 86: 27 new plus 59 preservation, the
+  latter comprising all 41 A controls and eighteen additional legacy controls.
+  Twenty parent-compatible bodies remain raw. Thirty-two grouped execution
+  statements bind passing tests, body hashes, straight-line code and visibly
+  nonempty literal rows. This is audited inference, not branch tracing or wait
+  iteration counting. T13 uses real live handoff; T17 uses subscription reads
+  through set/expiry without an intervening request; binary names alone prove
+  neither path. Restore-entrypoint controls do not substitute for live handoff.
+- Forty mutants each run the full 86 population, with intended assertion
+  diagnostics and source restoration verified. All pass/fail names and 159
+  crossings are retained; counts are not independent discrimination counts.
+  T17 bounded receive panics under M01/M20/M21/M22/M24 are not intended kills.
+  Missing-deadline/map/index preconditions under other mutants are identified
+  separately, and later assertions do not inherit normal-green reachedness.
+- M30 fails T10 restored-set equality after map equality passes. M31 separately
+  fails restored-map equality; later sequence probes are unreached. T10's
+  pre-mutation refinement directly seeds its source fixture's legacy sequence
+  after old-format restore, masking that one setup observation. T12's third
+  literal row independently restores an old-format snapshot without the set,
+  checks 33 metadata sequences, and refuses legacy seq9 without reseeding.
+  L09 is not claimed as nonempty metadata-sequence discrimination.
+- M26 fails the pane-info token-absence assertion with a custom JSON diagnostic.
+  Validator V1 wrongly required assertion/mismatch/missing in diagnostic text;
+  V2 checks the source macro/site instead, re-extracts M01-M26 without test rerun,
+  requires M01-M25 records identical and resumes M27 onward. Original scripts,
+  logs and M26 execution remain. M39's custom clear-token message is likewise
+  bound to its actual assertion, not recognized by diagnostic vocabulary.
+- Retain parent E0061/E0609 test-only compile faults, T15 missing-terminal setup
+  correction and the 78-versus-79 selector fault. The latter original output
+  existed only in the tool transcript and is transcribed, not a fabricated log.
+  T11's wrong unanswered-exit expectation was corrected against the unchanged
+  post-report retirement branch, not justified solely by a preservation rule.
+  Only T11 reran then; capture nonmutation and projected pending-exit behavior
+  remain separate assertions. Intermediate unused-store warnings are disclosed
+  without claiming a lint gate. Optional ECHILD probes remain unclassified.
+- Bounded reconstruction reverses the declared additions/adapters and reproduces
+  all 22 old Rust modules. Of 873 old test bodies, 869 are raw; four adaptations
+  are two empty PaneInfo fields, the hook exclusion/diagnostic, and one empty
+  seventh retirement field. No assertion start or test attribute is deleted;
+  per-file assertion totals do not decrease. All 41 removed Rust lines are
+  enumerated against the parent, including the one inline-test diagnostic line.
+  Five retained functions match upstream, with only existing toast branding.
+- Source audit V1 reconstructed the modules but stopped before accepting its
+  deletion labels because a partial-string reverse edit did not contain the
+  entire quoted source line. V2 uses explicit parent-line disposition regions;
+  original script and failed log remain, with no Rust change or test rerun.
+  Reconstruction, source fidelity, exclusion inventory and conditional-gate
+  comparison establish different boundaries; none substitutes for the others.
+- The stale schema.rs hook-exclusion diagnostic is corrected at its next
+  legitimate edit to name all four excluded kinds, with ordered comparison
+  unchanged. This handles that advisory, not N1 generally. ADR 0014 remains
+  immutable; E's historical custom-status field-list consequence stays forward.
+  README/CHANGELOG cover conditional migration, reporting, events, limits,
+  lifetime and revision asymmetry. No renderer or retirement is smuggled in.
+- Full check, content gates, normal hooks and exact-SHA verification precede
+  Gate-2. Source is pre-relicense by ancestry; existing license notices remain.
+  No release build, Zig verification, whole-M8 approval, C-E approval or operator
+  merge/push/install/tag/publish/release/cleanup authorization follows.

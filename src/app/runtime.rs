@@ -416,7 +416,11 @@ impl App {
             self.refresh_new_zynk_toast_context_for_update(&update, &previous_toast);
             self.emit_pane_state_update(&update);
         }
-        for ws_idx in self.state.expire_metadata_tokens(now) {
+        let (panes, workspaces) = self.state.expire_metadata_tokens(now);
+        for (ws_idx, pane_id) in panes {
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
+        for ws_idx in workspaces {
             self.emit_workspace_token_updated(ws_idx);
         }
         self.sync_agent_metadata_deadline();
@@ -643,6 +647,189 @@ mod tests {
     use super::*;
     use crate::app::state;
     use crate::workspace::Workspace;
+
+    #[test]
+    fn m828b_pane_expiry_sweeps_at_now_and_preserves_workspace_and_presentation_order() {
+        use crate::api::schema::{EventData, EventKind};
+
+        let (mut app, first_pane) = test_app_with_pane();
+        app.state.workspaces.push(Workspace::test_new("later-pane"));
+        app.state.ensure_test_terminals();
+        let second_pane = app.state.workspaces[1].tabs[0].root_pane;
+        let targets = [
+            app.public_pane_id(0, first_pane).unwrap(),
+            app.public_pane_id(1, second_pane).unwrap(),
+        ];
+        let report = |app: &mut super::super::App, method: &str, params: serde_json::Value| {
+            let request = serde_json::from_value(
+                serde_json::json!({"id":"expiry-order", "method":method, "params":params}),
+            )
+            .unwrap();
+            let response: serde_json::Value =
+                serde_json::from_str(&app.handle_api_request(request)).unwrap();
+            assert_eq!(response["result"]["type"], "ok");
+        };
+        report(
+            &mut app,
+            "pane.report_metadata",
+            serde_json::json!({
+                "pane_id":targets[0], "source":"legacy presentation", "title":"temporary title", "ttl_ms":30_000
+            }),
+        );
+        let presentation_deadline = app.agent_metadata_deadline.unwrap();
+        for (index, ttl) in [10_000, 20_000].into_iter().enumerate() {
+            report(
+                &mut app,
+                "pane.report_metadata",
+                serde_json::json!({
+                    "pane_id":targets[index], "source":"user:tokens", "tokens":{"build":"due"}, "ttl_ms":ttl
+                }),
+            );
+        }
+        let workspace = app.public_workspace_id(0);
+        report(
+            &mut app,
+            "workspace.report_metadata",
+            serde_json::json!({
+                "workspace_id":workspace, "source":"user:workspace", "tokens":{"status":"due"}, "ttl_ms":25_000
+            }),
+        );
+        let terminal_ids = [
+            app.state.workspaces[0]
+                .pane_state(first_pane)
+                .unwrap()
+                .attached_terminal_id
+                .clone(),
+            app.state.workspaces[1]
+                .pane_state(second_pane)
+                .unwrap()
+                .attached_terminal_id
+                .clone(),
+        ];
+        let deadlines: Vec<_> = terminal_ids
+            .iter()
+            .map(|id| {
+                app.state.terminals[id]
+                    .metadata_tokens
+                    .next_expiry()
+                    .unwrap()
+            })
+            .collect();
+        assert!(deadlines[0] < deadlines[1]);
+        assert_eq!(app.agent_metadata_deadline, Some(deadlines[0]));
+        let now = presentation_deadline.max(deadlines[1]).max(
+            app.state.workspaces[0]
+                .metadata_tokens
+                .next_expiry()
+                .unwrap(),
+        ) + Duration::from_millis(1);
+        let sequence = app.event_hub.current_sequence();
+        app.expire_metadata_at(deadlines[0], now);
+        for id in &terminal_ids {
+            assert!(app.state.terminals[id].metadata_tokens.values().is_empty());
+            assert_eq!(app.state.terminals[id].metadata_tokens.next_expiry(), None);
+            assert_eq!(app.state.terminals[id].revision, 2);
+        }
+        assert!(app.state.terminals[&terminal_ids[0]]
+            .agent_metadata
+            .is_empty());
+        assert!(app.state.workspaces[0].metadata_tokens.values().is_empty());
+        assert_eq!(app.agent_metadata_deadline, None);
+        let events = app.event_hub.events_after(sequence);
+        assert_eq!(
+            events
+                .iter()
+                .map(|(_, event)| event.event)
+                .collect::<Vec<_>>(),
+            vec![
+                EventKind::PaneAgentStatusChanged,
+                EventKind::PaneUpdated,
+                EventKind::PaneUpdated,
+                EventKind::WorkspaceMetadataUpdated,
+            ]
+        );
+        assert!(
+            matches!(&events[0].1.data, EventData::PaneAgentStatusChanged { pane_id, title: None, .. } if pane_id == &targets[0])
+        );
+        for (index, (ws_idx, pane)) in [(0, first_pane), (1, second_pane)].into_iter().enumerate() {
+            assert_eq!(
+                events[index + 1].1.data,
+                EventData::PaneUpdated {
+                    pane: app.pane_info(ws_idx, pane).unwrap()
+                }
+            );
+        }
+        assert_eq!(
+            events[3].1.data,
+            EventData::WorkspaceMetadataUpdated {
+                workspace: app.workspace_info(0)
+            }
+        );
+        let sequence = app.event_hub.current_sequence();
+        app.expire_metadata_at(deadlines[0], now);
+        assert!(app.event_hub.events_after(sequence).is_empty());
+        assert_eq!(app.state.terminals[&terminal_ids[0]].revision, 2);
+        assert_eq!(app.state.terminals[&terminal_ids[1]].revision, 2);
+    }
+
+    #[test]
+    fn m828b_monolithic_api_read_expires_pane_tokens_first() {
+        let (mut app, pane) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        assert!(app.pane_info(0, pane).is_some(), "registered pane fixture");
+        let target = app.public_pane_id(0, pane).unwrap();
+        let report = serde_json::from_value(serde_json::json!({"id": "m828b-seed", "method": "pane.report_metadata",
+            "params": {"pane_id": target, "source": "user:runtime", "title": "due", "ttl_ms": 20, "tokens": {"status": "due"}}})).unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(report)).unwrap();
+        assert_eq!(response["result"]["type"], "ok");
+        assert_eq!(
+            serde_json::to_value(app.pane_info(0, pane).unwrap()).unwrap()["tokens"]["status"],
+            "due"
+        );
+        let deadline = app.agent_metadata_deadline.expect("pane deadline");
+        let limit = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            assert!(Instant::now() < limit, "pane deadline wait exceeded bound");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let before = serde_json::to_value(app.pane_info(0, pane).unwrap()).unwrap();
+        assert_eq!(before["tokens"]["status"], "due");
+        let sequence = app.event_hub.current_sequence();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: serde_json::from_value(serde_json::json!({"id": "m828b-read", "method": "pane.get", "params": {"pane_id": target}})).unwrap(),
+            respond_to,
+            caller: crate::api::ApiCaller::default(),
+        });
+        let response: serde_json::Value =
+            serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
+                .unwrap();
+        assert_eq!(response["id"], "m828b-read");
+        assert_eq!(response["result"]["type"], "pane_info");
+        assert!(
+            response["result"]["pane"].get("tokens").is_none(),
+            "{response}"
+        );
+        assert_eq!(
+            response["result"]["pane"]["revision"].as_u64(),
+            Some(before["revision"].as_u64().unwrap() + 1)
+        );
+        assert_eq!(app.agent_metadata_deadline, None);
+        let updates = app
+            .event_hub
+            .events_after(sequence)
+            .into_iter()
+            .map(|(_, event)| serde_json::to_value(event).unwrap())
+            .filter(|event| event["event"] == "pane_updated")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            updates,
+            vec![
+                serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": response["result"]["pane"]}})
+            ]
+        );
+    }
 
     #[test]
     fn m828a_monolithic_api_read_expires_workspace_tokens_first() {

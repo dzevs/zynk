@@ -4794,6 +4794,220 @@ fn m814_cli_snapshot_sends_exact_request_and_preserves_complete_response() {
 }
 
 #[test]
+fn m828b_pane_token_cli_preserves_legacy_request_and_output() {
+    let response = serde_json::json!({"id": "cli:request", "result": {"type": "ok"}, "future_envelope": "kept silent"});
+    let (request, output) = mock_snapshot_cli(
+        &[
+            "pane",
+            "report-metadata",
+            "w7:p2",
+            "--source",
+            " user:build ",
+            "--agent",
+            "claude",
+            "--applies-to-source",
+            " legacy/source ",
+            "--title",
+            "Task",
+            "--display-agent",
+            "Builder",
+            "--custom-status",
+            "legacy status",
+            "--state-label",
+            "working=Building",
+            "--seq",
+            "0",
+            "--ttl-ms",
+            "500",
+            "--token",
+            "build=old",
+            "--clear-token",
+            "build",
+            "--token",
+            "build=ok=x",
+            "--token",
+            "old=x",
+            "--clear-token",
+            "old",
+        ],
+        response.clone(),
+    );
+    assert_eq!(
+        request,
+        Some(
+            serde_json::json!({"id": "cli:request", "method": "pane.report_metadata", "params": {
+                "pane_id": "w7:p2", "source": "user:build", "agent": "claude", "applies_to_source": " legacy/source ",
+                "title": "Task", "display_agent": "Builder", "custom_status": "legacy status", "state_labels": {"working": "Building"},
+                "clear_title": false, "clear_display_agent": false, "clear_custom_status": false, "clear_state_labels": false,
+                "seq": 0, "ttl_ms": 500, "tokens": {"build": "ok=x", "old": null}
+            }})
+        ),
+        "status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    let (request, output) = mock_snapshot_cli(
+        &[
+            "pane",
+            "report-metadata",
+            "w7:p2",
+            "--source",
+            "user:build",
+            "--clear-token",
+            "build",
+            "--clear-title",
+            "--clear-display-agent",
+            "--clear-custom-status",
+            "--clear-state-labels",
+        ],
+        response,
+    );
+    assert_eq!(
+        request,
+        Some(
+            serde_json::json!({"id": "cli:request", "method": "pane.report_metadata", "params": {
+                "pane_id": "w7:p2", "source": "user:build", "tokens": {"build": null},
+                "clear_title": true, "clear_display_agent": true, "clear_custom_status": true, "clear_state_labels": true
+            }})
+        )
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn m828b_pane_token_cli_invalid_args_and_help_do_not_connect() {
+    for args in [
+        vec!["pane", "report-metadata", "--help"],
+        vec!["pane", "--help"],
+    ] {
+        let (request, output) = mock_snapshot_cli(&args, serde_json::json!({}));
+        assert!(request.is_none(), "help connected: {args:?}");
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stdout.is_empty());
+        let help = String::from_utf8(output.stderr).unwrap();
+        assert!(help.contains("pane report-metadata"), "{help}");
+        for flag in [
+            "--token",
+            "--clear-token",
+            "--source",
+            "--custom-status",
+            "--clear-custom-status",
+            "--seq",
+            "--ttl-ms",
+        ] {
+            assert!(help.contains(flag), "missing {flag}: {help}");
+        }
+    }
+    for (tail, exit) in [
+        (vec!["--token"], 2),
+        (vec!["--clear-token"], 2),
+        (vec!["--token", "no-equals"], 2),
+        (vec!["--token", "=missing-name"], 2),
+        (vec!["--token", "x=y", "--seq", "bad"], 1),
+        (vec!["--token", "x=y", "--ttl-ms", "bad"], 1),
+        (vec!["--token", "x=y", "--seq"], 2),
+        (vec!["--token", "x=y", "--ttl-ms"], 2),
+        (
+            vec!["--token", "x=y", "--title", "text", "--clear-title"],
+            2,
+        ),
+        (
+            vec![
+                "--token",
+                "x=y",
+                "--display-agent",
+                "text",
+                "--clear-display-agent",
+            ],
+            2,
+        ),
+        (
+            vec![
+                "--token",
+                "x=y",
+                "--custom-status",
+                "text",
+                "--clear-custom-status",
+            ],
+            2,
+        ),
+        (
+            vec![
+                "--token",
+                "x=y",
+                "--state-label",
+                "working=text",
+                "--clear-state-labels",
+            ],
+            2,
+        ),
+        (vec!["--token", "x=y", "--applies-to-source", " "], 2),
+        (vec!["--token", "x=y", "--unknown"], 2),
+    ] {
+        let mut args = vec!["pane", "report-metadata", "w7:p2", "--source", "user:build"];
+        args.extend(tail);
+        let (request, output) = mock_snapshot_cli(&args, serde_json::json!({}));
+        assert!(request.is_none(), "invalid args connected: {args:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn m828b_pane_token_cli_preserves_api_errors_and_legacy_limits() {
+    let response = serde_json::json!({"id": "cli:request", "error": {"code": "invalid_metadata_ttl", "message": "server policy refusal"}, "context": {"kept": true}});
+    for tokens in [false, true] {
+        for ttl in ["0", "86400001"] {
+            let mut args = vec![
+                "pane",
+                "report-metadata",
+                "w7:p2",
+                "--source",
+                " legacy/source ",
+                "--title",
+                "legacy",
+                "--ttl-ms",
+                ttl,
+            ];
+            if tokens {
+                args.extend(["--token", "build=x"]);
+            }
+            let (request, output) = mock_snapshot_cli(&args, response.clone());
+            let mut expected = serde_json::json!({"id": "cli:request", "method": "pane.report_metadata", "params": {
+                "pane_id": "w7:p2", "source": "legacy/source", "title": "legacy", "ttl_ms": ttl.parse::<u64>().unwrap(),
+                "clear_title": false, "clear_display_agent": false, "clear_custom_status": false, "clear_state_labels": false
+            }});
+            if tokens {
+                expected["params"]["tokens"] = serde_json::json!({"build": "x"});
+            }
+            assert_eq!(
+                request,
+                Some(expected),
+                "tokens={tokens}, ttl={ttl}, stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                String::from_utf8(output.stderr).unwrap(),
+                format!("{response}\n")
+            );
+        }
+    }
+}
+
+#[test]
 fn m828a_workspace_metadata_cli_preserves_request_and_success_json() {
     let response = serde_json::json!({
         "id": "cli:workspace:report-metadata", "result": {"type": "ok"},

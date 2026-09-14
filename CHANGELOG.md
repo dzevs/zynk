@@ -10,12 +10,18 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- `pane.report_metadata` and `zynk pane report-metadata` accept bounded display-only
+  token patches, exposed by pane/agent reads and `pane.updated` subscriptions.
+  Value or TTL changes and expiry emit full snapshots; true no-ops do not.
+  Pane admission fences survive live handoff but reset on cold restore; values
+  remain ephemeral. Clearing, expiry and respawn do not release source slots.
+  Configurable rendering remains staged separately; custom status still coexists.
 - `workspace.report_metadata` and `zynk workspace report-metadata` accept bounded,
   display-only token patches with per-source sequences and optional expiry.
   Workspace reads expose tokens; `workspace.metadata_updated` subscriptions report
   full snapshots after changes and expiry, without plugin hooks or receipt authority.
   Values and sequence slots reset on restart or handoff. Configurable display is
-  staged separately; pane metadata and custom-status behavior are unchanged here.
+  staged separately; pane reporting is described above and custom status remains.
 - `zynk config check` prints full local configuration diagnostics without a
   running server or config writes. It exits 0 for valid or missing config,
   1 for diagnostics, and 2 for unsupported arguments; no JSON mode is provided.
@@ -74,6 +80,13 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Changed**
 
+- Nonempty pane token reports use strict source/TTL rules and 16-request-key,
+  32-stored-key and 32-sequenced-token-source limits. Absent or empty tokens
+  retain legacy presentation admission. Previously ignored token fields are
+  now interpreted, so malformed values can be refused and mixed reports may
+  require source/TTL migration. Token changes now advance the existing pane/agent
+  info revision; pane/agent read-result revisions remain zero. This counter is
+  not a content revision and does not persist across restart or handoff.
 - Initial API request reads share explicit Unix polling helpers, preserving
   existing framing, size, timeout, and error behavior.
 - Config banners now show the file basename, an optional TOML location, and

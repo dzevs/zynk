@@ -215,6 +215,53 @@ Values and sequence slots are excluded from saved session snapshots and handoff 
 report again after restart or handoff. Reporting, querying and subscribing are available here;
 configurable token display is staged separately. Tokens do not grant identity or message receipt.
 
+`pane.report_metadata` also accepts display-only tokens alongside the existing title,
+display-agent, custom-status and state-label fields. Use a current ID from `zynk pane list`:
+`zynk pane report-metadata "$PANE_ID" --source user:build --token build=ready --seq 0 --ttl-ms 5000`.
+Repeat `--token` or `--clear-token`; the last occurrence wins and `=` is allowed in values.
+The pane CLI retains silent success and its existing API-error output, unlike the structured
+workspace CLI response. A mixed socket report can be:
+
+```json
+{"id":"pane-display","method":"pane.report_metadata","params":{"pane_id":"PANE_ID","source":"user:build","seq":0,"ttl_ms":5000,"title":"Build","tokens":{"build":"ready","old":null}}}
+```
+
+Nonempty pane token patches use the workspace source/key/value rules and TTL bounds above:
+at most 16 request keys and 32 stored keys after clears and sets together. Omitting `tokens`
+or sending `{}` keeps the legacy presentation route, including its permissive nonempty source
+and unrestricted unsigned TTL. Adding nonempty tokens to such a report can therefore require
+changing its source or TTL. Previously ignored `tokens` inputs now have meaning; malformed
+token maps or values are rejected rather than silently discarded. Existing custom-status and
+presentation guards remain available; those guards do not restrict token storage or grant identity.
+
+Pane presentation and tokens share a per-source replay sequence. At most 32 sources may make
+sequenced token reports; legacy presentation sources remain uncapped. Unsequenced reports allocate
+no slot and do not erase the replay fence. A nonempty all-null patch still counts as a token report.
+Sources do not own keys: any accepted source may replace them. Syntax validation precedes stale
+success/no-op; net capacity precedes consuming a fresh sequence. Rejected reports do not partially
+change presentation, tokens or admission state, but an ordinary request can first sweep due metadata.
+
+`pane.get/list`, `agent.get/list` and live `session.snapshot` expose nonempty token maps.
+Subscribe with `{"subscriptions":[{"type":"pane.updated"}]}` for full pane snapshots after
+token value/deadline changes and scheduled expiry; envelope/data tags use `pane_updated`.
+True no-ops do not emit. Identical queued payloads are not deduplicated by the server subscription.
+There is no initial snapshot, new lossless history, plugin hook or `events.wait` selector for this kind.
+Seed from `pane.get`; snapshot acquisition and subscription are not atomic.
+
+Token changes introduce the first increments of the existing pane/agent info `revision` field.
+It counts changed token patches and expiry, including TTL-only changes, rather than terminal output.
+The same pane's `pane.read`, `agent.read` and `pane.wait_for_output` read-result revisions retain
+their existing zero values. This is not a content-revision implementation or an equality guarantee
+across those surfaces. The info counter is not persisted and starts at zero in reconstructed state;
+no cross-handoff monotonicity is promised.
+
+Pane token values, TTLs and presentation payloads are ephemeral across restart and live handoff.
+Unlike workspace admission, pane replay sequences and token-source slots survive live handoff;
+cold restore drops both, and older snapshots without token-source accounting default to an empty set.
+Clearing or expiring values, or respawning within the same terminal state, does not free admission
+slots or erase replay fences. Respawn adds no token-value reset. Configurable rendering remains staged
+separately; reporting tokens does not change lifecycle state, hook identity or receipt authority.
+
 The socket API accepts `events.subscribe` with `{"subscriptions":[{"type":"layout.updated"}]}`.
 Updates contain the target tab's current pane/split geometry, focus, and zoom after the supported
 pane/layout and creation operations. This is not an exhaustive TUI redraw stream or a plugin hook.

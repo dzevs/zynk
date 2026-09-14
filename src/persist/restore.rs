@@ -969,6 +969,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn m828b_handoff_preserves_token_admission_and_cold_restore_resets_it() {
+        struct RestoredRuntimes(HashMap<TerminalId, TerminalRuntime>);
+        impl Drop for RestoredRuntimes {
+            fn drop(&mut self) {
+                for (_, runtime) in self.0.drain() {
+                    runtime.shutdown();
+                }
+            }
+        }
+
+        let mut source = TerminalState::new(TerminalId::alloc(), std::env::current_dir().unwrap());
+        for index in 0..32 {
+            assert_eq!(
+                source.accept_metadata_report(&format!("token-{index}"), Some(7), true),
+                Ok(true)
+            );
+        }
+        assert_eq!(
+            source.accept_metadata_report("legacy source", Some(9), false),
+            Ok(true)
+        );
+        assert!(source.metadata_tokens.patch(
+            HashMap::from([("build".into(), Some("ephemeral".into()))]),
+            Some(std::time::Duration::from_secs(30)),
+            std::time::Instant::now(),
+        ));
+        source.revision = 23;
+        let snapshot =
+            snapshot_with_hook_retirement(source.export_hook_retirement(std::time::Instant::now()));
+        for (handoff, old_format) in [(true, false), (false, false), (true, true)] {
+            let mut encoded = serde_json::to_value(&snapshot).unwrap();
+            if old_format {
+                encoded["workspaces"][0]["tabs"][0]["panes"]["0"]["hook_retirement"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("metadata_token_sequence_sources");
+            }
+            let decoded: SessionSnapshot = serde_json::from_value(encoded).unwrap();
+            let (events, _event_rx) = mpsc::channel(32);
+            let (workspaces, terminals, runtimes) = if handoff {
+                restore_handoff(
+                    &decoded,
+                    0,
+                    test_restore_shell(),
+                    crate::config::ShellModeConfig::NonLogin,
+                    &mut HashMap::new(),
+                    events,
+                    Arc::new(Notify::new()),
+                    Arc::new(RenderSignal::new()),
+                )
+                .expect("handoff restore")
+            } else {
+                restore(
+                    &decoded,
+                    None,
+                    24,
+                    80,
+                    0,
+                    test_restore_shell(),
+                    crate::config::ShellModeConfig::NonLogin,
+                    false,
+                    events,
+                    Arc::new(Notify::new()),
+                    Arc::new(RenderSignal::new()),
+                )
+            };
+            let _runtimes = RestoredRuntimes(runtimes);
+            assert_eq!(workspaces.len(), 1);
+            assert_eq!(terminals.len(), 1);
+            let mut terminal = terminals.into_values().next().unwrap();
+            assert!(terminal.metadata_tokens.values().is_empty());
+            assert_eq!(terminal.metadata_tokens.next_expiry(), None);
+            assert!(terminal.agent_metadata.is_empty());
+            assert_eq!(terminal.revision, 0);
+            let restored = terminal.export_hook_retirement(std::time::Instant::now());
+            if handoff {
+                let restored = restored.unwrap();
+                assert_eq!(restored.metadata_sequences.len(), 33);
+                assert_eq!(
+                    restored.metadata_token_sequence_sources.len(),
+                    if old_format { 0 } else { 32 }
+                );
+            } else {
+                assert!(restored.is_none());
+            }
+            assert_eq!(
+                terminal.accept_metadata_report("token-0", Some(7), true),
+                Ok(!handoff),
+                "replay: {handoff}/{old_format}"
+            );
+            assert_eq!(
+                terminal.accept_metadata_report("legacy source", Some(9), false),
+                Ok(!handoff),
+                "legacy replay: {handoff}/{old_format}"
+            );
+            assert_eq!(
+                terminal.accept_metadata_report("new-source", Some(1), true),
+                if handoff && !old_format {
+                    Err(())
+                } else {
+                    Ok(true)
+                },
+                "source cap: {handoff}/{old_format}"
+            );
+            assert_eq!(
+                terminal.accept_metadata_report("token-0", Some(8), true),
+                Ok(true)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn m828a_workspace_metadata_is_ephemeral_across_capture_and_restore() {
         struct RestoredRuntimes(HashMap<TerminalId, TerminalRuntime>);
         impl Drop for RestoredRuntimes {

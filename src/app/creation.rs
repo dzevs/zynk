@@ -414,6 +414,7 @@ impl App {
             agent_status: pane_agent_status(terminal.state, pane.seen),
             custom_status: presentation.custom_status,
             state_labels: presentation.state_labels,
+            tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),
             scroll,
             revision: terminal.revision,

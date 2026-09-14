@@ -312,8 +312,13 @@ pub struct PaneReportMetadataParams {
     pub clear_custom_status: bool,
     #[serde(default)]
     pub clear_state_labels: bool,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[schemars(schema_with = "super::common::metadata_token_patch_schema")]
+    pub tokens: HashMap<String, Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
+    /// With a nonempty token patch, must be between 1 and 86,400,000 milliseconds.
+    /// Legacy presentation-only reports retain their existing unrestricted u64 range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
 }
@@ -360,6 +365,9 @@ pub struct PaneInfo {
     pub custom_status: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[schemars(schema_with = "super::common::metadata_token_values_schema")]
+    pub tokens: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

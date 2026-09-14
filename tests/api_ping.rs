@@ -2531,6 +2531,148 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
 }
 
 #[test]
+fn m828b_pane_subscription_observes_timer_expiry_without_read_requests() {
+    let _lock = test_lock();
+    let mut fixture = FollowCwdServer {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let socket = fixture.base.join("runtime/zynk.sock");
+    fixture.server = Some(spawn_zynk(
+        &fixture.base.join("config"),
+        &fixture.base.join("runtime"),
+        &socket,
+    ));
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let started = send_request(
+        &socket,
+        &serde_json::json!({"id": "m828b-start", "method": "agent.start",
+        "params": {"name": "token-timer", "cwd": fixture.base, "argv": ["/bin/cat"]}})
+        .to_string(),
+    );
+    assert_eq!(started["result"]["type"], "agent_started", "{started}");
+    let pane_id = started["result"]["agent"]["pane_id"].as_str().unwrap();
+    let mut reader = open_subscription(
+        &socket,
+        &serde_json::json!({"id": "m828b-sub", "method": "events.subscribe",
+        "params": {"subscriptions": [{"type": "pane.updated"}]}})
+        .to_string(),
+    );
+    let ack = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(ack["result"]["type"], "subscription_started", "{ack}");
+    assert_eq!(ack["id"], "m828b-sub");
+    let reported = send_request(&socket, &serde_json::json!({"id": "m828b-report", "method": "pane.report_metadata",
+        "params": {"pane_id": pane_id, "source": "user:timer", "seq": 0, "ttl_ms": 100, "tokens": {"build": "short lived"}}}).to_string());
+    assert_eq!(
+        reported,
+        serde_json::json!({"id": "m828b-report", "result": {"type": "ok"}})
+    );
+    let set_event = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(set_event["event"], "pane_updated");
+    assert_eq!(set_event["data"]["type"], "pane_updated");
+    assert_eq!(set_event["data"]["pane"]["pane_id"], pane_id);
+    assert_eq!(
+        set_event["data"]["pane"]["tokens"],
+        serde_json::json!({"build": "short lived"})
+    );
+    assert_eq!(set_event["data"]["pane"]["revision"], 1);
+    let mut expected = set_event;
+    expected["data"]["pane"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tokens");
+    expected["data"]["pane"]["revision"] = serde_json::json!(2);
+    let expired = reader.read_json_line(Duration::from_secs(3));
+    assert_eq!(expired, expected);
+    assert!(reader
+        .try_read_json_line(Duration::from_millis(150))
+        .is_none());
+}
+
+#[test]
+fn m828b_pane_and_agent_tokens_are_visible_without_authority() {
+    let _lock = test_lock();
+    let mut fixture = FollowCwdServer {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let socket = fixture.base.join("runtime/zynk.sock");
+    fixture.server = Some(spawn_zynk(
+        &fixture.base.join("config"),
+        &fixture.base.join("runtime"),
+        &socket,
+    ));
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let started = send_request(
+        &socket,
+        &serde_json::json!({"id": "m828b-start", "method": "agent.start",
+        "params": {"name": "token-worker", "cwd": fixture.base, "argv": ["/bin/cat"]}})
+        .to_string(),
+    );
+    assert_eq!(started["result"]["type"], "agent_started", "{started}");
+    let initial = &started["result"]["agent"];
+    let pane_id = initial["pane_id"].as_str().unwrap();
+    let terminal_id = initial["terminal_id"].as_str().unwrap();
+    assert_eq!(initial["revision"], 0);
+    assert!(initial.get("agent_session").is_none());
+    let reported = send_request(&socket, &serde_json::json!({"id": "m828b-report", "method": "pane.report_metadata",
+        "params": {"pane_id": pane_id, "source": "user:display", "seq": 1, "title": "Task", "display_agent": "Builder",
+            "custom_status": "legacy status", "tokens": {"build": "ok"}}}).to_string());
+    assert_eq!(reported["result"]["type"], "ok", "{reported}");
+    let pane_response = send_request(&socket, &serde_json::json!({"id": "m828b-pane", "method": "pane.get", "params": {"pane_id": pane_id}}).to_string());
+    let pane = &pane_response["result"]["pane"];
+    assert_eq!(pane["tokens"], serde_json::json!({"build": "ok"}));
+    let agent_response = send_request(&socket, &serde_json::json!({"id": "m828b-agent", "method": "agent.get", "params": {"target": terminal_id}}).to_string());
+    let agent = &agent_response["result"]["agent"];
+    assert_eq!(agent["tokens"], pane["tokens"]);
+    assert_eq!(pane["revision"], 1);
+    assert_eq!(agent["revision"], pane["revision"]);
+    for info in [pane, agent] {
+        assert_eq!(info["terminal_id"], terminal_id);
+        assert_eq!(info["agent"], initial["agent"]);
+        assert_eq!(info["title"], "Task");
+        assert_eq!(info["display_agent"], "Builder");
+        assert_eq!(info["custom_status"], "legacy status");
+        assert!(info.get("agent_session").is_none());
+    }
+    for (method, field) in [("pane.list", "panes"), ("agent.list", "agents")] {
+        let response = send_request(
+            &socket,
+            &serde_json::json!({"id": "m828b-list", "method": method, "params": {}}).to_string(),
+        );
+        let listed = response["result"][field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|info| info["pane_id"] == pane_id)
+            .unwrap();
+        assert_eq!(listed["tokens"], pane["tokens"]);
+        assert_eq!(listed["revision"], pane["revision"]);
+        assert_eq!(listed["custom_status"], "legacy status");
+        assert!(listed.get("agent_session").is_none());
+    }
+    for (method, params) in [
+        (
+            "pane.read",
+            serde_json::json!({"pane_id": pane_id, "source": "visible"}),
+        ),
+        (
+            "agent.read",
+            serde_json::json!({"target": terminal_id, "source": "visible"}),
+        ),
+    ] {
+        let response = send_request(
+            &socket,
+            &serde_json::json!({"id": "m828b-read", "method": method, "params": params})
+                .to_string(),
+        );
+        assert_eq!(response["result"]["type"], "pane_read", "{response}");
+        assert_eq!(response["result"]["read"]["pane_id"], pane_id);
+        assert_eq!(response["result"]["read"]["revision"], 0);
+    }
+}
+
+#[test]
 fn m828a_workspace_token_subscription_observes_timer_expiry_without_read_requests() {
     let _lock = test_lock();
     let mut fixture = FollowCwdServer {

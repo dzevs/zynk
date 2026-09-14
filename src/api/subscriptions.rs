@@ -168,6 +168,10 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::PaneCreated,
                 last_sequence: 0,
             })),
+            Subscription::PaneUpdated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::PaneUpdated,
+                last_sequence: 0,
+            })),
             Subscription::PaneClosed {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::PaneClosed,
                 last_sequence: 0,
@@ -610,6 +614,44 @@ mod tests {
 
     use super::*;
     use crate::api::schema::{AgentStatus, EventData, EventEnvelope, EventKind};
+
+    #[test]
+    fn m828b_pane_updated_uses_dedicated_event_stream() {
+        let hub = EventHub::default();
+        let (api_tx, mut api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let decoded =
+            serde_json::from_value::<Subscription>(serde_json::json!({"type": "pane.updated"}));
+        assert!(
+            decoded.is_ok(),
+            "pane subscription JSON refused: {decoded:?}"
+        );
+        let mut subscription =
+            ActiveSubscription::new(decoded.unwrap(), "pane-token", 0, &api_tx, &hub).unwrap();
+        assert!(matches!(&subscription, ActiveSubscription::Event(event)
+            if event.event_kind.dot_name() == "pane.updated"));
+        let pane = serde_json::json!({
+            "pane_id": "w7:p2", "terminal_id": "term_metadata", "workspace_id": "w7",
+            "tab_id": "w7:t1", "focused": false, "agent_status": "unknown", "revision": 1,
+            "tokens": {"build": "ready"}
+        });
+        let decoy = serde_json::json!({"event": "pane_created", "data": {
+            "type": "pane_created", "pane": pane
+        }});
+        hub.push(serde_json::from_value(decoy).unwrap());
+        let event = serde_json::json!({"event": "pane_updated", "data": {
+            "type": "pane_updated", "pane": pane
+        }});
+        for _ in 0..2 {
+            hub.push(serde_json::from_value(event.clone()).unwrap());
+        }
+        assert_eq!(subscription.poll(&api_tx, &hub), Some(event.clone()));
+        assert_eq!(subscription.poll(&api_tx, &hub), Some(event));
+        assert_eq!(subscription.poll(&api_tx, &hub), None);
+        assert!(matches!(
+            api_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
 
     #[test]
     fn workspace_metadata_subscription_uses_dedicated_event_kind() {
