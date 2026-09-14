@@ -418,6 +418,12 @@ pane_gaps = true                 # keep split panes visually separated
 tab_bar_position = "top"         # or "bottom"; desktop only
 status_indicators = "dots"       # preserve existing marks, or use distinct "symbols"
 
+[ui.sidebar.agents]
+row_gap = 0                     # blank rows before each later agent entry
+
+[ui.sidebar.spaces]
+row_gap = 0                     # blank rows except before indented workspace children
+
 [theme]
 auto_switch = false              # true: follow the host terminal's light/dark appearance
 dark_name = "catppuccin"         # theme used for a dark appearance when auto_switch is on
@@ -430,6 +436,23 @@ manifest_check = true            # background agent-detection manifest checks
 [keys]
 remote_image_paste = "ctrl+v"    # raw-key image paste, only in `zynk --remote`; "" disables it
 ```
+
+Expanded sidebar gaps accept integers from 0 through 65535 and can be reloaded.
+Both default to zero, packing entries more tightly. Spaces keep a parent and its
+indented children together; agents apply the same gap within and between groups,
+with no leading gap and no orphan group header. A final content row can fit without
+room for a trailing gap. Collapsed and mobile layouts are unchanged.
+
+No single `row_gap` value reproduces both pre-D1 agents rules: zero within a group
+and one between groups. Setting the spaces gap to one retains inter-entry spacing,
+but does not restore the old content-plus-trailing-gap admission rule at the bottom
+boundary. These are rule changes, not a claim that every individual layout changes.
+
+Only these two scalar gaps are supported here; configurable token rows and
+per-agent row overrides remain unavailable. Previously ignored gap keys are now
+typed configuration: negative, oversized or non-integer values are rejected as an
+invalid UI section. Startup uses default UI settings for that invalid section;
+reload preserves the previous UI while applying other valid sections.
 
 An empty bracketed paste can also request a local clipboard image in a remote
 client, even when `keys.remote_image_paste` is empty. Local clients pass empty

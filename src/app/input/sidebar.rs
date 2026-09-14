@@ -468,6 +468,336 @@ mod tests {
         workspace::Workspace,
     };
 
+    #[test]
+    fn m828d1_headers_and_configured_gaps_are_not_click_targets() {
+        let mut app = app_for_mouse_test();
+        let source = "[ui.sidebar.agents]\nrow_gap = 2\n";
+        assert!(source.parse::<toml::Value>().is_ok());
+        let config: crate::config::Config = toml::from_str(source).unwrap();
+        app.apply_live_config(&config, &[], &[], false);
+        let mut first = Workspace::test_new("alpha");
+        first.test_split(ratatui::layout::Direction::Horizontal);
+        first.test_add_tab(Some("logs"));
+        app.state.workspaces = vec![first, Workspace::test_new("beta")];
+        app.state.ensure_test_terminals();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.detected_agent = Some(Agent::Claude);
+        }
+        app.state.agent_panel_sort = AgentPanelSort::Spaces;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 70));
+        let area = app.state.agent_panel_rect();
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        assert_eq!(entries.len(), 4);
+        let targets: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.ws_idx, entry.tab_idx, entry.pane_id))
+            .collect();
+        assert_eq!((targets[0].0, targets[0].1), (0, 0));
+        assert_eq!((targets[1].0, targets[1].1), (0, 0));
+        assert_eq!((targets[2].0, targets[2].1), (0, 1));
+        assert_eq!((targets[3].0, targets[3].1), (1, 0));
+        let rows = crate::ui::agent_visible_rows(&app.state, area);
+        let children: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                crate::ui::AgentVisibleRow::Child { entry_idx, y, .. } => Some((*entry_idx, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(children.len(), 4);
+        let first_y = children[0].1;
+        assert_eq!(app.state.agent_detail_target_at(first_y), Some(targets[0]));
+        assert_eq!(
+            children[1].1,
+            first_y + 3,
+            "configured gap precedes second child"
+        );
+        assert_eq!(children[2].1, first_y + 7);
+        assert_eq!(children[3].1, first_y + 11);
+        for y in first_y - 1..=children[3].1 {
+            if children.iter().any(|(_, child_y)| *child_y == y) {
+                continue;
+            }
+            assert_eq!(app.state.agent_detail_target_at(first_y), Some(targets[0]));
+            assert_eq!(
+                app.state.agent_detail_target_at(y),
+                None,
+                "header/gap at {y}"
+            );
+            let active = app.state.active;
+            let focused = app.state.workspaces[active.unwrap()].focused_pane_id();
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                area.x + 2,
+                y,
+            ));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), area.x + 2, y));
+            assert_eq!(app.state.active, active);
+            assert_eq!(
+                app.state.workspaces[active.unwrap()].focused_pane_id(),
+                focused
+            );
+        }
+        for (entry_idx, y) in children {
+            let (ws_idx, tab_idx, pane_id) = targets[entry_idx];
+            assert_eq!(
+                app.state.agent_detail_target_at(y),
+                Some(targets[entry_idx])
+            );
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                area.x + 2,
+                y,
+            ));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), area.x + 2, y));
+            assert_eq!(app.state.active, Some(ws_idx));
+            assert_eq!(app.state.workspaces[ws_idx].active_tab, tab_idx);
+            assert_eq!(
+                app.state.workspaces[ws_idx].tabs[tab_idx].layout.focused(),
+                pane_id
+            );
+        }
+    }
+
+    #[test]
+    fn m828d1_packed_drag_boundaries_keep_group_identity() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            workspace_with_space("main", "repo-key"),
+            Workspace::test_new("normal"),
+            workspace_with_space("issue", "repo-key"),
+            Workspace::test_new("notes"),
+        ];
+        for workspace in &mut app.state.workspaces {
+            workspace.cached_git_branch = None;
+        }
+        app.state.ensure_test_terminals();
+        let active_id = app.state.workspaces[1].id.clone();
+        let selected_id = app.state.workspaces[3].id.clone();
+        let group_ids = [
+            app.state.workspaces[0].id.clone(),
+            app.state.workspaces[2].id.clone(),
+        ];
+        app.state.active = Some(1);
+        app.state.selected = 3;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
+        let cards = app.state.view.workspace_card_areas.clone();
+        assert_eq!(
+            cards.iter().map(|card| card.ws_idx).collect::<Vec<_>>(),
+            vec![0, 2, 1, 3]
+        );
+        assert!(cards[1].indented);
+        assert_eq!(cards[1].rect.y, cards[0].rect.y + cards[0].rect.height);
+        assert_eq!(
+            cards[2].rect.y,
+            cards[1].rect.y + cards[1].rect.height,
+            "standalone follows packed group"
+        );
+        assert_eq!(cards[3].rect.y, cards[2].rect.y + cards[2].rect.height);
+        let area = app.state.workspace_list_rect();
+        let target_y = crate::ui::workspace_drop_indicator_row(&cards, area, 0).unwrap();
+        assert_eq!(app.state.workspace_drop_index_at_row(target_y), Some(0));
+        for y in cards[0].rect.y..cards[3].rect.bottom() {
+            assert!(app.state.workspace_drop_index_at_row(y).is_some());
+            assert_ne!(
+                app.state.workspace_drop_index_at_row(y),
+                Some(2),
+                "no interior-group insertion at {y}"
+            );
+        }
+        let source_y = cards[2].rect.y;
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, source_y));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 2, target_y));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::WorkspaceReorder {
+                source_ws_idx: 1,
+                insert_idx: Some(0),
+                ..
+            })
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_y));
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|ws| ws.display_name())
+                .collect::<Vec<_>>(),
+            vec!["normal", "main", "issue", "notes"]
+        );
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 3);
+        assert_eq!(app.state.workspaces[0].id, active_id);
+        assert_eq!(app.state.workspaces[3].id, selected_id);
+        assert_eq!(
+            [
+                app.state.workspaces[1].id.clone(),
+                app.state.workspaces[2].id.clone()
+            ],
+            group_ids
+        );
+        for idx in [1, 2] {
+            assert_eq!(
+                app.state.workspaces[idx]
+                    .worktree_space
+                    .as_ref()
+                    .unwrap()
+                    .key,
+                "repo-key"
+            );
+        }
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(
+            snapshot
+                .workspaces
+                .iter()
+                .map(|ws| ws.custom_name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["normal", "main", "issue", "notes"]
+        );
+    }
+
+    #[test]
+    fn m828d1_gap_wheel_and_scrollbar_share_the_visible_model() {
+        for gap in [0, 2, u16::MAX] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = (0..12)
+                .map(|index| Workspace::test_new(&format!("agent-{index}")))
+                .collect();
+            app.state.ensure_test_terminals();
+            for terminal in app.state.terminals.values_mut() {
+                terminal.detected_agent = Some(Agent::Claude);
+            }
+            app.state.agent_panel_sort = AgentPanelSort::Spaces;
+            app.state.sidebar_agents.row_gap = gap;
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            let area = app.state.agent_panel_rect();
+            let entries = crate::ui::agent_panel_entries(&app.state);
+            assert_eq!(entries.len(), 12);
+            let first = entries[0].pane_id;
+            let last = entries[11].pane_id;
+            let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, area);
+            assert!(metrics.max_offset_from_bottom > 0);
+            let track = crate::ui::agent_panel_scrollbar_rect(&app.state, area).unwrap();
+            assert!(track.height >= 2);
+            assert_eq!(app.state.agent_panel_scroll, 0);
+            assert!(crate::ui::agent_visible_rows(&app.state, area)
+                .iter()
+                .any(|row| matches!(row, crate::ui::AgentVisibleRow::Child { entry_idx: 0, .. })));
+
+            app.handle_mouse(mouse(MouseEventKind::ScrollDown, area.x + 1, track.y));
+            assert_eq!(app.state.agent_panel_scroll, 1);
+            let wheel_rows = crate::ui::agent_visible_rows(&app.state, area);
+            assert!(wheel_rows
+                .iter()
+                .any(|row| matches!(row, crate::ui::AgentVisibleRow::Child { entry_idx: 1, .. })));
+            app.state
+                .set_agent_panel_offset_from_bottom(metrics.max_offset_from_bottom - 1);
+            assert_eq!(crate::ui::agent_visible_rows(&app.state, area), wheel_rows);
+            app.handle_mouse(mouse(MouseEventKind::ScrollUp, area.x + 1, track.y));
+            assert_eq!(app.state.agent_panel_scroll, 0);
+
+            for offset in [metrics.max_offset_from_bottom, 0] {
+                app.state.set_agent_panel_offset_from_bottom(offset);
+                let rows = crate::ui::agent_visible_rows(&app.state, area);
+                let target = if offset == 0 { last } else { first };
+                assert!(rows.iter().any(|row| matches!(row,
+                    crate::ui::AgentVisibleRow::Child { entry_idx, .. }
+                        if entries[*entry_idx].pane_id == target)));
+                let mut positives = 0;
+                let mut negatives = 0;
+                for y in track.y..track.y + track.height {
+                    let expected = rows.iter().find_map(|row| match row {
+                        crate::ui::AgentVisibleRow::Child {
+                            entry_idx,
+                            y: child_y,
+                            ..
+                        } if *child_y == y => {
+                            let entry = &entries[*entry_idx];
+                            Some((entry.ws_idx, entry.tab_idx, entry.pane_id))
+                        }
+                        _ => None,
+                    });
+                    assert_eq!(
+                        app.state.agent_detail_target_at(y),
+                        expected,
+                        "gap={gap} offset={offset} row={y}"
+                    );
+                    if expected.is_some() {
+                        positives += 1;
+                    } else {
+                        negatives += 1;
+                    }
+                }
+                assert!(
+                    positives > 0 && negatives > 0,
+                    "populated child and header/gap mirrors per page"
+                );
+            }
+
+            app.state
+                .set_agent_panel_offset_from_bottom(metrics.max_offset_from_bottom);
+            assert!(matches!(
+                app.state.agent_panel_scrollbar_target_at(track.x, track.y),
+                Some(super::ScrollbarClickTarget::Thumb { grab_row_offset: 0 })
+            ));
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                track.x,
+                track.y,
+            ));
+            assert!(matches!(
+                app.state.drag.as_ref().map(|drag| &drag.target),
+                Some(DragTarget::AgentPanelScrollbar { grab_row_offset: 0 })
+            ));
+            let bottom = track.y + track.height - 1;
+            app.handle_mouse(mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                track.x,
+                bottom,
+            ));
+            app.handle_mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                track.x,
+                bottom,
+            ));
+            assert!(app.state.drag.is_none());
+            assert_eq!(app.state.agent_panel_scroll, metrics.max_offset_from_bottom);
+            let rows = crate::ui::agent_visible_rows(&app.state, area);
+            let last_y = rows
+                .iter()
+                .find_map(|row| match row {
+                    crate::ui::AgentVisibleRow::Child {
+                        entry_idx: 11, y, ..
+                    } => Some(*y),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                app.state.agent_detail_target_at(last_y),
+                Some((11, 0, last))
+            );
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                area.x + 2,
+                last_y,
+            ));
+            app.handle_mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                area.x + 2,
+                last_y,
+            ));
+            assert_eq!(app.state.active, Some(11));
+            assert_eq!(app.state.workspaces[11].focused_pane_id(), Some(last));
+            app.state.assert_invariants_for_test();
+        }
+    }
+
     /// The terminal row of `pane`'s `Child` row in the grouped agents panel, resolved through the
     /// same shared visible-row model the renderer + hit-test use.
     fn agent_child_row_y(state: &crate::app::state::AppState, pane: crate::layout::PaneId) -> u16 {
@@ -1423,6 +1753,7 @@ mod tests {
     #[test]
     fn top_drop_slot_is_distinct_from_gap_below_first_workspace() {
         let mut app = app_for_mouse_test();
+        app.state.sidebar_spaces.row_gap = 1;
         let first_repo = temp_git_repo("main");
         let second_repo = temp_git_repo("main");
 
@@ -1464,6 +1795,7 @@ mod tests {
     #[test]
     fn bottom_drop_slot_stays_below_last_workspace_not_footer() {
         let mut app = app_for_mouse_test();
+        app.state.sidebar_spaces.row_gap = 1;
         app.state.workspaces = vec![
             Workspace::test_new("a"),
             Workspace::test_new("b"),

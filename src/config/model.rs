@@ -5,6 +5,7 @@ use std::{collections::BTreeSet, num::NonZeroUsize};
 use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
 
+use super::SidebarConfig;
 use super::{
     ActionKeybinds, BindingConfig, CommandKeybindConfig, IndexedKeybind, Keybinds, SoundConfig,
     ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD, DEFAULT_MOUSE_SCROLL_LINES,
@@ -864,6 +865,7 @@ pub struct WorktreesConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
+    pub sidebar: SidebarConfig,
     pub sidebar_width: u16,
     /// Minimum sidebar width (columns) when expanded. Default: 18.
     pub sidebar_min_width: u16,
@@ -1078,6 +1080,7 @@ impl Default for WorktreesConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
+            sidebar: SidebarConfig::default(),
             sidebar_width: 26,
             sidebar_min_width: 18,
             sidebar_max_width: 36,

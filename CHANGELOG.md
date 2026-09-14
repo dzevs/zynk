@@ -10,6 +10,12 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- Expanded sidebar agents and spaces accept reloadable `row_gap` values from 0
+  through 65535, both defaulting to zero. Workspace parents and indented children
+  stay packed; agent gaps apply within and between groups. No single value restores
+  both old agent spacing rules. Final content rows need no trailing gap to fit.
+  Collapsed/mobile layouts and token-row rendering are unchanged; malformed gap
+  values now invalidate the UI section instead of being ignored.
 - Pane/agent info exposes read-only raw and stripped OSC terminal-title observations,
   independently of reported presentation and agent detection. Stripping handles the
   supported braille, star and quarter-circle activity frames. Semantic title changes

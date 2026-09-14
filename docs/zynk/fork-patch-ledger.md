@@ -6078,3 +6078,219 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   execution is not release artifact certification or an install. No whole-M8
   approval, D/E approval or operator merge/push/install/tag/publish/release/
   cleanup authorization is implied.
+
+### M8-28D1 - Configurable sidebar gaps (IMPLEMENTED / PENDING VERIFICATION)
+
+- Partial assigned source `5cfe5e5e730246948b0c9428ad876b6938590aad`, gap
+  responsibilities from `5b91dae1`, and corrected packing from `7db744ab`.
+  Parent `bef7de5f527eb48562362a7f49530a6771c7abec`. Gate-1 subdivision and
+  gap-only design `b33df990` were approved by `msg_5893cc39cf20cea0` (seq825).
+  The sample-capture instrument supplement was approved at seq830; adapter 5
+  companion `ea6e596b` was approved by `msg_918d63a71e8d14b5` (seq843).
+  Original documents, corrections and verdicts remain immutable records.
+- D1 is independently usable with the existing fixed-height grouped renderer
+  and must pass its exact-SHA checks with all D2 code absent. D2 combines row
+  configuration with its renderer and height-aware placement, avoiding a
+  temporary config or placement contract. D2 requires its own executable
+  Gate-1 at the accepted D1 parent; D1 approval does not authorize D2.
+- D1 retains the three C title-sync bare calls, including their discarded bool,
+  with no configured title consumer or title-specific redraw assignment.
+  D2 owns terminal_title_sidebar_configured, the override-only guard control
+  and both configured redraw consumers. This explicitly carries the seq802
+  N1 consumer check to D2 Gate-1, not to an unspecified later cleanup.
+- The creator inventory is revalidated at 75 paths and 665 hunks, including
+  paths assigned elsewhere; 298 additional source hunks retain their separate
+  dispositions. Selection is intra-hunk where needed, never a whole-file port
+  inferred from a label. Source byte equality, ancestry, adaptation selection,
+  exclusion inventory and existing path notices address distinct claims.
+- Nine production paths, two test-only Rust paths and three documentation paths
+  define the boundary. Only src/config/sidebar.rs is new. Main's default-config
+  change is comments only. There is no dependency, wire method, protocol, DB,
+  platform, token resolver, status renderer, detection or title implementation
+  change. Production config loading and mouse/drop algorithms remain raw.
+- New gap-only AgentsSidebarConfig and SpacesSidebarConfig each contain one
+  u16 row_gap; SidebarConfig holds both. Derive zero defaults and serde defaults,
+  preserving the full 0..65535 domain. UiConfig owns the section; AppState stores
+  the typed values without runtime resources. App::new copies both; existing
+  UI-invalid and width-bounds guards control live assignment. No manual default
+  implementation is added merely to make a mutation possible.
+- Missing/read-error Config defaults and omitted serde fields have production
+  routes to those defaults. T04 reaches Config::default through App::new with
+  no gap assignment; T11 also observes defaults directly. These are verified
+  construction routes, not claims about the prevalence of user configurations.
+- Previously ignored gap keys become typed inputs. Invalid integer range/type
+  now invalidates the UI section: startup uses its defaults; live reload keeps
+  previous valid UI while other valid sections can apply. Unknown row_gap-like
+  keys retain diagnostics with the accepted sibling setting intact. Token rows
+  and per-agent overrides remain unsupported in D1.
+- Spaces use the scalar gap only when another entry exists and the next entry
+  is not an indented workspace. Keep fixed parent/card heights and one-row
+  indented children. Visible-count and card-placement admission charge content
+  only, followed by saturating gap advance clipped to the body. A last content
+  row need not reserve trailing gap. Workspace normalization and bottom-page
+  policy remain the fork's existing implementations, not the creator's rewrite.
+- Grouped agents keep headers and height-one Child rows. Apply row_gap before
+  every entry except the first, within and between groups. Check the prospective
+  header-plus-child coordinate before emitting either, using saturating bounds.
+  No orphan header or leading spacer is introduced. Pure placement takes only
+  entries, body, scroll and scalar; metrics and public rows forward the same
+  scalar without a recursive metrics/placement dependency.
+- Follow retains the collapsed early return and detail geometry, then searches
+  actual grouped placements for the target Child. Collect entries once, clamp
+  the initial offset with the gap-aware maximum, and use the final scrollbar
+  body while searching. The prior current-page capacity is not used to predict
+  a later page across different group headers. Invalid targets preserve the
+  clamped offset. Existing render and hit-test consumers use the shared rows.
+- Both gap defaults are zero. No single row_gap value reproduces both pre-D1
+  agents rules: zero within a group and one between groups. Spaces at one retain
+  inter-entry spacing, not universal equivalence to the old trailing-gap
+  admission rule. These are rule changes, not a claim that every fixture changes.
+  README, CHANGELOG and default comments declare the relevant user-facing
+  behavior; upstream's unqualified restoration claim is not imported.
+- Parent preparation added ten controls across five files, +701/-0. Removing
+  exactly those complete test blocks reconstructs every parent byte, including
+  whitespace; a deletion count alone is not that reconstruction. Actual
+  diagnostics identify nine assertion reds and T10's planned characterization
+  green. The 182 preservation controls pass, giving 192 distinct names at
+  catalog 4241. Fixture capability and per-ID reached/unreached groups were
+  recorded before production, unlike C's later corrected parent supplement.
+- The ordinary parent render baseline and isolated sample supplement completed
+  at that same production barrier. Seq835 independently witnessed the parent
+  evidence hashes and exact candidate diff then; it did not independently
+  classify assertions or establish the reconstruction's content.
+- Model/wiring, space geometry, grouped placement/follow and final controls
+  were executed incrementally with all 182 preservation each time. The nine
+  parent reds became seven, five and zero at the intended semantic groups.
+  Per-ID progression names expressions and fixtures, not comparable line
+  numbers across different increment sources. The final child catalog is 4251:
+  twenty new tests plus C's 4231, not growth of 202.
+- Final focused selection is 202: twenty new plus 182 preservation, all passing
+  after restoration. Ten original parent-compatible bodies remain raw. Child
+  evidence binds all seventeen parent-unreached groups at their actual layers.
+  Complete bodies, fixture/helper routes and outcomes support those statements;
+  aggregate PASS counts or harness names do not establish membership, all-input
+  coverage, every loop iteration or an execution trace.
+- T02 pairs generic-TOML and same-path typed-valid positives with each of seven
+  invalid kinds at each leaf. T03 pins workspace identity and indentedness as
+  well as coordinates. T06/T17 use populated input paths and positive Child
+  observations beside header/gap negatives. T08 exercises real config reload
+  outcomes; T09 covers default-packed drag/reorder identities. T10 characterizes
+  unchanged collapsed/mobile buffers at two configured gaps.
+- T13 executes 360 declared Cartesian combinations of gap, geometry and scroll
+  against an independent usize-coordinate oracle. T14 pins content-only exact
+  fit including maximum gap. T15 uses populated groups and checks last-Child
+  reach before metrics equality. T16 establishes unequal early/final capacities
+  and observes the actual focused Child; T19 checks glyphs, connectors, palette
+  and active backgrounds through the retained renderer. These are bounded
+  fixtures, not unreachability or universal behavior claims.
+- Five old-body adapters are exact: three setup-field insertions set spaces
+  gap to one, and two append scalar-zero helper arguments. Names, attributes
+  and every assertion remain raw. The original four were planned; L20's bottom
+  drop-slot fixture is ONE discovered omission, separately recorded. All five
+  bodies were raw through preparation/A/B/C; these are D1-first adaptations,
+  not a cumulative-rawness claim about the entire old-body population.
+- L20 failed its strict spare-row premise at default zero after three height-two
+  cards packed at y2/4/6. Gap one produced two cards at y2/5; a separate later
+  parent-source probe matched the printed identities/count/slot/footer/width,
+  with both old assertions passing. This isolates the gap-value contribution
+  in these fixtures, not the admission-rule change or universal gap-one
+  equivalence. The late probe remains separate from pre-production evidence.
+- Adapter 5 adds only the approved setup line after app_for_mouse_test. Its two
+  original assertions remain. T09 keeps default-zero coverage; T14 keeps the
+  exact-fit admission boundary. The one fixture-dependency omission and the
+  observed control-to-increment mapping are both reported, not converted into
+  a reliability rate or an adapter-count threshold. Static inspection and
+  selected execution remain complementary, not ranked substitutes.
+- Lint passed before mutation. Twenty-six variants each executed all 202 exact
+  controls, producing 5252 outcomes. All 26 intended first assertions matched
+  their pre-execution locators. M13 changes both wrap-policy sites to avoid a
+  masking saturation guard; M16/M17/M18 explicitly predict earlier assertions
+  than the original catalog description. No locator needed a post-run repair.
+- The 93 recorded crossings decompose as 78 D1-new and 15 preservation, and as 26
+  intended assertions, 61 incidental assertions, one fixture membership guard
+  and five unattributed handoff errors. M15/T07 fails its offscreen membership
+  premise, not its follow assertion. Incidental evidence claims only its actual
+  expression; later green groups are not inherited into a failing mutant.
+- Five M15 handoff errors report a closed handoff stream. They are NOT gap
+  discrimination and no cause is assigned. A separate later invocation of
+  identical M15 bytes/full-202 selection passed 197 and failed five gap-side
+  controls; the handoff errors did not recur. Non-recurrence is not a diagnosis,
+  schedule equivalence or replacement of the original 93 observations. Full 202
+  is green again after that probe and exact source restoration.
+- M20/M25/M26 mutate preserved hit-classification, palette and Git-demand code;
+  the other 23 sites are D1-changed. Those bases are explicit per variant.
+  Seven new controls have no dedicated mutant: T07, T09, T10, T12, T17, T19, T20.
+  The immutable design prose omitted T07, while both catalogs included it;
+  companion c18e4af4 records the correction without changing any population.
+  Ordinary regression greens are real bounded evidence, not intended kills.
+- Source audit removes twenty new controls, reconstructs the five adapters and
+  reverses enumerated production changes to reproduce ten old Rust files.
+  The new module contains only the three gap structs, serde imports and its
+  test module. Of 493 old bodies, 488 are byte-identical. All old test attributes
+  remain; all 42 Rust deletions are inventoried: 36 production lines, two comments
+  and four scalar-call lines in old tests. No assertion start or attribute is
+  removed. This is separate from semantic review of the changed functions.
+- Nine named production bodies and 37 whole files stay raw; C's three enclosing
+  title-sync call bodies are also raw. Method 82, Subscription 23 and EventKind 22
+  declarations/order and all six protocol-19 literals remain unchanged. The
+  full 140 authority payloads match checkpoint 17 by both membership and bytes.
+  Platform conditions, dependencies, policies and gate scripts are retained.
+- Retained instrument faults include fixture-call compilation, duplicate
+  nextest summaries, child body indentation, report field-shape assumptions
+  and source-audit path/population mistakes. Failed originals remain; separately
+  persisted reproductions are labelled rather than fabricated as original logs.
+  No instrument fault is a behavioral red or intended kill. Final mutation
+  mappings currently need no changed-test-body bridge; exact-SHA identity is
+  still a separate gate, not inferred from that statement.
+- Ordinary release render medians at 1/15/50 were 332/336/374 us parent versus
+  318/349/366 us child for background workspaces, and 332/401/474 us versus
+  328/391/461 us for active panes. These matched-fixture arithmetic observations
+  do not isolate a cause or establish dynamic comparability/equivalence.
+- T20 separately times full view+render at 80x24, 16 warmups and 256 samples for
+  each 1/15-pane and zero/two-gap combination. Median ns: 42559/76383 at zero,
+  31419/68348 at two; the respective 15/1 ratios are 1.7948 and 2.1754, not scaling
+  laws. Visible card/Child populations differ. The one-pane gap-two sequence
+  contains a lower later segment, recorded without a causal explanation.
+- The unchanged ordinary benchmark returns only sorted aggregates. Its approved
+  isolated supplement prints one source-order vector after measurement and
+  before sorting: six vectors of 40 each at both parent and child. Prior write
+  counts 0..5 are ordinal, not timing magnitude or bias direction. Count/median/
+  p95/max agreement is only a consistency check; it proves neither order nor
+  multiset identity. Supplement vectors are within-cardinality observations,
+  never a basis to compute, check or corroborate a scaling ratio.
+- The same supplement source and bounded fixture parameters define a matched
+  procedure, not dynamic parent/child comparability. Ordinary observations are
+  retained separately. No timing threshold, cache, token vectors, reduced
+  selection or claim about production workload frequency is introduced.
+- All D1 performance runs completed before the operator-authorized temporary
+  file deletion. The matrix overlapped that housekeeping, so its durations
+  are not comparison samples. M15 logs precede the apply invocation's recorded
+  start; earlier inventory and unrelated activity are not globally excluded.
+  This ordering is not a diagnosis of the five handoff errors. Cleanup touched
+  neither the candidate nor evidence/source/scratchpads and conveys no port gate.
+- D2 must measure all three title regimes together at its actual parent before
+  consumer edits and repeat at child, with sync-only and render intervals kept
+  separate. C's old medians are historical context, not substitutes. The third
+  raw-changing/stripped-equal regime remains due before whole-M8 Gate-2.
+- The new gap module adapts pre-relicense creator/5b content; NOTICE is unchanged.
+  Post-relicense 7db packing enters the already-listed/headered sidebar path.
+  Per-hunk ancestry is verified against the relicense graph, not inferred from
+  new-entry counts. NOTICE/header consistency does not establish provenance;
+  source bytes, attribution, retained notices and license texts stay separate.
+- D retains five primary obligations. D1 handles the gap/packing subtask; D2
+  still owns combined row/height behavior and cc9fa475/d4e0dd3d/d2c317ad primary
+  adaptations. D-M5-4 ALSO stays open at M8-33 for a0678a38 and at M9-12 for
+  d4e0dd3d/d2c317ad secondaries, including Styled/parts work outside D. 4cd1481a
+  remains palette preservation, not a port. 49e333ae remains C-scoped evidence,
+  not a D1 re-port or origin discharge. The creator is not wholly exhausted.
+- Stage only the fourteen complete declared paths, check worktree/index byte
+  equality, and resolve each gate's selected paths AND content source/scope.
+  Then unchanged full check/gate, normal hooks and exact-SHA full check/gate/202
+  precede Gate-2. No add-N substitute, bypass, suppression or isolation change.
+  Release-mode probes are not installation or release-artifact certification.
+- D1 repairs neither C limit: four corrected parent fixtures did not meet C's
+  original before-production order, and its two audit bridges are not final-byte
+  mutant executions. Both remain unresolved and unwaived. A/B/C/D1 discharge
+  nothing; twenty origins, unions 98/34, M8-37, M8-65, N1/N3 and the operator deviation
+  remain open. Whole-M8 Gate-2 and fresh independent Gate-3 precede integration.
+  No merge, push, install, tag, publish, release or further cleanup gate is implied.

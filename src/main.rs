@@ -331,6 +331,15 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
+# Expanded sidebar gaps, in rows (unsigned integer 0..65535). Both default to zero.
+# Agents: gap before each later entry, including between groups; no leading gap.
+# Spaces: gap between top-level entries, but never before an indented child.
+# Collapsed and mobile layouts do not use these gaps. Token rows are not configured here.
+# [ui.sidebar.agents]
+# row_gap = 0
+# [ui.sidebar.spaces]
+# row_gap = 0
+
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications

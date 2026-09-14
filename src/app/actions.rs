@@ -1491,21 +1491,7 @@ impl AppState {
             self.view.sidebar_rect,
             self.sidebar_section_split,
         );
-        let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
-        let visible = metrics.viewport_rows;
-        if visible == 0 {
-            return;
-        }
-
-        if idx < self.agent_panel_scroll {
-            self.agent_panel_scroll = idx;
-        } else if idx >= self.agent_panel_scroll.saturating_add(visible) {
-            self.agent_panel_scroll = idx.saturating_add(1).saturating_sub(visible);
-        }
-
-        let max_scroll =
-            crate::ui::agent_panel_scroll_metrics(self, detail_area).max_offset_from_bottom;
-        self.agent_panel_scroll = self.agent_panel_scroll.min(max_scroll);
+        self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(self, detail_area, idx);
     }
 
     pub(crate) fn terminal_ids_for_workspace(
@@ -3295,6 +3281,164 @@ mod tests {
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
     use ratatui::layout::Direction;
+
+    #[test]
+    fn m828d1_configured_gaps_follow_the_actual_child_placement() {
+        let source = "[ui.sidebar.agents]\nrow_gap = 2\n";
+        assert!(source.parse::<toml::Value>().is_ok());
+        let config: crate::config::Config = toml::from_str(source).unwrap();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut owner =
+            crate::app::App::new(&config, true, None, rx, crate::api::EventHub::default());
+        let state = &mut owner.state;
+        let mut first = Workspace::test_new("alpha");
+        first.test_split(Direction::Horizontal);
+        let mut last = Workspace::test_new("gamma");
+        last.test_split(Direction::Horizontal);
+        last.test_split(Direction::Horizontal);
+        state.workspaces = vec![first, Workspace::test_new("beta"), last];
+        state.ensure_test_terminals();
+        for terminal in state.terminals.values_mut() {
+            terminal.detected_agent = Some(Agent::Claude);
+        }
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Spaces;
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 30, 28);
+        assert!(!state.sidebar_collapsed);
+        let (_, area) = crate::ui::expanded_sidebar_sections(
+            state.view.sidebar_rect,
+            state.sidebar_section_split,
+        );
+        let entries = crate::ui::agent_panel_entries(state);
+        assert_eq!(entries.len(), 6);
+        assert_eq!(
+            entries.iter().map(|entry| entry.ws_idx).collect::<Vec<_>>(),
+            vec![0, 0, 1, 2, 2, 2]
+        );
+        let rows = crate::ui::agent_visible_rows(state, area);
+        let children: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                crate::ui::AgentVisibleRow::Child { entry_idx, y, .. } => Some((*entry_idx, *y)),
+                _ => None,
+            })
+            .collect();
+        assert!(children.len() >= 2);
+        assert_eq!(children[0].0, 0);
+        assert_eq!(children[1].0, 1);
+        assert_eq!(
+            children[1].1,
+            children[0].1 + 3,
+            "configured gap precedes follow"
+        );
+        for target in [5, 0, 3] {
+            assert!(!crate::ui::agent_visible_rows(state, area).iter().any(|row| {
+                matches!(row, crate::ui::AgentVisibleRow::Child { entry_idx, .. } if *entry_idx == target)
+            }), "target starts outside the visible children: {target}");
+            assert!(state.focus_agent_entry(target));
+            assert_eq!(state.active, Some(entries[target].ws_idx));
+            assert_eq!(
+                state.workspaces[entries[target].ws_idx].focused_pane_id(),
+                Some(entries[target].pane_id)
+            );
+            assert!(crate::ui::agent_visible_rows(state, area).iter().any(|row| {
+                matches!(row, crate::ui::AgentVisibleRow::Child { entry_idx, .. } if *entry_idx == target)
+            }), "focused target must be a placed child: {target}");
+            state.assert_invariants_for_test();
+        }
+    }
+
+    #[test]
+    fn m828d1_gap_follow_preserves_focus_and_hidden_early_exit() {
+        for gap in [0, 2] {
+            let mut state = app_with_workspaces(&["alpha", "beta", "gamma", "dense"]);
+            for _ in 0..4 {
+                state.workspaces[3].test_split(Direction::Horizontal);
+            }
+            state.ensure_test_terminals();
+            for terminal in state.terminals.values_mut() {
+                terminal.detected_agent = Some(Agent::Claude);
+            }
+            state.agent_panel_sort = crate::app::state::AgentPanelSort::Spaces;
+            state.sidebar_agents.row_gap = gap;
+            state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 30, 24);
+            let (_, area) = crate::ui::expanded_sidebar_sections(
+                state.view.sidebar_rect,
+                state.sidebar_section_split,
+            );
+            let entries = crate::ui::agent_panel_entries(&state);
+            assert_eq!(entries.len(), 8);
+            assert_eq!(
+                entries.iter().map(|e| e.ws_idx).collect::<Vec<_>>(),
+                vec![0, 1, 2, 3, 3, 3, 3, 3]
+            );
+            let initial = crate::ui::agent_visible_rows(&state, area);
+            assert!(initial
+                .iter()
+                .any(|row| matches!(row, crate::ui::AgentVisibleRow::Child { entry_idx: 0, .. })));
+            assert!(!initial
+                .iter()
+                .any(|row| matches!(row, crate::ui::AgentVisibleRow::Child { entry_idx: 5, .. })));
+            if gap == 0 {
+                let visible_now = initial
+                    .iter()
+                    .filter(|row| matches!(row, crate::ui::AgentVisibleRow::Child { .. }))
+                    .count();
+                assert_ne!(
+                    visible_now,
+                    crate::ui::agent_panel_scroll_metrics(&state, area).viewport_rows
+                );
+            }
+            for target in [5, 0, 7, 1, 6, 2, 3, 4] {
+                assert!(state.focus_agent_entry(target));
+                assert_eq!(state.active, Some(entries[target].ws_idx));
+                assert_eq!(
+                    state.workspaces[entries[target].ws_idx].focused_pane_id(),
+                    Some(entries[target].pane_id)
+                );
+                assert!(
+                    crate::ui::agent_visible_rows(&state, area)
+                        .iter()
+                        .any(|row| matches!(row,
+                    crate::ui::AgentVisibleRow::Child { entry_idx, .. } if *entry_idx == target)),
+                    "focused target is an actual child: gap={gap} target={target}"
+                );
+                let scroll = state.agent_panel_scroll;
+                assert!(
+                    scroll
+                        <= crate::ui::agent_panel_scroll_metrics(&state, area)
+                            .max_offset_from_bottom
+                );
+                state.ensure_agent_panel_entry_visible(target);
+                assert_eq!(
+                    state.agent_panel_scroll, scroll,
+                    "already-visible target is stable"
+                );
+                state.assert_invariants_for_test();
+            }
+            let scroll = state.agent_panel_scroll;
+            let active = state.active;
+            assert!(!state.focus_agent_entry(entries.len()));
+            assert_eq!(state.active, active);
+            assert_eq!(state.agent_panel_scroll, scroll);
+            assert_eq!(
+                crate::ui::agent_panel_scroll_for_target(&state, area, usize::MAX),
+                scroll
+            );
+            state.sidebar_collapsed = true;
+            state.agent_panel_scroll = usize::MAX;
+            state.ensure_agent_panel_entry_visible(0);
+            assert_eq!(
+                state.agent_panel_scroll,
+                usize::MAX,
+                "hidden early return is before clamping"
+            );
+            let empty = AppState::test_new();
+            assert_eq!(crate::ui::agent_panel_scroll_for_target(&empty, area, 0), 0);
+        }
+    }
 
     fn app_with_workspaces(names: &[&str]) -> AppState {
         let mut state = AppState::test_new();

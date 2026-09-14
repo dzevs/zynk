@@ -618,6 +618,8 @@ impl App {
             sidebar_width_auto: false,
             sidebar_collapsed: config.ui.sidebar_start_collapsed,
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
+            sidebar_agents: config.ui.sidebar.agents.clone(),
+            sidebar_spaces: config.ui.sidebar.spaces.clone(),
             sidebar_section_split,
             agent_panel_sort,
             status_indicators: config.ui.status_indicators,
@@ -1348,6 +1350,8 @@ impl App {
                 self.state.sidebar_min_width = config.ui.sidebar_min_width;
                 self.state.sidebar_max_width = config.ui.sidebar_max_width;
                 self.state.sidebar_collapsed_mode = config.ui.sidebar_collapsed_mode;
+                self.state.sidebar_agents = config.ui.sidebar.agents.clone();
+                self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.mobile_width_threshold = config.ui.mobile_width_threshold;
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
@@ -1837,6 +1841,187 @@ mod tests {
     use crate::workspace::Workspace;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::sync::Mutex;
+
+    #[test]
+    fn m828d1_gap_state_initialization_and_reload_are_section_atomic() {
+        let test_state = state::AppState::test_new();
+        assert_eq!(test_state.sidebar_agents.row_gap, 0);
+        assert_eq!(test_state.sidebar_spaces.row_gap, 0);
+        let config: Config =
+            toml::from_str("[ui.sidebar.agents]\nrow_gap = 2\n[ui.sidebar.spaces]\nrow_gap = 5\n")
+                .unwrap();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, rx, crate::api::EventHub::default());
+        assert_eq!(app.state.sidebar_agents.row_gap, 2);
+        assert_eq!(app.state.sidebar_spaces.row_gap, 5);
+        app.state.agent_panel_scroll = 7;
+        app.state.workspace_scroll = 9;
+        let changed: Config = toml::from_str(
+            "[ui]\nmouse_capture = false\n[ui.sidebar.agents]\nrow_gap = 3\n[ui.sidebar.spaces]\nrow_gap = 8\n",
+        )
+        .unwrap();
+        let applied = app.apply_live_config(&changed, &[], &[], false);
+        assert_eq!(applied.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.sidebar_agents.row_gap, 3);
+        assert_eq!(app.state.sidebar_spaces.row_gap, 8);
+        assert!(!app.state.mouse_capture);
+        assert_eq!(app.state.agent_panel_scroll, 0);
+        assert_eq!(app.state.workspace_scroll, 9);
+
+        app.state.agent_panel_scroll = 4;
+        let invalid_ui: Config = toml::from_str(
+            "[keys]\nnew_workspace = \"prefix+m\"\n[ui]\nmouse_capture = true\n[ui.sidebar.agents]\nrow_gap = 11\n[ui.sidebar.spaces]\nrow_gap = 12\n",
+        )
+        .unwrap();
+        let partial = app.apply_live_config(
+            &invalid_ui,
+            &["invalid ui config; keeping current settings".into()],
+            &["ui".into()],
+            false,
+        );
+        assert_eq!(partial.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(app.state.sidebar_agents.row_gap, 3);
+        assert_eq!(app.state.sidebar_spaces.row_gap, 8);
+        assert!(!app.state.mouse_capture);
+        assert_eq!(app.state.agent_panel_scroll, 4);
+        assert_eq!(app.state.workspace_scroll, 9);
+        assert!(app
+            .state
+            .keybinds
+            .new_workspace
+            .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty(),)));
+
+        let mut invalid_bounds = Config::default();
+        invalid_bounds.ui.sidebar_min_width = 40;
+        invalid_bounds.ui.sidebar_max_width = 20;
+        invalid_bounds.ui.sidebar.agents.row_gap = 13;
+        invalid_bounds.ui.sidebar.spaces.row_gap = 14;
+        let partial = app.apply_live_config(&invalid_bounds, &[], &[], false);
+        assert_eq!(partial.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(app.state.sidebar_agents.row_gap, 3);
+        assert_eq!(app.state.sidebar_spaces.row_gap, 8);
+        assert_eq!(app.state.agent_panel_scroll, 4);
+        assert_eq!(app.state.workspace_scroll, 9);
+    }
+
+    #[test]
+    fn m828d1_gap_reload_changes_geometry_and_preserves_invalid_ui() {
+        let _lock = config_env_lock().lock().unwrap();
+        struct RestoreConfigPath(Option<std::ffi::OsString>);
+        impl Drop for RestoreConfigPath {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, value);
+                } else {
+                    std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+                }
+            }
+        }
+        let _restore = RestoreConfigPath(std::env::var_os(crate::config::CONFIG_PATH_ENV_VAR));
+        let path = temp_config_path("m828d1-gap-reload");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        assert_eq!(crate::config::config_path(), path);
+        let mut app = test_app();
+        let mut first = Workspace::test_new("alpha");
+        first.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![first, Workspace::test_new("beta")];
+        for workspace in &mut app.state.workspaces {
+            workspace.cached_git_branch = None;
+        }
+        app.state.ensure_test_terminals();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.detected_agent = Some(Agent::Claude);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let area = ratatui::layout::Rect::new(0, 0, 106, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        assert_eq!(app.state.view.workspace_card_areas.len(), 2);
+        assert_eq!(crate::ui::agent_panel_entries(&app.state).len(), 3);
+        let before_y = app.state.view.workspace_card_areas[1].rect.y;
+        let valid = "[ui]\nmouse_capture = false\n[ui.sidebar.agents]\nrow_gap = 2\n[ui.sidebar.spaces]\nrow_gap = 2\n";
+        assert!(valid.parse::<toml::Value>().is_ok());
+        std::fs::write(&path, valid).unwrap();
+        let report = app.reload_config();
+        eprintln!(
+            "valid gap reload: {:?}; {:?}",
+            report.status, report.diagnostics
+        );
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(report.diagnostics.is_empty());
+        assert!(!app.state.mouse_capture);
+        crate::ui::compute_view(&mut app.state, area);
+        let cards = app.state.view.workspace_card_areas.clone();
+        assert_eq!(cards.len(), 2);
+        assert_ne!(cards[1].rect.y, before_y);
+        assert_eq!(cards[1].rect.y, cards[0].rect.y + 3);
+        assert!(!app.state.sidebar_collapsed);
+        let (_, agent_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let rows = crate::ui::agent_visible_rows(&app.state, agent_area);
+        let children: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                crate::ui::AgentVisibleRow::Child { y, .. } => Some(*y),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[1], children[0] + 3);
+        let invalid = "[keys]\nnew_workspace = \"prefix+m\"\n[ui]\nmouse_capture = true\n[ui.sidebar.agents]\nrow_gap = -1\n[ui.sidebar.spaces]\nrow_gap = 0\n";
+        assert!(invalid.parse::<toml::Value>().is_ok());
+        std::fs::write(&path, invalid).unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("invalid ui config")));
+        assert!(!app.state.mouse_capture);
+        assert!(app
+            .state
+            .keybinds
+            .new_workspace
+            .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
+        crate::ui::compute_view(&mut app.state, area);
+        assert_eq!(
+            app.state
+                .view
+                .workspace_card_areas
+                .iter()
+                .map(|card| card.rect)
+                .collect::<Vec<_>>(),
+            cards.iter().map(|card| card.rect).collect::<Vec<_>>()
+        );
+        assert_eq!(crate::ui::agent_visible_rows(&app.state, agent_area), rows);
+        let malformed = "[ui.sidebar.agents\nrow_gap = 0\n";
+        assert!(malformed.parse::<toml::Value>().is_err());
+        std::fs::write(&path, malformed).unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Failed);
+        assert!(!app.state.mouse_capture);
+        assert!(app
+            .state
+            .keybinds
+            .new_workspace
+            .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
+        crate::ui::compute_view(&mut app.state, area);
+        assert_eq!(
+            app.state
+                .view
+                .workspace_card_areas
+                .iter()
+                .map(|card| card.rect)
+                .collect::<Vec<_>>(),
+            cards.iter().map(|card| card.rect).collect::<Vec<_>>()
+        );
+        assert_eq!(crate::ui::agent_visible_rows(&app.state, agent_area), rows);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 
     fn raw_key(
         code: KeyCode,

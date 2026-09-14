@@ -782,6 +782,155 @@ mod tests {
     use super::*;
 
     #[test]
+    fn m828d1_gap_typos_remain_scoped_diagnostics() {
+        for panel in ["agents", "spaces"] {
+            for (key, value) in [
+                ("row_gapp", "9"),
+                ("rows", "[[\"workspace\"]]"),
+                ("rows_by_agent", "{ claude = [[\"agent\"]] }"),
+            ] {
+                let input = format!(
+                    "[ui]\nmouse_capture = false\n[ui.sidebar.{panel}]\nrow_gap = 2\n{key} = {value}\n"
+                );
+                assert!(input.parse::<toml::Value>().is_ok());
+                let startup = load_config_from_str(&input);
+                let live = load_live_config_from_str(&input).unwrap();
+                for loaded in [startup, live] {
+                    let gap = if panel == "agents" {
+                        loaded.config.ui.sidebar.agents.row_gap
+                    } else {
+                        loaded.config.ui.sidebar.spaces.row_gap
+                    };
+                    assert_eq!(gap, 2, "{panel} {key}");
+                    assert!(!loaded.config.ui.mouse_capture);
+                    assert!(loaded.invalid_sections.is_empty());
+                    assert_eq!(
+                        loaded.diagnostics,
+                        vec![format!(
+                            "unknown config key ui.sidebar.{panel}.{key}; ignoring key"
+                        )]
+                    );
+                }
+            }
+            let positive = format!("[ui.sidebar.{panel}]\nrow_gap = 4\n");
+            let valid = load_live_config_from_str(&positive).unwrap();
+            assert!(valid.diagnostics.is_empty());
+            assert_eq!(
+                if panel == "agents" {
+                    valid.config.ui.sidebar.agents.row_gap
+                } else {
+                    valid.config.ui.sidebar.spaces.row_gap
+                },
+                4
+            );
+            let input = format!(
+                "[keys]\nzoom = \"prefix+z\"\n[ui]\nmouse_capture = false\n[ui.sidebar]\n{panel} = 2\n"
+            );
+            assert!(input.parse::<toml::Value>().is_ok());
+            let invalid = load_live_config_from_str(&input).unwrap();
+            assert_eq!(invalid.invalid_sections, vec!["ui"]);
+            assert_eq!(invalid.diagnostics.len(), 1);
+            assert!(invalid.diagnostics[0].contains("invalid ui config"));
+            assert!(invalid.config.ui.mouse_capture);
+            assert_eq!(invalid.config.ui.sidebar.agents.row_gap, 0);
+            assert_eq!(invalid.config.ui.sidebar.spaces.row_gap, 0);
+            assert_eq!(
+                invalid.config.keys.zoom,
+                super::super::BindingConfig::one("prefix+z")
+            );
+        }
+    }
+
+    #[test]
+    fn m828d1_gap_keys_are_registered_at_both_loaders() {
+        let mut observations = Vec::new();
+        for panel in ["agents", "spaces"] {
+            for gap in [0, 2, 65535] {
+                let source = format!(
+                    "[keys]\nzoom = \"prefix+z\"\n[ui]\nmouse_capture = false\n[ui.sidebar.{panel}]\nrow_gap = {gap}\n"
+                );
+                assert!(source.parse::<toml::Value>().is_ok(), "{source}");
+                let startup = load_config_from_str(&source);
+                let live = load_live_config_from_str(&source).unwrap();
+                observations.push((panel, gap, startup, live));
+            }
+        }
+        assert_eq!(observations.len(), 6);
+        for (panel, gap, startup, live) in &observations {
+            eprintln!(
+                "{panel} gap={gap}: startup={:?}; live={:?}; invalid={:?}",
+                startup.diagnostics, live.diagnostics, live.invalid_sections
+            );
+            for loaded in [startup, live] {
+                assert!(!loaded.config.ui.mouse_capture);
+                assert_eq!(
+                    loaded.config.keys.zoom,
+                    super::super::BindingConfig::one("prefix+z")
+                );
+            }
+        }
+        for (panel, gap, startup, live) in observations {
+            assert!(
+                startup.diagnostics.is_empty(),
+                "startup must recognize {panel} row_gap={gap}: {:?}",
+                startup.diagnostics
+            );
+            assert!(
+                live.diagnostics.is_empty(),
+                "live must recognize {panel} row_gap={gap}: {:?}",
+                live.diagnostics
+            );
+            assert!(live.invalid_sections.is_empty());
+        }
+    }
+
+    #[test]
+    fn m828d1_malformed_gaps_fail_at_the_typed_boundary() {
+        for panel in ["agents", "spaces"] {
+            for invalid in [
+                "-1",
+                "65536",
+                "\"two\"",
+                "1.5",
+                "true",
+                "[1]",
+                "{ value = 1 }",
+            ] {
+                let valid = format!(
+                    "[keys]\nzoom = \"prefix+z\"\n[ui]\nmouse_capture = false\n[ui.sidebar.{panel}]\nrow_gap = 2\n"
+                );
+                assert!(valid.parse::<toml::Value>().is_ok());
+                let positive: Config = toml::from_str(&valid).unwrap();
+                assert!(!positive.ui.mouse_capture);
+                assert_eq!(
+                    positive.keys.zoom,
+                    super::super::BindingConfig::one("prefix+z")
+                );
+                let source = format!(
+                    "[keys]\nzoom = \"prefix+z\"\n[ui]\nmouse_capture = false\n[ui.sidebar.{panel}]\nrow_gap = {invalid}\n"
+                );
+                assert!(source.parse::<toml::Value>().is_ok(), "{source}");
+                let typed = toml::from_str::<Config>(&source);
+                let live = load_live_config_from_str(&source).unwrap();
+                eprintln!(
+                    "{panel} {invalid}: typed_accepted={}; live={:?}; invalid={:?}",
+                    typed.is_ok(),
+                    live.diagnostics,
+                    live.invalid_sections
+                );
+                assert!(typed.is_err(), "typed gap must refuse {panel} {invalid}");
+                assert_eq!(live.invalid_sections, vec!["ui"], "{panel} {invalid}");
+                assert_eq!(live.diagnostics.len(), 1, "{panel} {invalid}");
+                assert!(live.diagnostics[0].contains("invalid ui config"));
+                assert_eq!(
+                    live.config.keys.zoom,
+                    super::super::BindingConfig::one("prefix+z")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn config_dir_uses_zynk_app_name() {
         let _g = crate::config::test_config_env_lock().lock().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", "/tmp/zynk-xdg-test");
