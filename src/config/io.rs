@@ -782,12 +782,275 @@ mod tests {
     use super::*;
 
     #[test]
+    fn m828d2_rows_and_gaps_are_registered_together() {
+        for (panel, gap, rows) in [
+            (
+                "agents",
+                3,
+                serde_json::json!([["agent", "$stage"], ["terminal_title_stripped"]]),
+            ),
+            (
+                "spaces",
+                5,
+                serde_json::json!([["workspace", "$stage"], ["branch", "git_status"]]),
+            ),
+        ] {
+            let overrides = if panel == "agents" {
+                "rows_by_agent = { claude = [[\"pane\"], []] }\n"
+            } else {
+                ""
+            };
+            let input =
+                format!("[ui.sidebar.{panel}]\nrow_gap = {gap}\nrows = {rows}\n{overrides}");
+            let generic: toml::Value = input.parse().unwrap();
+            assert_eq!(
+                generic["ui"]["sidebar"][panel]["rows"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            for loaded in [
+                load_config_from_str(&input),
+                load_live_config_from_str(&input).unwrap(),
+            ] {
+                let encoded = serde_json::to_value(&loaded.config.ui.sidebar).unwrap();
+                assert_eq!(encoded[panel]["row_gap"], gap);
+                assert!(loaded.invalid_sections.is_empty());
+                assert_eq!(loaded.diagnostics, Vec::<String>::new(), "{panel}");
+                let mut expected = serde_json::json!({"row_gap": gap, "rows": rows});
+                if panel == "agents" {
+                    expected["rows_by_agent"] = serde_json::json!({"claude": [["pane"], []]});
+                }
+                assert_eq!(encoded[panel], expected);
+            }
+        }
+        let input = "[ui.sidebar.spaces]\nrow_gap = 7\nrows = [[\"workspace\"]]\nrows_by_agent = { claude = [[\"agent\"]] }\n";
+        assert!(input.parse::<toml::Value>().is_ok());
+        for loaded in [
+            load_config_from_str(input),
+            load_live_config_from_str(input).unwrap(),
+        ] {
+            let encoded = serde_json::to_value(&loaded.config.ui.sidebar.spaces).unwrap();
+            assert_eq!(encoded["rows"], serde_json::json!([["workspace"]]));
+            assert_eq!(encoded["row_gap"], 7);
+            assert!(loaded.invalid_sections.is_empty());
+            assert_eq!(
+                loaded.diagnostics,
+                vec!["unknown config key ui.sidebar.spaces.rows_by_agent; ignoring key"]
+            );
+        }
+    }
+
+    #[test]
+    fn m828d2_invalid_tokens_fail_after_valid_syntax_mirrors() {
+        let overlong = serde_json::to_string(&format!("${}", "a".repeat(33))).unwrap();
+        for panel in ["agents", "spaces"] {
+            let token = if panel == "agents" {
+                "agent"
+            } else {
+                "workspace"
+            };
+            for invalid in [
+                "\"summary\"",
+                "\"$\"",
+                "\"$bad.name\"",
+                "\"$bad space\"",
+                overlong.as_str(),
+                "\"$\u{e9}\"",
+                "42",
+                "{ token = \"workspace\", bold = true }",
+            ] {
+                let valid = format!("[ui.sidebar.{panel}]\nrow_gap = 2\nrows = [[\"{token}\"]]\n");
+                let generic: toml::Value = valid.parse().unwrap();
+                assert_eq!(
+                    generic["ui"]["sidebar"][panel]["rows"][0][0].as_str(),
+                    Some(token)
+                );
+                let positive: Config = toml::from_str(&valid).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&positive.ui.sidebar).unwrap()[panel]["row_gap"],
+                    2
+                );
+                let input = format!("[keys]\nzoom = \"prefix+z\"\n[ui.sidebar.{panel}]\nrow_gap = 2\nrows = [[{invalid}]]\n");
+                let generic: toml::Value = input.parse().unwrap();
+                assert_eq!(
+                    generic["ui"]["sidebar"][panel]["rows"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                let typed = toml::from_str::<Config>(&input);
+                assert!(typed.is_err(), "typed rows must reject {panel} {invalid}");
+                let startup = load_config_from_str(&input);
+                assert_eq!(startup.diagnostics.len(), 1);
+                assert!(startup.diagnostics[0].contains("config parse error"));
+                let live = load_live_config_from_str(&input).unwrap();
+                assert_eq!(live.invalid_sections, vec!["ui"]);
+                assert_eq!(live.diagnostics.len(), 1);
+                assert!(live.diagnostics[0].contains("invalid ui config"));
+                assert_eq!(
+                    live.config.keys.zoom,
+                    super::super::BindingConfig::one("prefix+z")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn m828d2_layout_limits_cover_rows_tokens_and_overrides() {
+        for scope in ["agents", "spaces", "override"] {
+            for (rows, columns) in [(17, 16), (16, 17)] {
+                let panel = if scope == "spaces" {
+                    "spaces"
+                } else {
+                    "agents"
+                };
+                let header = if scope == "override" {
+                    "[ui.sidebar.agents]\nrow_gap = 2\n[ui.sidebar.agents.rows_by_agent]\nclaude"
+                } else if scope == "agents" {
+                    "[ui.sidebar.agents]\nrow_gap = 2\nrows"
+                } else {
+                    "[ui.sidebar.spaces]\nrow_gap = 2\nrows"
+                };
+                let valid_rows = serde_json::to_string(&vec![vec!["workspace"; 16]; 16]).unwrap();
+                let valid = format!("{header} = {valid_rows}\n");
+                assert!(valid.parse::<toml::Value>().is_ok());
+                let positive: Config = toml::from_str(&valid).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&positive.ui.sidebar).unwrap()[panel]["row_gap"],
+                    2
+                );
+                let oversized =
+                    serde_json::to_string(&vec![vec!["workspace"; columns]; rows]).unwrap();
+                let input = format!("{header} = {oversized}\n");
+                let generic: toml::Value = input.parse().unwrap();
+                let layout = if scope == "override" {
+                    &generic["ui"]["sidebar"]["agents"]["rows_by_agent"]["claude"]
+                } else {
+                    &generic["ui"]["sidebar"][panel]["rows"]
+                };
+                assert_eq!(layout.as_array().unwrap().len(), rows);
+                assert_eq!(layout[0].as_array().unwrap().len(), columns);
+                assert!(
+                    toml::from_str::<Config>(&input).is_err(),
+                    "{scope} {rows}x{columns}"
+                );
+                let live = load_live_config_from_str(&input).unwrap();
+                assert_eq!(live.invalid_sections, vec!["ui"]);
+                assert_eq!(live.diagnostics.len(), 1);
+                assert!(live.diagnostics[0].contains("invalid ui config"));
+                for empty in ["[]", "[[]]"] {
+                    let input = format!("{header} = {empty}\n");
+                    assert!(input.parse::<toml::Value>().is_ok());
+                    let config: Config = toml::from_str(&input).unwrap();
+                    let encoded = serde_json::to_value(&config.ui.sidebar).unwrap();
+                    let actual = if scope == "override" {
+                        &encoded["agents"]["rows_by_agent"]["claude"]
+                    } else {
+                        &encoded[panel]["rows"]
+                    };
+                    assert_eq!(
+                        actual,
+                        &serde_json::from_str::<serde_json::Value>(empty).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m828d2_override_keys_use_exact_fork_canonical_labels() {
+        let labels = [
+            "pi",
+            "claude",
+            "codex",
+            "gemini",
+            "cursor",
+            "devin",
+            "agy",
+            "cline",
+            "mastracode",
+            "opencode",
+            "copilot",
+            "kimi",
+            "kiro",
+            "droid",
+            "amp",
+            "grok",
+            "hermes",
+            "kilo",
+            "qodercli",
+            "qwen",
+            "maki",
+        ];
+        let mut accepted = Vec::new();
+        for label in labels {
+            assert!(crate::detect::parse_canonical_agent_label(label).is_some());
+            let input = format!("[ui.sidebar.agents]\nrow_gap = 3\n[ui.sidebar.agents.rows_by_agent]\n\"{label}\" = [[\"agent\"]]\n");
+            assert!(input.parse::<toml::Value>().is_ok());
+            let config: Config = toml::from_str(&input).unwrap();
+            assert_eq!(config.ui.sidebar.agents.row_gap, 3);
+            accepted.push((
+                label,
+                serde_json::to_value(&config.ui.sidebar.agents).unwrap(),
+            ));
+        }
+        assert_eq!(accepted.len(), 21);
+        for (invalid, canonical) in [
+            ("claude-code", "claude"),
+            ("Claude", "claude"),
+            (" claude", "claude"),
+            ("claude ", "claude"),
+            ("claude.exe", "claude"),
+            ("antigravity", "agy"),
+            ("open-code", "opencode"),
+            ("cursor-agent", "cursor"),
+            ("unknown", "pi"),
+        ] {
+            let valid = format!("[ui.sidebar.agents]\nrow_gap = 4\n[ui.sidebar.agents.rows_by_agent]\n\"{canonical}\" = [[\"agent\"]]\n");
+            assert!(valid.parse::<toml::Value>().is_ok());
+            assert_eq!(
+                toml::from_str::<Config>(&valid)
+                    .unwrap()
+                    .ui
+                    .sidebar
+                    .agents
+                    .row_gap,
+                4
+            );
+            assert!(crate::detect::parse_canonical_agent_label(canonical).is_some());
+            assert!(crate::detect::parse_canonical_agent_label(invalid).is_none());
+            let input = format!("[ui.sidebar.agents]\nrow_gap = 4\n[ui.sidebar.agents.rows_by_agent]\n\"{invalid}\" = [[\"agent\"]]\n");
+            let generic: toml::Value = input.parse().unwrap();
+            assert_eq!(
+                generic["ui"]["sidebar"]["agents"]["rows_by_agent"][invalid][0][0].as_str(),
+                Some("agent")
+            );
+            assert!(
+                toml::from_str::<Config>(&input).is_err(),
+                "override key {invalid:?}"
+            );
+            let live = load_live_config_from_str(&input).unwrap();
+            assert_eq!(live.invalid_sections, vec!["ui"]);
+            assert_eq!(live.diagnostics.len(), 1);
+        }
+        for (label, encoded) in accepted {
+            assert_eq!(
+                encoded["rows_by_agent"],
+                serde_json::json!({(label): [["agent"]]})
+            );
+        }
+    }
+
+    #[test]
     fn m828d1_gap_typos_remain_scoped_diagnostics() {
         for panel in ["agents", "spaces"] {
             for (key, value) in [
                 ("row_gapp", "9"),
-                ("rows", "[[\"workspace\"]]"),
-                ("rows_by_agent", "{ claude = [[\"agent\"]] }"),
+                ("rowss", "[[\"workspace\"]]"),
+                ("rows_by_agent_typo", "{ claude = [[\"agent\"]] }"),
             ] {
                 let input = format!(
                     "[ui]\nmouse_capture = false\n[ui.sidebar.{panel}]\nrow_gap = 2\n{key} = {value}\n"

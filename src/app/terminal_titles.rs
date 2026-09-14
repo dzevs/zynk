@@ -1,6 +1,26 @@
 use super::App;
 
 impl App {
+    pub(crate) fn terminal_title_sidebar_configured(&self) -> bool {
+        let config = &self.state.sidebar_agents;
+        std::iter::once(&config.rows)
+            .chain(config.rows_by_agent.values())
+            .flatten()
+            .flatten()
+            .any(|token| {
+                matches!(
+                    token,
+                    crate::config::AgentSidebarToken::TerminalTitle
+                        | crate::config::AgentSidebarToken::TerminalTitleStripped
+                )
+            })
+    }
+
+    pub(crate) fn sync_terminal_titles_for_sidebar(&mut self) -> bool {
+        let raw_changed = self.sync_terminal_titles();
+        raw_changed && self.terminal_title_sidebar_configured()
+    }
+
     pub(crate) fn sync_terminal_titles(&mut self) -> bool {
         let mut observations = Vec::new();
         for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
@@ -48,6 +68,261 @@ mod tests {
     use crate::config::Config;
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
+
+    #[test]
+    fn m828d2_title_demand_includes_global_and_override_only_builtins() {
+        for (source, expected) in [
+            ("", false),
+            ("rows = []", false),
+            ("rows = [[\"agent\"], [\"pane\"]]", false),
+            ("rows = [[\"terminal_title\"]]", true),
+            ("rows = [[\"terminal_title_stripped\"]]", true),
+            ("rows = [[\"terminal_title\", \"terminal_title\"], [\"terminal_title_stripped\"]]", true),
+            ("rows = [[\"agent\"]]\nrows_by_agent = { claude = [[\"terminal_title\"]] }", true),
+            ("rows = [[\"agent\"]]\nrows_by_agent = { codex = [[\"terminal_title_stripped\"]] }", true),
+            ("rows = []\nrows_by_agent = { claude = [], codex = [] }", false),
+            ("rows = [[\"$terminal_title\", \"$terminal_title_stripped\"]]", false),
+            ("rows = []\nrows_by_agent = { claude = [[\"$terminal_title\"]], codex = [[\"$terminal_title_stripped\"]] }", false),
+        ] {
+            let text = format!("onboarding = false\n[ui.sidebar.agents]\n{source}\n");
+            assert!(text.parse::<toml::Value>().is_ok());
+            let config: Config = toml::from_str(&text).unwrap();
+            let mut app = App::new(
+                &config,
+                true,
+                None,
+                tokio::sync::mpsc::unbounded_channel().1,
+                crate::api::EventHub::default(),
+            );
+            app.state.workspaces.clear();
+            assert!(app.state.workspaces.is_empty());
+            assert_eq!(app.terminal_title_sidebar_configured(), expected, "{source}");
+        }
+    }
+
+    #[tokio::test]
+    async fn m828d2_configured_sync_consumer_never_skips_observation_updates() {
+        for (source, configured) in [
+            ("rows = [[\"terminal_title\"]]", true),
+            ("rows = [[\"terminal_title_stripped\"]]", true),
+            ("rows = [[\"agent\"]]\nrows_by_agent = { claude = [[\"terminal_title\"]] }", true),
+            ("rows = []\nrows_by_agent = { claude = [[\"terminal_title_stripped\"]] }", true),
+            ("rows = []", false),
+            ("rows = [[\"agent\"]]", false),
+            ("rows = [[\"$terminal_title\"]]\nrows_by_agent = { claude = [[\"$terminal_title_stripped\"]] }", false),
+        ] {
+            let text = format!("onboarding = false\n[ui.sidebar.agents]\n{source}\n");
+            assert!(text.parse::<toml::Value>().is_ok());
+            let config: Config = toml::from_str(&text).unwrap();
+            let hub = crate::api::EventHub::default();
+            let mut app = App::new(
+                &config,
+                true,
+                None,
+                tokio::sync::mpsc::unbounded_channel().1,
+                hub.clone(),
+            );
+            app.state.workspaces = vec![Workspace::test_new("title-consumer")];
+            app.state.active = Some(0);
+            app.state.ensure_test_terminals();
+            let pane = app.state.workspaces[0].tabs[0].root_pane;
+            let id = app.state.workspaces[0].terminal_id(pane).cloned().unwrap();
+            let terminal = app.state.terminals.get_mut(&id).unwrap();
+            terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+            terminal.set_manual_label("display-label".into());
+            assert!(terminal.metadata_tokens.patch(
+                std::collections::HashMap::from([
+                    ("terminal_title".into(), Some("custom-raw".into())),
+                    ("terminal_title_stripped".into(), Some("custom-stripped".into())),
+                ]),
+                None,
+                std::time::Instant::now(),
+            ));
+            assert_eq!(terminal.effective_known_agent(), Some(Agent::Claude));
+            assert_eq!(app.terminal_title_sidebar_configured(), configured);
+            let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+            runtime.test_process_pty_bytes("\x1b]2;\u{280b} alpha\x07".as_bytes());
+            assert_eq!(runtime.terminal_title().as_deref(), Some("\u{280b} alpha"));
+            app.terminal_runtimes.insert(id.clone(), runtime);
+            let cursor = hub.current_sequence();
+            assert!(app.sync_terminal_titles());
+            assert_eq!(hub.events_after(cursor).len(), 1);
+            assert_eq!(app.pane_info(0, pane).unwrap().revision, 1);
+
+            for (regime, raw, stripped, changed, revision, event_count) in [
+                ("raw-identical", "\u{280b} alpha", "alpha", false, 1, 0),
+                ("raw-changing-stripped-equal", "\u{2819} alpha", "alpha", true, 1, 0),
+                ("stripped-changing", "\u{2819} beta", "beta", true, 2, 1),
+            ] {
+                let runtime = app.terminal_runtimes.get(&id).unwrap();
+                runtime.test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
+                assert_eq!(runtime.terminal_title().as_deref(), Some(raw));
+                let cursor = hub.current_sequence();
+                let redraw = app.sync_terminal_titles_for_sidebar();
+                let info = app.pane_info(0, pane).unwrap();
+                assert_eq!(info.terminal_title.as_deref(), Some(raw), "{source}/{regime}");
+                assert_eq!(info.terminal_title_stripped.as_deref(), Some(stripped));
+                assert_eq!(info.revision, revision);
+                assert_eq!(info.label.as_deref(), Some("display-label"));
+                assert_eq!(info.title, None);
+                assert_eq!(info.agent_status, AgentStatus::Working);
+                let events = hub.events_after(cursor);
+                assert_eq!(events.len(), event_count, "{source}/{regime}");
+                for (_, event) in events {
+                    assert_eq!(event.event, EventKind::PaneUpdated);
+                    match event.data {
+                        EventData::PaneUpdated { pane: observed } => assert_eq!(observed, info),
+                        other => panic!("unexpected event: {other:?}"),
+                    }
+                }
+                assert_eq!(redraw, configured && changed, "{source}/{regime}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn m828d2_three_sync_regimes_are_observed_at_one_and_fifteen_panes() {
+        const WARMUP: usize = 16;
+        const SAMPLES: usize = 256;
+        let mut observations = Vec::new();
+        for count in [1_usize, 15] {
+            for regime in [
+                "raw-identical",
+                "raw-changing-stripped-equal",
+                "stripped-changing",
+            ] {
+                let hub = crate::api::EventHub::default();
+                let mut app = App::new(
+                    &Config::default(),
+                    true,
+                    None,
+                    tokio::sync::mpsc::unbounded_channel().1,
+                    hub.clone(),
+                );
+                let mut workspace = Workspace::test_new("three-regimes");
+                let mut panes = vec![workspace.tabs[0].root_pane];
+                for _ in 1..count {
+                    panes.push(workspace.test_split(ratatui::layout::Direction::Horizontal));
+                }
+                app.state.workspaces = vec![workspace];
+                app.state.active = Some(0);
+                app.state.ensure_test_terminals();
+                assert_eq!(panes.len(), count);
+                let title = |index: usize, step: usize| {
+                    let semantic_step = if regime == "stripped-changing" {
+                        step
+                    } else {
+                        0
+                    };
+                    let prefix = format!("pane-{index:02} step-{semantic_step:03} ");
+                    let plain = prefix.clone() + &"\u{1f642}".repeat(254 - prefix.chars().count());
+                    let glyph = if regime != "raw-identical" && step % 2 == 1 {
+                        '\u{2819}'
+                    } else {
+                        '\u{280b}'
+                    };
+                    (format!("{glyph} {plain}"), plain)
+                };
+                let mut fixtures = Vec::new();
+                for (index, pane) in panes.iter().enumerate() {
+                    let id = app.state.workspaces[0].terminal_id(*pane).cloned().unwrap();
+                    let (raw, plain) = title(index, 0);
+                    assert_eq!(raw.chars().count(), 256);
+                    let runtime =
+                        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+                    runtime.test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
+                    assert_eq!(runtime.terminal_title().as_deref(), Some(raw.as_str()));
+                    app.terminal_runtimes.insert(id.clone(), runtime);
+                    fixtures.push((*pane, id, raw, plain));
+                }
+                let cursor = hub.current_sequence();
+                assert!(app.sync_terminal_titles());
+                assert_eq!(hub.events_after(cursor).len(), count);
+                for (pane, _, raw, plain) in &fixtures {
+                    let info = app.pane_info(0, *pane).unwrap();
+                    assert_eq!(info.terminal_title.as_deref(), Some(raw.as_str()));
+                    assert_eq!(
+                        info.terminal_title_stripped.as_deref(),
+                        Some(plain.as_str())
+                    );
+                    assert_eq!(info.revision, 1);
+                }
+                let mut samples_ns = Vec::with_capacity(SAMPLES);
+                for iteration in 0..WARMUP + SAMPLES {
+                    for (index, (_, id, raw, plain)) in fixtures.iter_mut().enumerate() {
+                        let (next_raw, next_plain) = title(index, iteration + 1);
+                        assert_eq!(next_raw.chars().count(), 256);
+                        assert_eq!(*raw == next_raw, regime == "raw-identical");
+                        assert_eq!(*plain == next_plain, regime != "stripped-changing");
+                        let runtime = app.terminal_runtimes.get(id).unwrap();
+                        runtime.test_process_pty_bytes(format!("\x1b]2;{next_raw}\x07").as_bytes());
+                        assert_eq!(runtime.terminal_title().as_deref(), Some(next_raw.as_str()));
+                        *raw = next_raw;
+                        *plain = next_plain;
+                    }
+                    let cursor = hub.current_sequence();
+                    let started = std::time::Instant::now();
+                    let changed = app.sync_terminal_titles();
+                    let elapsed = started.elapsed();
+                    assert_eq!(changed, regime != "raw-identical");
+                    let mut expected = Vec::new();
+                    for (pane, _, raw, plain) in &fixtures {
+                        let info = app.pane_info(0, *pane).unwrap();
+                        assert_eq!(info.terminal_title.as_deref(), Some(raw.as_str()));
+                        assert_eq!(
+                            info.terminal_title_stripped.as_deref(),
+                            Some(plain.as_str())
+                        );
+                        assert_eq!(
+                            info.revision,
+                            if regime == "stripped-changing" {
+                                iteration as u64 + 2
+                            } else {
+                                1
+                            }
+                        );
+                        expected.push(info);
+                    }
+                    expected.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
+                    let mut actual = hub
+                        .events_after(cursor)
+                        .into_iter()
+                        .map(|(_, event)| {
+                            assert_eq!(event.event, EventKind::PaneUpdated);
+                            match event.data {
+                                EventData::PaneUpdated { pane } => pane,
+                                other => panic!("unexpected title event: {other:?}"),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    actual.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
+                    if regime == "stripped-changing" {
+                        assert_eq!(actual, expected);
+                    } else {
+                        assert!(actual.is_empty());
+                    }
+                    if iteration >= WARMUP {
+                        samples_ns.push(elapsed.as_nanos());
+                    }
+                }
+                assert_eq!(samples_ns.len(), SAMPLES);
+                let mut sorted = samples_ns.clone();
+                sorted.sort_unstable();
+                observations.push(serde_json::json!({
+                    "panes": count, "regime": regime, "cols": 80, "rows": 24,
+                    "title_scalars": 256, "warmup": WARMUP, "samples": SAMPLES,
+                    "samples_ns": samples_ns, "median_ns": sorted[SAMPLES / 2],
+                    "p95_ns": sorted[(SAMPLES * 95).div_ceil(100) - 1], "max_ns": sorted[SAMPLES - 1],
+                    "median_rule": "upper_middle", "p95_rule": "nearest_rank", "interval": "c_sync_only",
+                    "debug_assertions": cfg!(debug_assertions), "threshold": null
+                }));
+            }
+        }
+        assert_eq!(observations.len(), 6);
+        for observation in observations {
+            println!("M8_28D2_SYNC {observation}");
+        }
+    }
 
     #[tokio::test]
     async fn m828c_sync_scales_over_one_and_fifteen_attached_panes() {

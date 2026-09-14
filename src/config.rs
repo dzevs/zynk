@@ -28,7 +28,10 @@ pub use self::{
         HEADER_VERBOSE_ENV_VAR, MAX_HEADER_MAX_WIDTH, MAX_TOAST_DELAY_SECONDS,
         MIN_HEADER_MAX_WIDTH,
     },
-    sidebar::{AgentsSidebarConfig, SidebarConfig, SpacesSidebarConfig},
+    sidebar::{
+        AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SpaceSidebarToken,
+        SpacesSidebarConfig,
+    },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},
 };

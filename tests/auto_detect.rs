@@ -17,6 +17,231 @@ use support::{
     cleanup_test_base, register_runtime_dir, register_spawned_zynk_pid, unregister_spawned_zynk_pid,
 };
 
+#[test]
+fn m828d2_monolithic_title_rows_reach_owned_pty_paint_output() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+
+    struct PaintFixture {
+        process: Option<SpawnedZynk>,
+        reader: Option<thread::JoinHandle<()>>,
+        base: PathBuf,
+    }
+    impl Drop for PaintFixture {
+        fn drop(&mut self) {
+            drop(self.process.take());
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+            cleanup_test_base(&self.base);
+        }
+    }
+
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let client_socket = runtime_dir.join("zynk-client.sock");
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&config_home).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+    let fake = bin.join("claude");
+    fs::write(&fake, "#!/bin/sh\nstty -echo\nprintf '\\033]2;PAINTFIRST\\007'\nprintf 'D2-PAINT-READY\\n'\nwhile IFS= read -r line; do\n  if [ \"$line\" = next ]; then printf '\\033]2;rowsecondx\\007'; fi\ndone\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let config =
+        "onboarding = false\n[ui.sidebar.agents]\nrows = [[\"agent\"], [\"terminal_title\"]]\n";
+    assert!(config.parse::<toml::Value>().is_ok());
+    let config_path = config_home.join("d2.toml");
+    fs::write(&config_path, config).unwrap();
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 34,
+            cols: 106,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_zynk"));
+    cmd.arg("--no-session");
+    for (key, value) in [
+        ("XDG_CONFIG_HOME", config_home.clone()),
+        ("XDG_RUNTIME_DIR", runtime_dir.clone()),
+        ("ZYNK_CONFIG_PATH", config_path),
+        ("ZYNK_SOCKET_PATH", api_socket.clone()),
+        ("ZYNK_CLIENT_SOCKET_PATH", client_socket.clone()),
+        ("ZYNK_SQLITE_HOME", config_home.join("sqlite")),
+        ("ZYNK_HOME", base.join("home")),
+    ] {
+        cmd.env(key, value);
+    }
+    cmd.env(
+        "PATH",
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    cmd.env("SHELL", "/bin/sh");
+    cmd.env("ZYNK_DISABLE_SOUND", "1");
+    cmd.env_remove("ZYNK_ENV");
+    cmd.env_remove("ZYNK_TEST_TRUST_PEER_PID");
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    let pid = child.process_id().unwrap();
+    register_spawned_zynk_pid(Some(pid));
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let output = captured.clone();
+    let reading = thread::spawn(move || {
+        let mut bytes = [0; 8192];
+        loop {
+            match reader.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let mut output = output.lock().unwrap();
+                    output.extend_from_slice(&bytes[..count]);
+                    if output.len() > 2 * 1024 * 1024 {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
+    let _fixture = PaintFixture {
+        process: Some(SpawnedZynk {
+            _master: pair.master,
+            child,
+        }),
+        reader: Some(reading),
+        base,
+    };
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let peer = UnixStream::connect(&api_socket).unwrap();
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // The initialized output buffer and length match SO_PEERCRED's Linux ABI.
+    assert_eq!(
+        unsafe {
+            libc::getsockopt(
+                peer.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut credentials as *mut libc::ucred).cast(),
+                &mut size,
+            )
+        },
+        0
+    );
+    assert_eq!(credentials.pid as u32, pid);
+    assert_eq!(size as usize, std::mem::size_of::<libc::ucred>());
+    assert!(process_exists(pid));
+    assert!(!client_socket.exists());
+    drop(peer);
+    let call = |method: &str, params: Value| {
+        let mut socket = UnixStream::connect(&api_socket).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        writeln!(
+            socket,
+            "{}",
+            serde_json::json!({"id": "d2-paint", "method": method, "params": params})
+        )
+        .unwrap();
+        let mut line = String::new();
+        BufReader::new(socket).read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert!(response.get("error").is_none(), "{response}");
+        response["result"].clone()
+    };
+    let created = call(
+        "workspace.create",
+        serde_json::json!({"label": "paint-fixture", "focus": true}),
+    );
+    let pane = created["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(
+        "pane.send_input",
+        serde_json::json!({"pane_id": pane, "text": "claude", "keys": ["Enter"]}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let info = call("pane.get", serde_json::json!({"pane_id": pane}));
+        let text = call(
+            "pane.read",
+            serde_json::json!({"pane_id": pane, "source": "recent", "lines": 1000}),
+        );
+        if info["pane"]["terminal_title"] == "PAINTFIRST"
+            && info["pane"]["agent"] == "claude"
+            && text["read"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("D2-PAINT-READY"))
+        {
+            assert_eq!(info["pane"]["terminal_title_stripped"], "PAINTFIRST");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "capture/readiness/classification: {info}, {text}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let osc = regex::Regex::new(r"(?s)\x1b\].*?(?:\x07|\x1b\\)").unwrap();
+    let trailing_osc = regex::Regex::new(r"(?s)\x1b\].*$").unwrap();
+    let csi = regex::Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap();
+    let paint = |bytes: &[u8]| {
+        let text = String::from_utf8_lossy(bytes);
+        let without_osc = osc.replace_all(&text, "");
+        let complete = trailing_osc.replace_all(&without_osc, "");
+        csi.replace_all(&complete, "").into_owned()
+    };
+    assert_eq!(
+        paint(b"\x1b]2;PAINTFIRST\x07\x1b[1;1Hvisible\x1b]2;unfinished"),
+        "visible"
+    );
+    assert_eq!(paint(b"\x1b[2;3HPAINTFIRST"), "PAINTFIRST");
+    let wait_for_paint = |needle: &str, watermark: usize| {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let bytes = captured.lock().unwrap().clone();
+            assert!(bytes.len() <= 2 * 1024 * 1024, "bounded PTY capture");
+            let text = paint(&bytes);
+            if text
+                .get(watermark..)
+                .is_some_and(|tail| tail.contains(needle))
+            {
+                return text.len();
+            }
+            if Instant::now() >= deadline {
+                panic!("configured paint {needle:?} absent after OSC/CSI removal; raw bytes={}, clean bytes={}, watermark={watermark}", bytes.len(), text.len());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let watermark = wait_for_paint("PAINTFIRST", 0);
+    call(
+        "pane.send_input",
+        serde_json::json!({"pane_id": pane, "text": "next", "keys": ["Enter"]}),
+    );
+    // Only the owned PTY reader runs between this input and the paint observation.
+    assert!(wait_for_paint("rowsecondx", watermark) > watermark);
+}
+
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -334,11 +334,36 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Expanded sidebar gaps, in rows (unsigned integer 0..65535). Both default to zero.
 # Agents: gap before each later entry, including between groups; no leading gap.
 # Spaces: gap between top-level entries, but never before an indented child.
-# Collapsed and mobile layouts do not use these gaps. Token rows are not configured here.
+# Collapsed and mobile layouts do not use these gaps or token rows.
+# No gap value restores both old agents rules (within-group zero, between-group one).
+# Spaces at one do not restore the old trailing-gap admission rule at the bottom.
+# Plain rows: at most 16 rows, at most 16 string tokens per row; no Styled tables.
+# Agent tokens: state_icon, state_text, workspace, tab, pane, agent,
+# terminal_title, terminal_title_stripped. Space tokens: state_icon, state_text,
+# workspace, branch, git_status. Custom tokens: "$" + 1..32 ASCII letters,
+# digits, underscores or hyphens; case is significant. Agent rows read pane
+# metadata; space rows read workspace metadata. Custom "$terminal_title" is
+# not the terminal_title builtin. Missing values elide; available empty values
+# remain occurrences. Empty resolved rows elide, with one selectable line minimum.
+# Text does not wrap. Height, hit testing, scrolling and follow share admitted rows.
+# A final agent state_text token is right aligned. Omitted rows use these defaults;
+# explicit [] stays empty. Rows and gaps reload together under the UI section policy.
 # [ui.sidebar.agents]
 # row_gap = 0
+# rows = [["state_icon", "agent", "state_text"]]
+# rows_by_agent = {}
+# Optional override, selected by detected canonical agent, not its display name.
+# Aliases, case changes and unknown agent keys are invalid; [] does not fall back.
+# Replace the rows_by_agent = {} entry above with this table; do not define both.
+# [ui.sidebar.agents.rows_by_agent]
+# claude = [["state_icon", "agent", "state_text"], ["terminal_title_stripped"]]
 # [ui.sidebar.spaces]
 # row_gap = 0
+# rows = [["state_icon", "workspace"], ["branch", "git_status"]]
+# Indented worktree children suppress builtin branch/git_status, not custom tokens.
+# Title observation sync remains unconditional; configured title builtins request
+# sidebar redraw. Periodic Git details follow builtin branch/git_status demand;
+# one-shot identity refresh remains independent. Styled/parts tokens are unsupported.
 
 # Background notification popup delivery
 [ui.toast]

@@ -1190,6 +1190,11 @@ mod tests {
             state: AgentState::Idle,
             seen: true,
             last_agent_state_change_seq: None,
+            agent: None,
+            pane_label: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            tokens: std::collections::HashMap::new(),
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
         }

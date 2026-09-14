@@ -3283,6 +3283,197 @@ mod tests {
     use ratatui::layout::Direction;
 
     #[test]
+    fn m828d2_variable_height_follow_reveals_the_actual_target_child() {
+        use crate::app::state::AgentPanelSort;
+        use ratatui::layout::Rect;
+
+        for sort in [AgentPanelSort::Spaces, AgentPanelSort::Priority] {
+            let source = "onboarding = false\n[ui.sidebar.agents]\nrow_gap = 1\nrows = [[\"agent\"]]\n[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"], [\"pane\"], [\"$end\"]]\ncodex = [[\"agent\"], [\"$end\"]]\n";
+            assert!(source.parse::<toml::Value>().is_ok());
+            let config: crate::config::Config = toml::from_str(source).unwrap();
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut owner =
+                crate::app::App::new(&config, true, None, rx, crate::api::EventHub::default());
+            let state = &mut owner.state;
+            let mut alpha = Workspace::test_new("alpha");
+            alpha.test_split(Direction::Horizontal);
+            let mut gamma = Workspace::test_new("gamma");
+            gamma.test_split(Direction::Horizontal);
+            gamma.test_split(Direction::Horizontal);
+            state.workspaces = vec![alpha, Workspace::test_new("beta"), gamma];
+            state.ensure_test_terminals();
+            let traversal: Vec<_> = state
+                .workspaces
+                .iter()
+                .enumerate()
+                .flat_map(|(ws_idx, ws)| {
+                    ws.tabs.iter().flat_map(move |tab| {
+                        tab.layout.pane_ids().into_iter().map(move |pane| {
+                            (ws_idx, pane, tab.panes[&pane].attached_terminal_id.clone())
+                        })
+                    })
+                })
+                .collect();
+            assert_eq!(traversal.len(), 6);
+            let agents = [
+                Agent::Pi,
+                Agent::Claude,
+                Agent::Codex,
+                Agent::Claude,
+                Agent::Pi,
+                Agent::Codex,
+            ];
+            let heights = [1u16, 3, 2, 3, 1, 2];
+            for (index, (_, _, id)) in traversal.iter().enumerate() {
+                let terminal = state.terminals.get_mut(id).unwrap();
+                terminal.detected_agent = Some(agents[index]);
+                terminal.state = if index == 1 {
+                    AgentState::Blocked
+                } else {
+                    AgentState::Working
+                };
+                terminal.set_manual_label(format!("PANE-{index}"));
+                assert!(terminal.metadata_tokens.patch(
+                    std::collections::HashMap::from([("end".into(), Some(format!("END-{index}")))]),
+                    None,
+                    std::time::Instant::now()
+                ));
+                assert_eq!(
+                    terminal.metadata_tokens.values()["end"],
+                    format!("END-{index}")
+                );
+                assert_eq!(terminal.effective_known_agent(), Some(agents[index]));
+            }
+            state.agent_panel_sort = sort;
+            state.active = Some(0);
+            state.selected = 0;
+            state.mode = Mode::Terminal;
+            state.view.sidebar_rect = Rect::new(0, 0, 30, 24);
+            let (_, area) = crate::ui::expanded_sidebar_sections(
+                state.view.sidebar_rect,
+                state.sidebar_section_split,
+            );
+            assert_eq!(area, Rect::new(0, 12, 29, 12));
+            let order = if sort == AgentPanelSort::Spaces {
+                [0, 1, 2, 3, 4, 5]
+            } else {
+                [1, 0, 2, 3, 4, 5]
+            };
+            let entries = crate::ui::agent_panel_entries(state);
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| entry.pane_id)
+                    .collect::<Vec<_>>(),
+                order.map(|index| traversal[index].1)
+            );
+            assert_eq!(
+                order.map(|index| heights[index]),
+                if sort == AgentPanelSort::Spaces {
+                    [1, 3, 2, 3, 1, 2]
+                } else {
+                    [3, 1, 2, 3, 1, 2]
+                }
+            );
+            let initial = crate::ui::agent_visible_rows(state, area);
+            assert!(
+                !initial.iter().any(|row| matches!(
+                    row,
+                    crate::ui::AgentVisibleRow::Child { entry_idx: 5, .. }
+                )),
+                "populated last target starts offscreen"
+            );
+            assert_eq!(
+                initial
+                    .iter()
+                    .filter_map(|row| match row {
+                        crate::ui::AgentVisibleRow::Child { entry_idx, y, .. } =>
+                            Some((*entry_idx, *y)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                vec![(0, 16), (1, 17 + heights[order[0]])],
+                "initial page has two complete heterogeneous children"
+            );
+            for target in [5, 0, 5] {
+                assert!(
+                    !crate::ui::agent_visible_rows(state, area)
+                        .iter()
+                        .any(|row| matches!(row,
+                    crate::ui::AgentVisibleRow::Child { entry_idx, .. } if *entry_idx == target)),
+                    "target must be absent before follow, {sort:?}/{target}"
+                );
+                assert!(state.focus_agent_entry(target));
+                assert_eq!(state.active, Some(entries[target].ws_idx));
+                assert_eq!(
+                    state.workspaces[entries[target].ws_idx].focused_pane_id(),
+                    Some(entries[target].pane_id)
+                );
+                let rows = crate::ui::agent_visible_rows(state, area);
+                let y = rows
+                    .iter()
+                    .find_map(|row| match row {
+                        crate::ui::AgentVisibleRow::Child { entry_idx, y, .. }
+                            if *entry_idx == target =>
+                        {
+                            Some(*y)
+                        }
+                        _ => None,
+                    })
+                    .expect("focused target is an admitted Child, not only a group header");
+                let source_index = order[target];
+                let height = heights[source_index];
+                assert!(y + height <= area.bottom());
+                let mut screen =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(106, 24)).unwrap();
+                screen
+                    .draw(|frame| crate::ui::render(state, frame))
+                    .unwrap();
+                let text = |row| {
+                    (area.x..area.right())
+                        .map(|x| screen.backend().buffer()[(x, row)].symbol())
+                        .collect::<String>()
+                };
+                assert!(text(y).contains(entries[target].agent_label.as_deref().unwrap()));
+                if height > 1 {
+                    assert!(
+                        text(y + height - 1).contains(&format!("END-{source_index}")),
+                        "last admitted line follows its pane identity and resolved height"
+                    );
+                }
+                if height == 3 {
+                    assert!(text(y + 1).contains(&format!("PANE-{source_index}")));
+                }
+                state.assert_invariants_for_test();
+            }
+            assert!(!crate::ui::agent_panel_entries(state).is_empty());
+            state.sidebar_collapsed = true;
+            state.agent_panel_scroll = 2;
+            assert!(state.focus_agent_entry(0));
+            assert_eq!(state.agent_panel_scroll, 2, "hidden follow keeps scroll");
+            assert_eq!(
+                state.workspaces[entries[0].ws_idx].focused_pane_id(),
+                Some(entries[0].pane_id)
+            );
+            state.sidebar_collapsed = false;
+            let before = (
+                state.active,
+                state.agent_panel_scroll,
+                state.workspaces[entries[0].ws_idx].focused_pane_id(),
+            );
+            assert!(!state.focus_agent_entry(entries.len() + 3));
+            assert_eq!(
+                (
+                    state.active,
+                    state.agent_panel_scroll,
+                    state.workspaces[entries[0].ws_idx].focused_pane_id()
+                ),
+                before
+            );
+        }
+    }
+
+    #[test]
     fn m828d1_configured_gaps_follow_the_actual_child_placement() {
         let source = "[ui.sidebar.agents]\nrow_gap = 2\n";
         assert!(source.parse::<toml::Value>().is_ok());

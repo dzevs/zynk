@@ -14,14 +14,17 @@ pub struct PaneDetail {
     pub tab_idx: usize,
     pub tab_label: String,
     pub label: String,
+    pub pane_label: Option<String>,
+    pub terminal_title: Option<String>,
+    pub terminal_title_stripped: Option<String>,
     pub agent_label: String,
-    #[allow(dead_code)]
     pub agent: Option<Agent>,
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
     pub custom_status: Option<String>,
     pub state_labels: HashMap<String, String>,
+    pub tokens: HashMap<String, String>,
 }
 
 impl Tab {
@@ -51,6 +54,11 @@ impl Tab {
                     tab_idx,
                     tab_label: tab_label.to_string(),
                     label: agent_label.clone(),
+                    pane_label: terminal
+                        .effective_title()
+                        .or_else(|| terminal.manual_label.clone()),
+                    terminal_title: terminal.terminal_title().map(str::to_owned),
+                    terminal_title_stripped: terminal.terminal_title_stripped(),
                     agent_label,
                     agent: terminal.effective_known_agent(),
                     state: terminal.state,
@@ -58,6 +66,7 @@ impl Tab {
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,
                     custom_status: presentation.custom_status,
                     state_labels: presentation.state_labels,
+                    tokens: terminal.metadata_tokens.values(),
                 })
             })
             .collect()
@@ -121,6 +130,134 @@ mod tests {
 
     fn terminal_for_pane(ws: &Workspace, pane_id: PaneId) -> TerminalState {
         TerminalState::new(ws.terminal_id(pane_id).unwrap().clone(), "/tmp".into())
+    }
+
+    #[test]
+    fn m828d2_pane_projection_keeps_distinct_label_title_and_token_sources() {
+        use crate::terminal::AgentMetadataReport;
+
+        for (known, effective, manual, expected_pane) in [
+            (
+                Some(Agent::Claude),
+                Some("effective-title"),
+                Some("manual-pane"),
+                Some("effective-title"),
+            ),
+            (
+                Some(Agent::Pi),
+                None,
+                Some("fallback-pane"),
+                Some("fallback-pane"),
+            ),
+            (None, None, None, None),
+        ] {
+            let mut workspace = Workspace::test_new("workspace-source");
+            workspace.tabs[0].custom_name = Some("explicit-tab".into());
+            let pane_id = workspace.tabs[0].root_pane;
+            workspace.tabs[0].panes.get_mut(&pane_id).unwrap().seen = false;
+            let mut terminal = terminal_for_pane(&workspace, pane_id);
+            terminal.set_detected_state(known, AgentState::Working);
+            terminal.set_agent_name("fallback-agent".into());
+            if let Some(manual) = manual {
+                terminal.set_manual_label(manual.into());
+            }
+            terminal.set_agent_metadata(AgentMetadataReport {
+                source: "projection-fixture".into(),
+                agent_label: None,
+                applies_to_source: None,
+                title: effective.map(str::to_owned),
+                display_agent: Some("renamed-display".into()),
+                custom_status: Some("legacy-status".into()),
+                state_labels: HashMap::from([("working".into(), "legacy-working".into())]),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_custom_status: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(1),
+            });
+            let change = terminal.set_terminal_title(Some("\u{280b} osc-observation".into()));
+            assert!(change.raw_changed);
+            assert!(change.stripped_changed);
+            let tokens = HashMap::from([
+                ("build".into(), "custom-build".into()),
+                ("terminal_title".into(), "custom-title".into()),
+            ]);
+            assert!(terminal.metadata_tokens.patch(
+                tokens
+                    .iter()
+                    .map(|(key, value): (&String, &String)| (key.clone(), Some(value.clone())))
+                    .collect(),
+                None,
+                std::time::Instant::now(),
+            ));
+            assert_eq!(terminal.state, AgentState::Working);
+            assert_eq!(terminal.effective_known_agent(), known);
+            assert_eq!(
+                terminal.effective_display_agent().as_deref(),
+                Some("renamed-display")
+            );
+            assert_eq!(terminal.effective_title().as_deref(), effective);
+            assert_eq!(terminal.manual_label.as_deref(), manual);
+            assert_eq!(terminal.terminal_title(), Some("\u{280b} osc-observation"));
+            assert_eq!(
+                terminal.terminal_title_stripped().as_deref(),
+                Some("osc-observation")
+            );
+            assert_eq!(terminal.metadata_tokens.values(), tokens);
+            let presentation = terminal.effective_presentation();
+            assert_eq!(presentation.custom_status.as_deref(), Some("legacy-status"));
+            assert_eq!(
+                presentation.state_labels,
+                HashMap::from([("working".into(), "legacy-working".into())])
+            );
+            assert_eq!(
+                workspace.tab_display_name(0).as_deref(),
+                Some("explicit-tab")
+            );
+            let mut app = crate::app::AppState::test_new();
+            app.terminals = HashMap::from([(terminal.id.clone(), terminal)]);
+            app.workspaces = vec![workspace];
+            let details = app.workspaces[0].pane_details(&app.terminals);
+            assert_eq!(details.len(), 1);
+            let detail = &details[0];
+            assert_eq!(detail.pane_id, pane_id);
+            assert_eq!(detail.tab_label, "explicit-tab");
+            assert_eq!(detail.agent, known);
+            assert_eq!(detail.agent_label, "renamed-display");
+            assert_eq!(detail.pane_label.as_deref(), expected_pane);
+            assert_eq!(
+                detail.terminal_title.as_deref(),
+                Some("\u{280b} osc-observation")
+            );
+            assert_eq!(
+                detail.terminal_title_stripped.as_deref(),
+                Some("osc-observation")
+            );
+            assert_eq!(detail.tokens, tokens);
+            assert_eq!(detail.custom_status, presentation.custom_status);
+            assert_eq!(detail.state_labels, presentation.state_labels);
+            assert_eq!(detail.state, AgentState::Working);
+            assert!(!detail.seen);
+
+            let entries = crate::ui::agent_panel_entries(&app);
+            assert_eq!(entries.len(), 1);
+            let entry = &entries[0];
+            assert_eq!(entry.pane_id, pane_id);
+            assert_eq!(entry.primary_label, "workspace-source");
+            assert_eq!(entry.primary_tab_label.as_deref(), Some("explicit-tab"));
+            assert_eq!(entry.agent, known);
+            assert_eq!(entry.agent_label.as_deref(), Some("renamed-display"));
+            assert_eq!(entry.pane_label, detail.pane_label);
+            assert_eq!(entry.terminal_title, detail.terminal_title);
+            assert_eq!(
+                entry.terminal_title_stripped,
+                detail.terminal_title_stripped
+            );
+            assert_eq!(entry.tokens, tokens);
+            assert_eq!(entry.custom_status, detail.custom_status);
+            assert_eq!(entry.state_labels, detail.state_labels);
+        }
     }
 
     #[test]

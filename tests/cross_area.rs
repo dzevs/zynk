@@ -20,6 +20,137 @@ use support::{
     unregister_spawned_zynk_pid, CURRENT_PROTOCOL,
 };
 
+#[test]
+fn m828d2_headless_frame_observes_title_rows_without_intervening_requests() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = test_lock();
+    for override_only in [false, true] {
+        let base = unique_test_dir();
+        let config_home = base.join("config");
+        let runtime_dir = base.join("runtime");
+        let api_socket = runtime_dir.join("zynk.sock");
+        let client_socket = runtime_dir.join("zynk-client.sock");
+        let bin = base.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&config_home).unwrap();
+        fs::create_dir_all(&runtime_dir).unwrap();
+        register_runtime_dir(&runtime_dir);
+        let fake = bin.join("claude");
+        fs::write(&fake, "#!/bin/sh\nstty -echo\nprintf '\\033]2;FRAME-FIRST\\007'\nprintf 'D2-FRAME-READY\\n'\nwhile IFS= read -r line; do\n  if [ \"$line\" = next ]; then printf '\\033]2;FRAME-NEXT\\007'; fi\ndone\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let rows = if override_only {
+            "[ui.sidebar.agents]\nrows = [[\"agent\"]]\n[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"], [\"terminal_title\"]]\n"
+        } else {
+            "[ui.sidebar.agents]\nrows = [[\"agent\"], [\"terminal_title\"]]\n"
+        };
+        let config = format!("onboarding = false\n{rows}");
+        assert!(config.parse::<toml::Value>().is_ok());
+        let config_path = config_home.join("d2.toml");
+        fs::write(&config_path, &config).unwrap();
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 34,
+                cols: 106,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_zynk"));
+        cmd.arg("server");
+        for (key, value) in [
+            ("XDG_CONFIG_HOME", config_home.clone()),
+            ("XDG_RUNTIME_DIR", runtime_dir.clone()),
+            ("ZYNK_CONFIG_PATH", config_path),
+            ("ZYNK_SOCKET_PATH", api_socket.clone()),
+            ("ZYNK_CLIENT_SOCKET_PATH", client_socket.clone()),
+            ("ZYNK_SQLITE_HOME", config_home.join("sqlite")),
+            ("ZYNK_HOME", base.join("home")),
+        ] {
+            cmd.env(key, value);
+        }
+        cmd.env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        cmd.env("SHELL", "/bin/sh");
+        cmd.env("ZYNK_DISABLE_SOUND", "1");
+        cmd.env_remove("ZYNK_ENV");
+        cmd.env_remove("ZYNK_TEST_TRUST_PEER_PID");
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        register_spawned_zynk_pid(child.process_id());
+        drop(pair.slave);
+        let server = SpawnedZynk {
+            _master: Some(pair.master),
+            child,
+        };
+        wait_for_socket(&api_socket, Duration::from_secs(10));
+        wait_for_socket(&client_socket, Duration::from_secs(10));
+        let mut client = UnixStream::connect(&client_socket).unwrap();
+        client_handshake(&mut client, CURRENT_PROTOCOL, 106, 34);
+        assert!(wait_for_frame(&mut client, Duration::from_secs(3)));
+        let created = workspace_create(&api_socket, "frame-title-fixture");
+        assert!(created.get("error").is_none(), "{created}");
+        let pane = created["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        pane_send_input(&api_socket, &pane, "claude");
+        assert!(
+            pane_read_recent_contains(&api_socket, &pane, "D2-FRAME-READY", Duration::from_secs(5)),
+            "fake agent readiness"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = send_json_request(
+                &api_socket,
+                "d2-capture",
+                "pane.get",
+                json!({"pane_id": pane}),
+            );
+            assert!(response.get("error").is_none(), "{response}");
+            if response["result"]["pane"]["terminal_title"] == "FRAME-FIRST"
+                && response["result"]["pane"]["agent"] == "claude"
+            {
+                assert_eq!(
+                    response["result"]["pane"]["terminal_title_stripped"],
+                    "FRAME-FIRST"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "capture/classification did not arrive: {response}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            wait_for_frame_matching(&mut client, Duration::from_secs(3), |frame| {
+                frame_contains_text(frame, "FRAME-FIRST")
+            })
+            .unwrap(),
+            "initial configured title frame, override_only={override_only}"
+        );
+        pane_send_input(&api_socket, &pane, "next");
+        // No App request between this title-producing input and the decoded frame.
+        assert!(
+            wait_for_frame_matching(&mut client, Duration::from_secs(3), |frame| {
+                frame_contains_text(frame, "FRAME-NEXT")
+            })
+            .unwrap(),
+            "updated configured title frame, override_only={override_only}"
+        );
+        send_client_detach(&mut client);
+        drop(client);
+        cleanup_spawned_zynk(server, base);
+    }
+}
+
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

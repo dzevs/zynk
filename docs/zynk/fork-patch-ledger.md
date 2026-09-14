@@ -6294,3 +6294,226 @@ This is mutation evidence, not a new M6-09 production change or peer approval.
   nothing; twenty origins, unions 98/34, M8-37, M8-65, N1/N3 and the operator deviation
   remain open. Whole-M8 Gate-2 and fresh independent Gate-3 precede integration.
   No merge, push, install, tag, publish, release or further cleanup gate is implied.
+
+### M8-28D2 - Configured sidebar rows (IMPLEMENTED / PENDING VERIFICATION)
+
+- Parent b92778e3 / tree 867f174b. Gate-1 approved the executable design at
+  seq888, released implementation at seq890, and approved only the uniform
+  binary() to binary_id() invocation repair at seq893. Original design and
+  catalogs remain immutable. Test identity is binary ID plus test name, never
+  name alone. Exact-SHA checks and Gate-2 remain separate from this entry.
+- Plain rows and canonical per-agent overrides extend D1's gap-bearing structs.
+  Defaults: agents [[state_icon, agent, state_text]], spaces [[state_icon,
+  workspace], [branch, git_status]], row_gap zero and no overrides. Limits are
+  16 rows and 16 string tokens per row, including overrides. Custom keys use
+  dollar-prefix plus 1..32 ASCII alphanumeric/underscore/hyphen bytes, preserving
+  case. Unknown builtins, malformed custom keys, aliases and Styled tables are
+  rejected. The existing 21-agent canonical parser is unchanged.
+- Known agent enum chooses overrides independently of renamed display text;
+  missing enum uses global rows. Explicit empty overrides do not fall back.
+  Unavailable occurrences elide, available empty strings remain occurrences,
+  and empty resolved vectors elide their rows. A blank entry retains one
+  selectable line. C's empty sanitized OSC title to None convention stays raw
+  and is not changed to the sidebar resolver's available-empty convention.
+- Pane label, raw title, stripped title, known enum and pane-token values are
+  independent projections. Workspace tokens stay workspace-owned. E's legacy
+  custom_status and state_labels remain. Group identity and collapse are not
+  inferred from configured text. Indented workspace children suppress builtin
+  branch/Git counters, not their label or custom tokens.
+- Plain span allocation uses display columns, icon/counter/separator budgets
+  and later flexible-token priority. Final agent StateText is right aligned as
+  a general rule. Fixed overflow clips in the Paragraph rectangle; no wrapping
+  or universal span-width claim. Fork glyphs, tree structure, active/selection
+  backgrounds and sufficient-width default information remain. Collapsed and
+  mobile production rendering stays raw.
+- Resolved heights drive workspace cards, suffix offsets and grouped Child
+  placement. Child carries entry index, y, height and last; height vectors are
+  resolved after priority sorting. Agent height clips to body minus one for a
+  header, including mid-group; header plus child admission is atomic. Render,
+  interior-line hit, metrics and follow use that model with D1 saturating gaps.
+  No single gap restores pre-D1 agents' zero-within/one-between rules; spaces
+  at one do not restore old trailing-gap admission. These are rule changes,
+  not claims that every individual layout changes.
+- Six pre-existing boundary repairs are explicitly included: workspace body
+  and scrollbar, agent body and scrollbar, agent sort toggle and expanded
+  collapse toggle. Width-one panels retain content without a track; sort rect
+  clips to panel width; full-sidebar width two puts collapse on the divider.
+  Each repair has a source basis and separate bound T25 assertions. No dedicated
+  clipping mutant or complete shared-rectangle sweep is claimed.
+- C sync remains raw and runs unconditionally through the new shared helper;
+  only its redraw signal is configuration-gated. Two loops consume the bool,
+  while API-dispatch's bare sync call stays raw. Each enclosing loop reconstructs
+  outside its exact replacement block. This is source preservation, not a proof
+  that downstream branches execute identically. Custom title decoys do not enable
+  the guard. Git demand selects plain builtin Branch/GitStatus; cache, worker,
+  deadlines and one-shot identity-refresh bodies remain raw. No parts API.
+- Parent barrier observed 397 outcomes: 374 preservation, three characterization
+  greens and twenty negative stops (nineteen assertion macros and T33's bounded
+  paint-absence panic). All 23 new units plus two Git helpers reconstruct ten
+  parent files; 1718 other paths are raw. The unfiltered catalog is 4274 with
+  both-direction membership. Counts and line addresses belong to that snapshot.
+- Final new controls are forty, with seventeen post-interface additions, giving
+  414 selected and catalog 4291. Every increment retains all implemented new
+  controls plus all 374 preservation. Body-local positive/negative audits and
+  51 parent-unreached group bindings accompany the child results. A green body
+  is not a universal trace; loop and branch reachedness remain scoped.
+- Source audit accounts for 676 old test bodies: 666 raw and ten declared
+  adapters, plus two helper-literal adapters separately. Six test adapters match
+  proposed bytes directly; A06-A09 reverse formatting first, then adaptation.
+  All five D1 geometry premises have child observations. L20 again prints two
+  cards at y2/y5, slot7 and footer9; its track-width field has no D1 comparison.
+- Twenty parent units remain raw; T07/T24/T26 were corrected after production
+  edits. Their prior outcomes and owned-copy diagnostics remain, and no rerun
+  recovers final-fixture-before-production chronology. Six pre-production new
+  fixture corrections, these three late-parent corrections, three post-interface
+  controls with four correction events, T21's lint correction, unexecuted drafts,
+  instrument refusals and D1's one inherited-adapter omission remain separate.
+- Unchanged lint passed before variants. The matrix has 46 original observations
+  of 414 exact outcomes each: 19044 outcomes, 38088 raw final-status rows with
+  identical repetitions required. All 46 intended first sites match preflight.
+  The reviewer hash read has no bound pre-run time; priority rests on retained
+  preparation/start/source records jointly, not on absent outcome keys.
+- Mutation report 2ce64b49 has 226 crossings: 165 new and 61 preservation;
+  198 macros (45 intended, 151 incidental, two fixture-premise guards) plus
+  28 other stops. M40/T26 is the sole intended non-macro, an admitted-Child
+  expect, not follow/height/paint discrimination. M33/T33's paint panic is
+  incidental; M33's intended T14 is a child-vector assertion. Per-record data,
+  not these sums, establishes each assignment.
+- The other stops include original M16's 21 unattributed socket-readiness
+  panics and M41/P134's unattributed JSON-line timeout with unresolved original
+  caller. M41/P136's initial-envelope expect has unknown loop iteration. Its
+  prior positives differ from readiness failure. M16 recurrence and M41's
+  focused raw/fault/raw diagnostic are separate observations, not replacements,
+  causal isolation or equivalent schedules. Interrupted M19 has zero outcomes
+  and is outside the 46-observation cohort. Restored full 414 passes.
+- Seventeen of forty new controls (42.5%) have no dedicated mutant. Four have
+  no crossing: T01/T06/T19/T39. The other thirteen have 59 recorded crossings;
+  T32's seven include a readiness panic. Each has its own basis, not a collective
+  kill label. No crossing does not mean no bounded regression evidence.
+- Four repair positions have no bound-assertion crossing. Agent body has six
+  initial wide-vector crossings plus M38's narrow interior lookup; agent track
+  has M39's narrow transition crossing. Early stops leave later groups unreached.
+  All thirteen T25 crossings are exposed beside each repair's own selection.
+  Uncrossed assertions are not unexecuted assertions. No span/count comparison
+  establishes evidential weight or discharges M8-RECT-NARROW.
+- Performance report 27f402e3 binds parent and child T39 release: six vectors,
+  16 warmups and 256 samples each, across all three sync regimes and 1/15 panes.
+  The interval is C sync only, not the new consumer or renderer. Child T40 has
+  twelve retained vectors, 16 warmups and 64 samples each, at 120x48/sidebar40,
+  1/15 attached panes, 1/4/16 rows and gap0/3. Public render is timed inside the
+  draw closure; backend/diff/assertion/output are outside. No live PTY, threshold,
+  causal parent resolver delta, representative workload or scaling law is claimed.
+- Ordinary parent/child render observations remain separate from isolated raw
+  supplements. Each supplement has six vectors of forty samples from the existing
+  test-only profile helper; its fixture invokes production rendering. Prior
+  diagnostic writes 0..5 are counts, not measured effects. Complete copy/runner
+  reconstruction does not establish dynamic equivalence. Supplements are only
+  within-cardinality observations, never ratio computation/check/corroboration.
+  Successful suite stdout was discarded; PASS alone does not supply a dataset.
+- Source reconstruction and P7 bind all selected responsibilities to original
+  source bytes and ancestry, not hunk trailers. New tokens.rs derives from the
+  pre-relicense creator/resolver; post-relicense packing/glyph/background/Git
+  adaptations enter existing noticed/headered paths. NOTICE and license texts
+  stay raw. Labels, notice consistency and reconstruction are separate from
+  semantic correctness or proof of provenance by themselves.
+- Final documentation changes README/CHANGELOG, this append and the commented
+  sidebar sample inside DEFAULT_CONFIG. The original matrix does not execute
+  these final documentation bytes. Complete source/control/site re-binding and
+  exact-SHA full checks remain required; no changed-test-byte bridge is implied.
+
+Standing items for whole-M8 Gate-2, unresolved and unwaived:
+
+- C: four corrected parent fixtures lack original before-production chronology.
+- C: two final-mutant-byte bridges are audits, not executions on final mutant bytes.
+- D2: T07/T24/T26 lack final-fixture-before-production chronology, separately.
+- M8-RECT-NARROW: shared render/hit rectangle narrow-width class remains unswept.
+  The six included repairs do not clear collapsed toggle, divider, workspace-list
+  or wrapper-mediated members; reviewer grep candidates are not a proved population.
+- All twenty origins, unions 98/34, D primaries, M8-33 a0678a38 and both M9-12
+  d4e0dd3d/d2c317ad secondaries, M8-37, M8-65, N1/N3 and operator deviation remain
+  open. 4cd1481a is palette preservation, 49e333ae C evidence, not origin discharge;
+  the 5cfe creator is not wholly exhausted. Styled/parts and E retirement stay out.
+- Whole-M8 Gate-2 and fresh independent Gate-3 precede integration. No merge,
+  push, install, tag, publish, release or cleanup is authorized by this entry.
+
+### M8-28D2 corrected-source observations (implemented, review pending)
+
+The preceding D2 matrix/performance rows describe the first, pre-correction
+cohort. They remain observations of those bytes, not executions of the corrected
+emitter. This append records the correction and the separately executed cohort;
+it does not close D2, any origin, a standing limit or an operator gate.
+
+- The unchanged desktop full-frame characterization outside the 414 selection
+  caught a production FrameData/style-byte regression. Owned parent/child frame
+  comparison located one space cell at (2,2): foreground and DIM differed while
+  background and all other cells/fields matched. The shared inter-token emitter
+  now uses an unspecified style for a plain space and retains the separator
+  style for non-space separators. It does not add DIM or reset existing row
+  style. Spaces, grouped agents and right-alignment recursion share this route;
+  other spacing emitters remain unchanged. No terminal appearance claim follows.
+- The correction changes one production block only, with no test, digest,
+  fixture, selector, mutant, timeout, isolation or adapter change. Complete
+  staged-tree comparison and source reversal bind that scope. The original
+  failed check, no-fail-fast 4285-pass/one-failure observation, first matrix and
+  first performance observations remain retained. The corrected full-scheduled
+  invocation passes 4286 with five skipped; this is not a named reconciliation
+  of the first fail-fast invocation's 475 unrun tests. The selected-cohort miss
+  is separate from the unswept M8-RECT-NARROW class.
+- Corrected lint passed before the new 46-variant matrix. Report 9c85397d binds
+  19044 qualified outcomes and 38088 raw rows with identical repetitions, not
+  46 outcomes. All intended sites match the second preflight; first-cohort
+  outcomes were already known, so these predictions were not blinded anew.
+- The corrected cohort has 205 crossings: 164 new-control and 41 preservation,
+  comprising 198 assertion macros and seven other stops. Per-record sources,
+  diagnostics, qualified identities and snapshot mappings supply the assignment.
+  Original M16's 21 readiness failures did not recur in its corrected invocation;
+  no cause, schedule equivalence or replacement of the original rows is claimed.
+  The absent new-control crossing is M16/T32, also accounting for the seventeen
+  no-dedicated controls' 59-to-58 crossing change. Four remain without crossing:
+  T01, T06, T19 and T39. No dedicated clipping mutant was added.
+- Corrected M41/P134 retains its unattributed JSON-line timeout with caller null;
+  P136 retains an initial-envelope expect with unknown loop iteration and prior
+  envelope count. The wrapper's separate outside-control refusal, manual source
+  disposition and restored 414-pass recovery are not extra variants. An older
+  focused probe locates only its own caller, not either matrix timeout.
+- Final restored selection passes all 414. Child report 4ff18c74 binds forty
+  controls, 374 preservation, the 4291 compiled catalog in both directions,
+  51 parent-unreached groups, six repair positions and five D1 premise probes.
+  Each repair is re-bound to corrected source and its own observations: four
+  have no crossing at bound spans; agent body has six wide-vector crossings
+  and M38's narrow lookup; agent scrollbar has M39's narrow transition crossing.
+  No passing body or source reconstruction is an unconditional execution trace.
+- Corrected source audit 434a6619 accounts for all 1729 payloads: 14 old Rust
+  reconstructions, one new module, four documentation reconstructions and 1710
+  raw files. Sixteen of seventeen declared Rust paths are touched, plus three
+  documentation paths: nineteen of twenty total, with config/model.rs raw.
+  The 676 old bodies remain 666 raw plus ten adapters; four reverse formatting
+  first. H01/H02 remain separate. Twenty parent units remain raw, T07/T24/T26
+  remain late-corrected, and two parent helpers remain raw.
+- Corrected performance report db901c50 retains the parent observations beside
+  new child release executions. T39 has six vectors of 256 samples with sixteen
+  warmups each; T40 has twelve vectors of 64 samples with sixteen warmups each.
+  Ordinary render and the owned-copy six-by-forty sample supplement are separate
+  observations. The supplement reconstructs every payload/mode after removing
+  its one diagnostic. Its prior-write counts 0..5 are not measured effects.
+  No scaling law, threshold, representative workload, causal source delta,
+  matched schedule or supplement ratio corroboration is claimed.
+- This ledger suffix alone follows the corrected matrix and performance runs.
+  Full source/P7 binding, fresh precommit checks, normal commit and exact-SHA
+  checks remain required. Documentation presence in an inventory is not prose
+  execution or semantic validation, and those runs did not execute this suffix.
+- Instrument provenance travels with the packet: the final-source/P7 binder
+  had three internal cycles with six actionable findings, retained dispositions
+  and no clean internal verdict. The separate commit driver and exact-SHA
+  command runner had seven findings in their first review; their corrections
+  pass eleven bounded mocked cases, not real Git/hook/Cargo executions. Their
+  subsequent review, the exact-SHA verifier and packet constructor have separate
+  records. Neither an internal source review nor a generated packet is Gate-2,
+  independent Gate-3 or operator approval.
+
+The three standing limits remain separate: C's four corrected-parent chronology
+failures; C's two final-mutant-byte audit bridges; and D2's T07/T24/T26 corrected-
+parent chronology. All twenty origins, unions and secondaries, M8-37, M8-65,
+N1/N3, the operator deviation and M8-RECT-NARROW remain unresolved and unwaived.
+Whole-M8 Gate-2 and fresh independent Gate-3 still precede integration. No merge,
+push, install, tag, publish, release or cleanup is authorized by this append.

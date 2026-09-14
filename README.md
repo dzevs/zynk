@@ -420,9 +420,12 @@ status_indicators = "dots"       # preserve existing marks, or use distinct "sym
 
 [ui.sidebar.agents]
 row_gap = 0                     # blank rows before each later agent entry
+rows = [["state_icon", "agent", "state_text"]]
+rows_by_agent = {}
 
 [ui.sidebar.spaces]
 row_gap = 0                     # blank rows except before indented workspace children
+rows = [["state_icon", "workspace"], ["branch", "git_status"]]
 
 [theme]
 auto_switch = false              # true: follow the host terminal's light/dark appearance
@@ -448,11 +451,62 @@ and one between groups. Setting the spaces gap to one retains inter-entry spacin
 but does not restore the old content-plus-trailing-gap admission rule at the bottom
 boundary. These are rule changes, not a claim that every individual layout changes.
 
-Only these two scalar gaps are supported here; configurable token rows and
-per-agent row overrides remain unavailable. Previously ignored gap keys are now
-typed configuration: negative, oversized or non-integer values are rejected as an
-invalid UI section. Startup uses default UI settings for that invalid section;
-reload preserves the previous UI while applying other valid sections.
+Expanded sidebar `rows` are arrays of arrays of plain string tokens, with at most
+16 rows and 16 tokens per row. Agent rows support `state_icon`, `state_text`,
+`workspace`, `tab`, `pane`, `agent`, `terminal_title`, and
+`terminal_title_stripped`. Space rows support `state_icon`, `state_text`,
+`workspace`, `branch`, and `git_status`. Custom tokens use `$` followed by 1..32
+ASCII letters, digits, underscores or hyphens; case is significant. Agent custom
+tokens read pane metadata, while space custom tokens read workspace metadata.
+`$terminal_title` is a custom key, not the title builtin. Styled token tables and
+token parts are unsupported.
+
+Override agent rows by canonical detected agent, independently of a renamed
+display label. For example, replace `rows_by_agent = {}` above with this table
+after the agents configuration; do not define both:
+
+```toml
+[ui.sidebar.agents.rows_by_agent]
+claude = [["state_icon", "agent", "state_text"], ["terminal_title_stripped"]]
+codex = [["agent", "pane"], ["$task"]]
+```
+
+Only the existing canonical agent labels are accepted; aliases, case changes,
+whitespace and unknown labels are invalid. A missing detected agent uses global
+rows even when its display label resembles a canonical name. Omitted layouts use
+the defaults above. Explicit empty layouts or overrides do not fall back. Missing
+values elide their occurrences; a row with no resolved occurrences disappears.
+An available empty string still counts as an occurrence. An entry with no resolved
+rows retains one selectable line. Empty OSC titles are separately filtered from
+captured title observations; the token resolver does not redefine that capture rule.
+
+Rows never wrap. Display-column truncation reserves icons, counters and separators,
+with later flexible tokens preferred when space is limited. A final agent
+`state_text` occurrence is right aligned. Separators are spaces after a state icon
+or before Git status, and middle dots otherwise. Pane text uses its effective title
+before its manual label; group headers and identity remain independent of row text.
+Indented workspace children retain their label and custom tokens while suppressing
+builtin branch and Git status details. Existing status glyphs, selection colors and
+active backgrounds extend across admitted content lines.
+
+Rendering, content-line clicks, scroll metrics and target follow share resolved
+heights and gaps. Oversized workspace entries clip to their body; agent entries
+clip to body height minus one for the group header. If a header and one content
+line cannot fit, neither is admitted. The same child-height bound applies mid-group.
+At one content column the sidebar keeps content and suppresses its scrollbar;
+the agent sort toggle clips to the panel. A full sidebar two columns wide puts
+its collapse toggle on the divider, leaving the content cell available.
+
+Title capture continues regardless of configuration. Configured title builtins in
+global or override rows request redraw in both desktop execution loops; a custom
+key with the same spelling does not. Periodic Git detail demand follows builtin
+space `branch` and `git_status` tokens; one-shot identity refresh remains independent.
+
+Rows, overrides and gaps reload together. Previously ignored keys are now typed:
+invalid row/token shapes, invalid override keys and negative, oversized or
+non-integer gaps invalidate the UI section. Startup uses default UI settings for
+that invalid section; reload preserves the previous UI while applying other valid
+sections. Collapsed and mobile rendering do not use these token layouts.
 
 An empty bracketed paste can also request a local clipboard image in a remote
 client, even when `keys.remote_image_paste` is empty. Local clients pass empty

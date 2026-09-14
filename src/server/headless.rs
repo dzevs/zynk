@@ -439,7 +439,11 @@ impl HeadlessServer {
                 crate::render_prof::event("render.request.signal");
             }
 
-            self.app.sync_terminal_titles();
+            if self.app.sync_terminal_titles_for_sidebar() {
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.terminal_title");
+            }
 
             // 2. Drain a bounded internal-event batch. API handlers perform an
             // exhaustive forwarding-aware drain before reading pane/runtime state.
@@ -4728,6 +4732,131 @@ mod tests {
             serde_json::from_str(&app.handle_api_request(request)).unwrap();
         assert_eq!(response["result"]["type"], "pane_info");
         response["result"]["pane"].clone()
+    }
+
+    #[tokio::test]
+    async fn m828d2_headless_title_projection_reaches_configured_virtual_rows() {
+        let source = "onboarding = false\n[ui.sidebar.agents]\nrows = [[\"agent\"], [\"terminal_title\"], [\"terminal_title_stripped\"]]\n";
+        assert_eq!(
+            source.parse::<toml::Value>().unwrap()["ui"]["sidebar"]["agents"]["rows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        let config: crate::config::Config = toml::from_str(source).unwrap();
+        assert!(!config.should_show_onboarding());
+        let mut fixture = m828a_headless_fixture();
+        let server = fixture.server.as_mut().unwrap();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        server.app = crate::app::App::new(&config, true, None, rx, api::EventHub::default());
+        let workspace = crate::workspace::Workspace::test_new("virtual-titles");
+        let pane = workspace.tabs[0].root_pane;
+        let terminal = workspace.terminal_id(pane).unwrap().clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .detected_agent = Some(crate::detect::Agent::Claude);
+        server.app.state.terminals.get_mut(&terminal).unwrap().state =
+            crate::detect::AgentState::Working;
+        server.app.terminal_runtimes.insert(
+            terminal.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        assert_eq!(
+            server.app.state.terminals[&terminal].effective_known_agent(),
+            Some(crate::detect::Agent::Claude)
+        );
+        for (raw, emits) in [
+            ("\u{25d0} VIRTUAL-TITLE", true),
+            ("\u{25d1} VIRTUAL-TITLE", false),
+        ] {
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal)
+                .unwrap()
+                .test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
+            assert_eq!(
+                server
+                    .app
+                    .terminal_runtimes
+                    .get(&terminal)
+                    .unwrap()
+                    .agent_osc_title(),
+                raw
+            );
+            let sequence = server.app.event_hub.current_sequence();
+            let (respond_to, receiver) = std::sync::mpsc::channel();
+            server.handle_api_request_with_shutdown_check_inner(api::ApiRequestMessage {
+                request: serde_json::from_value(serde_json::json!({"id": "d2-virtual", "method": "pane.list", "params": {}})).unwrap(),
+                respond_to, caller: api::ApiCaller::default(),
+            }, true);
+            let response: serde_json::Value =
+                serde_json::from_str(&receiver.recv_timeout(Duration::from_secs(1)).unwrap())
+                    .unwrap();
+            assert!(response.get("error").is_none(), "{response}");
+            assert_eq!(response["result"]["panes"].as_array().unwrap().len(), 1);
+            let info = &response["result"]["panes"][0];
+            assert_eq!(info["terminal_title"], raw);
+            assert_eq!(info["terminal_title_stripped"], "VIRTUAL-TITLE");
+            assert_eq!(info["revision"], 1);
+            let events: Vec<_> = server
+                .app
+                .event_hub
+                .events_after(sequence)
+                .into_iter()
+                .map(|(_, event)| serde_json::to_value(event).unwrap())
+                .collect();
+            assert_eq!(
+                events,
+                if emits {
+                    vec![
+                        serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": info}}),
+                    ]
+                } else {
+                    Vec::new()
+                }
+            );
+            let (buffer, _) = crate::server::render_stream::render_virtual_with_runtime_registry(
+                &mut server.app.state,
+                &server.app.terminal_runtimes,
+                Rect::new(0, 0, 106, 34),
+                true,
+                crate::kitty_graphics::HostCellSize::default(),
+            );
+            let sidebar = server.app.state.view.sidebar_rect;
+            assert!(sidebar.width > 0);
+            let rows: Vec<String> = (sidebar.y..sidebar.bottom())
+                .map(|y| {
+                    (sidebar.x..sidebar.right())
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect()
+                })
+                .collect();
+            assert!(
+                rows.iter().any(|line| line.contains("claude")),
+                "known agent is rendered"
+            );
+            assert!(
+                rows.iter().any(|line| line.contains(raw)),
+                "raw configured row: {rows:?}"
+            );
+            assert!(
+                rows.iter()
+                    .filter(|line| line.contains("VIRTUAL-TITLE"))
+                    .count()
+                    >= 2,
+                "raw and stripped rows are separate: {rows:?}"
+            );
+        }
     }
 
     #[tokio::test]

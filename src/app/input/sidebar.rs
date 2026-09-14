@@ -445,7 +445,12 @@ impl AppState {
         crate::ui::agent_visible_rows(self, detail_area)
             .into_iter()
             .find_map(|visible| match visible {
-                crate::ui::AgentVisibleRow::Child { entry_idx, y, .. } if y == row => entries
+                crate::ui::AgentVisibleRow::Child {
+                    entry_idx,
+                    y,
+                    height,
+                    ..
+                } if row >= y && row < y.saturating_add(height) => entries
                     .get(entry_idx)
                     .map(|e| (e.ws_idx, e.tab_idx, e.pane_id)),
                 _ => None,
@@ -467,6 +472,934 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    #[test]
+    fn m828d2_every_agent_content_line_is_a_hit_but_headers_and_gaps_are_not() {
+        let mut app = app_for_mouse_test();
+        let source = "onboarding = false\n[ui.sidebar.agents]\nrow_gap = 2\nrows = [[\"agent\"], [\"$one\"], [\"$two\"]]\n";
+        assert!(source.parse::<toml::Value>().is_ok());
+        let config: crate::config::Config = toml::from_str(source).unwrap();
+        app.apply_live_config(&config, &[], &[], false);
+        let mut alpha = Workspace::test_new("alpha");
+        alpha.test_split(ratatui::layout::Direction::Horizontal);
+        alpha.test_add_tab(Some("logs"));
+        app.state.workspaces = vec![alpha, Workspace::test_new("beta")];
+        app.state.ensure_test_terminals();
+        let ids: Vec<_> = app
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|ws| {
+                ws.tabs.iter().flat_map(|tab| {
+                    tab.layout
+                        .pane_ids()
+                        .into_iter()
+                        .map(|pane| tab.panes[&pane].attached_terminal_id.clone())
+                })
+            })
+            .collect();
+        assert_eq!(ids.len(), 4);
+        for (index, (id, agent)) in ids
+            .iter()
+            .zip([Agent::Claude, Agent::Pi, Agent::Codex, Agent::Claude])
+            .enumerate()
+        {
+            let terminal = app.state.terminals.get_mut(id).unwrap();
+            terminal.detected_agent = Some(agent);
+            terminal.state = AgentState::Working;
+            let mut patch = std::collections::HashMap::new();
+            if index != 1 {
+                patch.insert("one".into(), Some(format!("ONE-{index}")));
+            }
+            if index == 0 || index == 3 {
+                patch.insert("two".into(), Some(format!("TWO-{index}")));
+            }
+            if !patch.is_empty() {
+                assert!(terminal
+                    .metadata_tokens
+                    .patch(patch, None, std::time::Instant::now()));
+            }
+            assert_eq!(terminal.effective_known_agent(), Some(agent));
+            assert_eq!(terminal.metadata_tokens.values().len(), [2, 0, 1, 2][index]);
+            if index != 1 {
+                assert_eq!(
+                    terminal.metadata_tokens.values()["one"],
+                    format!("ONE-{index}")
+                );
+            }
+            if index == 0 || index == 3 {
+                assert_eq!(
+                    terminal.metadata_tokens.values()["two"],
+                    format!("TWO-{index}")
+                );
+            }
+        }
+        app.state.agent_panel_sort = AgentPanelSort::Spaces;
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 70));
+        let area = app.state.agent_panel_rect();
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        let targets: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.ws_idx, entry.tab_idx, entry.pane_id))
+            .collect();
+        assert_eq!(
+            targets
+                .iter()
+                .map(|(ws, tab, _)| (*ws, *tab))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (0, 0), (0, 1), (1, 0)]
+        );
+        let rows = crate::ui::agent_visible_rows(&app.state, area);
+        assert!(
+            matches!(rows.first(), Some(crate::ui::AgentVisibleRow::GroupHeader {
+            entry_idx: 0, y,
+        }) if *y == area.y + 3)
+        );
+        let starts = [area.y + 4, area.y + 9, area.y + 13, area.y + 18];
+        let heights = [3, 1, 2, 3];
+        let children: Vec<_> = crate::ui::agent_visible_rows(&app.state, area)
+            .iter()
+            .filter_map(|row| match row {
+                crate::ui::AgentVisibleRow::Child { entry_idx, y, .. } => Some((*entry_idx, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            children,
+            starts.iter().copied().enumerate().collect::<Vec<_>>(),
+            "heterogeneous content precedes hit tests"
+        );
+        let mut screen =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(106, 70)).unwrap();
+        screen
+            .draw(|frame| crate::ui::render(&app.state, frame))
+            .unwrap();
+        let row_text = |y| {
+            (area.x..area.right())
+                .map(|x| screen.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        for (index, name) in ["claude", "pi", "codex", "claude"].iter().enumerate() {
+            assert!(row_text(starts[index]).contains(name));
+            if heights[index] >= 2 {
+                assert!(row_text(starts[index] + 1).contains(&format!("ONE-{index}")));
+            }
+            if heights[index] == 3 {
+                assert!(row_text(starts[index] + 2).contains(&format!("TWO-{index}")));
+            }
+        }
+        for (index, &(ws, tab, pane)) in targets.iter().enumerate() {
+            for y in starts[index]..starts[index] + heights[index] {
+                let other = targets[(index + 1) % targets.len()];
+                app.state.focus_pane_in_workspace(ws, pane);
+                assert!(app.state.focus_pane_in_workspace(other.0, other.2));
+                app.state.agent_panel_scroll = 0;
+                assert_eq!(app.state.active, Some(other.0));
+                assert_ne!(app.state.workspaces[other.0].focused_pane_id(), Some(pane));
+                assert_eq!(app.state.agent_detail_target_at(y), Some((ws, tab, pane)));
+                app.handle_mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    area.x + 2,
+                    y,
+                ));
+                app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), area.x + 2, y));
+                assert_eq!(app.state.active, Some(ws));
+                assert_eq!(app.state.workspaces[ws].active_tab, tab);
+                assert_eq!(app.state.workspaces[ws].tabs[tab].layout.focused(), pane);
+            }
+        }
+        for y in starts[0] - 1..starts[3] + heights[3] {
+            if starts
+                .iter()
+                .zip(heights)
+                .any(|(&start, height)| (start..start + height).contains(&y))
+            {
+                continue;
+            }
+            app.state
+                .focus_pane_in_workspace(targets[0].0, targets[0].2);
+            assert!(app
+                .state
+                .focus_pane_in_workspace(targets[1].0, targets[1].2));
+            assert!(app
+                .state
+                .focus_pane_in_workspace(targets[0].0, targets[0].2));
+            app.state.agent_panel_scroll = 0;
+            assert_eq!(
+                app.state.agent_detail_target_at(starts[0]),
+                Some(targets[0])
+            );
+            assert_eq!(
+                app.state.agent_detail_target_at(y),
+                None,
+                "populated header/gap {y}"
+            );
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                area.x + 2,
+                y,
+            ));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), area.x + 2, y));
+            assert_eq!(app.state.active, Some(targets[0].0));
+            assert_eq!(app.state.workspaces[targets[0].0].active_tab, targets[0].1);
+            assert_eq!(
+                app.state.workspaces[targets[0].0].focused_pane_id(),
+                Some(targets[0].2)
+            );
+        }
+    }
+
+    #[test]
+    fn m828d2_variable_height_wheel_and_drag_use_shared_metrics() {
+        let fixture = || {
+            let mut app = app_for_mouse_test();
+            let source = "onboarding = false\n[ui.sidebar.spaces]\nrow_gap = 1\nrows = [[\"workspace\"], [\"$more\"]]\n[ui.sidebar.agents]\nrow_gap = 1\nrows = [[\"agent\"], [\"$more\"]]\n";
+            assert!(source.parse::<toml::Value>().is_ok());
+            let config: crate::config::Config = toml::from_str(source).unwrap();
+            app.apply_live_config(&config, &[], &[], false);
+            app.state.workspaces = (0..8)
+                .map(|i| Workspace::test_new(&format!("space-{i}")))
+                .collect();
+            for (index, workspace) in app.state.workspaces.iter_mut().enumerate() {
+                workspace.cached_git_branch = None;
+                if index % 2 == 0 {
+                    assert!(workspace.metadata_tokens.patch(
+                        std::collections::HashMap::from([(
+                            "more".into(),
+                            Some(format!("SPACE-{index}"))
+                        )]),
+                        None,
+                        std::time::Instant::now()
+                    ));
+                    assert_eq!(
+                        workspace.metadata_tokens.values()["more"],
+                        format!("SPACE-{index}")
+                    );
+                } else {
+                    assert!(workspace.metadata_tokens.values().is_empty());
+                }
+            }
+            app.state.ensure_test_terminals();
+            for (index, workspace) in app.state.workspaces.iter().enumerate() {
+                let tab = &workspace.tabs[0];
+                let id = &tab.panes[&tab.root_pane].attached_terminal_id;
+                let terminal = app.state.terminals.get_mut(id).unwrap();
+                terminal.detected_agent = Some(Agent::Claude);
+                terminal.state = AgentState::Working;
+                if index % 2 == 0 {
+                    assert!(terminal.metadata_tokens.patch(
+                        std::collections::HashMap::from([(
+                            "more".into(),
+                            Some(format!("AGENT-{index}"))
+                        )]),
+                        None,
+                        std::time::Instant::now()
+                    ));
+                    assert_eq!(
+                        terminal.metadata_tokens.values()["more"],
+                        format!("AGENT-{index}")
+                    );
+                } else {
+                    assert!(terminal.metadata_tokens.values().is_empty());
+                }
+                assert_eq!(terminal.effective_known_agent(), Some(Agent::Claude));
+            }
+            app.state.active = Some(0);
+            app.state.mode = Mode::Terminal;
+            app.state.agent_panel_sort = AgentPanelSort::Spaces;
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+            assert_eq!(crate::ui::agent_panel_entries(&app.state).len(), 8);
+            app
+        };
+        let mut app = fixture();
+        let spaces = app.state.workspace_list_rect();
+        let agents = app.state.agent_panel_rect();
+        assert_eq!(
+            (spaces.y, spaces.height, agents.y, agents.height),
+            (0, 12, 12, 12)
+        );
+        assert_eq!(
+            app.state
+                .view
+                .workspace_card_areas
+                .iter()
+                .map(|card| (card.ws_idx, card.rect))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, Rect::new(0, 2, 24, 2)),
+                (1, Rect::new(0, 5, 24, 1)),
+                (2, Rect::new(0, 7, 24, 2)),
+                (3, Rect::new(0, 10, 24, 1))
+            ]
+        );
+        let children = |state: &crate::app::state::AppState, area| {
+            crate::ui::agent_visible_rows(state, area)
+                .iter()
+                .filter_map(|row| match row {
+                    crate::ui::AgentVisibleRow::Child { entry_idx, y, .. } => {
+                        Some((*entry_idx, *y))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(children(&app.state, agents), vec![(0, 16), (1, 20)]);
+        assert_eq!(
+            crate::ui::workspace_list_scroll_metrics(&app.state, spaces).max_offset_from_bottom,
+            4
+        );
+        assert_eq!(
+            crate::ui::agent_panel_scroll_metrics(&app.state, agents).max_offset_from_bottom,
+            5
+        );
+        for is_agent in [false, true] {
+            let area = if is_agent { agents } else { spaces };
+            app.handle_mouse(mouse(MouseEventKind::ScrollDown, area.x + 1, area.y + 4));
+            assert_eq!(
+                if is_agent {
+                    app.state.agent_panel_scroll
+                } else {
+                    app.state.workspace_scroll
+                },
+                1
+            );
+            app.handle_mouse(mouse(MouseEventKind::ScrollUp, area.x + 1, area.y + 4));
+            assert_eq!(
+                if is_agent {
+                    app.state.agent_panel_scroll
+                } else {
+                    app.state.workspace_scroll
+                },
+                0
+            );
+            let track = if is_agent {
+                crate::ui::agent_panel_scrollbar_rect(&app.state, area)
+            } else {
+                crate::ui::workspace_list_scrollbar_rect(&app.state, area)
+            }
+            .unwrap();
+            let target = if is_agent {
+                app.state.agent_panel_scrollbar_target_at(track.x, track.y)
+            } else {
+                app.state
+                    .workspace_list_scrollbar_target_at(track.x, track.y)
+            };
+            assert!(matches!(
+                target,
+                Some(super::ScrollbarClickTarget::Thumb { grab_row_offset: 0 })
+            ));
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                track.x,
+                track.y,
+            ));
+            if is_agent {
+                assert!(matches!(
+                    app.state.drag.as_ref().map(|drag| &drag.target),
+                    Some(DragTarget::AgentPanelScrollbar { .. })
+                ));
+            } else {
+                assert!(matches!(
+                    app.state.drag.as_ref().map(|drag| &drag.target),
+                    Some(DragTarget::WorkspaceListScrollbar { .. })
+                ));
+            }
+            app.handle_mouse(mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                track.x,
+                track.bottom() - 1,
+            ));
+            app.handle_mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                track.x,
+                track.bottom() - 1,
+            ));
+            assert_eq!(
+                if is_agent {
+                    app.state.agent_panel_scroll
+                } else {
+                    app.state.workspace_scroll
+                },
+                if is_agent { 5 } else { 4 }
+            );
+            if is_agent {
+                let last = children(&app.state, area)
+                    .into_iter()
+                    .find(|(index, _)| *index == 7)
+                    .unwrap();
+                let entry = &crate::ui::agent_panel_entries(&app.state)[7];
+                assert_eq!(
+                    app.state.agent_detail_target_at(last.1),
+                    Some((entry.ws_idx, entry.tab_idx, entry.pane_id))
+                );
+                assert_eq!(app.state.agent_detail_target_at(area.y + 2), None);
+            } else {
+                crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+                let last = app.state.view.workspace_card_areas.last().unwrap();
+                assert_eq!((last.ws_idx, last.rect.y, last.rect.height), (7, 10, 1));
+                assert_eq!(app.state.workspace_at_row(last.rect.y), Some(7));
+                assert_eq!(app.state.workspace_at_row(area.y + 1), None);
+            }
+        }
+        app.state.workspace_scroll = usize::MAX;
+        app.state.agent_panel_scroll = usize::MAX;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        assert_eq!(
+            (app.state.workspace_scroll, app.state.agent_panel_scroll),
+            (4, 5)
+        );
+        assert_eq!(
+            app.state.view.workspace_card_areas.last().unwrap().ws_idx,
+            7
+        );
+        assert!(children(&app.state, agents)
+            .iter()
+            .any(|(index, _)| *index == 7));
+
+        for width in [0u16, 1, 2] {
+            for sort in [AgentPanelSort::Spaces, AgentPanelSort::Priority] {
+                let mut app = fixture();
+                assert!(!app.state.view.workspace_card_areas.is_empty());
+                assert!(!children(&app.state, app.state.agent_panel_rect()).is_empty());
+                app.state.sidebar_min_width = 1;
+                app.state.sidebar_width = width + 1;
+                app.state.agent_panel_sort = sort;
+                crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+                let full = app.state.view.sidebar_rect;
+                assert_eq!(full.width, width + 1);
+                let spaces = app.state.workspace_list_rect();
+                let agents = app.state.agent_panel_rect();
+                assert_eq!((spaces.width, agents.width), (width, width));
+                let space_track = crate::ui::workspace_list_scrollbar_rect(&app.state, spaces);
+                let agent_track = crate::ui::agent_panel_scrollbar_rect(&app.state, agents);
+                let toggle = crate::ui::agent_panel_toggle_rect(agents, sort);
+                if width == 0 {
+                    assert!(space_track.is_none() && agent_track.is_none());
+                    assert!(app.state.view.workspace_card_areas.is_empty());
+                    assert!(children(&app.state, agents).is_empty());
+                    assert_eq!(app.state.workspace_at_row(2), None);
+                    assert_eq!(app.state.agent_detail_target_at(16), None);
+                    assert_eq!(toggle, Rect::default());
+                    assert!(!app.state.on_agent_panel_sort_toggle(0, 13));
+                } else {
+                    assert_eq!(
+                        crate::ui::workspace_list_scroll_metrics(&app.state, spaces)
+                            .max_offset_from_bottom,
+                        4
+                    );
+                    assert_eq!(
+                        crate::ui::agent_panel_scroll_metrics(&app.state, agents)
+                            .max_offset_from_bottom,
+                        5
+                    );
+                    assert_eq!(space_track.is_some(), width == 2);
+                    assert_eq!(agent_track.is_some(), width == 2);
+                    assert!(app
+                        .state
+                        .view
+                        .workspace_card_areas
+                        .iter()
+                        .all(|card| card.rect.width == 1));
+                    assert_eq!(app.state.workspace_at_row(2), Some(0));
+                    assert_eq!(children(&app.state, agents), vec![(0, 16), (1, 20)]);
+                    let entries = crate::ui::agent_panel_entries(&app.state);
+                    assert_eq!(
+                        app.state.agent_detail_target_at(17),
+                        Some((entries[0].ws_idx, entries[0].tab_idx, entries[0].pane_id))
+                    );
+                    assert!(app
+                        .state
+                        .focus_pane_in_workspace(entries[1].ws_idx, entries[1].pane_id));
+                    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 17));
+                    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 0, 17));
+                    assert_eq!(app.state.active, Some(entries[0].ws_idx));
+                    assert_eq!(
+                        app.state.workspaces[entries[0].ws_idx].focused_pane_id(),
+                        Some(entries[0].pane_id)
+                    );
+                    if let Some(track) = space_track {
+                        assert_eq!((track.x, track.width), (1, 1));
+                    }
+                    if let Some(track) = agent_track {
+                        assert_eq!((track.x, track.width), (1, 1));
+                    }
+                    assert_eq!(toggle, Rect::new(agents.x, agents.y + 1, width, 1));
+                    assert!(app.state.on_agent_panel_sort_toggle(toggle.x, toggle.y));
+                    assert!(!app
+                        .state
+                        .on_agent_panel_sort_toggle(toggle.right(), toggle.y));
+                    app.state.agent_panel_scroll = 1;
+                    app.handle_mouse(mouse(
+                        MouseEventKind::Down(MouseButton::Left),
+                        toggle.x,
+                        toggle.y,
+                    ));
+                    app.handle_mouse(mouse(
+                        MouseEventKind::Up(MouseButton::Left),
+                        toggle.x,
+                        toggle.y,
+                    ));
+                    assert_ne!(app.state.agent_panel_sort, sort);
+                    assert_eq!(app.state.agent_panel_scroll, 0);
+                    app.state.agent_panel_sort = sort;
+                    for col in [toggle.right(), full.right()] {
+                        app.handle_mouse(mouse(
+                            MouseEventKind::Down(MouseButton::Left),
+                            col,
+                            toggle.y,
+                        ));
+                        app.handle_mouse(mouse(
+                            MouseEventKind::Up(MouseButton::Left),
+                            col,
+                            toggle.y,
+                        ));
+                        assert_eq!(app.state.agent_panel_sort, sort, "outside toggle dispatch");
+                        app.state.drag = None;
+                    }
+                    assert!(app.state.focus_agent_entry(7));
+                    assert!(children(&app.state, agents)
+                        .iter()
+                        .any(|(index, _)| *index == 7));
+                    app.state.agent_panel_scroll = 0;
+                }
+                app.state.view.pane_infos.clear();
+                app.state.view.split_borders.clear();
+                app.state.view.tab_bar_rect = Rect::default();
+                app.state.view.terminal_area = Rect::default();
+                let mut screen =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(106, 24)).unwrap();
+                screen
+                    .draw(|frame| {
+                        for cell in &mut frame.buffer_mut().content {
+                            cell.set_symbol("#");
+                        }
+                        crate::ui::render(&app.state, frame);
+                    })
+                    .unwrap();
+                for y in 0..24 {
+                    for x in full.right()..106 {
+                        assert_eq!(
+                            screen.backend().buffer()[(x, y)].symbol(),
+                            "#",
+                            "outside full sidebar {width}/{sort:?}/{x}/{y}"
+                        );
+                    }
+                }
+                if width > 0 {
+                    assert_eq!(
+                        screen.backend().buffer()[(0, toggle.y)].symbol(),
+                        if sort == AgentPanelSort::Spaces {
+                            "g"
+                        } else {
+                            "p"
+                        }
+                    );
+                    assert_eq!(screen.backend().buffer()[(0, 16)].symbol(), "└");
+                    assert_ne!(screen.backend().buffer()[(0, 2)].symbol(), "#");
+                }
+            }
+        }
+
+        let source = "onboarding = false\n[ui.sidebar.agents]\nrow_gap = 0\nrows = [[\"agent\"], [\"$more\"]]\n";
+        assert!(source.parse::<toml::Value>().is_ok());
+        let config: crate::config::Config = toml::from_str(source).unwrap();
+        let mut app = app_for_mouse_test();
+        app.apply_live_config(&config, &[], &[], false);
+        let mut workspace = Workspace::test_new("pair");
+        workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = AgentState::Working;
+        }
+        app.state.active = Some(0);
+        app.state.sidebar_min_width = 1;
+        app.state.sidebar_width = 3;
+        let panes = app.state.workspaces[0].tabs[0].layout.pane_ids();
+        assert_eq!(panes.len(), 2);
+        let second_id = app.state.workspaces[0].tabs[0].panes[&panes[1]]
+            .attached_terminal_id
+            .clone();
+        for (step, more) in [false, true, false].into_iter().enumerate() {
+            let terminal = app.state.terminals.get_mut(&second_id).unwrap();
+            if more {
+                assert!(terminal.metadata_tokens.patch(
+                    std::collections::HashMap::from([("more".into(), Some("SECOND-LINE".into()))]),
+                    None,
+                    std::time::Instant::now()
+                ));
+                assert_eq!(terminal.metadata_tokens.values()["more"], "SECOND-LINE");
+            } else if step == 2 {
+                assert_eq!(terminal.metadata_tokens.values()["more"], "SECOND-LINE");
+                assert!(terminal.metadata_tokens.patch(
+                    std::collections::HashMap::from([("more".into(), None)]),
+                    None,
+                    std::time::Instant::now()
+                ));
+                assert!(terminal.metadata_tokens.values().is_empty());
+                assert_eq!(app.state.agent_panel_scroll, 1);
+            } else {
+                assert!(terminal.metadata_tokens.values().is_empty());
+            }
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 12));
+            let area = app.state.agent_panel_rect();
+            assert_eq!(area, Rect::new(0, 6, 2, 6));
+            let track = crate::ui::agent_panel_scrollbar_rect(&app.state, area);
+            assert_eq!(track.is_some(), more);
+            assert_eq!(
+                area.width - u16::from(track.is_some()),
+                if more { 1 } else { 2 }
+            );
+            assert_eq!(
+                crate::ui::agent_panel_scroll_metrics(&app.state, area).max_offset_from_bottom,
+                usize::from(more)
+            );
+            assert_eq!(app.state.agent_panel_scroll, 0);
+            assert_eq!(
+                children(&app.state, area),
+                if more {
+                    vec![(0, 10)]
+                } else {
+                    vec![(0, 10), (1, 11)]
+                }
+            );
+            assert_eq!(app.state.agent_detail_target_at(10), Some((0, 0, panes[0])));
+            if more {
+                assert!(app.state.focus_agent_entry(1));
+                assert_eq!(app.state.agent_panel_scroll, 1);
+                assert_eq!(children(&app.state, area), vec![(1, 10)]);
+                assert_eq!(app.state.agent_detail_target_at(10), Some((0, 0, panes[1])));
+                assert_eq!(app.state.agent_detail_target_at(11), Some((0, 0, panes[1])));
+            } else {
+                assert_eq!(app.state.agent_detail_target_at(11), Some((0, 0, panes[1])));
+            }
+        }
+
+        app.state.sidebar_width = 2;
+        assert!(app.state.focus_pane_in_workspace(0, panes[0]));
+        assert!(app.state.focus_pane_in_workspace(0, panes[1]));
+        app.state.agent_panel_scroll = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 10));
+        let full = app.state.view.sidebar_rect;
+        let area = app.state.agent_panel_rect();
+        assert_eq!(full, Rect::new(0, 0, 2, 10));
+        assert_eq!(area, Rect::new(0, 5, 1, 5));
+        assert_eq!(children(&app.state, area), vec![(0, 9)]);
+        let collapse = crate::ui::expanded_sidebar_toggle_rect(full);
+        assert_eq!(collapse, Rect::new(1, 9, 1, 1));
+        assert!(!app.state.on_sidebar_toggle(0, 9));
+        assert!(app.state.on_sidebar_toggle(1, 9));
+        assert!(!app.state.on_sidebar_divider(1, 9));
+        let mut screen =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(106, 10)).unwrap();
+        screen
+            .draw(|frame| crate::ui::render(&app.state, frame))
+            .unwrap();
+        assert_eq!(screen.backend().buffer()[(0, 9)].symbol(), "├");
+        assert_eq!(screen.backend().buffer()[(1, 9)].symbol(), "«");
+        assert_eq!(app.state.agent_detail_target_at(9), Some((0, 0, panes[0])));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 9));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 0, 9));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(panes[0]));
+        assert!(!app.state.sidebar_collapsed);
+        assert_eq!(app.state.sidebar_width, 2);
+        assert!(app.state.focus_pane_in_workspace(0, panes[1]));
+        app.state.agent_panel_scroll = 0;
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 1, 9));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 1, 9));
+        assert!(app.state.sidebar_collapsed);
+        assert_eq!(app.state.sidebar_width, 2);
+        assert!(app.state.drag.is_none());
+        for width in [0, 1, 3, 26] {
+            assert_eq!(
+                crate::ui::expanded_sidebar_toggle_rect(Rect::new(0, 0, width, 10)),
+                if width <= 1 {
+                    Rect::default()
+                } else {
+                    Rect::new(width - 2, 9, 1, 1)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn m828d2_gap_one_drop_premises_and_variable_rows_are_distinct() {
+        {
+            let mut app = app_for_mouse_test();
+            app.state.sidebar_spaces.row_gap = 1;
+            app.state.workspaces = vec![
+                Workspace::test_new("a"),
+                Workspace::test_new("b"),
+                Workspace::test_new("c"),
+            ];
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+            let cards = &app.state.view.workspace_card_areas;
+            assert_eq!(
+                cards
+                    .iter()
+                    .map(|card| (card.ws_idx, card.rect))
+                    .collect::<Vec<_>>(),
+                vec![(0, Rect::new(0, 2, 24, 2)), (1, Rect::new(0, 5, 24, 2))]
+            );
+            assert_eq!(app.state.sidebar_footer_rect(), Rect::new(0, 9, 25, 1));
+            let slot = crate::ui::workspace_drop_indicator_row(
+                cards,
+                app.state.workspace_list_rect(),
+                cards.len(),
+            )
+            .unwrap();
+            assert_eq!(slot, 7);
+            assert_eq!(slot, cards.last().unwrap().rect.bottom());
+            assert!(slot < app.state.sidebar_footer_rect().y - 1);
+        }
+        {
+            let mut app = app_for_mouse_test();
+            app.state.sidebar_spaces.row_gap = 1;
+            let repos = [temp_git_repo("main"), temp_git_repo("main")];
+            app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+            for (workspace, repo) in app.state.workspaces.iter_mut().zip(&repos) {
+                workspace.identity_cwd = repo.clone();
+                workspace.refresh_git_ahead_behind();
+            }
+            app.state.ensure_test_terminals();
+            for (workspace, repo) in app.state.workspaces.iter().zip(&repos) {
+                let tab = &workspace.tabs[0];
+                let id = &tab.panes[&tab.root_pane].attached_terminal_id;
+                app.state.terminals.get_mut(id).unwrap().cwd = repo.clone();
+            }
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+            assert_eq!(
+                app.state
+                    .view
+                    .workspace_card_areas
+                    .iter()
+                    .map(|card| (card.ws_idx, card.rect))
+                    .collect::<Vec<_>>(),
+                vec![(0, Rect::new(0, 2, 25, 2)), (1, Rect::new(0, 5, 25, 2))]
+            );
+            for workspace in &app.state.workspaces {
+                assert_eq!(workspace.branch().as_deref(), Some("main"));
+            }
+            for row in [0, 1, 2] {
+                assert_eq!(app.state.workspace_drop_index_at_row(row), Some(0));
+            }
+            assert_eq!(app.state.workspace_drop_index_at_row(3), Some(1));
+            for repo in repos {
+                fs::remove_dir_all(repo).unwrap();
+            }
+        }
+        {
+            let mut app = app_for_mouse_test();
+            app.state.sidebar_spaces.row_gap = 1;
+            app.state.workspaces = vec![
+                Workspace::test_new("a"),
+                Workspace::test_new("b"),
+                Workspace::test_new("c"),
+            ];
+            let active_id = app.state.workspaces[1].id.clone();
+            let selected_id = app.state.workspaces[2].id.clone();
+            app.state.active = Some(1);
+            app.state.selected = 2;
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+            assert_eq!(
+                app.state
+                    .view
+                    .workspace_card_areas
+                    .iter()
+                    .map(|card| (card.ws_idx, card.rect.y, card.rect.height))
+                    .collect::<Vec<_>>(),
+                vec![(0, 2, 2), (1, 5, 2)]
+            );
+            assert_eq!(
+                crate::ui::workspace_drop_indicator_row(
+                    &app.state.view.workspace_card_areas,
+                    app.state.workspace_list_rect(),
+                    0
+                ),
+                Some(1)
+            );
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 5));
+            app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 2, 1));
+            assert!(matches!(
+                app.state.drag.as_ref().map(|drag| &drag.target),
+                Some(DragTarget::WorkspaceReorder {
+                    source_ws_idx: 1,
+                    insert_idx: Some(0),
+                    ..
+                })
+            ));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, 1));
+            assert_eq!(
+                app.state
+                    .workspaces
+                    .iter()
+                    .map(|ws| ws.display_name())
+                    .collect::<Vec<_>>(),
+                vec!["b", "a", "c"]
+            );
+            assert_eq!((app.state.active, app.state.selected), (Some(0), 2));
+            assert_eq!(app.state.workspaces[0].id, active_id);
+            assert_eq!(app.state.workspaces[2].id, selected_id);
+            assert_eq!(
+                capture_snapshot(&app.state)
+                    .workspaces
+                    .iter()
+                    .map(|ws| ws.custom_name.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["b", "a", "c"]
+            );
+        }
+        {
+            let mut app = app_for_mouse_test();
+            let source = "[ui.sidebar.spaces]\nrow_gap = 1\nrows = [[\"workspace\"], [\"$one\"], [\"$two\"]]\n";
+            assert!(source.parse::<toml::Value>().is_ok());
+            let config: crate::config::Config = toml::from_str(source).unwrap();
+            app.apply_live_config(&config, &[], &[], false);
+            app.state.workspaces = vec![
+                Workspace::test_new("a"),
+                Workspace::test_new("b"),
+                Workspace::test_new("c"),
+            ];
+            for (index, workspace) in app.state.workspaces.iter_mut().enumerate() {
+                workspace.cached_git_branch = None;
+                let mut patch = std::collections::HashMap::new();
+                if index != 1 {
+                    patch.insert("one".into(), Some(format!("ONE-{index}")));
+                }
+                if index == 0 {
+                    patch.insert("two".into(), Some("TWO-0".into()));
+                }
+                if !patch.is_empty() {
+                    assert!(workspace.metadata_tokens.patch(
+                        patch,
+                        None,
+                        std::time::Instant::now()
+                    ));
+                }
+                assert_eq!(workspace.metadata_tokens.values().len(), [2, 0, 1][index]);
+                if index != 1 {
+                    assert_eq!(
+                        workspace.metadata_tokens.values()["one"],
+                        format!("ONE-{index}")
+                    );
+                }
+            }
+            app.state.active = Some(0);
+            let first_id = app.state.workspaces[0].id.clone();
+            let last_id = app.state.workspaces[2].id.clone();
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+            let cards = &app.state.view.workspace_card_areas;
+            assert_eq!(
+                cards
+                    .iter()
+                    .map(|card| (card.ws_idx, card.rect))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (0, Rect::new(0, 2, 25, 3)),
+                    (1, Rect::new(0, 6, 25, 1)),
+                    (2, Rect::new(0, 8, 25, 2))
+                ]
+            );
+            for (index, row) in [1, 5, 7, 10].into_iter().enumerate() {
+                assert_eq!(
+                    crate::ui::workspace_drop_indicator_row(
+                        cards,
+                        app.state.workspace_list_rect(),
+                        index
+                    ),
+                    Some(row)
+                );
+                assert_eq!(app.state.workspace_drop_index_at_row(row), Some(index));
+            }
+            for (index, range) in [(0, 2..5), (1, 6..7), (2, 8..10)] {
+                for row in range {
+                    assert_eq!(app.state.workspace_at_row(row), Some(index));
+                }
+            }
+            assert_eq!(app.state.workspace_at_row(5), None);
+            assert_eq!(app.state.workspace_at_row(7), None);
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 8));
+            app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 2, 1));
+            assert!(matches!(
+                app.state.drag.as_ref().map(|drag| &drag.target),
+                Some(DragTarget::WorkspaceReorder {
+                    source_ws_idx: 2,
+                    insert_idx: Some(0),
+                    ..
+                })
+            ));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, 1));
+            assert_eq!(
+                app.state
+                    .workspaces
+                    .iter()
+                    .map(|ws| ws.display_name())
+                    .collect::<Vec<_>>(),
+                vec!["c", "a", "b"]
+            );
+            assert_eq!(app.state.workspaces[0].id, last_id);
+            assert_eq!(app.state.workspaces[1].id, first_id);
+        }
+        {
+            let mut app = app_for_mouse_test();
+            let source = "[ui.sidebar.spaces]\nrow_gap = 0\nrows = [[\"workspace\"], [\"$one\"]]\n";
+            assert!(source.parse::<toml::Value>().is_ok());
+            let config: crate::config::Config = toml::from_str(source).unwrap();
+            app.apply_live_config(&config, &[], &[], false);
+            let mut workspace = Workspace::test_new("solo");
+            workspace.cached_git_branch = None;
+            assert!(workspace.metadata_tokens.patch(
+                std::collections::HashMap::from([("one".into(), Some("PACKED-END".into()))]),
+                None,
+                std::time::Instant::now()
+            ));
+            assert_eq!(workspace.metadata_tokens.values()["one"], "PACKED-END");
+            app.state.workspaces = vec![workspace];
+            app.state.active = Some(0);
+            app.state.mouse_capture = true;
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 12));
+            assert_eq!(
+                app.state.view.workspace_card_areas[0].rect,
+                Rect::new(0, 2, 25, 2)
+            );
+            assert_eq!(app.state.sidebar_footer_rect().y, 5);
+            assert_eq!(
+                crate::ui::workspace_drop_indicator_row(
+                    &app.state.view.workspace_card_areas,
+                    app.state.workspace_list_rect(),
+                    1
+                ),
+                Some(4)
+            );
+            let mut screen =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(106, 12)).unwrap();
+            screen
+                .draw(|frame| crate::ui::render(&app.state, frame))
+                .unwrap();
+            assert!((0..25)
+                .map(|x| screen.backend().buffer()[(x, 3)].symbol())
+                .collect::<String>()
+                .contains("PACKED-END"));
+            app.state.drag = Some(crate::app::state::DragState {
+                target: DragTarget::WorkspaceReorder {
+                    source_id: 0,
+                    source_ws_idx: 0,
+                    insert_idx: Some(1),
+                },
+            });
+            screen
+                .draw(|frame| crate::ui::render(&app.state, frame))
+                .unwrap();
+            assert_eq!(screen.backend().buffer()[(0, 4)].symbol(), "─");
+            assert_eq!(
+                screen.backend().buffer()[(0, 4)].style().fg,
+                Some(app.state.palette.accent)
+            );
+        }
+    }
 
     #[test]
     fn m828d1_headers_and_configured_gaps_are_not_click_targets() {
