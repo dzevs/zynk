@@ -154,6 +154,10 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Successful live handoff waits for its socket response write attempt before
+  setting the old server's final exit flags. Completion, writer disconnection,
+  or the six-second receive timeout permits shutdown; this is not proof that
+  the caller read the response or received a native message.
 - API-driven tab renames refresh label widths and click targets immediately,
   including inactive tabs in the active workspace, without changing focus.
 - Explicit pane or agent API focus clears unseen attention even for an already

@@ -130,6 +130,7 @@ impl ApiCaller {
 pub struct ApiRequestMessage {
     pub request: Request,
     pub respond_to: std::sync::mpsc::Sender<String>,
+    pub response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
     /// The connection this request arrived on (ADR 0014). Pane-bound methods
     /// refuse a caller that cannot be placed inside the target pane's tree.
     pub caller: ApiCaller,

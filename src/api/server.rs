@@ -305,6 +305,7 @@ fn handle_connection_with_stop(
             result
         }
         method_body => {
+            let (response_write_tx, response_write_rx) = std::sync::mpsc::channel();
             let response = handle_request(
                 Request {
                     id: request_id.clone(),
@@ -314,8 +315,10 @@ fn handle_connection_with_stop(
                 capabilities,
                 caller,
                 server_stop,
+                Some(response_write_rx),
             );
             let result = write_text_line_allow_disconnect(&mut stream, &response);
+            let _ = response_write_tx.send(());
             match &result {
                 Ok(()) => crate::logging::api_request_completed(
                     &request_id,
@@ -338,6 +341,7 @@ fn handle_request(
     capabilities: Option<ServerCapabilities>,
     caller: ApiCaller,
     server_stop: Option<&Arc<AtomicBool>>,
+    response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
 ) -> String {
     if matches!(&request.method, Method::Ping(_)) {
         return serde_json::to_string(&SuccessResponse {
@@ -360,7 +364,13 @@ fn handle_request(
         return response;
     }
 
-    dispatch_to_app(request, api_tx, caller)
+    dispatch_to_app_with_timeout_and_write_completion(
+        request,
+        api_tx,
+        None,
+        caller,
+        response_write_complete,
+    )
 }
 
 fn priority_stop_response(
@@ -654,15 +664,21 @@ pub(super) fn should_stop_connection(
     local_stream_peer_closed(stream)
 }
 
-fn dispatch_to_app(request: Request, api_tx: &ApiRequestSender, caller: ApiCaller) -> String {
-    dispatch_to_app_with_timeout(request, api_tx, None, caller)
-}
-
 pub(super) fn dispatch_to_app_with_timeout(
     request: Request,
     api_tx: &ApiRequestSender,
     timeout: Option<Duration>,
     caller: ApiCaller,
+) -> String {
+    dispatch_to_app_with_timeout_and_write_completion(request, api_tx, timeout, caller, None)
+}
+
+fn dispatch_to_app_with_timeout_and_write_completion(
+    request: Request,
+    api_tx: &ApiRequestSender,
+    timeout: Option<Duration>,
+    caller: ApiCaller,
+    response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
 ) -> String {
     let request_id = request.id.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
@@ -670,6 +686,7 @@ pub(super) fn dispatch_to_app_with_timeout(
         request,
         respond_to,
         caller,
+        response_write_complete,
     }) {
         return error_response_json(
             request_id,
@@ -1696,6 +1713,7 @@ mod tests {
             }),
             ApiCaller::default(),
             None,
+            None,
         );
 
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -1718,6 +1736,7 @@ mod tests {
                 None,
                 ApiCaller::default(),
                 Some(&thread_stop),
+                None,
             )
         });
 
@@ -1750,6 +1769,7 @@ mod tests {
             None,
             ApiCaller::default(),
             Some(&stop),
+            None,
         );
         let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
         assert_eq!(rejected["error"]["code"], "server_unavailable");
@@ -1763,6 +1783,7 @@ mod tests {
             None,
             ApiCaller::default(),
             Some(&stop),
+            None,
         );
         let ping: SuccessResponse = serde_json::from_str(&ping).unwrap();
         assert!(matches!(ping.result, ResponseResult::Pong { .. }));
@@ -1865,7 +1886,14 @@ mod tests {
 
         let request_for_thread = request.clone();
         let thread = std::thread::spawn(move || {
-            handle_request(request_for_thread, &tx, None, ApiCaller::default(), None)
+            handle_request(
+                request_for_thread,
+                &tx,
+                None,
+                ApiCaller::default(),
+                None,
+                None,
+            )
         });
 
         let msg = rx.blocking_recv().unwrap();
@@ -2009,5 +2037,71 @@ mod tests {
         let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(result.is_ok());
         server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn m829_socket_response_completion_preserves_caller_and_response() {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel();
+        let (mut client, server, path) = local_stream_pair("write-ack");
+        let expected_caller = ApiCaller::from_socket(crate::ipc::stream_peer_credentials(&client));
+        assert!(expected_caller.peer.is_some());
+        client
+            .write_all(b"{\"id\":\"req_write\",\"method\":\"workspace.list\",\"params\":{}}\n")
+            .unwrap();
+        client.flush().unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let worker = std::thread::spawn(move || {
+            handle_connection(server, &api_tx, &EventHub::default(), &server_running, None)
+        });
+        let msg = recv_api_request_for(&mut api_rx, Duration::from_secs(3))
+            .expect("socket request reaches app");
+        assert_eq!(msg.caller, expected_caller);
+        let complete = msg
+            .response_write_complete
+            .expect("socket request carries write-completion receiver");
+        assert_eq!(
+            complete.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        msg.respond_to
+            .send(
+                serde_json::to_string(&SuccessResponse {
+                    id: msg.request.id,
+                    result: ResponseResult::Ok {},
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        complete
+            .recv_timeout(Duration::from_secs(3))
+            .expect("socket response write completes");
+        let response: SuccessResponse = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(response.id, "req_write");
+        assert!(matches!(response.result, ResponseResult::Ok {}));
+        worker.join().unwrap().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn m829_internal_dispatch_has_no_socket_write_waiter() {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel();
+        let worker = std::thread::spawn(move || {
+            dispatch_to_app_with_timeout(
+                Request {
+                    id: "internal".into(),
+                    method: Method::WorkspaceList(crate::api::schema::EmptyParams::default()),
+                },
+                &api_tx,
+                Some(Duration::from_secs(3)),
+                ApiCaller::default(),
+            )
+        });
+        let msg = recv_api_request_for(&mut api_rx, Duration::from_secs(3))
+            .expect("internal request reaches app");
+        assert!(msg.response_write_complete.is_none());
+        assert_eq!(msg.caller, ApiCaller::default());
+        msg.respond_to.send("internal response".into()).unwrap();
+        assert_eq!(worker.join().unwrap(), "internal response");
     }
 }

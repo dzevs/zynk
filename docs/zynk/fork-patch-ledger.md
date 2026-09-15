@@ -6609,3 +6609,74 @@ M8-65, N1/N3 and the operator deviation remain open. M8-RECT-NARROW, the distinc
 D2 selected-cohort style-byte miss, and every boundary-tool review history stay
 open. E Gate-2, whole-M8 Gate-2 and fresh independent Gate-3 precede integration.
 No merge, push, install, tag, publish, release or cleanup is authorized here.
+
+### M8-29/M8-30: Handoff Response Completion
+
+This arrival builds on E's approved checkpoint a2442bd4. It ports M8-29
+b88aa1301e324c80d46cac767f87109f38cf4fe2 and M8-30
+d482836a87e6fd5f884b595021578c0a39f16cf5 only; M8-31 remains a later slice.
+The portable short socket-fixture name in M8-30 is not a macOS production edit.
+The executable Gate-1 was approved at native seq1092 after adding F05 for H02;
+the original request-changes and preflight remain retained, not rewritten.
+
+- Ordinary socket dispatch carries a completion receiver and signals after the
+  existing write attempt returns. Successful handoff sends, waits, then applies
+  the three final exit flags. Completion, disconnection or a six-second receive
+  timeout permits finish; no peer read, parse, message receipt or wall-clock
+  service bound is implied. Failed handoff does not take that wait/finish path.
+- Caller identity, priority stop, streaming, ownership transfer, worker drain,
+  rollback and earlier handoff waits are preserved. The public internal timeout
+  dispatcher keeps its signature and forwards no socket waiter. The old private
+  forwarder's definition and sole caller were enumerated at parent; that caller
+  was replaced and the exact-identifier query has no child residue over all
+  1729 tracked payloads. This is a byte query, not a resolved call graph.
+- Fresh raw parent baseline passed 4298 scheduled tests with five ignored.
+  The frozen five controls then produced nine absent-interface compiler
+  diagnostics and zero test outcomes before production edits. None has a parent
+  behavioural red, and no parent production stub or later fixture correction
+  is claimed. All five frozen control bodies remain unchanged.
+- Child full passed 4303 scheduled tests with five ignored, including the
+  unchanged FrameData characterizations, and lint passed on those same bytes.
+  Targeted selection is 617 old identities plus five controls, 622 total.
+  Binary plus test name is the identity; SKIPs and catalog rows are not runs.
+- Five serial faults produced 3110 scheduled outcomes: 3103 PASS and seven FAIL.
+  All five intended first sites matched their own prepared source snapshots.
+  Six stops are assertion macros and one is the completion-channel expect.
+  F02 also crossed H04's elapsed lower bound after its constant positive;
+  F03 also crossed H03's pending equality. These are two incidental observations,
+  not additional dedicated faults. H03's pending group remains scheduling-bound.
+  F01 stopped before the socket response read; F05 before the caller equality,
+  response send and worker join. No later-group discrimination is inferred.
+- Each fault restoration rechecked all 1729 green payload bytes and modes.
+  Restored selection passed all 622. The per-site report binds variant,
+  qualified identity, source snapshot, assertion span and printed diagnostics;
+  neither seven crossings nor five intended matches is a coverage rate or a
+  sweep of all authority, rollback or early-shutdown defects.
+- Source report a6abc5f2 reconstructs all four complete Rust files to parent
+  after explicit carrier, dispatch, flag extraction, constructor, signature,
+  frozen-control insertion and one formatter reversal. Its 223 old test units
+  are 202 raw and 21 source adapters, with no property conversion. Runtime
+  production remains raw. Source reconstruction is not behavioural equivalence
+  or a complete execution trace; it accompanies actual child executions.
+- Actual edits are four Rust paths and three documentation paths. Documentation
+  follows the fault cohort and is not covered as executed code by that cohort.
+- The first catalog comparison refused on a preflight-only oid field, but the
+  full baseline had already launched before that refusal was interpreted.
+  Corrected field projection and complete qualified membership reconciliation
+  preserve the invocation result, not a prior ordering guarantee. This slice's
+  design did not restate E's general prerequisite-before-dependent rule; both
+  that omission and the ordering deviation remain explicit review inputs.
+- Internal source and tooling examinations are separate from candidate results,
+  co-author Gate-2 and independent Gate-3. Their retained inputs, findings,
+  dispositions and execution bounds accompany the review packet. Successful
+  execution does not close an earlier instrument review history.
+
+Final source binding, fresh checks, normal local commit, exact-SHA checks and
+M8-29/M8-30 Gate-2 remain required by this implementation entry. All three
+standing limits are individually unresolved and unwaived, including D2's own
+T07/T24/T26 chronology loss. All twenty origins and recorded carries, unions
+98/34, D's five primaries, M8-33, both M9-12 secondary adaptations, M8-37, M8-65,
+older N1/N3 and the operator deviation remain open. M8-RECT-NARROW and the distinct
+D2 selected-cohort style-byte miss remain open, as do E N-1, E Gate-2 N-3 and
+every instrument review history. No whole-M8 approval, independent Gate-3,
+operator action, merge, push, install, tag, publish, release or cleanup follows.

@@ -69,6 +69,26 @@ use crate::server::client_transport::ClientWriter;
 #[cfg(test)]
 use std::fs;
 
+const LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(6);
+
+fn wait_for_live_handoff_response_write(
+    response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+) {
+    let Some(response_write_complete) = response_write_complete else {
+        return;
+    };
+
+    match response_write_complete.recv_timeout(LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            warn!("timed out waiting for live handoff response write; old server exiting");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            warn!("live handoff response writer disconnected; old server exiting");
+        }
+    }
+}
+
 const DIRECT_STRUCTURED_INPUT_UNSUPPORTED: &str =
     "direct terminal control accepts raw Input; structured InputEvents are unsupported";
 const DIRECT_TARGET_REQUIRED: &str =
@@ -798,6 +818,7 @@ impl HeadlessServer {
                 },
                 respond_to,
                 caller: api::ApiCaller::default(),
+                response_write_complete: None,
             },
             true,
         );
@@ -1157,11 +1178,14 @@ impl HeadlessServer {
         }
         crate::server::handoff::wait_owned_ack(&mut stream);
 
+        Ok(())
+    }
+
+    fn finish_live_handoff_shutdown(&mut self) {
         self.shutting_down = true;
         self.app.state.should_quit = true;
         self.app.no_session = true;
         info!("live handoff completed; old server exiting");
-        Ok(())
     }
 
     fn sync_visible_server_config_diagnostic(&mut self, uses_local_keybindings: bool) {
@@ -3025,7 +3049,9 @@ impl HeadlessServer {
         let metadata_expired = self.app.expire_due_metadata(Instant::now());
 
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
-            let response = match self.perform_live_handoff(params.clone()) {
+            let handoff_result = self.perform_live_handoff(params.clone());
+            let handoff_succeeded = handoff_result.is_ok();
+            let response = match handoff_result {
                 Ok(()) => serde_json::to_string(&api::schema::SuccessResponse {
                     id: msg.request.id,
                     result: api::schema::ResponseResult::Ok {},
@@ -3040,6 +3066,10 @@ impl HeadlessServer {
             }
             .unwrap_or_else(|_| "{}".to_string());
             let _ = msg.respond_to.send(response);
+            if handoff_succeeded {
+                wait_for_live_handoff_response_write(msg.response_write_complete);
+                self.finish_live_handoff_shutdown();
+            }
             return true;
         }
 
@@ -4798,6 +4828,7 @@ mod tests {
             server.handle_api_request_with_shutdown_check_inner(api::ApiRequestMessage {
                 request: serde_json::from_value(serde_json::json!({"id": "d2-virtual", "method": "pane.list", "params": {}})).unwrap(),
                 respond_to, caller: api::ApiCaller::default(),
+                response_write_complete: None,
             }, true);
             let response: serde_json::Value =
                 serde_json::from_str(&receiver.recv_timeout(Duration::from_secs(1)).unwrap())
@@ -4871,6 +4902,7 @@ mod tests {
                     .unwrap(),
                     respond_to,
                     caller: api::ApiCaller::default(),
+                    response_write_complete: None,
                 },
                 true,
             );
@@ -4985,6 +5017,7 @@ mod tests {
                 request: serde_json::from_value(serde_json::json!({"id": "m828b-read", "method": "pane.get", "params": {"pane_id": target}})).unwrap(),
                 respond_to,
                 caller: api::ApiCaller::default(),
+                response_write_complete: None,
             }, true);
             let response: serde_json::Value =
                 serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
@@ -5134,6 +5167,7 @@ mod tests {
                 })).unwrap(),
                 respond_to,
                 caller: api::ApiCaller::default(),
+                response_write_complete: None,
             }, true);
             let response: serde_json::Value =
                 serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
@@ -5305,6 +5339,7 @@ mod tests {
                     },
                     respond_to,
                     caller: api::ApiCaller::default(),
+                    response_write_complete: None,
                 })
                 .unwrap();
         }
@@ -5374,6 +5409,7 @@ mod tests {
                 },
                 respond_to,
                 caller: api::ApiCaller::default(),
+                response_write_complete: None,
             })
             .expect("queue API request");
 
@@ -5411,6 +5447,7 @@ mod tests {
                     },
                     respond_to,
                     caller: api::ApiCaller::default(),
+                    response_write_complete: None,
                 })
                 .unwrap();
             responses.push(response_rx);
@@ -5542,6 +5579,7 @@ mod tests {
                 },
                 respond_to,
                 caller: api::ApiCaller::default(),
+                response_write_complete: None,
             })
             .unwrap();
         let (writer, control_rx, _render_rx) = test_client_writer();
@@ -5601,6 +5639,7 @@ mod tests {
                 },
                 respond_to,
                 caller: api::ApiCaller::default(),
+                response_write_complete: None,
             })
         );
         let response = response_rx
@@ -11951,6 +11990,7 @@ next_tab = ""
             },
             respond_to,
             caller: api::ApiCaller::default(),
+            response_write_complete: None,
         });
 
         assert!(changed);
@@ -12037,6 +12077,7 @@ next_tab = ""
             },
             respond_to,
             caller: api::ApiCaller::default(),
+            response_write_complete: None,
         });
 
         assert!(changed);
@@ -12089,6 +12130,7 @@ next_tab = ""
             },
             respond_to,
             caller: api::ApiCaller::default(),
+            response_write_complete: None,
         });
 
         assert!(changed);
@@ -12121,6 +12163,7 @@ next_tab = ""
             },
             respond_to,
             caller: api::ApiCaller::default(),
+            response_write_complete: None,
         });
 
         assert!(changed);
@@ -12158,6 +12201,7 @@ next_tab = ""
                 },
                 respond_to,
                 caller: api::ApiCaller::default(),
+                response_write_complete: None,
             })
         );
 
@@ -12214,6 +12258,7 @@ next_tab = ""
                 },
                 respond_to,
                 caller: api::ApiCaller::default(),
+                response_write_complete: None,
             })
         );
 
@@ -12487,6 +12532,7 @@ next_tab = ""
             },
             respond_to,
             caller: api::ApiCaller::default(),
+            response_write_complete: None,
         });
 
         assert!(changed);
@@ -12556,6 +12602,62 @@ next_tab = ""
             "Found direct calls to self.app.handle_internal_event outside \
              handle_internal_event_with_forwarding (bypass risk):\n  {}",
             bypass_lines.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn m829_handoff_write_wait_handles_absent_complete_and_disconnected() {
+        wait_for_live_handoff_response_write(None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(()).unwrap();
+        wait_for_live_handoff_response_write(Some(rx));
+        drop(tx);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        drop(tx);
+        wait_for_live_handoff_response_write(Some(rx));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            wait_for_live_handoff_response_write(Some(rx));
+            finished_tx.send(()).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "pending write must not immediately finish the wait"
+        );
+        tx.send(()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn m829_handoff_write_timeout_keeps_the_six_second_bound() {
+        assert_eq!(LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT, Duration::from_secs(6));
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let started = Instant::now();
+        wait_for_live_handoff_response_write(Some(rx));
+        assert!(started.elapsed() >= Duration::from_secs(6));
+    }
+
+    #[test]
+    fn m829_finished_handoff_sets_all_exit_flags() {
+        let mut server = test_headless_server();
+        server.shutting_down = false;
+        server.app.state.should_quit = false;
+        server.app.no_session = false;
+        server.finish_live_handoff_shutdown();
+        assert_eq!(
+            (
+                server.shutting_down,
+                server.app.state.should_quit,
+                server.app.no_session
+            ),
+            (true, true, true)
         );
     }
 }

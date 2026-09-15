@@ -661,6 +661,7 @@ mod tests {
             .unwrap(),
             respond_to,
             caller: crate::api::ApiCaller::default(),
+            response_write_complete: None,
         });
         let response: serde_json::Value =
             serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
@@ -1023,6 +1024,7 @@ mod tests {
             request: serde_json::from_value(serde_json::json!({"id": "m828b-read", "method": "pane.get", "params": {"pane_id": target}})).unwrap(),
             respond_to,
             caller: crate::api::ApiCaller::default(),
+            response_write_complete: None,
         });
         let response: serde_json::Value =
             serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())
@@ -1091,6 +1093,7 @@ mod tests {
             })).unwrap(),
             respond_to,
             caller: crate::api::ApiCaller::default(),
+            response_write_complete: None,
         });
         let response: serde_json::Value =
             serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(1)).unwrap())

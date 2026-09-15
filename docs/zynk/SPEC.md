@@ -292,6 +292,16 @@ they do not migrate old values or acquire lifecycle, hook, replay or receipt aut
 navigator details and the agent switcher have no automatic token alias. See the README migration
 section for the three caller experiences and token reporting limits.
 
+Successful `server.live_handoff` sends its response, waits for completion of the
+ordinary socket writer's existing write attempt, then sets the old server's final
+exit flags. The internal completion carrier is neither a JSON field nor a native
+message receipt: it proves no peer read or parse. A disconnected writer or the
+six-second channel receive timeout permits shutdown; scheduling can extend the
+observed duration, so this is not a six-second wall-clock service guarantee.
+Internal dispatch without a socket waiter does not wait. Failed handoff retains
+its existing error path, and caller identity, ownership transfer, rollback,
+delivery status and `message_received` admission are unchanged.
+
 ## 9. Fork engineering discipline
 
 - zynk-native code in **NEW modules**: `zynk_db`, `zynk_messages`, `zynk_receipts`, `zynk_retrieval`,
