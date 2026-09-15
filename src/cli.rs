@@ -908,7 +908,7 @@ fn wait_agent_status(args: &[String]) -> std::io::Result<i32> {
                 agent,
                 title,
                 display_agent,
-                custom_status,
+
                 state_labels,
             } = event.data
             else {
@@ -922,7 +922,7 @@ fn wait_agent_status(args: &[String]) -> std::io::Result<i32> {
                         workspace_id,
                         agent_status,
                         agent,
-                        custom_status,
+
                         title,
                         display_agent,
                         state_labels,

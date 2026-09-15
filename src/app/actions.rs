@@ -558,15 +558,13 @@ impl AppState {
                     .and_then(|terminal| terminal.agent_name.as_deref())
                     .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()))
             });
-            let custom_status = terminal.and_then(|terminal| terminal.effective_custom_status());
             let state = terminal
                 .map(|terminal| terminal.state)
                 .unwrap_or(AgentState::Unknown);
             let status_label = terminal
                 .map(|terminal| terminal.effective_presentation().state_labels)
                 .and_then(|labels| labels.get(state_label_text(state, pane.seen)).cloned());
-            let status = custom_status
-                .or(status_label)
+            let status = status_label
                 .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
             let meta = match (agent_label, status.as_deref()) {
                 (Some(agent_label), Some(status)) => format!("{agent_label} · {status}"),
@@ -2737,7 +2735,7 @@ impl AppState {
                 agent_label,
                 state,
                 message,
-                custom_status,
+
                 seq,
                 session_ref,
             } => {
@@ -2745,7 +2743,7 @@ impl AppState {
                 // reports its session and nothing else — no identity, no lifecycle.
                 // A SESSION-IDENTITY-ONLY integration reports lifecycle AND session in
                 // the same call: the session, source and label are hook-derived
-                // identity and are kept, while the reported state/message/custom_status
+                // identity and are kept, while the reported state/message
                 // are dropped so the screen stays the only lifecycle authority. Every
                 // other source takes full hook authority. `TerminalState` enforces the
                 // same identity/lifecycle split internally, so a caller that reaches
@@ -2774,7 +2772,6 @@ impl AppState {
                             agent_label,
                             state,
                             message,
-                            custom_status,
                             session_ref,
                             seq,
                         )
@@ -2811,11 +2808,11 @@ impl AppState {
                 applies_to_source,
                 title,
                 display_agent,
-                custom_status,
+
                 state_labels,
                 clear_title,
                 clear_display_agent,
-                clear_custom_status,
+
                 clear_state_labels,
                 seq,
                 ttl,
@@ -2827,11 +2824,11 @@ impl AppState {
                         applies_to_source,
                         title,
                         display_agent,
-                        custom_status,
+
                         state_labels,
                         clear_title,
                         clear_display_agent,
-                        clear_custom_status,
+
                         clear_state_labels,
                         ttl,
                         seq,
@@ -3281,6 +3278,77 @@ mod tests {
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
     use ratatui::layout::Direction;
+
+    fn m828e_presentation_owner() -> crate::app::App {
+        let config: crate::config::Config =
+            toml::from_str("onboarding = false\n[ui.sidebar.agents]\nrows = [[\"$task\"]]\n")
+                .unwrap();
+        let mut app = crate::app::App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("retirement")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane)
+            .unwrap()
+            .seen = true;
+        app.next_resize_poll = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        let ws = &app.state.workspaces[0];
+        let target = crate::workspace::public_pane_id_for_number(
+            &ws.id,
+            ws.public_pane_number(pane).unwrap(),
+        );
+        let request = serde_json::from_value(serde_json::json!({"id":"retirement", "method":"pane.report_metadata", "params":{
+            "pane_id":target, "source":"user:retirement", "title":"TITLE", "display_agent":"DISPLAY", "state_labels":{"idle":"STATE-LABEL"}, "custom_status":"OLD-STATUS", "tokens":{"task":"TOKEN-ONLY"}
+        }})).unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(request)).unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"id":"retirement", "result":{"type":"ok"}})
+        );
+        app
+    }
+
+    #[test]
+    fn m828e_switcher_uses_state_label_instead_of_retired_status_priority() {
+        let mut owner = m828e_presentation_owner();
+        owner
+            .state
+            .navigator
+            .expanded_workspaces
+            .insert(owner.state.workspaces[0].id.clone());
+        let pane = owner.state.workspaces[0].tabs[0].root_pane;
+        let rows = owner.state.navigator_rows_from(&owner.terminal_runtimes);
+        let row = rows.iter().find(|row| matches!(row.target, crate::app::state::NavigatorTarget::Pane { ws_idx: 0, tab_idx: 0, pane_id } if pane_id == pane)).expect("pane row");
+        assert!(row.meta.contains("DISPLAY"), "{}", row.meta);
+        assert!(row.meta.contains("STATE-LABEL"), "{}", row.meta);
+        assert!(
+            !row.meta.contains("OLD-STATUS") && !row.meta.contains("TOKEN-ONLY"),
+            "{}",
+            row.meta
+        );
+    }
 
     #[test]
     fn m828d2_variable_height_follow_reveals_the_actual_target_child() {
@@ -5512,7 +5580,7 @@ mod tests {
             agent_label: "hermes".into(),
             state: AgentState::Blocked,
             message: None,
-            custom_status: None,
+
             seq: None,
             session_ref: None,
         });
@@ -5551,7 +5619,7 @@ mod tests {
             agent_label: "codex".into(),
             state: AgentState::Working,
             message: None,
-            custom_status: None,
+
             seq: Some(1),
             session_ref: None,
         });
@@ -5698,7 +5766,7 @@ mod tests {
             agent_label: "hermes".into(),
             state: AgentState::Idle,
             message: None,
-            custom_status: None,
+
             seq: Some(20),
             session_ref: crate::agent_resume::AgentSessionRef::id("existing-session"),
         });
@@ -5864,7 +5932,7 @@ mod tests {
             agent_label: "hermes".into(),
             state: AgentState::Blocked,
             message: None,
-            custom_status: None,
+
             seq: Some(1),
             session_ref: crate::agent_resume::AgentSessionRef::id("hermes-session"),
         });
@@ -5933,7 +6001,7 @@ mod tests {
             agent_label: "claude".into(),
             state: AgentState::Blocked,
             message: None,
-            custom_status: None,
+
             seq: Some(1),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session"),
         });
@@ -6016,7 +6084,7 @@ mod tests {
             agent_label: "devin".into(),
             state: AgentState::Working,
             message: None,
-            custom_status: None,
+
             seq: Some(1),
             session_ref: crate::agent_resume::AgentSessionRef::id("devin-session"),
         });
@@ -6041,7 +6109,7 @@ mod tests {
             agent_label: "pi".into(),
             state: AgentState::Working,
             message: None,
-            custom_status: None,
+
             seq: Some(20),
             session_ref: crate::agent_resume::AgentSessionRef::path(first_session),
         });
@@ -6054,7 +6122,7 @@ mod tests {
             agent_label: "pi".into(),
             state: AgentState::Working,
             message: None,
-            custom_status: None,
+
             seq: Some(21),
             session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
         });

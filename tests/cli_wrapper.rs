@@ -15,6 +15,93 @@ use support::{
     cleanup_test_base, register_runtime_dir, register_spawned_zynk_pid, unregister_spawned_zynk_pid,
 };
 
+#[test]
+fn m828e_retired_cli_flags_refuse_before_socket_connection() {
+    for args in [
+        vec![
+            "pane",
+            "report-agent",
+            "w1:p1",
+            "--source",
+            "zynk:claude",
+            "--agent",
+            "claude",
+            "--state",
+            "working",
+            "--custom-status",
+            "old",
+        ],
+        vec![
+            "pane",
+            "report-metadata",
+            "w1:p1",
+            "--source",
+            "user:task",
+            "--custom-status",
+            "old",
+        ],
+        vec![
+            "pane",
+            "report-metadata",
+            "w1:p1",
+            "--source",
+            "user:task",
+            "--clear-custom-status",
+        ],
+    ] {
+        let (request, run) = mock_snapshot_cli(
+            &args,
+            serde_json::json!({"id":"cli:request", "result":{"type":"ok"}}),
+        );
+        let error = String::from_utf8_lossy(&run.stderr);
+        assert!(request.is_none(), "retired flag connected: {args:?}");
+        assert_eq!(run.status.code(), Some(2), "{args:?}: {error}");
+        assert!(error.contains("unknown option"), "{args:?}: {error}");
+        assert!(error.contains("custom-status"), "{args:?}: {error}");
+        assert!(run.stdout.is_empty());
+    }
+}
+
+#[test]
+fn m828e_cli_help_omits_retired_flags_and_keeps_token_replacement() {
+    for command in ["report-agent", "report-metadata"] {
+        let (request, run) = mock_snapshot_cli(
+            &["pane", command, "--help"],
+            serde_json::json!({"id":"unused", "result":{"type":"ok"}}),
+        );
+        let output = String::from_utf8_lossy(&run.stderr);
+        assert!(request.is_none(), "help connected: {command}");
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let prefix = format!("zynk pane {command} <pane_id> ");
+        let lines: Vec<_> = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(&prefix))
+            .collect();
+        assert_eq!(lines.len(), 1, "{command}: {output}");
+        let flags: Vec<_> = lines[0]
+            .split([' ', '[', ']', '|'])
+            .filter(|part| part.starts_with("--"))
+            .collect();
+        assert!(flags.contains(&"--source"));
+        assert!(!flags.contains(&"--custom-status"), "{command}: {output}");
+        assert!(
+            !flags.contains(&"--clear-custom-status"),
+            "{command}: {output}"
+        );
+        if command == "report-metadata" {
+            assert!(flags.contains(&"--token") && flags.contains(&"--clear-token"));
+            assert!(flags.contains(&"--title") && flags.contains(&"--state-label"));
+        } else {
+            assert!(flags.contains(&"--state") && flags.contains(&"--agent-session-id"));
+        }
+    }
+}
+
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1227,8 +1314,6 @@ fn pane_report_metadata_sends_presentation_request() {
             "Refactor auth",
             "--display-agent",
             "Claude auth",
-            "--custom-status",
-            "middleware",
             "--state-label",
             "working=deep in the mines",
             "--ttl-ms",
@@ -1250,7 +1335,6 @@ fn pane_report_metadata_sends_presentation_request() {
     assert!(request["params"]["applies_to_source"].is_null());
     assert_eq!(request["params"]["title"], "Refactor auth");
     assert_eq!(request["params"]["display_agent"], "Claude auth");
-    assert_eq!(request["params"]["custom_status"], "middleware");
     assert_eq!(
         request["params"]["state_labels"]["working"],
         "deep in the mines"
@@ -1274,7 +1358,7 @@ fn pane_report_metadata_rejects_blank_source_before_socket_request() {
             "1-1",
             "--source",
             "   ",
-            "--custom-status",
+            "--title",
             "middleware",
         ],
     );
@@ -1305,7 +1389,7 @@ fn pane_report_metadata_rejects_blank_applies_to_source_before_socket_request() 
             "user:claude-title",
             "--applies-to-source",
             "   ",
-            "--custom-status",
+            "--title",
             "middleware",
         ],
     );
@@ -4811,8 +4895,6 @@ fn m828b_pane_token_cli_preserves_legacy_request_and_output() {
             "Task",
             "--display-agent",
             "Builder",
-            "--custom-status",
-            "legacy status",
             "--state-label",
             "working=Building",
             "--seq",
@@ -4837,8 +4919,8 @@ fn m828b_pane_token_cli_preserves_legacy_request_and_output() {
         Some(
             serde_json::json!({"id": "cli:request", "method": "pane.report_metadata", "params": {
                 "pane_id": "w7:p2", "source": "user:build", "agent": "claude", "applies_to_source": " legacy/source ",
-                "title": "Task", "display_agent": "Builder", "custom_status": "legacy status", "state_labels": {"working": "Building"},
-                "clear_title": false, "clear_display_agent": false, "clear_custom_status": false, "clear_state_labels": false,
+                "title": "Task", "display_agent": "Builder", "state_labels": {"working": "Building"},
+                "clear_title": false, "clear_display_agent": false, "clear_state_labels": false,
                 "seq": 0, "ttl_ms": 500, "tokens": {"build": "ok=x", "old": null}
             }})
         ),
@@ -4860,7 +4942,6 @@ fn m828b_pane_token_cli_preserves_legacy_request_and_output() {
             "build",
             "--clear-title",
             "--clear-display-agent",
-            "--clear-custom-status",
             "--clear-state-labels",
         ],
         response,
@@ -4870,7 +4951,7 @@ fn m828b_pane_token_cli_preserves_legacy_request_and_output() {
         Some(
             serde_json::json!({"id": "cli:request", "method": "pane.report_metadata", "params": {
                 "pane_id": "w7:p2", "source": "user:build", "tokens": {"build": null},
-                "clear_title": true, "clear_display_agent": true, "clear_custom_status": true, "clear_state_labels": true
+                "clear_title": true, "clear_display_agent": true, "clear_state_labels": true
             }})
         )
     );
@@ -4891,15 +4972,7 @@ fn m828b_pane_token_cli_invalid_args_and_help_do_not_connect() {
         assert!(output.stdout.is_empty());
         let help = String::from_utf8(output.stderr).unwrap();
         assert!(help.contains("pane report-metadata"), "{help}");
-        for flag in [
-            "--token",
-            "--clear-token",
-            "--source",
-            "--custom-status",
-            "--clear-custom-status",
-            "--seq",
-            "--ttl-ms",
-        ] {
+        for flag in ["--token", "--clear-token", "--source", "--seq", "--ttl-ms"] {
             assert!(help.contains(flag), "missing {flag}: {help}");
         }
     }
@@ -4986,7 +5059,7 @@ fn m828b_pane_token_cli_preserves_api_errors_and_legacy_limits() {
             let (request, output) = mock_snapshot_cli(&args, response.clone());
             let mut expected = serde_json::json!({"id": "cli:request", "method": "pane.report_metadata", "params": {
                 "pane_id": "w7:p2", "source": "legacy/source", "title": "legacy", "ttl_ms": ttl.parse::<u64>().unwrap(),
-                "clear_title": false, "clear_display_agent": false, "clear_custom_status": false, "clear_state_labels": false
+                "clear_title": false, "clear_display_agent": false, "clear_state_labels": false
             }});
             if tokens {
                 expected["params"]["tokens"] = serde_json::json!({"build": "x"});
@@ -5298,7 +5371,7 @@ fn m811_cli_wait_status_sends_event_wait_and_preserves_subscription_stdout() {
     let data = serde_json::json!({
         "pane_id": "caller:p7", "workspace_id": "caller", "agent_status": "blocked",
         "agent": "pi", "title": "Question", "display_agent": "Reviewer",
-        "custom_status": "approval", "state_labels": {"blocked": "Needs input"}
+        "state_labels": {"blocked": "Needs input"}
     });
     let mut wire_data = data.clone();
     wire_data["type"] = "pane_agent_status_changed".into();

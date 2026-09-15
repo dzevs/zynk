@@ -500,7 +500,6 @@ fn report_agent_command() -> Command {
         .arg(option("agent", "LABEL"))
         .arg(pane_agent_state_option("state"))
         .arg(option("message", "TEXT"))
-        .arg(option("custom-status", "TEXT"))
         .arg(option("seq", "N"))
         .arg(option("agent-session-id", "ID"))
         .arg(path_option("agent-session-path", "PATH"))
@@ -538,8 +537,6 @@ fn report_metadata_command() -> Command {
         .arg(flag("clear-title"))
         .arg(option("display-agent", "TEXT"))
         .arg(flag("clear-display-agent"))
-        .arg(option("custom-status", "TEXT"))
-        .arg(flag("clear-custom-status"))
         .arg(option("state-label", "STATUS=TEXT"))
         .arg(flag("clear-state-labels"))
         .arg(repeatable_option("token", "NAME=VALUE"))
@@ -987,12 +984,10 @@ mod tests {
             [
                 "agent",
                 "applies-to-source",
-                "clear-custom-status",
                 "clear-display-agent",
                 "clear-state-labels",
                 "clear-title",
                 "clear-token",
-                "custom-status",
                 "display-agent",
                 "seq",
                 "source",
@@ -1003,6 +998,11 @@ mod tests {
             ]
         );
         let positional = report.get_positionals().collect::<Vec<_>>();
+        for name in ["custom-status", "clear-custom-status"] {
+            assert!(!report
+                .get_arguments()
+                .any(|arg| arg.get_long() == Some(name)));
+        }
         assert_eq!(positional.len(), 1);
         assert!(positional[0].is_required_set());
         for name in ["token", "clear-token"] {

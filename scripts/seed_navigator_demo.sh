@@ -91,7 +91,11 @@ report() {
     --source nav-seed \
     --agent "$agent" \
     --state "$state" \
-    --custom-status "$status" \
+    --seq "$seq" >/dev/null
+  # Task text is display-only; opt into $task in desktop agent rows to show it.
+  run pane report-metadata "$pane" \
+    --source user:nav-seed \
+    --token "task=$status" \
     --seq "$seq" >/dev/null
 }
 

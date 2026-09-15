@@ -603,7 +603,7 @@ impl App {
                     agent: update.agent_label.clone(),
                     title: presentation.title,
                     display_agent: presentation.display_agent,
-                    custom_status: presentation.custom_status,
+
                     state_labels: presentation.state_labels,
                 },
             });

@@ -41,7 +41,7 @@ pub(crate) struct AgentPanelEntry {
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
-    pub custom_status: Option<String>,
+
     pub state_labels: std::collections::HashMap<String, String>,
 }
 
@@ -161,7 +161,7 @@ fn agent_panel_entries_with_runtimes(
                         state: detail.state,
                         seen: detail.seen,
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
-                        custom_status: detail.custom_status,
+
                         state_labels: detail.state_labels,
                     }
                 })
@@ -1728,6 +1728,92 @@ mod tests {
     use crate::{detect::Agent, layout::PaneId, workspace::Workspace};
     use ratatui::{backend::TestBackend, layout::Direction, Terminal};
 
+    fn m828e_presentation_owner() -> crate::app::App {
+        let config: crate::config::Config =
+            toml::from_str("onboarding = false\n[ui.sidebar.agents]\nrows = [[\"$task\"]]\n")
+                .unwrap();
+        let mut app = crate::app::App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("retirement")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane)
+            .unwrap()
+            .seen = true;
+        app.next_resize_poll = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        let ws = &app.state.workspaces[0];
+        let target = crate::workspace::public_pane_id_for_number(
+            &ws.id,
+            ws.public_pane_number(pane).unwrap(),
+        );
+        let request = serde_json::from_value(serde_json::json!({"id":"retirement", "method":"pane.report_metadata", "params":{
+            "pane_id":target, "source":"user:retirement", "title":"TITLE", "display_agent":"DISPLAY", "state_labels":{"idle":"STATE-LABEL"}, "custom_status":"OLD-STATUS", "tokens":{"task":"TOKEN-ONLY"}
+        }})).unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(request)).unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"id":"retirement", "result":{"type":"ok"}})
+        );
+        app
+    }
+
+    #[test]
+    fn m828e_desktop_token_replacement_is_explicit_and_repeatable() {
+        let mut owner = m828e_presentation_owner();
+        let app = &mut owner.state;
+        let area = ratatui::layout::Rect::new(0, 0, 100, 36);
+        crate::ui::compute_view(app, area);
+        assert_eq!(app.view.layout, crate::app::state::ViewLayout::Desktop);
+        let entries = agent_panel_entries(app);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].tokens.get("task").map(String::as_str),
+            Some("TOKEN-ONLY")
+        );
+        assert_eq!(entries[0].agent_label.as_deref(), Some("DISPLAY"));
+        let mut screen =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        screen.draw(|frame| crate::ui::render(app, frame)).unwrap();
+        let text: String = screen
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("TOKEN-ONLY"), "{text}");
+        assert!(!text.contains("OLD-STATUS"), "{text}");
+        assert!(
+            !text.contains("STATE-LABEL"),
+            "explicit custom-only row: {text}"
+        );
+        let baseline = screen.backend().buffer().clone();
+        screen.draw(|frame| crate::ui::render(app, frame)).unwrap();
+        assert_eq!(screen.backend().buffer(), &baseline);
+    }
+
     #[test]
     fn m828d2_token_render_cost_is_observed_on_bounded_geometry() {
         const AREA: Rect = Rect::new(0, 0, 120, 48);
@@ -2048,14 +2134,14 @@ mod tests {
                             applies_to_source: None,
                             title: None,
                             display_agent: None,
-                            custom_status: None,
+
                             state_labels: std::collections::HashMap::from([(
                                 space_status.into(),
                                 label.into(),
                             )]),
                             clear_title: false,
                             clear_display_agent: false,
-                            clear_custom_status: false,
+
                             clear_state_labels: false,
                             ttl: None,
                             seq: Some(1),
@@ -6101,7 +6187,7 @@ mod tests {
             terminal_title: None,
             terminal_title_stripped: None,
             tokens: std::collections::HashMap::new(),
-            custom_status: None,
+
             state_labels: std::collections::HashMap::new(),
         }
     }

@@ -82,15 +82,6 @@ pub(super) fn normalize_reported_agent_label(agent: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-pub(super) fn normalize_custom_status(status: Option<String>) -> Option<String> {
-    let trimmed = status?.trim().to_string();
-    let mut normalized = String::new();
-    for ch in trimmed.chars().filter(|ch| !ch.is_control()).take(32) {
-        normalized.push(ch);
-    }
-    (!normalized.trim().is_empty()).then(|| normalized.trim().to_string())
-}
-
 pub(super) const METADATA_TTL_MAX_MS: u64 = 86_400_000;
 pub(super) const METADATA_SOURCE_MAX_CHARS: usize = 80;
 const METADATA_TTL_MIN_MS: u64 = 1;

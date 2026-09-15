@@ -424,7 +424,7 @@ impl App {
             display_agent: pane.display_agent,
             agent_status: pane.agent_status,
             screen_detection_skipped: terminal.full_lifecycle_hook_authority_active(),
-            custom_status: pane.custom_status,
+
             state_labels: pane.state_labels,
             tokens: pane.tokens,
             agent_session: pane.agent_session,

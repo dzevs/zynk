@@ -40,13 +40,13 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
   Value or TTL changes and expiry emit full snapshots; true no-ops do not.
   Pane admission fences survive live handoff but reset on cold restore; values
   remain ephemeral. Clearing, expiry and respawn do not release source slots.
-  Configured sidebar rows can display these values; custom status still coexists.
+  Configured sidebar rows can display these values as explicit custom tokens.
 - `workspace.report_metadata` and `zynk workspace report-metadata` accept bounded,
   display-only token patches with per-source sequences and optional expiry.
   Workspace reads expose tokens; `workspace.metadata_updated` subscriptions report
   full snapshots after changes and expiry, without plugin hooks or receipt authority.
   Values and sequence slots reset on restart or handoff. Configured space rows can
-  display these values; pane reporting is described above and custom status remains.
+  display these values; pane reporting is described above.
 - `zynk config check` prints full local configuration diagnostics without a
   running server or config writes. It exits 0 for valid or missing config,
   1 for diagnostics, and 2 for unsupported arguments; no JSON mode is provided.
@@ -332,6 +332,16 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Removed**
 
+- Dedicated pane `custom_status` / `clear_custom_status` fields and their CLI flags,
+  including legacy hook fallback, mobile/navigator suffixes and switcher priority.
+  JSON info and agent-status events omit the retired member. JSON requests ignore
+  retired keys under the existing unknown-field policy: retired-only metadata
+  reports fail with `invalid_metadata_request`, while otherwise valid mixed reports
+  apply surviving fields and retain the contentless `ok` response without an ignored-key
+  signal. CLI flags are rejected as unknown arguments before a socket request.
+  Use explicit pane tokens such as `--token task=reviewing` and configured desktop
+  `$task` rows; no alias or automatic value migration is provided. Binary client-frame
+  protocol version 19 is unchanged. See the README migration section.
 - **macOS and Windows support** ([ADR 0013](docs/zynk/decisions/0013-linux-only-platform-scope.md)): the
   platform implementations, the Windows PTY / named-pipe IPC / console input paths, the darwin archive-rewrite
   path in `build.rs`, the platform-only dependencies and the non-Linux CI targets. A build for any other target

@@ -22,7 +22,7 @@ pub struct PaneDetail {
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
-    pub custom_status: Option<String>,
+
     pub state_labels: HashMap<String, String>,
     pub tokens: HashMap<String, String>,
 }
@@ -64,7 +64,7 @@ impl Tab {
                     state: terminal.state,
                     seen: pane.seen,
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,
-                    custom_status: presentation.custom_status,
+
                     state_labels: presentation.state_labels,
                     tokens: terminal.metadata_tokens.values(),
                 })
@@ -167,11 +167,11 @@ mod tests {
                 applies_to_source: None,
                 title: effective.map(str::to_owned),
                 display_agent: Some("renamed-display".into()),
-                custom_status: Some("legacy-status".into()),
+
                 state_labels: HashMap::from([("working".into(), "legacy-working".into())]),
                 clear_title: false,
                 clear_display_agent: false,
-                clear_custom_status: false,
+
                 clear_state_labels: false,
                 ttl: None,
                 seq: Some(1),
@@ -206,7 +206,6 @@ mod tests {
             );
             assert_eq!(terminal.metadata_tokens.values(), tokens);
             let presentation = terminal.effective_presentation();
-            assert_eq!(presentation.custom_status.as_deref(), Some("legacy-status"));
             assert_eq!(
                 presentation.state_labels,
                 HashMap::from([("working".into(), "legacy-working".into())])
@@ -235,7 +234,6 @@ mod tests {
                 Some("osc-observation")
             );
             assert_eq!(detail.tokens, tokens);
-            assert_eq!(detail.custom_status, presentation.custom_status);
             assert_eq!(detail.state_labels, presentation.state_labels);
             assert_eq!(detail.state, AgentState::Working);
             assert!(!detail.seen);
@@ -255,7 +253,6 @@ mod tests {
                 detail.terminal_title_stripped
             );
             assert_eq!(entry.tokens, tokens);
-            assert_eq!(entry.custom_status, detail.custom_status);
             assert_eq!(entry.state_labels, detail.state_labels);
         }
     }

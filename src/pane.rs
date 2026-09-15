@@ -4849,7 +4849,6 @@ mod tests {
                 "pi".into(),
                 AgentState::Working,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::id("restarted"),
                 Some(10),
             )

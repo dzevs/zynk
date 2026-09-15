@@ -1405,7 +1405,7 @@ mod tests {
         serde_json::json!({
             "pane_id": "pane_1", "workspace_id": "ws_1", "agent_status": status,
             "agent": "pi", "title": "Observed title", "display_agent": "Review",
-            "custom_status": "waiting", "state_labels": {"idle": "Ready"}
+            "state_labels": {"idle": "Ready"}
         })
     }
 

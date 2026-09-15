@@ -752,7 +752,7 @@ fn opencode_child_prompt_through_the_real_asset(parent: &str, nested: bool) -> (
 #[test]
 fn an_own_opencode_child_prompt_keeps_the_root_receipt_anchor() {
     // Codex M4 P2 (`msg_a12f9abba8700337`): a session-less full-lifecycle report REPLACES the
-    // pane's session anchor (`set_hook_authority_with_custom_status_at`, `src/terminal/state.rs`:
+    // pane's session anchor (`set_hook_authority_at`, `src/terminal/state.rs`:
     // `persisted_agent_session = None` + `hook_authority.session_ref = None`), so the asset must
     // name the OWNING root on a child's prompt. The prompt must still project `blocked` onto the
     // pane, and a message addressed to that root just before it must still receipt.

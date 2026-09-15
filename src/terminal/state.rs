@@ -41,7 +41,7 @@ pub struct HookAuthority {
     pub agent_label: String,
     pub state: AgentState,
     pub message: Option<String>,
-    pub custom_status: Option<String>,
+
     pub reported_at: Instant,
     pub session_ref: Option<crate::agent_resume::AgentSessionRef>,
     /// The capture instant of an observed process EXIT this owner has not yet been
@@ -826,25 +826,11 @@ impl TerminalState {
         message: Option<String>,
         seq: Option<u64>,
     ) -> Option<EffectiveStateChange> {
-        self.set_hook_authority_with_custom_status(source, agent_label, state, message, None, seq)
-    }
-
-    #[cfg(test)]
-    pub fn set_hook_authority_with_custom_status(
-        &mut self,
-        source: String,
-        agent_label: String,
-        state: AgentState,
-        message: Option<String>,
-        custom_status: Option<String>,
-        seq: Option<u64>,
-    ) -> Option<EffectiveStateChange> {
-        self.set_hook_authority_with_custom_status_at(
+        self.set_hook_authority_at(
             source,
             agent_label,
             state,
             message,
-            custom_status,
             None,
             seq,
             Instant::now(),
@@ -858,29 +844,28 @@ impl TerminalState {
         agent_label: String,
         state: AgentState,
         message: Option<String>,
-        custom_status: Option<String>,
+
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         seq: Option<u64>,
     ) -> Option<TerminalStateMutation> {
-        self.set_hook_authority_with_custom_status_at(
+        self.set_hook_authority_at(
             source,
             agent_label,
             state,
             message,
-            custom_status,
             session_ref,
             seq,
             Instant::now(),
         )
     }
 
-    pub fn set_hook_authority_with_custom_status_at(
+    pub fn set_hook_authority_at(
         &mut self,
         source: String,
         agent_label: String,
         state: AgentState,
         message: Option<String>,
-        custom_status: Option<String>,
+
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         seq: Option<u64>,
         now: Instant,
@@ -955,7 +940,7 @@ impl TerminalState {
             agent_label,
             state,
             message,
-            custom_status,
+
             reported_at: now,
             session_ref,
             unconfirmed_since,
@@ -979,7 +964,7 @@ impl TerminalState {
     /// Identity and lifecycle authority are SPLIT here. The reported `source`,
     /// `agent_label` and `session_ref` are hook-derived IDENTITY and are kept, so
     /// `pane.get` still surfaces the session and a receipt can anchor on it. The
-    /// reported `state`/`message`/`custom_status` are dropped: screen detection
+    /// reported `state`/`message` are dropped: screen detection
     /// stays the only lifecycle authority for these integrations, and the report
     /// never takes `hook_authority`, so no lifecycle arbitration runs.
     ///
@@ -3038,11 +3023,11 @@ mod tests {
             applies_to_source: None,
             title: Some("metadata title".into()),
             display_agent: Some("Builder".into()),
-            custom_status: Some("legacy status".into()),
+
             state_labels: HashMap::new(),
             clear_title: false,
             clear_display_agent: false,
-            clear_custom_status: false,
+
             clear_state_labels: false,
             ttl: None,
             seq: Some(9),
@@ -3315,7 +3300,7 @@ mod tests {
             agent_label: label.into(),
             state: AgentState::Idle,
             message: None,
-            custom_status: None,
+
             reported_at: now,
             session_ref: None,
             unconfirmed_since: None,
@@ -3340,11 +3325,10 @@ mod tests {
             Some(sessionless_authority("zynk:claude", "claude", now));
         let mut same_authority = authority_over_persisted.clone();
         assert!(same_authority
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:claude".into(),
                 "claude".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(2),
@@ -3355,11 +3339,10 @@ mod tests {
         lower_persisted.detected_agent = Some(Agent::Codex);
         let before = lower_persisted.clone();
         assert!(lower_persisted
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:codex".into(),
                 "codex".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("old-session"),
                 Some(21),
@@ -3389,11 +3372,10 @@ mod tests {
         lower_persisted.detected_agent = Some(Agent::Codex);
         let before = lower_persisted.clone();
         assert!(lower_persisted
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:codex".into(),
                 "codex".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("old-session"),
                 Some(21),
@@ -3413,11 +3395,10 @@ mod tests {
             Some(sessionless_identity("zynk:hermes", "hermes", now));
         let mut same_authority = authority_over_identity.clone();
         assert!(same_authority
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:claude".into(),
                 "claude".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(2),
@@ -3464,11 +3445,10 @@ mod tests {
                     .unwrap();
             } else {
                 terminal
-                    .set_hook_authority_with_custom_status_at(
+                    .set_hook_authority_at(
                         old_source.into(),
                         old_label.into(),
                         AgentState::Idle,
-                        None,
                         None,
                         None,
                         Some(1),
@@ -3479,11 +3459,10 @@ mod tests {
             terminal.detected_agent = Some(Agent::Claude);
             let before = terminal.clone();
             assert!(terminal
-                .set_hook_authority_with_custom_status_at(
+                .set_hook_authority_at(
                     "zynk:claude".into(),
                     "claude".into(),
                     AgentState::Working,
-                    None,
                     None,
                     crate::agent_resume::AgentSessionRef::id("claude-session"),
                     Some(21),
@@ -3531,11 +3510,10 @@ mod tests {
             let session_ref = crate::agent_resume::AgentSessionRef::id("same-session");
             if shape == "full" {
                 terminal
-                    .set_hook_authority_with_custom_status_at(
+                    .set_hook_authority_at(
                         source.into(),
                         label.into(),
                         AgentState::Idle,
-                        None,
                         None,
                         session_ref.clone(),
                         Some(1),
@@ -3597,11 +3575,10 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.detected_agent = Some(Agent::Pi);
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Idle,
-                None,
                 None,
                 first,
                 Some(20),
@@ -3610,11 +3587,10 @@ mod tests {
             .unwrap();
         let before = terminal.clone();
         assert!(terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 second.clone(),
                 Some(21),
@@ -3629,11 +3605,10 @@ mod tests {
 
         terminal.hook_authority.as_mut().unwrap().session_ref = second.clone();
         assert!(terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 second,
                 Some(21),
@@ -3681,11 +3656,10 @@ mod tests {
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         let before = terminal.clone();
 
-        let rejected = terminal.set_hook_authority_with_custom_status_at(
+        let rejected = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("pi-new-session"),
             Some(21),
@@ -3883,7 +3857,7 @@ mod tests {
                         agent_label: "codex".into(),
                         state: AgentState::Idle,
                         message: None,
-                        custom_status: None,
+
                         reported_at: now,
                         session_ref: crate::agent_resume::AgentSessionRef::id("old-session"),
                         unconfirmed_since: None,
@@ -3923,11 +3897,10 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:codex".into(),
                 "codex".into(),
                 AgentState::Idle,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("old-session"),
                 Some(1),
@@ -4261,11 +4234,10 @@ mod tests {
                 match shape {
                     "full" => {
                         terminal
-                            .set_hook_authority_with_custom_status_at(
+                            .set_hook_authority_at(
                                 "zynk:claude".into(),
                                 "claude".into(),
                                 AgentState::Idle,
-                                None,
                                 None,
                                 reference,
                                 None,
@@ -4473,7 +4445,6 @@ mod tests {
                 "pi".into(),
                 AgentState::Idle,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::path(old_session),
                 Some(10),
             );
@@ -4496,7 +4467,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::path(new_session.clone()),
                 Some(12),
@@ -4525,7 +4495,6 @@ mod tests {
             "pi".into(),
             AgentState::Idle,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(session_a.clone()),
             Some(10),
         );
@@ -4541,7 +4510,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(session_b.clone()),
             Some(12),
@@ -4559,7 +4527,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(session_a.clone()),
             Some(14),
         );
@@ -4576,7 +4543,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(session_b),
             Some(15),
@@ -4630,7 +4596,6 @@ mod tests {
                 "pi".into(),
                 AgentState::Idle,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::path(old_session.clone()),
                 Some(10),
             );
@@ -4646,7 +4611,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::path(new_session),
                 Some(12),
@@ -4677,7 +4641,6 @@ mod tests {
             "omp".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(old_session.clone()),
             Some(10),
         );
@@ -4706,7 +4669,6 @@ mod tests {
             "omp".into(),
             AgentState::Blocked,
             Some("waiting".into()),
-            None,
             crate::agent_resume::AgentSessionRef::path(new_session.clone()),
             Some(12),
         );
@@ -4723,7 +4685,6 @@ mod tests {
             "omp".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(old_session),
             Some(13),
         );
@@ -4737,11 +4698,10 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             None,
             Some(10),
@@ -4765,11 +4725,10 @@ mod tests {
             AgentState::Working
         );
 
-        let stale = terminal.set_hook_authority_with_custom_status_at(
+        let stale = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             None,
             Some(9),
@@ -4784,11 +4743,10 @@ mod tests {
     fn process_exit_clears_omp_full_lifecycle_hook_authority_without_known_agent() {
         let now = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:omp".into(),
             "omp".into(),
             AgentState::Working,
-            None,
             None,
             None,
             Some(10),
@@ -4818,11 +4776,10 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             None,
             Some(20),
@@ -4838,12 +4795,11 @@ mod tests {
             true,
             now + Duration::from_millis(1),
         );
-        let late = terminal.set_hook_authority_with_custom_status_at(
+        let late = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
-            Some("late".into()),
             None,
             Some(21),
             now + Duration::from_millis(2),
@@ -4865,7 +4821,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(session_path.clone()),
             Some(20),
         );
@@ -4885,7 +4840,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            Some("late".into()),
             crate::agent_resume::AgentSessionRef::path(session_path),
             Some(21),
         );
@@ -4931,7 +4885,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(session_path.clone()),
             Some(20),
         );
@@ -4941,7 +4894,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(session_path),
             Some(22),
@@ -4961,7 +4913,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(test_session_path("old.jsonl")),
             Some(20),
         );
@@ -4971,7 +4922,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(test_session_path("new.jsonl")),
             Some(22),
@@ -4991,7 +4941,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(test_session_path("one.jsonl")),
             Some(20),
         );
@@ -5000,7 +4949,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(test_session_path("two.jsonl")),
             Some(21),
@@ -5063,7 +5011,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(test_session_path("old.jsonl")),
             Some(1000),
         );
@@ -5073,7 +5020,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(test_session_path("new.jsonl")),
             Some(1500),
@@ -5096,7 +5042,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(session_a.clone()),
             Some(1000),
         );
@@ -5106,7 +5051,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(session_b),
             Some(1500),
@@ -5119,7 +5063,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            Some("late".into()),
             crate::agent_resume::AgentSessionRef::path(session_a),
             Some(2500),
         );
@@ -5127,7 +5070,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(session_c),
             Some(2500),
@@ -5204,7 +5146,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(old_session.clone()),
             Some(1000),
         );
@@ -5244,7 +5185,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            Some("late".into()),
             crate::agent_resume::AgentSessionRef::path(old_session),
             Some(500),
         );
@@ -5252,7 +5192,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(new_session),
             Some(500),
@@ -5271,11 +5210,10 @@ mod tests {
         let new_session = test_session_path("new-after-process-exit.jsonl");
         let now = Instant::now();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(old_session),
             Some(1000),
@@ -5291,11 +5229,10 @@ mod tests {
             now + Duration::from_millis(1),
         );
 
-        let early_new = terminal.set_hook_authority_with_custom_status_at(
+        let early_new = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(new_session.clone()),
             Some(500),
@@ -5323,11 +5260,10 @@ mod tests {
             false,
             now + Duration::from_millis(4),
         );
-        let fresh_new = terminal.set_hook_authority_with_custom_status_at(
+        let fresh_new = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(new_session),
             Some(500),
@@ -5345,11 +5281,10 @@ mod tests {
         let old_session = test_session_path("old-before-nosession-process-exit.jsonl");
         let now = Instant::now();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(old_session),
             Some(1000),
@@ -5365,11 +5300,10 @@ mod tests {
             now + Duration::from_millis(1),
         );
 
-        let early_without_session = terminal.set_hook_authority_with_custom_status_at(
+        let early_without_session = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             None,
             Some(500),
@@ -5397,11 +5331,10 @@ mod tests {
             false,
             now + Duration::from_millis(4),
         );
-        let fresh_without_session = terminal.set_hook_authority_with_custom_status_at(
+        let fresh_without_session = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             None,
             Some(500),
@@ -5421,11 +5354,10 @@ mod tests {
         let session_c = test_session_path("generation-c.jsonl");
         let now = Instant::now();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(session_a.clone()),
             Some(1000),
@@ -5459,11 +5391,10 @@ mod tests {
             false,
             now + Duration::from_millis(3),
         );
-        let generation_b = terminal.set_hook_authority_with_custom_status_at(
+        let generation_b = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(session_b),
             Some(500),
@@ -5499,21 +5430,19 @@ mod tests {
             now + Duration::from_millis(7),
         );
 
-        let late_generation_a = terminal.set_hook_authority_with_custom_status_at(
+        let late_generation_a = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
-            Some("late".into()),
             crate::agent_resume::AgentSessionRef::path(session_a),
             Some(250),
             now + Duration::from_millis(8),
         );
-        let generation_c = terminal.set_hook_authority_with_custom_status_at(
+        let generation_c = terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(session_c),
             Some(250),
@@ -5583,7 +5512,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::id("fresh-session"),
             Some(22),
         );
@@ -5604,7 +5532,6 @@ mod tests {
             "omp".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::id("omp-old"),
             Some(20),
         );
@@ -5617,7 +5544,6 @@ mod tests {
             "omp".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::id("omp-old"),
             Some(22),
         );
@@ -5629,7 +5555,6 @@ mod tests {
             "zynk:omp".into(),
             "omp".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("omp-new"),
             Some(23),
@@ -5654,7 +5579,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::path(test_session_path("new.jsonl")),
                 Some(20),
@@ -5880,7 +5804,6 @@ mod tests {
                 "opencode".into(),
                 AgentState::Working,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::id("opencode-server-session"),
                 Some(4_100),
             )
@@ -5964,7 +5887,6 @@ mod tests {
                 "opencode".into(),
                 AgentState::Idle,
                 None,
-                None,
                 Some(old_session.clone()),
                 Some(20),
             )
@@ -5973,7 +5895,6 @@ mod tests {
             "zynk:opencode".into(),
             "opencode".into(),
             AgentState::Working,
-            None,
             None,
             Some(attached_session.clone()),
             Some(21),
@@ -6016,7 +5937,6 @@ mod tests {
                 "opencode".into(),
                 AgentState::Working,
                 None,
-                None,
                 Some(selected_session.clone()),
                 Some(22),
             )
@@ -6035,7 +5955,6 @@ mod tests {
             "opencode".into(),
             AgentState::Idle,
             None,
-            None,
             Some(old_session),
             Some(23),
         );
@@ -6046,7 +5965,6 @@ mod tests {
             "zynk:opencode".into(),
             "opencode".into(),
             AgentState::Blocked,
-            None,
             None,
             Some(attached_session),
             Some(24),
@@ -6077,7 +5995,6 @@ mod tests {
             "opencode".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::id("opencode-attached-client"),
             Some(31),
         );
@@ -6100,7 +6017,6 @@ mod tests {
                 "zynk:opencode".into(),
                 "opencode".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("opencode-visible"),
                 Some(32),
@@ -6197,7 +6113,6 @@ mod tests {
             "zynk:hermes".into(),
             "hermes".into(),
             AgentState::Blocked,
-            None,
             None,
             Some(replacement_ref.clone()),
             Some(12),
@@ -6308,7 +6223,6 @@ mod tests {
             "agy".into(),
             AgentState::Blocked,
             None,
-            None,
             Some(replacement_ref.clone()),
             Some(12),
         );
@@ -6369,7 +6283,6 @@ mod tests {
                 "hermes".into(),
                 AgentState::Blocked,
                 Some("ignored message".into()),
-                Some("ignored status".into()),
                 Some(session_ref.clone()),
                 Some(1),
             )
@@ -6416,7 +6329,6 @@ mod tests {
                 AgentState::Working,
                 None,
                 None,
-                None,
                 Some(1),
             )
             .expect("the first identity report is a mutation");
@@ -6445,7 +6357,6 @@ mod tests {
             "hermes".into(),
             AgentState::Idle,
             None,
-            None,
             Some(first.clone()),
             Some(1),
         );
@@ -6456,7 +6367,6 @@ mod tests {
             "zynk:hermes".into(),
             "hermes".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("hermes-2"),
             Some(2),
@@ -6479,7 +6389,6 @@ mod tests {
             "zynk:hermes".into(),
             "hermes".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("hermes-1"),
             Some(1),
@@ -6507,7 +6416,6 @@ mod tests {
             AgentState::Idle,
             None,
             None,
-            None,
             Some(1),
         );
         assert!(terminal.hook_identity.is_some());
@@ -6525,7 +6433,6 @@ mod tests {
             "zynk:hermes".into(),
             "hermes".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("hermes-1"),
             Some(1),
@@ -6552,7 +6459,6 @@ mod tests {
             "hermes".into(),
             AgentState::Idle,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::id("hermes-1"),
             Some(1),
         );
@@ -6570,7 +6476,6 @@ mod tests {
             "zynk:hermes".into(),
             "hermes".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("hermes-1"),
             Some(seq),
@@ -6626,11 +6531,10 @@ mod tests {
         let mut terminal = test_terminal();
         let observed = Instant::now();
         terminal.set_detected_state(Some(Agent::Hermes), AgentState::Idle);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:hermes".into(),
             "hermes".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("hermes-new"),
             Some(20),
@@ -6681,7 +6585,6 @@ mod tests {
             AgentState::Idle,
             None,
             None,
-            None,
             Some(1),
         );
         let before = terminal.clone();
@@ -6690,7 +6593,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("pi-new"),
                 Some(1),
@@ -6705,7 +6607,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("pi-new"),
                 Some(1),
@@ -6733,7 +6634,6 @@ mod tests {
             "zynk:hermes".into(),
             "hermes".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("hermes-2"),
             Some(22),
@@ -6835,7 +6735,6 @@ mod tests {
             "zynk:hermes".into(),
             "hermes".into(),
             AgentState::Idle,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("hermes-2"),
             Some(5),
@@ -7627,7 +7526,6 @@ mod tests {
                 "pi".into(),
                 AgentState::Working,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::id("pi-1"),
                 Some(30),
             )
@@ -8024,11 +7922,10 @@ mod tests {
             base + Duration::from_secs(3),
         );
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("pi-after-hermes"),
                 Some(1),
@@ -8045,11 +7942,10 @@ mod tests {
 
         // The regression: an ordinary same-session Pi lifecycle follow-up.
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Idle,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("pi-after-hermes"),
                 Some(2),
@@ -8144,11 +8040,10 @@ mod tests {
         let mut terminal = test_terminal();
         observe_at(&mut terminal, Some(Agent::Pi), false, base);
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(1),
@@ -8181,11 +8076,10 @@ mod tests {
         // retires, and the refusal must not spend the incoming sequence.
         let before = terminal.clone();
         assert!(terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "other:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(1),
@@ -8206,11 +8100,10 @@ mod tests {
 
         // A DIFFERENT source reporting the same agent label then takes the pane.
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "other:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(1),
@@ -8242,11 +8135,10 @@ mod tests {
         let mut terminal = test_terminal();
         observe_at(&mut terminal, Some(Agent::Pi), false, base);
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(1),
@@ -8268,11 +8160,10 @@ mod tests {
             base + Duration::from_secs(3),
         );
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:codex".into(),
                 "codex".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(1),
@@ -8291,11 +8182,10 @@ mod tests {
         );
 
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:codex".into(),
                 "codex".into(),
                 AgentState::Idle,
-                None,
                 None,
                 None,
                 Some(2),
@@ -8315,11 +8205,10 @@ mod tests {
         let mut terminal = test_terminal();
         observe_at(&mut terminal, Some(Agent::Pi), false, base);
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(1),
@@ -8432,11 +8321,10 @@ mod tests {
         let mut terminal = test_terminal();
         observe_at(&mut terminal, Some(Agent::Pi), false, base);
         terminal
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("pi-one"),
                 Some(1),
@@ -8498,11 +8386,10 @@ mod tests {
         let mut fenced = test_terminal();
         observe_at(&mut fenced, Some(Agent::Pi), false, base);
         fenced
-            .set_hook_authority_with_custom_status_at(
+            .set_hook_authority_at(
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("pi-one"),
                 Some(1),
@@ -9203,7 +9090,6 @@ mod tests {
                 AgentState::Working,
                 None,
                 None,
-                None,
                 Some(1),
             )
             .expect("the full-lifecycle owner takes authority");
@@ -9231,7 +9117,6 @@ mod tests {
             AgentState::Idle,
             None,
             None,
-            None,
             Some(2),
         );
 
@@ -9250,7 +9135,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(1),
@@ -9295,7 +9179,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("pi-1"),
                 Some(1),
@@ -9361,7 +9244,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path("/tmp/pi-session.jsonl"),
             Some(21),
@@ -9499,7 +9381,6 @@ mod tests {
             "zynk:claude".into(),
             "claude".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("claude-session"),
             Some(20),
@@ -9663,15 +9544,14 @@ mod tests {
     }
 
     #[test]
-    fn visible_blocker_suppresses_stale_hook_custom_status() {
+    fn visible_blocker_overrides_hook_state_after_presentation_retirement() {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
-        terminal.set_hook_authority_with_custom_status(
+        terminal.set_hook_authority(
             "zynk:codex".into(),
             "codex".into(),
             AgentState::Working,
             None,
-            Some("planning".into()),
             None,
         );
 
@@ -9684,7 +9564,6 @@ mod tests {
         );
 
         assert_eq!(terminal.state, AgentState::Blocked);
-        assert_eq!(terminal.effective_custom_status(), None);
     }
 
     #[test]
@@ -9692,12 +9571,11 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:claude".into(),
             "claude".into(),
             AgentState::Working,
             None,
-            Some("thinking".into()),
             None,
             None,
             now,
@@ -9715,10 +9593,6 @@ mod tests {
 
         assert_eq!(terminal.fallback_state, AgentState::Idle);
         assert_eq!(terminal.state, AgentState::Working);
-        assert_eq!(
-            terminal.effective_custom_status().as_deref(),
-            Some("thinking")
-        );
     }
 
     #[test]
@@ -9726,12 +9600,11 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Working);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:opencode".into(),
             "opencode".into(),
             AgentState::Working,
             None,
-            Some("thinking".into()),
             None,
             None,
             now,
@@ -9748,10 +9621,6 @@ mod tests {
 
         assert_eq!(terminal.fallback_state, AgentState::Working);
         assert_eq!(terminal.state, AgentState::Working);
-        assert_eq!(
-            terminal.effective_custom_status().as_deref(),
-            Some("thinking")
-        );
     }
 
     #[test]
@@ -9759,11 +9628,10 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:claude".into(),
             "claude".into(),
             AgentState::Idle,
-            None,
             None,
             None,
             None,
@@ -9790,11 +9658,10 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:kimi".into(),
             "kimi".into(),
             AgentState::Idle,
-            None,
             None,
             None,
             None,
@@ -9821,11 +9688,10 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Kilo), AgentState::Idle);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:kilo".into(),
             "kilo".into(),
             AgentState::Idle,
-            None,
             None,
             None,
             None,
@@ -9861,11 +9727,10 @@ mod tests {
             now,
         );
 
-        let change = terminal.set_hook_authority_with_custom_status_at(
+        let change = terminal.set_hook_authority_at(
             "zynk:claude".into(),
             "claude".into(),
             AgentState::Idle,
-            None,
             None,
             None,
             None,
@@ -9896,12 +9761,11 @@ mod tests {
             false,
             now,
         );
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:codex".into(),
             "codex".into(),
             AgentState::Blocked,
             None,
-            Some("permission".into()),
             None,
             None,
             now + Duration::from_millis(1201),
@@ -9921,10 +9785,6 @@ mod tests {
 
         assert_eq!(terminal.fallback_state, AgentState::Working);
         assert_eq!(terminal.state, AgentState::Blocked);
-        assert_eq!(
-            terminal.effective_custom_status().as_deref(),
-            Some("permission")
-        );
         assert!(change.effective_state_change.is_none());
     }
 
@@ -10036,11 +9896,10 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             None,
             None,
@@ -10144,11 +10003,10 @@ mod tests {
             false,
             observed,
         );
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:claude".into(),
             "claude".into(),
             AgentState::Working,
-            None,
             None,
             None,
             Some(1),
@@ -10181,22 +10039,20 @@ mod tests {
             false,
             observed,
         );
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:codex".into(),
             "codex".into(),
             AgentState::Working,
-            None,
             None,
             None,
             Some(1),
             observed,
         );
-        terminal.set_hook_authority_with_custom_status_at(
+        terminal.set_hook_authority_at(
             "zynk:codex".into(),
             "codex".into(),
             AgentState::Working,
             None,
-            Some("new turn".into()),
             None,
             Some(2),
             observed + Duration::from_secs(1),
@@ -10213,7 +10069,7 @@ mod tests {
         );
 
         let authority = terminal.hook_authority.as_ref().expect("hook authority");
-        assert_eq!(authority.custom_status.as_deref(), Some("new turn"));
+        assert_eq!(authority.reported_at, observed + Duration::from_secs(1));
         assert_eq!(terminal.state, AgentState::Working);
         assert_eq!(terminal.effective_agent_label(), Some("codex"));
     }
@@ -10295,7 +10151,6 @@ mod tests {
                 "pi".into(),
                 AgentState::Working,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::path(session_path.clone()),
                 Some(20),
             )
@@ -10325,7 +10180,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(session_path.clone()),
             Some(20),
         );
@@ -10334,7 +10188,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(new_session_path),
             Some(19),
@@ -10360,7 +10213,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(session_path),
             Some(20),
         );
@@ -10370,7 +10222,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 None,
                 Some(21),
@@ -10544,7 +10395,6 @@ mod tests {
                 "opencode".into(),
                 AgentState::Working,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::id("opencode-session"),
                 Some(20),
             )
@@ -10556,7 +10406,6 @@ mod tests {
                 "opencode".into(),
                 AgentState::Blocked,
                 Some("needs approval".into()),
-                None,
                 crate::agent_resume::AgentSessionRef::id("nested-session"),
                 Some(21),
             )
@@ -10583,7 +10432,6 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
             crate::agent_resume::AgentSessionRef::path(session_path),
             Some(20),
         );
@@ -10604,7 +10452,6 @@ mod tests {
             "zynk:pi".into(),
             "pi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::path(session_path),
             Some(20),
@@ -10665,7 +10512,6 @@ mod tests {
             "zynk:kimi".into(),
             "kimi".into(),
             AgentState::Working,
-            None,
             None,
             crate::agent_resume::AgentSessionRef::id("kimi-session"),
             Some(20),

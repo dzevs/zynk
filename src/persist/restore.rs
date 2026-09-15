@@ -1871,7 +1871,6 @@ mod tests {
                 "pi".into(),
                 AgentState::Working,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::id("pi-1"),
                 Some(20),
             )
@@ -1891,7 +1890,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("pi-1"),
                 Some(30),

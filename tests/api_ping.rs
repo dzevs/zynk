@@ -1756,7 +1756,7 @@ fn pane_report_agent_updates_effective_state() {
     let metadata = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_hook_metadata","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"zynk:pi","title":"Refactor auth","display_agent":"Pi auth","custom_status":"middleware","state_labels":{{"working":"deep in the mines"}}}}}}"#,
+            r#"{{"id":"req_hook_metadata","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"zynk:pi","title":"Refactor auth","display_agent":"Pi auth","state_labels":{{"working":"deep in the mines"}}}}}}"#,
             pane_id
         ),
     );
@@ -1773,7 +1773,6 @@ fn pane_report_agent_updates_effective_state() {
     assert_eq!(pane["result"]["pane"]["agent_status"], "working");
     assert_eq!(pane["result"]["pane"]["title"], "Refactor auth");
     assert_eq!(pane["result"]["pane"]["display_agent"], "Pi auth");
-    assert_eq!(pane["result"]["pane"]["custom_status"], "middleware");
     assert_eq!(
         pane["result"]["pane"]["state_labels"]["working"],
         "deep in the mines"
@@ -1796,7 +1795,6 @@ fn pane_report_agent_updates_effective_state() {
     );
     assert_eq!(agent["result"]["agent"]["title"], "Refactor auth");
     assert_eq!(agent["result"]["agent"]["display_agent"], "Pi auth");
-    assert_eq!(agent["result"]["agent"]["custom_status"], "middleware");
     assert_eq!(
         agent["result"]["agent"]["state_labels"]["working"],
         "deep in the mines"
@@ -1805,7 +1803,7 @@ fn pane_report_agent_updates_effective_state() {
     let invalid_metadata = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_hook_metadata_invalid","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","custom_status":"x","clear_custom_status":true}}}}"#,
+            r#"{{"id":"req_hook_metadata_invalid","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","title":"x","clear_title":true}}}}"#,
             pane_id
         ),
     );
@@ -1817,7 +1815,7 @@ fn pane_report_agent_updates_effective_state() {
     let blank_source_metadata = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_hook_metadata_blank_source","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"   ","custom_status":"x"}}}}"#,
+            r#"{{"id":"req_hook_metadata_blank_source","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"   ","title":"x"}}}}"#,
             pane_id
         ),
     );
@@ -1841,7 +1839,7 @@ fn pane_report_agent_updates_effective_state() {
     let blank_authority_source_metadata = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_hook_metadata_blank_authority_source","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","applies_to_source":"   ","custom_status":"x"}}}}"#,
+            r#"{{"id":"req_hook_metadata_blank_authority_source","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","applies_to_source":"   ","title":"x"}}}}"#,
             pane_id
         ),
     );
@@ -2481,7 +2479,7 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
     let metadata = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_meta_sub_3","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"zynk:pi","custom_status":"filtered out"}}}}"#,
+            r#"{{"id":"req_meta_sub_3","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"zynk:pi","title":"filtered out"}}}}"#,
             pane_id
         ),
     );
@@ -2507,7 +2505,7 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
     let metadata = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_meta_sub_4","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"zynk:pi","custom_status":"short lived","ttl_ms":100}}}}"#,
+            r#"{{"id":"req_meta_sub_4","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"zynk:pi","title":"short lived","ttl_ms":100}}}}"#,
             pane_id
         ),
     );
@@ -2518,14 +2516,14 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
     assert_eq!(set_event["data"]["pane_id"], pane_id);
     assert_eq!(set_event["data"]["agent_status"], "working");
     assert_eq!(set_event["data"]["agent"], "pi");
-    assert_eq!(set_event["data"]["custom_status"], "short lived");
+    assert_eq!(set_event["data"]["title"], "short lived");
 
     let expiry_event = reader.read_json_line(Duration::from_secs(3));
     assert_eq!(expiry_event["event"], "pane.agent_status_changed");
     assert_eq!(expiry_event["data"]["pane_id"], pane_id);
     assert_eq!(expiry_event["data"]["agent_status"], "working");
     assert_eq!(expiry_event["data"]["agent"], "pi");
-    assert!(expiry_event["data"]["custom_status"].is_null());
+    assert!(expiry_event["data"]["title"].is_null());
 
     cleanup_spawned_zynk(child, base);
 }
@@ -2710,7 +2708,7 @@ fn m828b_pane_and_agent_tokens_are_visible_without_authority() {
     assert!(initial.get("agent_session").is_none());
     let reported = send_request(&socket, &serde_json::json!({"id": "m828b-report", "method": "pane.report_metadata",
         "params": {"pane_id": pane_id, "source": "user:display", "seq": 1, "title": "Task", "display_agent": "Builder",
-            "custom_status": "legacy status", "tokens": {"build": "ok"}}}).to_string());
+            "tokens": {"build": "ok"}}}).to_string());
     assert_eq!(reported["result"]["type"], "ok", "{reported}");
     let pane_response = send_request(&socket, &serde_json::json!({"id": "m828b-pane", "method": "pane.get", "params": {"pane_id": pane_id}}).to_string());
     let pane = &pane_response["result"]["pane"];
@@ -2725,7 +2723,6 @@ fn m828b_pane_and_agent_tokens_are_visible_without_authority() {
         assert_eq!(info["agent"], initial["agent"]);
         assert_eq!(info["title"], "Task");
         assert_eq!(info["display_agent"], "Builder");
-        assert_eq!(info["custom_status"], "legacy status");
         assert!(info.get("agent_session").is_none());
     }
     for (method, field) in [("pane.list", "panes"), ("agent.list", "agents")] {
@@ -2741,7 +2738,6 @@ fn m828b_pane_and_agent_tokens_are_visible_without_authority() {
             .unwrap();
         assert_eq!(listed["tokens"], pane["tokens"]);
         assert_eq!(listed["revision"], pane["revision"]);
-        assert_eq!(listed["custom_status"], "legacy status");
         assert!(listed.get("agent_session").is_none());
     }
     for (method, params) in [

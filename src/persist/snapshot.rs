@@ -689,11 +689,11 @@ mod tests {
                 applies_to_source: None,
                 title: Some("never-persist-title".into()),
                 display_agent: None,
-                custom_status: None,
+
                 state_labels: HashMap::new(),
                 clear_title: false,
                 clear_display_agent: false,
-                clear_custom_status: false,
+
                 clear_state_labels: false,
                 ttl: Some(Duration::from_secs(30)),
                 seq: Some(7),
@@ -1358,7 +1358,6 @@ mod tests {
                 "pi".into(),
                 crate::detect::AgentState::Working,
                 None,
-                None,
                 crate::agent_resume::AgentSessionRef::path(session_path.clone()),
                 Some(20),
             );
@@ -1402,7 +1401,6 @@ mod tests {
                 "zynk:pi".into(),
                 "pi".into(),
                 crate::detect::AgentState::Working,
-                None,
                 None,
                 crate::agent_resume::AgentSessionRef::id("pi-1"),
                 Some(20),

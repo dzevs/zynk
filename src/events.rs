@@ -83,7 +83,7 @@ pub enum AppEvent {
         agent_label: String,
         state: AgentState,
         message: Option<String>,
-        custom_status: Option<String>,
+
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
     },
@@ -104,11 +104,11 @@ pub enum AppEvent {
         applies_to_source: Option<String>,
         title: Option<String>,
         display_agent: Option<String>,
-        custom_status: Option<String>,
+
         state_labels: std::collections::HashMap<String, String>,
         clear_title: bool,
         clear_display_agent: bool,
-        clear_custom_status: bool,
+
         clear_state_labels: bool,
         seq: Option<u64>,
         ttl: Option<std::time::Duration>,

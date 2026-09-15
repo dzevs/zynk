@@ -492,9 +492,6 @@ fn pane_detail(
             } else {
                 parts.push("shell".to_string());
             }
-            if let Some(status) = terminal.effective_custom_status() {
-                parts.push(status.to_string());
-            }
         }
     }
     parts.join(" · ")
@@ -576,6 +573,71 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use crate::detect::AgentState;
+
+    fn m828e_presentation_owner() -> crate::app::App {
+        let config: crate::config::Config =
+            toml::from_str("onboarding = false\n[ui.sidebar.agents]\nrows = [[\"$task\"]]\n")
+                .unwrap();
+        let mut app = crate::app::App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("retirement")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane)
+            .unwrap()
+            .seen = true;
+        app.next_resize_poll = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        let ws = &app.state.workspaces[0];
+        let target = crate::workspace::public_pane_id_for_number(
+            &ws.id,
+            ws.public_pane_number(pane).unwrap(),
+        );
+        let request = serde_json::from_value(serde_json::json!({"id":"retirement", "method":"pane.report_metadata", "params":{
+            "pane_id":target, "source":"user:retirement", "title":"TITLE", "display_agent":"DISPLAY", "state_labels":{"idle":"STATE-LABEL"}, "custom_status":"OLD-STATUS", "tokens":{"task":"TOKEN-ONLY"}
+        }})).unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(request)).unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"id":"retirement", "result":{"type":"ok"}})
+        );
+        app
+    }
+
+    #[test]
+    fn m828e_navigator_retires_custom_suffix_and_keeps_semantic_detail() {
+        let owner = m828e_presentation_owner();
+        let pane = owner.state.workspaces[0].tabs[0].root_pane;
+        let detail = pane_detail(&owner.state, &owner.terminal_runtimes, 0, 0, pane);
+        assert!(
+            detail.contains("TITLE") && detail.contains("DISPLAY"),
+            "{detail}"
+        );
+        assert!(detail.contains("STATE-LABEL"), "{detail}");
+        assert!(!detail.contains("OLD-STATUS"), "{detail}");
+        assert!(!detail.contains("TOKEN-ONLY"), "{detail}");
+    }
 
     fn row(depth: u8, is_workspace: bool) -> NavigatorRow {
         NavigatorRow {

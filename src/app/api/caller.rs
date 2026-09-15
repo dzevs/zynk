@@ -668,7 +668,6 @@ mod tests {
                 agent: "pi".into(),
                 state: PaneAgentState::Idle,
                 message: None,
-                custom_status: None,
                 seq: None,
                 agent_session_id: None,
                 agent_session_path: None,

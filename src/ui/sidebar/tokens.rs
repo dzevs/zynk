@@ -143,7 +143,7 @@ mod tests {
             state: AgentState::Working,
             seen: true,
             last_agent_state_change_seq: None,
-            custom_status: Some("retained-custom-status".into()),
+
             state_labels: HashMap::new(),
         }
     }

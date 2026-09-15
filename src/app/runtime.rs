@@ -1153,7 +1153,7 @@ mod tests {
             agent_label: "pi".into(),
             state: crate::detect::AgentState::Working,
             message: None,
-            custom_status: None,
+
             seq: None,
             session_ref: None,
         });
@@ -1164,14 +1164,14 @@ mod tests {
             applies_to_source: Some("zynk:pi".into()),
             title: Some("temporary title".into()),
             display_agent: Some("display pi".into()),
-            custom_status: Some("short lived".into()),
+
             state_labels: std::collections::HashMap::from([(
                 "working".into(),
                 "busy label".into(),
             )]),
             clear_title: false,
             clear_display_agent: false,
-            clear_custom_status: false,
+
             clear_state_labels: false,
             seq: Some(4),
             ttl: Some(Duration::from_secs(60)),
@@ -1186,8 +1186,8 @@ mod tests {
         assert_eq!(terminal.state, crate::detect::AgentState::Working);
         assert!(terminal.agent_metadata.contains_key("user:pi-display"));
         assert_eq!(
-            terminal.effective_custom_status().as_deref(),
-            Some("short lived")
+            terminal.effective_title().as_deref(),
+            Some("temporary title")
         );
         let authority = terminal.hook_authority.clone();
         let identity = terminal.hook_identity.clone();
@@ -1229,7 +1229,7 @@ mod tests {
             terminal.agent_metadata.is_empty(),
             "stored presentation must be purged"
         );
-        assert_eq!(terminal.effective_custom_status(), None);
+        assert_eq!(terminal.effective_title(), None);
         assert_eq!(terminal.state, crate::detect::AgentState::Working);
         assert_eq!(terminal.hook_authority, authority);
         assert_eq!(terminal.hook_identity, identity);
@@ -1242,7 +1242,7 @@ mod tests {
         assert!(
             matches!(&events[0].1.data, EventData::PaneAgentStatusChanged {
             agent_status: crate::api::schema::AgentStatus::Working,
-            title: None, display_agent: None, custom_status: None, state_labels, ..
+            title: None, display_agent: None, state_labels, ..
         } if state_labels.is_empty())
         );
         assert_eq!(events[1].1.event, EventKind::WorkspaceMetadataUpdated);

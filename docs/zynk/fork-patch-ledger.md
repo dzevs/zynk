@@ -6517,3 +6517,95 @@ parent chronology. All twenty origins, unions and secondaries, M8-37, M8-65,
 N1/N3, the operator deviation and M8-RECT-NARROW remain unresolved and unwaived.
 Whole-M8 Gate-2 and fresh independent Gate-3 still precede integration. No merge,
 push, install, tag, publish, release or cleanup is authorized by this append.
+
+### M8-28E presentation retirement (implemented, review pending)
+
+E builds on the D2 checkpoint 8976a51, without extending its approval. The
+assigned 5cfe5e5e source is adapted for this fork; unrelated A/B/C/D, styled-row,
+platform, packaging and native-conversation changes are not imported by E.
+Gate-1 approved the executable specification and two bounded addenda only.
+
+- Dedicated custom_status storage, request/projection/event members, clear flag,
+  hook fallback, CLI flags, mobile/navigator suffixes and switcher priority are
+  retired. Surviving title, display-agent and state-label presentation remains
+  separate from lifecycle, hook ownership, B1 replay and receipt authority.
+  The binary client-frame protocol remains version 19; JSON clients must adapt
+  to the removed member. The accepted ADR 0014 field-list wording and historical
+  release fixture remain raw historical context, not current field inventories.
+- Compatibility is explicit: JSON decoding still ignores unknown retired keys;
+  retired-only metadata fails the existing missing-field check; an otherwise
+  valid mixed report applies surviving fields with the unchanged contentless
+  Ok response and no ignored-key signal. CLI legacy flags refuse before a socket
+  request. There is no catch-all, new deny policy, automatic alias or envelope
+  rewrite. README/SPEC/CHANGELOG describe explicit task tokens and desktop $task
+  rows, not an automatic mobile/navigator replacement or value migration.
+- Original full parent passed 4286 with five ignored. Twelve parent-compatible
+  controls were then added without production changes: E09 passed, and the
+  other eleven stopped at their declared retirement groups. Qualified output
+  enumeration, not count arithmetic, establishes that all old statuses stayed
+  unchanged. Parent-controls had 4298 scheduled and five ignored identities.
+- The first child compile failed with zero outcomes. The complete byte query
+  had located two restore test-helper calls, but their path had wrongly been
+  disposed RAW. The approved addendum removed only the fifth argument from the
+  two helpers and added their three raw consuming tests to targeted selection.
+  Production restore remains raw. A separate plan defect in the expired-entry
+  conversion was corrected to clear an empty state-label map while preserving
+  Fresh display and the expired-title witness; no child execution used the
+  defective conversion. The original preflights and failed compile remain.
+- Child full-v2 passed all 4298 scheduled tests with five ignored, including the
+  unchanged desktop/mobile FrameData characterizations. Lint passed on those
+  same 1729 payloads and modes. Targeted membership is 169 old controls plus
+  twelve new controls, 181 total, with three approved old-control renames.
+- Six serial faults produced 1086 scheduled outcomes: 1071 PASS and 15 FAIL.
+  Report 531c8ef7 binds all rows by variant, binary, test name and source snapshot.
+  All six intended first sites match the prepared predictions. Ten stops are
+  assertion macros and five are request-decoding unwraps. F01's six incidental
+  decoding stops precede handler/render groups; they are not socket-readiness
+  failures or discrimination of later groups. The other three incidental stops
+  retain their atomic-validation and exact mobile-detail sites.
+- E02, E03, E06, E07 and E08 have no crossing in these six faults; all pass on
+  restored child. Absence of a crossing is neither unexecuted coverage nor a
+  complete fault-class claim. F06's old deadline equality precedes its later
+  title/clear/expiry assertions. Combined detail assertions retain their printed
+  values without attributing a failed conjunct from the site alone.
+- All six restoration boundaries rechecked the 1729 original child bytes/modes.
+  Restored selection passed 181. Its 3825 printed SKIPs include three ignored
+  identities; another 297 full-population identities belong entirely to nineteen
+  binaries with no selected tests and no printed rows, including the other two
+  ignored identities. The companion enumerates these sets; neither SKIPs nor
+  omitted binaries are test executions. Each printed identity repeats twice.
+- Source-only report b690ada9 binds 169 old bodies: 37 raw, 92 reconstructed
+  interface adapters and 40 property conversions/partial retirements. It checks
+  all 132 changed existing tests in the covered files against P7, all twelve new
+  controls raw against their parent-compatible bodies, the two B1 production
+  methods outside retirement operations, and the complete restore file. Its
+  36 proof files include one raw P7 path outside the 35 edited Rust files.
+  Source reconstruction and converted properties are not behavioural equivalence,
+  final-byte execution at parent, or complete execution traces.
+- Actual edit populations are 35 Rust plus five documentation/demo paths, forty
+  total. This is distinct from the original retired-spelling query's forty paths.
+  The demo's extracted report function passes a real Bash/stub argv probe and
+  the whole script passes syntax checking; no complete demo or live-runtime
+  experiment was run. Documentation bytes postdate the Rust fault cohort.
+- Internal tool histories remain separate from candidate results. The parser's
+  three review cycles returned findings; corrections pass sixteen focused cases,
+  but there is no clean internal verdict. A later body-auditor execution refused
+  despite a clean static cycle; its wrong proof-path population was corrected
+  without candidate changes, retaining the failed attempt. Kind classification
+  was corrected before report execution to use source, not default panic words.
+  Detailed inputs, dispositions, mock/syntax limits and output bindings travel
+  with the review packet. They are not Gate-2 or independent Gate-3 approvals.
+
+Final source/delta binding, fresh checks, normal local commit and exact-SHA
+checks are still required by this implementation entry. E Gate-1 N-1 remains
+nonblocking and open: the three converted subscription controls vary title, not
+separate display-agent and state-label changes. N-2's population-label question
+is closed; no broader inventory or behavioural completeness follows.
+
+The three standing limits remain individually unresolved and unwaived, including
+T07/T24/T26 chronology incurred during D2. All twenty origins and recorded carries,
+unions 98/34, D's five primaries, M8-33, both M9-12 secondary adaptations, M8-37,
+M8-65, N1/N3 and the operator deviation remain open. M8-RECT-NARROW, the distinct
+D2 selected-cohort style-byte miss, and every boundary-tool review history stay
+open. E Gate-2, whole-M8 Gate-2 and fresh independent Gate-3 precede integration.
+No merge, push, install, tag, publish, release or cleanup is authorized here.

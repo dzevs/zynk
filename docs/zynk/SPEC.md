@@ -274,11 +274,23 @@ not denormalized onto every message.
 - Transport: newline-delimited JSON over `~/.config/zynk/zynk.sock` (zynk → `~/.config/zynk/…`).
 - `pane.send_input` (atomic submit), `pane.send_text`/`send_keys` (no Enter).
 - `pane.report_agent` (lifecycle), `pane.report_agent_session` → `agent_session{source,agent,kind:id|path,value}`,
-  `pane.report_metadata` (display: title/display-agent/custom-status/state-labels/ttl).
+  `pane.report_metadata` (display: title/display-agent/state-labels/tokens/ttl).
 - `events.subscribe`/`events.wait` (`pane.agent_status_changed`, `workspace.*`).
 - `integration install <pi|omp|claude|codex|…>` — registers agent hooks; zynk registers its own.
 - zynk has NO native conversation persistence → F1/F2/F3/F4 + delivery records are 100% zynk-layer.
   (zynk's `src/persist*` is session/layout state, not messages — a pattern to learn from, not reuse.)
+
+Dedicated `custom_status` and `clear_custom_status` presentation are retired. JSON request decoding
+keeps its existing unknown-field policy: retired keys are ignored, even in otherwise valid mixed
+reports, with no alias or ignored-key signal in the legacy contentless `Ok {}` API response.
+Retired-only metadata reports fail the existing missing-field check (`invalid_metadata_request`).
+CLI `--custom-status` and `--clear-custom-status` fail as unknown arguments before a socket request.
+JSON projections and agent-status events omit the retired member; the binary client-frame protocol
+stays at version 19. This does not change F4's separate CLI command-envelope contract. Explicit
+display tokens such as `task`, opted into as `$task` in desktop agent rows, replace user-chosen text;
+they do not migrate old values or acquire lifecycle, hook, replay or receipt authority. Mobile and
+navigator details and the agent switcher have no automatic token alias. See the README migration
+section for the three caller experiences and token reporting limits.
 
 ## 9. Fork engineering discipline
 

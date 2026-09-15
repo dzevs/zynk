@@ -502,11 +502,11 @@ mod tests {
                 applies_to_source: None,
                 title: Some(format!("presentation-{index}")),
                 display_agent: None,
-                custom_status: None,
+
                 state_labels: std::collections::HashMap::new(),
                 clear_title: false,
                 clear_display_agent: false,
-                clear_custom_status: false,
+
                 clear_state_labels: false,
                 ttl: None,
                 seq: Some(1),

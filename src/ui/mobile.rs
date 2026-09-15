@@ -718,9 +718,6 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     if let Some(agent_label) = entry.agent_label.as_deref() {
         parts.push(agent_label.to_string());
     }
-    if let Some(custom_status) = entry.custom_status.as_deref() {
-        parts.push(custom_status.to_string());
-    }
 
     format!("  {}", parts.join(" · "))
 }
@@ -1178,6 +1175,75 @@ fn draw_horizontal_rule(frame: &mut Frame, area: Rect, p: &Palette) {
 mod tests {
     use super::*;
 
+    fn m828e_presentation_owner() -> crate::app::App {
+        let config: crate::config::Config =
+            toml::from_str("onboarding = false\n[ui.sidebar.agents]\nrows = [[\"$task\"]]\n")
+                .unwrap();
+        let mut app = crate::app::App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("retirement")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane)
+            .unwrap()
+            .seen = true;
+        app.next_resize_poll = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        let ws = &app.state.workspaces[0];
+        let target = crate::workspace::public_pane_id_for_number(
+            &ws.id,
+            ws.public_pane_number(pane).unwrap(),
+        );
+        let request = serde_json::from_value(serde_json::json!({"id":"retirement", "method":"pane.report_metadata", "params":{
+            "pane_id":target, "source":"user:retirement", "title":"TITLE", "display_agent":"DISPLAY", "state_labels":{"idle":"STATE-LABEL"}, "custom_status":"OLD-STATUS", "tokens":{"task":"TOKEN-ONLY"}
+        }})).unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(request)).unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"id":"retirement", "result":{"type":"ok"}})
+        );
+        app
+    }
+
+    #[test]
+    fn m828e_mobile_retires_custom_suffix_without_importing_desktop_tokens() {
+        let owner = m828e_presentation_owner();
+        let entries = crate::ui::sidebar::agent_panel_entries(&owner.state);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].tokens.get("task").map(String::as_str),
+            Some("TOKEN-ONLY")
+        );
+        let detail = mobile_agent_detail(&entries[0]);
+        assert!(
+            detail.contains("STATE-LABEL") && detail.contains("DISPLAY"),
+            "{detail}"
+        );
+        assert!(!detail.contains("OLD-STATUS"), "{detail}");
+        assert!(!detail.contains("TOKEN-ONLY"), "{detail}");
+    }
+
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry {
             ws_idx: 0,
@@ -1195,7 +1261,7 @@ mod tests {
             terminal_title: None,
             terminal_title_stripped: None,
             tokens: std::collections::HashMap::new(),
-            custom_status: None,
+
             state_labels: std::collections::HashMap::new(),
         }
     }

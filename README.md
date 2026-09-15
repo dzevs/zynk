@@ -212,11 +212,11 @@ snapshots after changed reports and scheduled expiry. Event envelope/data tags u
 This is an ordinary retained-history subscription, not a plugin hook, initial-state probe,
 lossless log, or atomic snapshot/subscribe operation. Seed from `workspace.get`.
 Values and sequence slots are excluded from saved session snapshots and handoff payloads;
-report again after restart or handoff. Reporting, querying and subscribing are available here;
-configurable token display is staged separately. Tokens do not grant identity or message receipt.
+report again after restart or handoff. Configured desktop space rows can display these tokens.
+Tokens do not grant identity or message receipt.
 
 `pane.report_metadata` also accepts display-only tokens alongside the existing title,
-display-agent, custom-status and state-label fields. Use a current ID from `zynk pane list`:
+display-agent and state-label fields. Use a current ID from `zynk pane list`:
 `zynk pane report-metadata "$PANE_ID" --source user:build --token build=ready --seq 0 --ttl-ms 5000`.
 Repeat `--token` or `--clear-token`; the last occurrence wins and `=` is allowed in values.
 The pane CLI retains silent success and its existing API-error output, unlike the structured
@@ -231,8 +231,8 @@ at most 16 request keys and 32 stored keys after clears and sets together. Omitt
 or sending `{}` keeps the legacy presentation route, including its permissive nonempty source
 and unrestricted unsigned TTL. Adding nonempty tokens to such a report can therefore require
 changing its source or TTL. Previously ignored `tokens` inputs now have meaning; malformed
-token maps or values are rejected rather than silently discarded. Existing custom-status and
-presentation guards remain available; those guards do not restrict token storage or grant identity.
+token maps or values are rejected rather than silently discarded. The remaining presentation
+guards do not restrict token storage or grant identity.
 
 Pane presentation and tokens share a per-source replay sequence. At most 32 sources may make
 sequenced token reports; legacy presentation sources remain uncapped. Unsequenced reports allocate
@@ -260,8 +260,40 @@ Pane token values, TTLs and presentation payloads are ephemeral across restart a
 Unlike workspace admission, pane replay sequences and token-source slots survive live handoff;
 cold restore drops both, and older snapshots without token-source accounting default to an empty set.
 Clearing or expiring values, or respawning within the same terminal state, does not free admission
-slots or erase replay fences. Respawn adds no token-value reset. Configurable rendering remains staged
-separately; reporting tokens does not change lifecycle state, hook identity or receipt authority.
+slots or erase replay fences. Respawn adds no token-value reset. Configured desktop agent rows can
+display these tokens; reporting them does not change lifecycle state, hook identity or receipt authority.
+
+#### Migrating custom status
+
+The dedicated `custom_status` field and `clear_custom_status` flag are retired, including their
+CLI flags `--custom-status` and `--clear-custom-status`. CLI calls using those flags are rejected
+as unknown arguments before making a socket request. JSON requests retain their existing
+unknown-field policy: those keys are ignored, regardless of their value type. A metadata report
+containing only retired fields is rejected with `invalid_metadata_request` because no reportable
+field remains. An otherwise valid mixed report applies its remaining fields and returns the
+unchanged `{"result":{"type":"ok"}}` response (with the request ID), without identifying ignored
+keys. Lifecycle reports likewise ignore a supplied retired key and process their remaining fields.
+There is no automatic alias, value migration or new response envelope.
+
+For display-only task text, report an explicit token using the source, size, sequence and TTL rules
+above, then opt into it in desktop sidebar rows:
+
+```sh
+zynk pane report-metadata "$PANE_ID" --source user:task --token task=reviewing
+```
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "agent", "state_text"], ["$task"]]
+```
+
+The token is not hook authority, lifecycle state or a fallback for state labels. Mobile and
+navigator details no longer append legacy custom status, and the agent switcher no longer prefers
+it over state labels; none of those surfaces automatically displays `$task`. Pane/agent JSON
+projections and `pane.agent_status_changed` event data omit `custom_status`. This JSON member
+retirement does not change the separately versioned binary client-frame protocol (version 19).
+External JSON consumers must stop depending on the removed member; ephemeral values must be
+reported again after restart or handoff.
 
 Pane/agent info also exposes optional `terminal_title` and `terminal_title_stripped` observations,
 including in live `session.snapshot` and full `pane.updated` snapshots. They are omitted when absent

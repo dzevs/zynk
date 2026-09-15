@@ -220,6 +220,118 @@ mod tests {
     use super::*;
 
     #[test]
+    fn m828e_retired_request_keys_follow_unknown_field_policy() {
+        for (method, base) in [
+            (
+                "pane.report_agent",
+                serde_json::json!({"pane_id":"w1:p1", "source":"zynk:claude", "agent":"claude", "state":"working", "message":"kept", "seq":7}),
+            ),
+            (
+                "pane.report_metadata",
+                serde_json::json!({"pane_id":"w1:p1", "source":"user:task", "title":"kept", "tokens":{"task":"ready"}, "seq":7}),
+            ),
+        ] {
+            for legacy in [
+                serde_json::json!("old"),
+                serde_json::json!(null),
+                serde_json::json!({"ignored":true}),
+            ] {
+                let mut params = base.clone();
+                params["custom_status"] = legacy;
+                params["clear_custom_status"] = serde_json::json!(true);
+                params["unknown_sentinel"] = serde_json::json!({"ignored":true});
+                let input =
+                    serde_json::json!({"id":"retirement", "method":method, "params":params});
+                let request: Request = serde_json::from_value(input).unwrap();
+                let output = serde_json::to_value(request).unwrap();
+                assert_eq!(output["method"], method);
+                assert_eq!(output["params"]["seq"], 7);
+                assert!(output["params"].get("unknown_sentinel").is_none());
+                assert!(
+                    output["params"].get("custom_status").is_none(),
+                    "{method}: {output}"
+                );
+                assert!(
+                    output["params"].get("clear_custom_status").is_none(),
+                    "{method}: {output}"
+                );
+                for (key, value) in base.as_object().unwrap() {
+                    assert_eq!(&output["params"][key], value, "{method}/{key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m828e_runtime_schema_has_no_retired_properties() {
+        fn inspect(value: &serde_json::Value, at: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let Some(properties) =
+                        map.get("properties").and_then(serde_json::Value::as_object)
+                    {
+                        for field in ["custom_status", "clear_custom_status"] {
+                            assert!(!properties.contains_key(field), "{at}/properties/{field}");
+                        }
+                    }
+                    for (key, child) in map {
+                        inspect(child, &format!("{at}/{key}"));
+                    }
+                }
+                serde_json::Value::Array(array) => {
+                    for (index, child) in array.iter().enumerate() {
+                        inspect(child, &format!("{at}/{index}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let schema = export::protocol_schema_document();
+        let metadata =
+            &schema["schemas"]["request"]["$defs"]["PaneReportMetadataParams"]["properties"];
+        for key in [
+            "title",
+            "display_agent",
+            "state_labels",
+            "tokens",
+            "seq",
+            "ttl_ms",
+        ] {
+            assert!(metadata.get(key).is_some(), "retained field {key}");
+        }
+        inspect(&schema, "schema");
+    }
+
+    #[test]
+    fn m828e_info_and_status_serializers_drop_retired_output() {
+        let mut pane = m828b_pane_json();
+        pane["custom_status"] = serde_json::json!("old");
+        pane["title"] = serde_json::json!("kept");
+        pane["tokens"] = serde_json::json!({"task":"ready"});
+        for output in [
+            serde_json::to_value(serde_json::from_value::<PaneInfo>(pane.clone()).unwrap())
+                .unwrap(),
+            serde_json::to_value(serde_json::from_value::<AgentInfo>(pane).unwrap()).unwrap(),
+        ] {
+            assert_eq!(output["title"], "kept");
+            assert_eq!(output["tokens"], serde_json::json!({"task":"ready"}));
+            assert!(output.get("custom_status").is_none(), "{output}");
+        }
+        let status = serde_json::json!({"pane_id":"w1:p1", "workspace_id":"w1", "agent_status":"working", "agent":"claude", "title":"kept", "display_agent":"display", "state_labels":{"working":"busy"}, "custom_status":"old"});
+        let typed: PaneAgentStatusChangedEvent = serde_json::from_value(status.clone()).unwrap();
+        let direct = serde_json::to_value(typed).unwrap();
+        assert_eq!(direct["state_labels"]["working"], "busy");
+        assert!(direct.get("custom_status").is_none(), "{direct}");
+        let mut data = status;
+        data["type"] = serde_json::json!("pane_agent_status_changed");
+        let typed: EventData = serde_json::from_value(data).unwrap();
+        let output = serde_json::to_value(typed).unwrap();
+        assert_eq!(output["type"], "pane_agent_status_changed");
+        assert_eq!(output["display_agent"], "display");
+        assert!(output.get("custom_status").is_none(), "{output}");
+    }
+
+    #[test]
     fn m828c_terminal_title_json_defaults_and_schema() {
         for (raw, stripped) in [
             (None, None),
@@ -366,7 +478,7 @@ mod tests {
             "params": {"pane_id": "w7:p2", "source": "user:build", "seq": 0,
                 "ttl_ms": 86_400_000, "tokens": {"build": "ok", "old": null},
                 "clear_title": false, "clear_display_agent": false,
-                "clear_custom_status": false, "clear_state_labels": false}
+                "clear_state_labels": false}
         });
         let decoded: Request = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), value);
@@ -1227,7 +1339,7 @@ mod tests {
                     terminal_title_stripped: None,
                     display_agent: None,
                     agent_status: AgentStatus::Unknown,
-                    custom_status: None,
+
                     state_labels: HashMap::new(),
                     tokens: HashMap::new(),
                     agent_session: None,
@@ -1282,7 +1394,7 @@ mod tests {
                     terminal_title_stripped: None,
                     display_agent: None,
                     agent_status: AgentStatus::Unknown,
-                    custom_status: None,
+
                     state_labels: HashMap::new(),
                     tokens: HashMap::new(),
                     agent_session: None,

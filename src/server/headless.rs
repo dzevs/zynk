@@ -5829,7 +5829,6 @@ mod tests {
                             agent_label: "pi".into(),
                             state: crate::detect::AgentState::Idle,
                             message: None,
-                            custom_status: None,
                             seq: Some(1),
                             session_ref: None,
                         }
@@ -8281,7 +8280,6 @@ next_tab = ""
                 agent_label: "pi".into(),
                 state: crate::detect::AgentState::Working,
                 message: None,
-                custom_status: None,
                 seq: None,
                 session_ref: None,
             })
@@ -8292,13 +8290,11 @@ next_tab = ""
                 source: "user:pi-display".into(),
                 agent_label: Some("pi".into()),
                 applies_to_source: Some("zynk:pi".into()),
-                title: None,
+                title: Some("short lived".into()),
                 display_agent: None,
-                custom_status: Some("short lived".into()),
                 state_labels: HashMap::new(),
                 clear_title: false,
                 clear_display_agent: false,
-                clear_custom_status: false,
                 clear_state_labels: false,
                 seq: None,
                 ttl: Some(Duration::from_millis(1)),
@@ -8321,7 +8317,7 @@ next_tab = ""
                 .terminals
                 .get(&terminal_id)
                 .expect("terminal")
-                .effective_custom_status()
+                .effective_title()
                 .as_deref(),
             Some("short lived")
         );
@@ -8336,7 +8332,7 @@ next_tab = ""
                 .terminals
                 .get(&terminal_id)
                 .expect("terminal")
-                .effective_custom_status(),
+                .effective_title(),
             None
         );
         assert!(server
@@ -8349,9 +8345,9 @@ next_tab = ""
                     && matches!(
                         &event.data,
                         crate::api::schema::EventData::PaneAgentStatusChanged {
-                            custom_status,
+                            title,
                             ..
-                        } if custom_status.is_none()
+                        } if title.is_none()
                     )
             }));
     }
@@ -12483,7 +12479,7 @@ next_tab = ""
                     agent: "pi".into(),
                     state: api::schema::PaneAgentState::Idle,
                     message: None,
-                    custom_status: None,
+
                     seq: Some(19),
                     agent_session_id: None,
                     agent_session_path: None,
