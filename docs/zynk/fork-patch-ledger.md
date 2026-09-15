@@ -6680,3 +6680,81 @@ older N1/N3 and the operator deviation remain open. M8-RECT-NARROW and the disti
 D2 selected-cohort style-byte miss remain open, as do E N-1, E Gate-2 N-3 and
 every instrument review history. No whole-M8 approval, independent Gate-3,
 operator action, merge, push, install, tag, publish, release or cleanup follows.
+
+### M8-31: Split SGR Mouse Input
+
+This slice adapts upstream 464c658fdd3a9257b1eb5095b0ae024a306b29ee to
+parent f278e33a88b1f30bfea7771428bd7bd9ef20b472. M8-31 executable Gate-1 was
+approved at native seq1126; no implementation, whole-M8, independent Gate-3 or
+operator approval follows from it. The parent production remained raw through
+the separate existing-interface and absent-interface control invocations.
+
+- The client adds undiscarded full SGR prefixes to its capture-gated 150-ms
+  policy. The legacy reader extends only full prefixes, not lone Escape. The
+  OSC/ST state guard excludes those payloads from the new alternative; the old
+  lone-Escape getter and both second polls remain raw. Existing m810 table
+  assertions remain raw and are not an exhaustive description of this expanded
+  selector merely because their historical test name mentions only lone Escape.
+- Four upstream/fork divergences have explicit child policies: the old emitted
+  Escape orphan entry counts continuation from zero; new full prefixes count
+  their own bytes; the shared helper ends immediately at its budget; and only
+  inspected bytes are removed, preserving same-buffer surplus. Exactly 128
+  prefix bytes arm until the next drain call, including empty input. Longer
+  prefixes do not arm; no zero-counter invariant is claimed for that branch.
+- A further quiet flush resets mouse discard state for BOTH origins. Late tails
+  then become ordinary input. This is an intentional old-lifetime change, not
+  preservation of that lifetime or a discharge of an origin. Host-reply CSI
+  handling and the existing incremental drain helpers stay raw.
+- The new full-prefix entry clears its spent host-reply Escape hold without
+  changing outstanding query counts. M8-31-PARENT-SPENT-ESC-HOLD is a separate
+  source-derived parent generic-drop finding, not one of the twenty origins.
+  Its non-SGR ESC[123 witness remains outside this scoped fix. No executed
+  reproduction of that parent witness, general repair or discharge is claimed.
+- Fresh parent catalog had 4308 qualified identities including five ignored;
+  the full raw baseline passed all 4303 scheduled tests. After frozen I01-I05
+  insertion, 4313 identities comprised 4304 PASS, four named FAIL and five SKIP.
+  The failures were I01/I03/I04/I05; I02 passed. I06 then produced two absent
+  helper compiler diagnostics and zero test outcomes, not a behavioral red.
+  The parent catalog4308 and parent-plus-five scheduled4308 are different
+  populations. Qualified identity is binary plus test name, not name alone.
+- Green child full passed all 4309 scheduled tests with five ignored, including
+  the unchanged FrameData characterizations. All six frozen control bodies and
+  all 119 old scheduled test units in the two Rust paths remain raw. Source
+  report 328cb5ec reconstructs both complete files through nine explicit
+  production operations, the frozen insertions and formatting. Source equality
+  is neither behavioral equivalence nor a complete execution trace.
+- Eight serial faults over662 selected identities produced5296 scheduled
+  outcomes:5285 PASS and11 FAIL, eight intended sites and three incidentals.
+  Ten stops are equality macros and one is an assertion macro. I01 has F01/F07,
+  I03 F02/F08, I04 F03, I05 F04/F06, and I06 F05. I02 has no parent red, dedicated
+  fault or recorded crossing; its parent and child passes do not establish
+  fault-demonstrated protection against regression. No reader scheduling or
+  wall-clock guarantee follows from these in-memory controls.
+- F02 incidentally stops I04 and I05 at family-Some assertions before their
+  own intended fault sites, with neither origin nor prefix length printed.
+  F07 incidentally stops the legacy discard-policy equality. F08 stops before
+  the completed next host reply and decrement assertions. The retained
+  per-site report6c27d9a1 binds every variant to its own source and diagnostic;
+  no later-group or undiagnosed-conjunct inference follows from a crossing.
+- Each restoration rechecked all1729 green bytes and modes plus raw index and
+  HEAD. Restored selection passed all662. Corrected v3 inspections re-read all
+  eight retained fault invocations; F01-F03 retain their original v1 outputs and
+  later row/diagnostic-equality companions. Later validation does not supply a
+  check at an earlier restoration or dispatch boundary. The inspector's earlier
+  findings and the preparation, source and boundary-instrument histories stay
+  attached to their evidence; successful execution is not a review verdict.
+- Documentation follows the restored fault cohort. Its presence in a later
+  invocation's inventory is not execution as code. Consumer and final-source
+  dispositions, final worktree checks, normal local commit, exact-SHA checks and
+  M8-31 Gate-2 remain exit obligations of this implementation entry.
+
+The explicit prerequisite-before-dependent rule in this slice does not repair
+M8-29/30's ordering deviation or its governing-design omission. All three
+standing limits remain individually unresolved and unwaived, including D2's
+own T07/T24/T26 chronology loss. All twenty origins and recorded carries,
+unions98/34, D's five primaries, M8-33, both M9-12 secondary adaptations, M8-37,
+M8-65, older N1/N3 and the operator deviation remain open. M8-RECT-NARROW, the
+distinct D2 selected-cohort style-byte miss, E N-1, E Gate-2 N-3, M8-31 N-1/N-2,
+M8-31-PARENT-SPENT-ESC-HOLD and every instrument history remain separately open.
+Whole-M8 Gate-2 and fresh independent Gate-3 still precede integration. No
+merge, push, install, tag, publish, release or cleanup is authorized here.

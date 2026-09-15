@@ -154,6 +154,12 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Incomplete full SGR mouse prefixes get a 150-ms first reassembly poll under
+  active client mouse capture, and in the legacy reader. Timed-out full prefixes
+  use a prefix-inclusive 128-byte drain budget; uninspected surplus is retained.
+  A further quiet flush ends mouse-tail discard for both prefix origins, so a
+  tail arriving after that reset is ordinary input. These are polling policies,
+  not a guarantee about terminal scheduling or end-to-end latency.
 - Successful live handoff waits for its socket response write attempt before
   setting the old server's final exit flags. Completion, writer disconnection,
   or the six-second receive timeout permits shutdown; this is not proof that
@@ -172,7 +178,7 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 - Interactive terminal clients clear inherited mouse-reporting modes on setup,
   transitions, and cleanup. Delayed SGR mouse tails no longer leak into pane
   input; ordinary keys and bracketed paste retain their existing handling.
-  Active mouse capture uses a longer lone-Escape reassembly poll window.
+  Active mouse capture uses a longer Escape-sequence reassembly poll window.
 - Client stream EOF and I/O failures are reported as connection loss, while
   malformed and oversized protocol frames remain protocol errors.
 - New tabs and new-tab layouts follow the focused pane's cached working

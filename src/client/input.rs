@@ -136,8 +136,10 @@ fn idle_flush_timeout_ms(
     framer: &crate::raw_input::RawInputByteFramer,
     host_mouse_capture_active: bool,
 ) -> i32 {
-    if host_mouse_capture_active && framer.has_pending_lone_escape() {
-        crate::raw_input::MOUSE_ACTIVE_LONE_ESCAPE_FLUSH_TIMEOUT_MS
+    if host_mouse_capture_active
+        && (framer.has_pending_lone_escape() || framer.has_pending_incomplete_sgr_mouse_sequence())
+    {
+        crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
     } else {
         crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
     }
@@ -230,6 +232,41 @@ fn poll_read_ready(fd: i32, timeout_ms: i32) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m831_client_timeout_requires_capture_and_mouse_prefix_state() {
+        for (bytes, active_timeout) in [
+            (b"".as_slice(), 10),
+            (b"\x1b".as_slice(), 150),
+            (b"\x1b[".as_slice(), 10),
+            (b"x".as_slice(), 10),
+            (b"\x1b[200~".as_slice(), 10),
+            (b"\x1b[49:33;2:".as_slice(), 10),
+            (b"\x1b[<".as_slice(), 150),
+            (b"\x1b[<3".as_slice(), 150),
+            (b"\x1b[<35;58;".as_slice(), 150),
+        ] {
+            let mut framer = crate::raw_input::RawInputByteFramer::default();
+            framer.push(bytes);
+            assert_eq!(idle_flush_timeout_ms(&framer, false), 10, "{bytes:?}");
+            assert_eq!(
+                idle_flush_timeout_ms(&framer, true),
+                active_timeout,
+                "{bytes:?}"
+            );
+            assert_eq!(idle_flush_timeout_ms(&framer, false), 10, "{bytes:?}");
+        }
+
+        for introducer in [b"\x1b]".as_slice(), b"\x1bP".as_slice()] {
+            let mut discarding = crate::raw_input::RawInputByteFramer::default();
+            assert!(discarding.push(introducer).is_empty());
+            assert!(discarding.flush_timeout().is_empty());
+            assert!(discarding.push(b"\x1b[<3").is_empty());
+            assert!(discarding.has_pending_input());
+            assert_eq!(idle_flush_timeout_ms(&discarding, false), 10);
+            assert_eq!(idle_flush_timeout_ms(&discarding, true), 10);
+        }
+    }
 
     #[test]
     fn m810_mouse_poll_window_only_applies_to_active_lone_escape() {

@@ -302,6 +302,27 @@ Internal dispatch without a socket waiter does not wait. Failed handoff retains
 its existing error path, and caller identity, ownership transfer, rollback,
 delivery status and `message_received` admission are unchanged.
 
+Incomplete full SGR mouse prefixes (`ESC[<` followed by ASCII digits or
+semicolons, including an empty suffix) receive a 150-ms first reassembly poll
+when client mouse capture is active. The existing lone-Escape alternative is
+unchanged. The legacy reader extends only full prefixes; lone Escape stays at
+10 ms there. The new full-prefix alternative is ineligible inside an existing
+discard family, including OSC/ST payloads. The second poll remains 10 ms;
+these policies do not establish a real delayed-reader trace or latency SLA.
+
+A timed-out full prefix is dropped and arms mouse-tail discard only when its
+length is at most 128 bytes, counting that prefix in the budget. Exactly 128
+arms until the next drain call, including an empty push; longer prefixes are
+dropped without arming. The existing orphan path after an emitted Escape keeps
+its zero-based continuation budget. Both use the fork's immediate budget
+termination and inspected-only removal, retaining uninspected same-buffer
+surplus. A further quiet flush clears mouse discard state for both origins;
+later tails become ordinary input. This intentionally changes the old orphan
+lifetime without discharging its carried origin. Host-reply CSI discard keeps
+its separate behavior. The new full-prefix entry clears its spent Escape hold
+without cancelling outstanding host replies; it does not repair the separate
+parent generic-drop spent-hold condition recorded in the patch ledger.
+
 ## 9. Fork engineering discipline
 
 - zynk-native code in **NEW modules**: `zynk_db`, `zynk_messages`, `zynk_receipts`, `zynk_retrieval`,
