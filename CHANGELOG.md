@@ -10,6 +10,14 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- Experimental pane graphics socket methods: `pane.graphics.set`, `.clear`,
+  `.info`, and `.stream`, with App-local stream ownership and retained graphics
+  updates that respect full-render priority and writer backpressure. The existing
+  default-off `experimental.kitty_graphics` opt-in now also admits API uploads.
+  Public decoded payloads are capped at 512 KiB and raw stream bodies at 16 MiB;
+  there is no aggregate memory quota or connection cap. Layers and streams do not
+  survive restart or live handoff. See README for framing, conflicts, cell hints,
+  and the resource limitation. Binary protocol 19 and native receipts are unchanged.
 - Expanded sidebar token rows and canonical per-agent overrides, using pane or
   workspace metadata and optional raw/stripped terminal titles. Plain layouts
   accept at most 16 rows of 16 tokens; explicit empty overrides do not fall back.

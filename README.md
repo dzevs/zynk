@@ -263,6 +263,63 @@ Clearing or expiring values, or respawning within the same terminal state, does 
 slots or erase replay fences. Respawn adds no token-value reset. Configured desktop agent rows can
 display these tokens; reporting them does not change lifecycle state, hook identity or receipt authority.
 
+#### Experimental pane graphics
+
+The local socket API provides `pane.graphics.set`, `pane.graphics.clear`,
+`pane.graphics.info`, and `pane.graphics.stream` when
+`experimental.kitty_graphics = true` (default: `false`). An existing opt-in now
+also permits image uploads, not just client-side painting. This relies on the
+owner-only local socket; it is not isolation from untrusted same-user plugins.
+Successfully decoded methods return `feature_disabled` while disabled.
+
+Set or replace one layer using a current pane ID and base64 image bytes:
+
+```json
+{"id":"image","method":"pane.graphics.set","params":{"pane_id":"PANE_ID","format":"rgba","image_width":1,"image_height":1,"data_base64":"AQIDBA=="}}
+```
+
+Formats are `png`, `rgb`, and `rgba`; dimensions must be nonzero. RGB/RGBA data
+must match their dimensions exactly. PNG bytes are passed through, not decoded
+or validated as an image. Decoded public uploads are limited to 512 KiB.
+Optional `placement` contains signed `viewport_col`/`viewport_row` and unsigned
+`grid_cols`/`grid_rows`, all defaulting to zero. Zero grid dimensions use the
+pane's inner dimensions; placement is clipped to that pane.
+
+Clear uses `{"id":"clear","method":"pane.graphics.clear","params":{"pane_id":"PANE_ID"}}`.
+Set/clear success is the ordinary `{"id":"image","result":{"type":"ok"}}`
+shape, with the submitted ID. Info uses the same target and returns
+`pane_graphics_info` with `cell_width_px` and `cell_height_px`, or
+`cell_size_unavailable`. Positive cell hints may include the client's existing
+8x16 fallback; they do not certify measured physical dimensions.
+
+For streaming, send an ordinary `pane.graphics.stream` request with `pane_id`
+and wait for its initial `ok`. On the same connection, send an LF-terminated
+JSON header with `format`, `image_width`, `image_height`, `data_length`, and
+optional `placement`, immediately followed by exactly `data_length` raw bytes.
+Each body is nonempty and at most 16 MiB; each header is at most 64 KiB including
+LF. No per-frame success reply is sent. Read-idle/total limits are configured at
+5/30 seconds after a header starts and for each body; waiting for the first
+header byte has no such deadline. These are not wall-clock response guarantees.
+This public streaming method is not listed by generated schema discovery.
+
+A stream owns its resolved pane until closed or invalidated. Concurrent set,
+clear, or second-stream requests return `stream_conflict`; retired frames return
+`stream_closed`. Supplied owner/raw-data JSON fields are ignored: only the server
+sets those internal fields. Internal stream method names are not public methods.
+Pane removal or disabling the feature discards relevant layers and claims;
+re-enabling does not restore them. Restart and successful live handoff discard
+all layers and streams: reconnect and resend. Failed handoff after listener
+replacement also does not guarantee stream continuity, and no final
+`stream_closed` reply is guaranteed on connection loss.
+
+There is **no aggregate memory quota or connection cap**. Concurrent valid
+uploads, queued requests, per-client caches, and encoding can exhaust memory;
+the 32 MiB outgoing frame limit is checked after encoding allocations. Keep the
+feature experimental and default-off unless this resource limitation is resolved
+or explicitly accepted and documented for the changed release policy. API
+acceptance or render enqueue is not proof of display, peer parsing, or native
+message receipt.
+
 #### Migrating custom status
 
 The dedicated `custom_status` field and `clear_custom_status` flag are retired, including their

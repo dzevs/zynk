@@ -140,6 +140,10 @@ pub enum ResponseResult {
     PaneRead {
         read: PaneReadResult,
     },
+    PaneGraphicsInfo {
+        cell_width_px: u32,
+        cell_height_px: u32,
+    },
     PaneProcessInfo {
         process_info: PaneProcessInfo,
     },

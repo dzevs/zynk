@@ -28,28 +28,30 @@ pub(crate) struct HostCellSize {
 }
 
 impl HostCellSize {
-    pub(crate) fn from_terminal(area: Rect) -> Self {
+    pub(crate) fn try_from_terminal(area: Rect) -> Option<Self> {
         let Ok(size) = crossterm::terminal::window_size() else {
-            return Self::fallback_for_area(area);
+            return None;
         };
         if size.columns == 0 || size.rows == 0 {
-            return Self::fallback_for_area(area);
+            return None;
         }
         if size.width == 0 || size.height == 0 {
-            return Self::fallback_for_area(area);
+            return None;
         }
-        Self {
-            width_px: (size.width as u32 / size.columns as u32).max(1),
-            height_px: (size.height as u32 / size.rows as u32).max(1),
-        }
-        .for_area(area)
+        Some(
+            Self {
+                width_px: (size.width as u32 / size.columns as u32).max(1),
+                height_px: (size.height as u32 / size.rows as u32).max(1),
+            }
+            .for_area(area),
+        )
     }
 
     pub(crate) fn is_known(self) -> bool {
         self.width_px > 0 && self.height_px > 0
     }
 
-    fn fallback_for_area(area: Rect) -> Self {
+    pub(crate) fn fallback_for_area(area: Rect) -> Self {
         Self {
             width_px: 8,
             height_px: 16,
@@ -74,10 +76,23 @@ struct HostViewKey {
 #[derive(Debug)]
 struct HostPlacement {
     pane_id: PaneId,
+    source_kind: HostSourceKind,
     area: Rect,
     cell_size: HostCellSize,
     placement: KittyImagePlacement,
     scrollback_offset: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostSourceKind {
+    Terminal,
+    PaneLayer,
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum HostSourceKey {
+    Terminal { pane_id: PaneId, image_id: u32 },
+    PaneLayer { pane_id: PaneId },
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -92,7 +107,7 @@ struct ImageSignature {
 /// The source that OWNS a host placement slot: the pane plus the ids the client
 /// itself used. Two of these can hash to one host placement id, so the owner —
 /// not the hash — is what decides whether a slot may be reused.
-type PlacementSource = (PaneId, u32, u32);
+type PlacementSource = (HostSourceKey, u32);
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 struct PlacementSignature {
@@ -126,11 +141,12 @@ struct ClippedPlacement {
 }
 
 #[derive(Debug, Default, Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub(crate) struct HostGraphicsCache {
     images: HashMap<u32, ImageSignature>,
     placements: HashMap<(u32, u32), PlacementSignature>,
     /// Host image currently backing each (pane, source image id) pair.
-    sources: HashMap<(PaneId, u32), u32>,
+    sources: HashMap<HostSourceKey, u32>,
     view: Option<HostViewKey>,
 }
 
@@ -257,6 +273,13 @@ pub(crate) fn has_visible_pane_graphics(
     }
 
     for info in surface.pane_infos {
+        if app.pane_graphics_layers.get(&info.id).is_some_and(|layer| {
+            let placement =
+                pane_graphics_host_placement(info, cell_size, layer, &HashMap::new(), false);
+            clipped_placement(&placement).is_some()
+        }) {
+            return true;
+        }
         let Some(runtime) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         else {
             continue;
@@ -268,6 +291,7 @@ pub(crate) fn has_visible_pane_graphics(
         for placement in runtime.kitty_image_placements_with_data_filter(|_| false) {
             let host_placement = HostPlacement {
                 pane_id: info.id,
+                source_kind: HostSourceKind::Terminal,
                 area: info.inner_rect,
                 cell_size,
                 placement,
@@ -287,13 +311,17 @@ fn encode_graphics_update(
     view_changed: bool,
     host_images: &mut HashMap<u32, ImageSignature>,
     host_placements: &mut HashMap<(u32, u32), PlacementSignature>,
-    sources: &mut HashMap<(PaneId, u32), u32>,
+    sources: &mut HashMap<HostSourceKey, u32>,
 ) {
     // Prune sources that are no longer visible: a stale entry would keep its
     // old host image referenced and block the superseded-image delete.
-    let current_sources: HashSet<(PaneId, u32)> = placements
+    let current_sources: HashSet<HostSourceKey> = placements
         .iter()
-        .map(|placement| (placement.pane_id, placement.placement.image_id))
+        .filter(|placement| {
+            placement.source_kind == HostSourceKind::Terminal
+                || clipped_placement(placement).is_some()
+        })
+        .map(host_source_key)
         .collect();
     sources.retain(|source, _| current_sources.contains(source));
 
@@ -325,7 +353,7 @@ fn encode_graphics_update(
             );
             continue;
         };
-        let source = placement_source(placement.pane_id, &placement.placement);
+        let source = placement_source(placement);
         let Some(host_placement_id) = resolve_host_placement_id(source, host_id, host_placements)
         else {
             tracing::warn!(
@@ -359,9 +387,7 @@ fn encode_graphics_update(
             host_images.insert(host_id, image_signature);
         }
 
-        if let Some(previous) =
-            sources.insert((placement.pane_id, placement.placement.image_id), host_id)
-        {
+        if let Some(previous) = sources.insert(host_source_key(placement), host_id) {
             if previous != host_id {
                 superseded_images.push(previous);
             }
@@ -455,7 +481,7 @@ fn encode_graphics_update(
 /// one a source moved away from, or one whose only source disappeared.
 fn release_unreferenced_image(
     bytes: &mut Vec<u8>,
-    sources: &HashMap<(PaneId, u32), u32>,
+    sources: &HashMap<HostSourceKey, u32>,
     host_images: &mut HashMap<u32, ImageSignature>,
     host_placements: &mut HashMap<(u32, u32), PlacementSignature>,
     current_placements: &mut HashSet<(u32, u32)>,
@@ -575,6 +601,15 @@ fn collect_visible_placements(
     );
     let mut placements = Vec::new();
     for info in surface.pane_infos {
+        if let Some(layer) = app.pane_graphics_layers.get(&info.id) {
+            placements.push(pane_graphics_host_placement(
+                info,
+                cell_size,
+                layer,
+                uploaded_images,
+                true,
+            ));
+        }
         let runtime = match app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             Some(rt) => rt,
             None => {
@@ -597,6 +632,7 @@ fn collect_visible_placements(
                 .unwrap_or(0);
             placements.push(HostPlacement {
                 pane_id: info.id,
+                source_kind: HostSourceKind::Terminal,
                 area: info.inner_rect,
                 cell_size,
                 placement,
@@ -609,6 +645,79 @@ fn collect_visible_placements(
         "collect_visible_placements: done"
     );
     placements
+}
+
+fn pane_graphics_host_placement(
+    info: &crate::layout::PaneInfo,
+    cell_size: HostCellSize,
+    layer: &crate::app::state::PaneGraphicsLayer,
+    uploaded_images: &HashMap<u32, ImageSignature>,
+    include_data: bool,
+) -> HostPlacement {
+    let format = match layer.format {
+        crate::api::schema::PaneGraphicsFormat::Png => KittyImageFormat::Png,
+        crate::api::schema::PaneGraphicsFormat::Rgb => KittyImageFormat::Rgb,
+        crate::api::schema::PaneGraphicsFormat::Rgba => KittyImageFormat::Rgba,
+    };
+    let signature = ImageSignature {
+        image_width: layer.image_width,
+        image_height: layer.image_height,
+        format_code: kitty_format_code(format),
+        data_len: layer.data.len(),
+        data_fingerprint: layer.data_fingerprint,
+    };
+    let uploaded = resolve_host_image_id(info.id, signature, uploaded_images)
+        .and_then(|id| uploaded_images.get(&id).copied())
+        == Some(signature);
+    let data = if include_data && !uploaded {
+        layer.data.clone()
+    } else {
+        Vec::new()
+    };
+    let render = layer.render;
+    let grid_cols = if render.grid_cols == 0 {
+        u32::from(info.inner_rect.width)
+    } else {
+        render.grid_cols
+    };
+    let grid_rows = if render.grid_rows == 0 {
+        u32::from(info.inner_rect.height)
+    } else {
+        render.grid_rows
+    };
+
+    HostPlacement {
+        pane_id: info.id,
+        source_kind: HostSourceKind::PaneLayer,
+        area: info.inner_rect,
+        cell_size,
+        scrollback_offset: 0,
+        placement: KittyImagePlacement {
+            image_id: 1,
+            placement_id: 1,
+            z: 0,
+            x_offset: 0,
+            y_offset: 0,
+            image_width: layer.image_width,
+            image_height: layer.image_height,
+            format,
+            data_len: layer.data.len(),
+            data_fingerprint: layer.data_fingerprint,
+            data,
+            render: crate::ghostty::KittyPlacementRenderInfo {
+                pixel_width: layer.image_width,
+                pixel_height: layer.image_height,
+                grid_cols,
+                grid_rows,
+                viewport_col: render.viewport_col,
+                viewport_row: render.viewport_row,
+                source_x: 0,
+                source_y: 0,
+                source_width: 0,
+                source_height: 0,
+            },
+        },
+    }
 }
 
 /// Resolves the host image id a signature is uploaded at.
@@ -683,14 +792,36 @@ fn host_image_id_for_signature(pane_id: PaneId, signature: ImageSignature) -> u3
     HOST_IMAGE_ID_BASE + ((hasher.finish() as u32) % HOST_IMAGE_ID_SPAN)
 }
 
-fn placement_source(pane_id: PaneId, placement: &KittyImagePlacement) -> PlacementSource {
-    (pane_id, placement.image_id, placement.placement_id)
+fn host_source_key(placement: &HostPlacement) -> HostSourceKey {
+    match placement.source_kind {
+        HostSourceKind::Terminal => HostSourceKey::Terminal {
+            pane_id: placement.pane_id,
+            image_id: placement.placement.image_id,
+        },
+        HostSourceKind::PaneLayer => HostSourceKey::PaneLayer {
+            pane_id: placement.pane_id,
+        },
+    }
+}
+
+fn placement_source(placement: &HostPlacement) -> PlacementSource {
+    (host_source_key(placement), placement.placement.placement_id)
 }
 
 fn host_placement_id(source: PlacementSource) -> u32 {
-    let (pane_id, image_id, placement_id) = source;
+    let (source_key, placement_id) = source;
     let mut hasher = DefaultHasher::new();
-    pane_id.raw().hash(&mut hasher);
+    let image_id = match source_key {
+        HostSourceKey::Terminal { pane_id, image_id } => {
+            pane_id.raw().hash(&mut hasher);
+            image_id
+        }
+        HostSourceKey::PaneLayer { pane_id } => {
+            "pane.graphics".hash(&mut hasher);
+            pane_id.raw().hash(&mut hasher);
+            1
+        }
+    };
     image_id.hash(&mut hasher);
     placement_id.hash(&mut hasher);
     HOST_PLACEMENT_ID_BASE + ((hasher.finish() as u32) % HOST_PLACEMENT_ID_SPAN)
@@ -979,6 +1110,288 @@ fn encode_kitty_data(out: &mut Vec<u8>, control: &str, data: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    fn m832a_encode_placements(
+        cache: &mut HostGraphicsCache,
+        placements: &[HostPlacement],
+    ) -> String {
+        let mut bytes = Vec::new();
+        encode_graphics_update(
+            &mut bytes,
+            placements,
+            false,
+            &mut cache.images,
+            &mut cache.placements,
+            &mut cache.sources,
+        );
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn m832a_source_kind_and_colliding_placement_owners_stay_distinct() {
+        let mut terminal = test_placement(0, 0);
+        terminal.placement.image_id = 1;
+        terminal.placement.placement_id = 1;
+        let mut legacy = DefaultHasher::new();
+        terminal.pane_id.raw().hash(&mut legacy);
+        terminal.placement.image_id.hash(&mut legacy);
+        terminal.placement.placement_id.hash(&mut legacy);
+        assert_eq!(
+            host_placement_id(placement_source(&terminal)),
+            HOST_PLACEMENT_ID_BASE + ((legacy.finish() as u32) % HOST_PLACEMENT_ID_SPAN)
+        );
+        let mut layer = test_placement(0, 0);
+        layer.source_kind = HostSourceKind::PaneLayer;
+        layer.placement.image_id = 1;
+        layer.placement.placement_id = 1;
+        assert_ne!(host_source_key(&terminal), host_source_key(&layer));
+        assert_ne!(placement_source(&terminal), placement_source(&layer));
+        let layer_base = host_placement_id(placement_source(&layer));
+        let (clipped, format) = clipped_placement(&terminal).unwrap();
+        let host_id =
+            host_image_id_for_signature(terminal.pane_id, image_signature(&terminal, format));
+        // A synthetic occupied slot isolates the owner comparison from the hash.
+        let resident = placement_signature(
+            placement_source(&terminal),
+            clipped,
+            terminal.placement.z,
+            0,
+        );
+        let occupied = HashMap::from([((host_id, layer_base), resident)]);
+        let probed =
+            resolve_host_placement_id(placement_source(&layer), host_id, &occupied).unwrap();
+        assert_ne!(probed, layer_base);
+        assert_eq!(occupied.get(&(host_id, layer_base)), Some(&resident));
+        let collision = (0..10_000_000_u32)
+            .find(|id| {
+                terminal.placement.placement_id = *id;
+                host_placement_id(placement_source(&terminal)) == layer_base
+            })
+            .expect("bounded terminal/layer placement collision fixture");
+        assert_eq!(terminal.placement.placement_id, collision);
+        let placements = [terminal, layer];
+        let mut cache = HostGraphicsCache::default();
+        let update = m832a_encode_placements(&mut cache, &placements);
+        assert_eq!(cache.images.len(), 1);
+        assert_eq!(cache.sources.len(), 2);
+        assert_eq!(cache.placements.len(), 2);
+        let ids = displayed_placement_ids(&update);
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert!(m832a_encode_placements(&mut cache, &placements).is_empty());
+    }
+
+    #[test]
+    fn m832a_layer_collection_and_encoding_share_the_b1_collision_resolver() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("layer-collection")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        app.view.pane_infos = vec![crate::layout::PaneInfo {
+            id: pane,
+            rect: Rect::new(0, 0, 20, 10),
+            inner_rect: Rect::new(0, 0, 20, 10),
+            scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
+            is_focused: true,
+        }];
+        let (first, second) = colliding_data_fingerprints(pane);
+        let mut layer = crate::app::state::PaneGraphicsLayer::new(
+            crate::api::schema::PaneGraphicsFormat::Rgba,
+            30,
+            30,
+            vec![255; 30 * 30 * 4],
+            crate::api::schema::PaneGraphicsPlacementParams {
+                grid_cols: 3,
+                grid_rows: 3,
+                ..Default::default()
+            },
+        );
+        layer.data_fingerprint = second;
+        app.pane_graphics_layers.insert(pane, layer);
+        let mut resident = test_placement(0, 0);
+        resident.pane_id = pane;
+        resident.placement.data_fingerprint = first;
+        let resident_signature =
+            image_signature(&resident, kitty_format_code(KittyImageFormat::Rgba));
+        let base = host_image_id_for_signature(pane, resident_signature);
+        let mut cache = HostGraphicsCache::default();
+        cache.images.insert(base, resident_signature);
+        let runtimes = TerminalRuntimeRegistry::default();
+        let cell = HostCellSize {
+            width_px: 10,
+            height_px: 10,
+        };
+        let collected = collect_visible_placements(
+            &app,
+            &runtimes,
+            app.view.tab_surface(),
+            cell,
+            &cache.images,
+        );
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].source_kind, HostSourceKind::PaneLayer);
+        let signature = image_signature(&collected[0], kitty_format_code(KittyImageFormat::Rgba));
+        assert_eq!(host_image_id_for_signature(pane, signature), base);
+        let resolved = resolve_host_image_id(pane, signature, &cache.images).unwrap();
+        assert_ne!(resolved, base);
+        assert!(!collected[0].placement.data.is_empty());
+        let update = m832a_encode_placements(&mut cache, &collected);
+        assert!(update.contains(&format!("\x1b_Ga=t,t=d,f=32,s=30,v=30,i={resolved},q=2")));
+        assert!(update.contains(&format!("\x1b_Ga=p,i={resolved},")));
+        let placement_before = cache.placements.clone();
+        let sources_before = cache.sources.clone();
+        // Keep the original collision resident so the recollection must still probe.
+        cache.images.insert(base, resident_signature);
+        let again = collect_visible_placements(
+            &app,
+            &runtimes,
+            app.view.tab_surface(),
+            cell,
+            &cache.images,
+        );
+        assert_eq!(again.len(), 1);
+        assert!(again[0].placement.data.is_empty());
+        assert_eq!(
+            image_signature(&again[0], kitty_format_code(KittyImageFormat::Rgba)),
+            signature
+        );
+        let second_update = m832a_encode_placements(&mut cache, &again);
+        assert!(!second_update.contains("a=t,"));
+        assert!(!second_update.contains(&format!("a=d,d=I,i={resolved},")));
+        assert_eq!(cache.images.len(), 1);
+        assert_eq!(cache.images.get(&resolved), Some(&signature));
+        assert_eq!(cache.placements, placement_before);
+        assert_eq!(cache.sources, sources_before);
+        app.pane_graphics_layers.get_mut(&pane).unwrap().render =
+            crate::api::schema::PaneGraphicsPlacementParams::default();
+        let defaults = collect_visible_placements(
+            &app,
+            &runtimes,
+            app.view.tab_surface(),
+            cell,
+            &HashMap::new(),
+        );
+        assert_eq!(defaults.len(), 1);
+        let (clipped, code) = clipped_placement(&defaults[0]).unwrap();
+        assert_eq!(code, 32);
+        assert_eq!(
+            (clipped.x, clipped.y, clipped.cols, clipped.rows),
+            (0, 0, 20, 10)
+        );
+        assert_eq!(defaults[0].placement.data.len(), 30 * 30 * 4);
+    }
+
+    #[test]
+    fn m832a_removed_layer_allows_new_same_frame_adopters_in_both_orders() {
+        for reverse in [false, true] {
+            let mut cache = HostGraphicsCache::default();
+            let mut old = test_placement(0, 0);
+            old.source_kind = HostSourceKind::PaneLayer;
+            old.placement.image_id = 1;
+            old.placement.placement_id = 1;
+            m832a_encode_placements(&mut cache, &[old]);
+            let host_id = *cache.images.keys().next().unwrap();
+            let old_placement = *cache.placements.keys().next().unwrap();
+            let mut first = test_placement(0, 0);
+            first.placement.image_id = 8;
+            first.placement.data.clear();
+            let mut second = test_placement(1, 0);
+            second.placement.image_id = 9;
+            second.placement.data.clear();
+            let mut adopters = [first, second];
+            if reverse {
+                adopters.reverse();
+            }
+            let update = m832a_encode_placements(&mut cache, &adopters);
+            assert!(
+                !update.contains(&format!("a=d,d=I,i={host_id},")),
+                "reverse={reverse}"
+            );
+            assert!(!update.contains("a=t,"), "reverse={reverse}");
+            assert!(
+                update.contains(&format!(
+                    "a=d,d=i,i={},p={},",
+                    old_placement.0, old_placement.1
+                )),
+                "reverse={reverse}"
+            );
+            assert!(!cache.placements.contains_key(&old_placement));
+            assert_eq!(cache.images.len(), 1, "reverse={reverse}");
+            assert_eq!(cache.sources.len(), 2, "reverse={reverse}");
+            assert_eq!(cache.placements.len(), 2, "reverse={reverse}");
+            assert!(cache.sources.values().all(|id| *id == host_id));
+        }
+    }
+
+    #[test]
+    fn m832a_clipped_layer_releases_ownership_but_keeps_a_surviving_terminal_image() {
+        let mut cache = HostGraphicsCache::default();
+        let terminal = test_placement(0, 0);
+        let mut layer = test_placement(1, 0);
+        layer.source_kind = HostSourceKind::PaneLayer;
+        layer.placement.image_id = 1;
+        layer.placement.placement_id = 1;
+        let terminal_source = placement_source(&terminal);
+        let layer_source = placement_source(&layer);
+        m832a_encode_placements(&mut cache, &[terminal, layer]);
+        let host_id = *cache.images.keys().next().unwrap();
+        let terminal_key = *cache
+            .placements
+            .iter()
+            .find(|(_, p)| p.source == terminal_source)
+            .unwrap()
+            .0;
+        let layer_key = *cache
+            .placements
+            .iter()
+            .find(|(_, p)| p.source == layer_source)
+            .unwrap()
+            .0;
+        assert_ne!(terminal_key, layer_key);
+        let terminal_placement = cache.placements[&terminal_key];
+        let terminal = test_placement(0, 0);
+        let mut clipped = test_placement(1000, 0);
+        clipped.source_kind = HostSourceKind::PaneLayer;
+        clipped.placement.image_id = 1;
+        clipped.placement.placement_id = 1;
+        let update = m832a_encode_placements(&mut cache, &[terminal, clipped]);
+        assert_eq!(cache.sources.len(), 1);
+        assert_eq!(cache.images.len(), 1);
+        assert!(!update.contains(&format!("a=d,d=I,i={host_id},")));
+        assert!(update.contains(&format!("a=d,d=i,i={},p={},", layer_key.0, layer_key.1)));
+        assert!(!update.contains(&format!(
+            "a=d,d=i,i={},p={},",
+            terminal_key.0, terminal_key.1
+        )));
+        assert_eq!(cache.placements.len(), 1);
+        assert!(!cache.placements.contains_key(&layer_key));
+        assert_eq!(
+            cache.placements.get(&terminal_key),
+            Some(&terminal_placement)
+        );
+        let final_update = m832a_encode_placements(&mut cache, &[]);
+        assert!(final_update.contains(&format!("a=d,d=I,i={host_id},")));
+        assert!(cache.images.is_empty());
+        assert!(cache.placements.is_empty());
+        assert!(cache.sources.is_empty());
+        let mut layer_only = test_placement(0, 0);
+        layer_only.source_kind = HostSourceKind::PaneLayer;
+        layer_only.placement.image_id = 1;
+        layer_only.placement.placement_id = 1;
+        m832a_encode_placements(&mut cache, &[layer_only]);
+        let lone_id = *cache.images.keys().next().unwrap();
+        let mut clipped_only = test_placement(1000, 0);
+        clipped_only.source_kind = HostSourceKind::PaneLayer;
+        clipped_only.placement.image_id = 1;
+        clipped_only.placement.placement_id = 1;
+        let alone = m832a_encode_placements(&mut cache, &[clipped_only]);
+        assert!(alone.contains(&format!("a=d,d=I,i={lone_id},")));
+        assert!(cache.images.is_empty());
+        assert!(cache.placements.is_empty());
+        assert!(cache.sources.is_empty());
+    }
+
     use super::*;
     use crate::ghostty::KittyPlacementRenderInfo;
 
@@ -1030,7 +1443,7 @@ mod tests {
     /// hashed host placement ids collide.
     fn colliding_placement_ids(pane_id: PaneId, image_id: u32) -> (u32, u32) {
         first_colliding_pair(0..10_000_000u32, |placement_id| {
-            host_placement_id((pane_id, image_id, placement_id))
+            host_placement_id((HostSourceKey::Terminal { pane_id, image_id }, placement_id))
         })
     }
 
@@ -1051,6 +1464,7 @@ mod tests {
 
     fn test_placement(viewport_col: i32, viewport_row: i32) -> HostPlacement {
         HostPlacement {
+            source_kind: HostSourceKind::Terminal,
             pane_id: PaneId::from_raw(1),
             area: Rect::new(0, 0, 20, 10),
             cell_size: HostCellSize {
@@ -1842,8 +2256,14 @@ mod tests {
         let image_id = 7;
         let (first_placement_id, second_placement_id) = colliding_placement_ids(pane_id, image_id);
         assert_eq!(
-            host_placement_id((pane_id, image_id, first_placement_id)),
-            host_placement_id((pane_id, image_id, second_placement_id)),
+            host_placement_id((
+                HostSourceKey::Terminal { pane_id, image_id },
+                first_placement_id
+            )),
+            host_placement_id((
+                HostSourceKey::Terminal { pane_id, image_id },
+                second_placement_id
+            )),
             "the two sources must hash to the same host placement id"
         );
 
@@ -1926,7 +2346,10 @@ mod tests {
         let pane_id = PaneId::from_raw(1);
         let image_id = 7;
         let (first_placement_id, second_placement_id) = colliding_placement_ids(pane_id, image_id);
-        let base_id = host_placement_id((pane_id, image_id, first_placement_id));
+        let base_id = host_placement_id((
+            HostSourceKey::Terminal { pane_id, image_id },
+            first_placement_id,
+        ));
 
         let mut images = HashMap::new();
         let mut placements = HashMap::new();

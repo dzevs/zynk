@@ -26,6 +26,8 @@ use crate::ipc::{
     socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
 };
 
+mod pane_graphics_stream;
+
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
 pub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -224,6 +226,28 @@ fn handle_connection_with_stop(
     }
 
     match request.method {
+        Method::PaneGraphicsStream(params) => {
+            let result = pane_graphics_stream::serve(
+                stream,
+                request_id.clone(),
+                params,
+                api_tx,
+                running,
+                caller,
+            );
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "stream_closed",
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
+        }
         Method::EventsSubscribe(params) => {
             let result = stream_subscriptions(
                 stream,
@@ -465,6 +489,13 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneSendKeys(_) => "pane.send_keys",
         Method::PaneSendInput(_) => "pane.send_input",
         Method::PaneRead(_) => "pane.read",
+        Method::PaneGraphicsSet(_) => "pane.graphics.set",
+        Method::PaneGraphicsClear(_) => "pane.graphics.clear",
+        Method::PaneGraphicsInfo(_) => "pane.graphics.info",
+        Method::PaneGraphicsStream(_) => "pane.graphics.stream",
+        Method::PaneGraphicsStreamSet(_) => "pane.graphics.stream.set",
+        Method::PaneGraphicsStreamOpen(_) => "pane.graphics.stream.open",
+        Method::PaneGraphicsStreamClose(_) => "pane.graphics.stream.close",
         Method::PaneReportAgent(_) => "pane.report_agent",
         Method::PaneReportAgentSession(_) => "pane.report_agent_session",
         Method::PaneReportMetadata(_) => "pane.report_metadata",
@@ -740,6 +771,218 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m832b_header_limit_counts_lf_and_unterminated_input() {
+        let running = Arc::new(AtomicBool::new(true));
+        let active = Arc::new(AtomicBool::new(true));
+        for cap in [4, 64 * 1024] {
+            for (n, lf) in [(cap - 1, true), (cap, true), (cap, false), (cap + 1, false)] {
+                let mut bytes = vec![b'x'; n];
+                if lf {
+                    bytes.push(b'\n');
+                }
+                let mut socket = m827_queued_stream(&bytes);
+                let result = super::pane_graphics_stream::read_line(
+                    &mut socket,
+                    &running,
+                    &active,
+                    cap,
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                )
+                .map_err(|e| e.kind());
+                let expected = if bytes.len() > cap {
+                    Err(io::ErrorKind::InvalidData)
+                } else if lf {
+                    Ok(Some(String::from_utf8(bytes).unwrap()))
+                } else {
+                    Ok(None)
+                };
+                assert_eq!(result, expected, "cap={cap} n={n} lf={lf}");
+            }
+        }
+    }
+
+    #[test]
+    fn m832b_stream_socket_preserves_caller_and_invalidates_before_close_response() {
+        use crate::api::schema::Method;
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel();
+        let (mut client, server) = m827_socket_pair();
+        let caller = ApiCaller::from_socket(crate::ipc::stream_peer_credentials(&client));
+        assert!(caller.peer.is_some());
+        writeln!(
+            client,
+            "{}",
+            serde_json::json!({"id":"stream-socket","method":"pane.graphics.stream",
+            "params":{"pane_id":"1:p1","owner":"forged-owner"}})
+        )
+        .unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &EventHub::default(), &running, None);
+            done_tx.send(result).unwrap();
+        });
+        let open = recv_api_request_for(&mut api_rx, Duration::from_secs(3))
+            .expect("stream open reaches App");
+        assert_eq!(open.caller, caller);
+        assert!(open.response_write_complete.is_none());
+        let Method::PaneGraphicsStreamOpen(params) = open.request.method else {
+            panic!("expected typed Open");
+        };
+        assert_ne!(params.params.owner, "forged-owner");
+        assert!(!params.params.owner.is_empty());
+        let owner = params.params.owner;
+        let active = params.active;
+        assert!(active.load(Ordering::Acquire));
+        open.respond_to
+            .send(serde_json::json!({"id":"stream-socket","result":{"type":"ok"}}).to_string())
+            .unwrap();
+        let ack: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(ack["result"]["type"], "ok");
+        writeln!(
+            client,
+            "{}",
+            serde_json::json!({"format":"rgba","image_width":1,
+            "image_height":1,"data_length":4})
+        )
+        .unwrap();
+        client.write_all(&[1, 2, 3, 4]).unwrap();
+        let frame = recv_api_request_for(&mut api_rx, Duration::from_secs(3))
+            .expect("stream frame reaches App");
+        assert_eq!(frame.caller, caller);
+        let Method::PaneGraphicsStreamSet(params) = frame.request.method else {
+            panic!("expected typed Set");
+        };
+        assert_eq!(params.owner, owner);
+        assert_eq!(params.data, Some(vec![1, 2, 3, 4]));
+        frame
+            .respond_to
+            .send(serde_json::json!({"id":"frame","result":{"type":"ok"}}).to_string())
+            .unwrap();
+        drop(client);
+        let close = recv_api_request_for(&mut api_rx, Duration::from_secs(3))
+            .expect("stream close reaches App");
+        assert_eq!(close.caller, caller);
+        let Method::PaneGraphicsStreamClose(params) = close.request.method else {
+            panic!("expected typed Close");
+        };
+        assert_eq!(params.owner, owner);
+        assert!(
+            !active.load(Ordering::Acquire),
+            "closed before close response with strong token retained"
+        );
+        close
+            .respond_to
+            .send(serde_json::json!({"id":"close","result":{"type":"ok"}}).to_string())
+            .unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("stream worker completed")
+            .unwrap();
+        worker.join().unwrap();
+    }
+    #[test]
+    fn m832a_static_socket_dispatch_preserves_caller_completion_and_response() {
+        for method in [
+            "pane.graphics.set",
+            "pane.graphics.clear",
+            "pane.graphics.info",
+        ] {
+            let (api_tx, mut api_rx) = mpsc::unbounded_channel();
+            let (mut client, server) = m827_socket_pair();
+            let expected_caller =
+                ApiCaller::from_socket(crate::ipc::stream_peer_credentials(&client));
+            assert!(expected_caller.peer.is_some());
+            let params = if method == "pane.graphics.set" {
+                serde_json::json!({"pane_id": "w1:p1", "format": "rgba",
+                    "image_width": 1, "image_height": 1, "data_base64": "AQIDBA=="})
+            } else {
+                serde_json::json!({"pane_id": "w1:p1"})
+            };
+            let request =
+                serde_json::json!({"id": "static-socket", "method": method, "params": params});
+            client.write_all(format!("{request}\n").as_bytes()).unwrap();
+            let running = Arc::new(AtomicBool::new(true));
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let result =
+                    handle_connection(server, &api_tx, &EventHub::default(), &running, None);
+                done_tx.send(result).unwrap();
+            });
+            let msg = recv_api_request_for(&mut api_rx, Duration::from_secs(3))
+                .expect("static socket request reaches app");
+            assert_eq!(msg.caller, expected_caller, "method={method}");
+            assert_eq!(
+                serde_json::to_value(&msg.request).unwrap()["method"],
+                method
+            );
+            let complete = msg.response_write_complete.expect("socket write observer");
+            assert_eq!(
+                complete.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            );
+            let response = serde_json::json!({"id": "static-socket", "result": {"type": "ok"}});
+            msg.respond_to.send(response.to_string()).unwrap();
+            complete
+                .recv_timeout(Duration::from_secs(3))
+                .expect("response write observation");
+            done_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("socket worker completion")
+                .unwrap();
+            worker.join().unwrap();
+            let actual: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+            assert_eq!(actual, response, "method={method}");
+        }
+    }
+
+    #[test]
+    fn m832b_public_socket_rejects_internal_graphics_spellings_at_decoding() {
+        for method in [
+            "pane.graphics.stream.open",
+            "pane.graphics.stream.set",
+            "pane.graphics.stream.close",
+            "PaneGraphicsStreamOpen",
+            "PaneGraphicsStreamSet",
+            "PaneGraphicsStreamClose",
+        ] {
+            let (api_tx, mut api_rx) = mpsc::unbounded_channel();
+            api_rx.close();
+            let (mut client, server) = m827_socket_pair();
+            let request = serde_json::json!({"id":"external-internal","method":method,
+                "params":{"pane_id":"w1:p1","owner":"external", "data":[1,2,3,4],
+                    "format":"rgba","image_width":1,"image_height":1}});
+            writeln!(client, "{request}").unwrap();
+            handle_connection(
+                server,
+                &api_tx,
+                &EventHub::default(),
+                &Arc::new(AtomicBool::new(true)),
+                None,
+            )
+            .unwrap();
+            let response: serde_json::Value =
+                serde_json::from_str(&read_line(&mut client)).unwrap();
+            assert_eq!(
+                response["error"]["code"], "invalid_request",
+                "method={method}"
+            );
+            assert_eq!(response["id"], "", "method={method}");
+            assert!(api_rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn m832b_initial_line_fits_public_maximum_and_rejects_duplicate_method() {
+        use base64::Engine as _;
+        let request = serde_json::json!({"id":"max","method":"pane.graphics.set","params":{
+            "pane_id":"1:p1","format":"png","image_width":1,"image_height":1,
+            "data_base64":base64::engine::general_purpose::STANDARD.encode(vec![1;512*1024])}});
+        assert!(serde_json::to_vec(&request).unwrap().len() < MAX_INITIAL_REQUEST_BYTES);
+        assert!(serde_json::from_str::<Request>(r#"{"id":"duplicate","method":"ping","method":"pane.graphics.stream","params":{"pane_id":"1:p1"}}"#).is_err());
+    }
+
     use super::*;
     use interprocess::local_socket::traits::Listener as _;
     use std::io::{BufRead, BufReader, Read};

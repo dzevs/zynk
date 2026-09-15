@@ -5,6 +5,74 @@ use serde::{Deserialize, Serialize};
 use super::agents::AgentSessionInfo;
 use super::common::{AgentStatus, PaneAgentState, ReadFormat, ReadSource, SplitDirection};
 
+pub(crate) const PANE_GRAPHICS_SET_MAX_BYTES: usize = 512 * 1024;
+pub(crate) const PANE_GRAPHICS_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneGraphicsFormat {
+    Png,
+    Rgb,
+    Rgba,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneGraphicsSetParams {
+    pub pane_id: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub owner: String,
+    pub format: PaneGraphicsFormat,
+    pub image_width: u32,
+    pub image_height: u32,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub data: Option<Vec<u8>>,
+    #[serde(default)]
+    pub data_base64: String,
+    #[serde(default)]
+    pub placement: PaneGraphicsPlacementParams,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+pub struct PaneGraphicsPlacementParams {
+    #[serde(default)]
+    pub viewport_col: i32,
+    #[serde(default)]
+    pub viewport_row: i32,
+    #[serde(default)]
+    pub grid_cols: u32,
+    #[serde(default)]
+    pub grid_rows: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneGraphicsClearParams {
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneGraphicsStreamParams {
+    pub pane_id: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub owner: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneGraphicsStreamOpenParams {
+    pub params: PaneGraphicsStreamParams,
+    pub active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PartialEq for PaneGraphicsStreamOpenParams {
+    fn eq(&self, other: &Self) -> bool {
+        self.params == other.params && std::sync::Arc::ptr_eq(&self.active, &other.active)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneSplitParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]

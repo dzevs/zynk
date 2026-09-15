@@ -164,6 +164,24 @@ pub enum Method {
     PaneSendInput(PaneSendInputParams),
     #[serde(rename = "pane.read")]
     PaneRead(PaneReadParams),
+    #[serde(rename = "pane.graphics.set")]
+    PaneGraphicsSet(PaneGraphicsSetParams),
+    #[serde(rename = "pane.graphics.clear")]
+    PaneGraphicsClear(PaneGraphicsClearParams),
+    #[serde(rename = "pane.graphics.info")]
+    PaneGraphicsInfo(PaneTarget),
+    #[serde(rename = "pane.graphics.stream")]
+    #[schemars(skip)]
+    PaneGraphicsStream(PaneGraphicsStreamParams),
+    #[serde(skip)]
+    #[schemars(skip)]
+    PaneGraphicsStreamSet(PaneGraphicsSetParams),
+    #[serde(skip)]
+    #[schemars(skip)]
+    PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams),
+    #[serde(skip)]
+    #[schemars(skip)]
+    PaneGraphicsStreamClose(PaneGraphicsStreamParams),
     #[serde(rename = "pane.report_agent")]
     PaneReportAgent(PaneReportAgentParams),
     #[serde(rename = "pane.report_agent_session")]
@@ -215,6 +233,168 @@ pub enum Method {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m832b_skipped_fields_internal_serialization_and_connection_equality_are_distinct() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let set: PaneGraphicsSetParams = serde_json::from_value(serde_json::json!({
+            "pane_id":"w1:p1", "format":"rgba", "image_width":1,"image_height":1,
+            "owner":"external-owner", "data":[9,9,9,9], "data_base64":"AQIDBA==",
+        }))
+        .unwrap();
+        assert!(set.owner.is_empty());
+        assert!(set.data.is_none());
+        assert_eq!(set.data_base64, "AQIDBA==");
+        let params: PaneGraphicsStreamParams = serde_json::from_value(serde_json::json!({
+            "pane_id":"w1:p1", "owner":"external-owner",
+        }))
+        .unwrap();
+        assert!(params.owner.is_empty());
+        let active = Arc::new(AtomicBool::new(true));
+        let open = PaneGraphicsStreamOpenParams {
+            params: params.clone(),
+            active: active.clone(),
+        };
+        let cloned = open.clone();
+        assert_eq!(open, cloned);
+        assert_ne!(
+            open,
+            PaneGraphicsStreamOpenParams {
+                params: params.clone(),
+                active: Arc::new(AtomicBool::new(true)),
+            }
+        );
+        active.store(false, Ordering::Release);
+        assert_eq!(open, cloned);
+        for method in [
+            Method::PaneGraphicsStreamOpen(open),
+            Method::PaneGraphicsStreamSet(set),
+            Method::PaneGraphicsStreamClose(params),
+        ] {
+            let request = Request {
+                id: "internal".into(),
+                method,
+            };
+            assert!(
+                serde_json::to_string(&request).is_err(),
+                "{:?}",
+                request.method
+            );
+        }
+    }
+    #[test]
+    fn m832a_static_wire_names_formats_defaults_and_response_are_explicit() {
+        for format in ["png", "rgb", "rgba"] {
+            let value = serde_json::json!({
+                "id": "static-set", "method": "pane.graphics.set",
+                "params": {"pane_id": "w1:p1", "format": format,
+                    "image_width": 1, "image_height": 1, "data_base64": "AQIDBA==",
+                    "placement": {"viewport_col": -2, "viewport_row": 3,
+                        "grid_cols": 4, "grid_rows": 5}}
+            });
+            let request: Request =
+                serde_json::from_value(value.clone()).expect("static set wire ID");
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                value,
+                "format={format}"
+            );
+            assert!(crate::api::request_changes_ui(&request));
+        }
+        for (method, changes_ui) in [("pane.graphics.clear", true), ("pane.graphics.info", false)] {
+            let value = serde_json::json!({"id": "static", "method": method,
+                "params": {"pane_id": "w1:p1"}});
+            let request: Request = serde_json::from_value(value.clone()).expect("static wire ID");
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                value,
+                "method={method}"
+            );
+            assert_eq!(
+                crate::api::request_changes_ui(&request),
+                changes_ui,
+                "method={method}"
+            );
+        }
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "defaults", "method": "pane.graphics.set", "params": {
+                "pane_id": "w1:p1", "format": "png", "image_width": 1, "image_height": 1}
+        }))
+        .unwrap();
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["params"]["data_base64"], "");
+        assert_eq!(
+            value["params"]["placement"],
+            serde_json::json!({
+            "viewport_col": 0, "viewport_row": 0, "grid_cols": 0, "grid_rows": 0})
+        );
+        let response = serde_json::json!({"id": "info", "result": {
+            "type": "pane_graphics_info", "cell_width_px": 11, "cell_height_px": 22}});
+        let decoded: SuccessResponse =
+            serde_json::from_value(response.clone()).expect("info response ID");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), response);
+    }
+
+    #[test]
+    fn m832a_invalid_static_public_shapes_are_refused_by_decoding() {
+        let invalid = [
+            serde_json::json!({"pane_id": "w1:p1", "format": "rgba", "image_height": 1}),
+            serde_json::json!({"pane_id": "w1:p1", "format": "jpeg", "image_width": 1, "image_height": 1}),
+            serde_json::json!({"pane_id": "w1:p1", "format": "rgba", "image_width": -1, "image_height": 1}),
+            serde_json::json!({"pane_id": "w1:p1", "format": "rgba", "image_width": 1, "image_height": 1, "data_base64": [1,2,3]}),
+        ];
+        for (index, params) in invalid.into_iter().enumerate() {
+            assert!(
+                serde_json::from_value::<Request>(serde_json::json!({
+                    "id": "bad", "method": "pane.graphics.set", "params": params
+                }))
+                .is_err(),
+                "invalid shape index={index}"
+            );
+        }
+        for method in ["pane.graphics.clear", "pane.graphics.info"] {
+            assert!(
+                serde_json::from_value::<Request>(serde_json::json!({
+                "id": "bad", "method": method, "params": {}}))
+                .is_err(),
+                "method={method}"
+            );
+        }
+    }
+
+    #[test]
+    fn m832b_four_public_wire_ids_round_trip_without_exposing_internal_fields() {
+        for method in [
+            "pane.graphics.set",
+            "pane.graphics.clear",
+            "pane.graphics.info",
+            "pane.graphics.stream",
+        ] {
+            let params = if method == "pane.graphics.set" {
+                serde_json::json!({"pane_id":"w1:p1","format":"rgba",
+                    "image_width":1,"image_height":1,"data_base64":"AQIDBA=="})
+            } else {
+                serde_json::json!({"pane_id":"w1:p1"})
+            };
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "id":"wire", "method":method, "params":params,
+            }))
+            .expect("public graphics wire ID");
+            let value = serde_json::to_value(&request).unwrap();
+            assert_eq!(value["method"], method);
+            assert_eq!(value["id"], "wire");
+            assert!(value["params"].get("owner").is_none());
+            assert!(value["params"].get("data").is_none());
+            assert_eq!(
+                crate::api::request_changes_ui(&request),
+                method != "pane.graphics.info"
+            );
+            assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+        }
+    }
+
     use std::collections::HashMap;
 
     use super::*;
@@ -1521,6 +1701,10 @@ mod tests {
         "pane.send_keys",
         "pane.send_input",
         "pane.read",
+        "pane.graphics.set",
+        "pane.graphics.clear",
+        "pane.graphics.info",
+        "pane.graphics.stream",
         "pane.report_agent",
         "pane.report_agent_session",
         "pane.report_metadata",

@@ -4,6 +4,7 @@ use crate::config::{Keybinds, NewTerminalCwdConfig, SoundConfig, ToastConfig, To
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
+use std::hash::{Hash, Hasher};
 
 use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
@@ -16,6 +17,37 @@ pub(crate) type InstalledPluginRegistry =
 pub(crate) struct PluginPaneRecord {
     pub plugin_id: String,
     pub entrypoint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaneGraphicsLayer {
+    pub format: crate::api::schema::PaneGraphicsFormat,
+    pub image_width: u32,
+    pub image_height: u32,
+    pub data: Vec<u8>,
+    pub data_fingerprint: u64,
+    pub render: crate::api::schema::PaneGraphicsPlacementParams,
+}
+
+impl PaneGraphicsLayer {
+    pub(crate) fn new(
+        format: crate::api::schema::PaneGraphicsFormat,
+        image_width: u32,
+        image_height: u32,
+        data: Vec<u8>,
+        render: crate::api::schema::PaneGraphicsPlacementParams,
+    ) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        data.hash(&mut hasher);
+        Self {
+            format,
+            image_width,
+            image_height,
+            data,
+            data_fingerprint: hasher.finish(),
+            render,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1609,6 +1641,11 @@ pub struct AppState {
     pub(crate) installed_plugins: InstalledPluginRegistry,
     /// Pane ids opened through the plugin pane API.
     pub(crate) plugin_panes: std::collections::HashMap<PaneId, PluginPaneRecord>,
+    /// Session-local API image layers, excluded from persistence and handoff.
+    pub(crate) pane_graphics_layers: std::collections::HashMap<PaneId, PaneGraphicsLayer>,
+    pub(crate) pane_graphics_streams: std::collections::HashMap<PaneId, String>,
+    pub(crate) pane_graphics_revision: u64,
+    pub(crate) host_cell_size: crate::kitty_graphics::HostCellSize,
     /// Recent plugin action/event command executions.
     pub(crate) plugin_command_logs: Vec<crate::api::schema::PluginCommandLogInfo>,
     pub(crate) next_plugin_command_log_id: u64,
@@ -1989,6 +2026,10 @@ impl AppState {
             integration_install_messages: Vec::new(),
             installed_plugins: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),
+            pane_graphics_layers: std::collections::HashMap::new(),
+            pane_graphics_streams: std::collections::HashMap::new(),
+            pane_graphics_revision: 0,
+            host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,

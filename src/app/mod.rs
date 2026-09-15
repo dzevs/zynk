@@ -95,6 +95,13 @@ impl PaneClickState {
 pub struct App {
     pub state: AppState,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    pub(crate) pane_graphics_stream_registrations: HashMap<
+        String,
+        (
+            crate::layout::PaneId,
+            std::sync::Weak<std::sync::atomic::AtomicBool>,
+        ),
+    >,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -675,6 +682,10 @@ impl App {
             integration_install_messages: Vec::new(),
             installed_plugins: load_plugin_registry(no_session),
             plugin_panes: std::collections::HashMap::new(),
+            pane_graphics_layers: std::collections::HashMap::new(),
+            pane_graphics_streams: std::collections::HashMap::new(),
+            pane_graphics_revision: 0,
+            host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,
@@ -725,6 +736,7 @@ impl App {
             last_api_notification_at: None,
             state,
             terminal_runtimes: restored_terminal_runtimes,
+            pane_graphics_stream_registrations: HashMap::new(),
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -889,6 +901,9 @@ impl App {
             }
 
             self.sync_focus_events();
+            if self.sync_pane_graphics_streams() {
+                needs_render = true;
+            }
             self.sync_session_save_schedule();
 
             let now = Instant::now();
@@ -1002,10 +1017,15 @@ impl App {
                     self.full_redraw_pending = false;
                 }
                 let mut cell_size = crate::kitty_graphics::HostCellSize::default();
+                let mut observed_cell_size = crate::kitty_graphics::HostCellSize::default();
                 terminal.draw(|frame| {
                     let area = frame.area();
                     if kitty_graphics_enabled {
-                        cell_size = crate::kitty_graphics::HostCellSize::from_terminal(area);
+                        let observed = crate::kitty_graphics::HostCellSize::try_from_terminal(area);
+                        observed_cell_size = observed.unwrap_or_default();
+                        cell_size = observed.unwrap_or_else(|| {
+                            crate::kitty_graphics::HostCellSize::fallback_for_area(area)
+                        });
                         crate::ui::compute_view_with_cell_size(
                             &mut self.state,
                             &self.terminal_runtimes,
@@ -1025,6 +1045,7 @@ impl App {
                         frame,
                     );
                 })?;
+                self.state.host_cell_size = observed_cell_size;
                 if kitty_graphics_enabled {
                     crate::kitty_graphics::paint_local_pane_graphics(
                         &self.state,
@@ -1400,6 +1421,10 @@ impl App {
             crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
             if was_kitty_graphics_enabled && !config.experimental.kitty_graphics {
                 let _ = crate::kitty_graphics::clear_all_host_graphics();
+                self.state.pane_graphics_layers.clear();
+                self.state.pane_graphics_streams.clear();
+                self.sync_pane_graphics_streams();
+                self.state.host_cell_size = crate::kitty_graphics::HostCellSize::default();
             }
             self.state.reveal_hidden_cursor_for_cjk_ime =
                 config.experimental.reveal_hidden_cursor_for_cjk_ime;
@@ -1836,6 +1861,75 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m832b_config_disable_invalidates_live_claim_without_resurrection() {
+        use crate::api::schema::*;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("disable")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.kitty_graphics_enabled = true;
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let target = app.public_pane_id(0, pane).unwrap();
+        let active = Arc::new(AtomicBool::new(true));
+        let response = app.handle_api_request(Request {
+            id: "claim".into(),
+            method: Method::PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams {
+                params: PaneGraphicsStreamParams {
+                    pane_id: target,
+                    owner: "disable".into(),
+                },
+                active: active.clone(),
+            }),
+        });
+        assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
+        let mut config = crate::config::Config::default();
+        config.experimental.pane_history = true;
+        app.apply_live_config(&config, &[], &[], false);
+        assert!(!active.load(Ordering::Acquire));
+        assert!(app.state.pane_graphics_streams.is_empty());
+        assert!(app.pane_graphics_stream_registrations.is_empty());
+        config.experimental.kitty_graphics = true;
+        app.apply_live_config(&config, &[], &[], false);
+        assert!(app.state.pane_graphics_streams.is_empty());
+        assert!(app.pane_graphics_stream_registrations.is_empty());
+    }
+    #[test]
+    fn m832a_config_disable_discards_static_layers_and_observed_cell_size() {
+        let mut app = test_app();
+        let pane = crate::layout::PaneId::alloc();
+        app.state.kitty_graphics_enabled = true;
+        app.state.host_cell_size = crate::kitty_graphics::HostCellSize {
+            width_px: 11,
+            height_px: 22,
+        };
+        app.state.pane_graphics_layers.insert(
+            pane,
+            crate::app::state::PaneGraphicsLayer::new(
+                crate::api::schema::PaneGraphicsFormat::Rgba,
+                1,
+                1,
+                vec![1, 2, 3, 4],
+                crate::api::schema::PaneGraphicsPlacementParams::default(),
+            ),
+        );
+        let mut config = crate::config::Config::default();
+        config.experimental.pane_history = true;
+        app.apply_live_config(&config, &[], &[], false);
+        assert!(!app.state.kitty_graphics_enabled);
+        assert!(app.state.pane_graphics_layers.is_empty());
+        assert!(!app.state.host_cell_size.is_known());
+        config.experimental.kitty_graphics = true;
+        app.apply_live_config(&config, &[], &[], false);
+        assert!(app.state.kitty_graphics_enabled);
+        assert!(app.state.pane_graphics_layers.is_empty());
+        assert!(!app.state.host_cell_size.is_known());
+    }
+
     use super::*;
     use crate::config::Config;
     use crate::detect::{Agent, AgentState};

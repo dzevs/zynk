@@ -7,6 +7,7 @@ pub(crate) mod caller;
 mod env;
 mod integrations;
 mod layouts;
+mod pane_graphics;
 mod panes;
 pub(crate) mod plugins;
 mod responses;
@@ -59,7 +60,7 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
-        match ev {
+        let changed = match ev {
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -68,7 +69,8 @@ impl App {
                 self.handle_internal_event(ev);
                 true
             }
-        }
+        };
+        changed | self.sync_pane_graphics_streams()
     }
 
     fn handle_git_status_refreshed(
@@ -1083,6 +1085,29 @@ impl App {
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
+            Method::PaneGraphicsSet(params) => {
+                return self.handle_pane_graphics_set(request.id, params);
+            }
+            Method::PaneGraphicsClear(params) => {
+                return self.handle_pane_graphics_clear(request.id, params);
+            }
+            Method::PaneGraphicsInfo(target) => {
+                return self.handle_pane_graphics_info(request.id, target);
+            }
+            Method::PaneGraphicsStream(_) => {
+                return responses::encode_error(request.id,
+                    if self.state.kitty_graphics_enabled { "stream_transport_required" } else { "feature_disabled" },
+                    "pane graphics require experimental.kitty_graphics and the streaming socket transport");
+            }
+            Method::PaneGraphicsStreamSet(params) => {
+                return self.handle_pane_graphics_stream_set(request.id, params);
+            }
+            Method::PaneGraphicsStreamOpen(params) => {
+                return self.handle_pane_graphics_stream_open(request.id, params);
+            }
+            Method::PaneGraphicsStreamClose(params) => {
+                return self.handle_pane_graphics_stream_close(request.id, params);
+            }
             Method::PaneReportAgent(params) => {
                 return self.handle_pane_report_agent(request.id, params);
             }

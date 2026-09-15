@@ -323,6 +323,87 @@ its separate behavior. The new full-prefix entry clears its spent Escape hold
 without cancelling outstanding host replies; it does not repair the separate
 parent generic-drop spent-hold condition recorded in the patch ledger.
 
+### Experimental pane graphics
+
+`pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.info`, and
+`pane.graphics.stream` are public socket methods gated by the existing
+`experimental.kitty_graphics` flag, default false. Reusing an existing true value
+widens its capability from painting to upload admission without a separate
+consent step. The acceptance depends on owner-only socket permissions (currently
+0600), not hostile-plugin isolation. The existing socket permission test checks
+application of the constant, not a literal 0600 policy; the handoff listener
+has its own hardcoded 0600. Any permission change must revisit both paths and
+this capability acceptance.
+
+After successful decoding, disabled public methods and internal open/set return
+`feature_disabled` before target or payload processing. Malformed requests use
+the existing earlier `invalid_request` decoder path. Internal close/cancellation
+remain available after disable. No existing caller authority set is widened.
+
+Set requires pane ID, format (`png`, `rgb`, `rgba`), nonzero width/height and
+nonempty data. Public base64 is checked for encoded length before a bounded
+decode, with at most 512 KiB decoded data. Over-limit data may return
+`image_too_large` before malformed-encoding diagnosis; invalid dimensions,
+encoding or RGB/RGBA length use `invalid_image`. PNG content remains opaque.
+Set replaces one layer; clear removes it or succeeds when absent. Placement
+defaults to viewport (0,0) and the pane's inner grid dimensions when either
+grid dimension is zero, with clipping to the pane. Info returns
+`pane_graphics_info` and positive cell pixel dimensions or
+`cell_size_unavailable`; available foreground-client hints can be the existing
+8x16 fallback, not physical measurement. Set/clear use the existing `ok` envelope.
+
+Stream begins with an ordinary public Request and one open `ok`. Following frames
+use an LF-terminated JSON header plus exactly `data_length` raw bytes. Headers
+include format, image dimensions, length and optional placement. The header cap
+is 64 KiB including LF; the nonempty body cap is 16 MiB, checked before allocation
+and again at mutation. Body reads use 64 KiB chunks. Header timing starts with
+its first byte; header/body idle and total limits are 5 and 30 seconds. An idle
+connection awaiting its first header has no header deadline. These are configured
+receive bounds, not scheduling-independent completion guarantees. Successful
+frames do not receive individual `ok` replies. Frame errors end the stream.
+Public Stream remains omitted from generated schema discovery (M832-G1-N1).
+
+Internal Open/Set/Close Method variants are skipped by both serde and schemars;
+attempted serialization of such a typed variant intentionally fails. Transport
+sends them only through the typed App request channel. Public owner/data fields
+are ignored and default empty/None, independently of method exclusion. The
+server supplies owner and raw bytes, preserves the accepted ApiCaller, resolves
+the pane once, and validates the active matching owner on subsequent frames.
+An active claim makes public set/clear and a second open return `stream_conflict`.
+An abandoned queued open returns `stream_closed` rather than deleting a later
+static layer. Unknown close is idempotent; stale close cannot remove another
+owner. Runtime registrations are App-local weak tokens, never pure-state handles.
+
+Pane/tab/workspace removal and feature disable clear relevant state. Finite
+request/event synchronization and pre-wait/render synchronization invalidate
+claims and propagate changed cleanup to Full rendering; re-enable resurrects
+nothing. Layers, claims, revision and cell hints are session-local, absent from
+persisted and handoff schemas. Successful handoff loses all streams/layers and
+requires reconnect/resend, without a guaranteed final `stream_closed`. Early
+handoff failure differs from listener rollback replacing ServerHandle; no stream
+continuity guarantee applies after replacement. No graphics handoff experiment
+or native receipt guarantee is implied by these source contracts.
+
+Layer collection and encoding use the same B1 bounded collision resolver, with
+tagged source/placement ownership, adoption before release and a retained
+pre-update upload snapshot. Full UI work wins over graphics; visible PTY plus
+graphics is Full, hidden/clean plus graphics can be Graphics. App-only targets
+need compatible geometry and a valid semantic baseline; other cases retain
+their full/raw paths. Speculative cache commits only after successful enqueue,
+or for empty output with no send. A full writer lane retains the old cache and
+strongest pending kind. Graphics-only work does not replace semantic baselines;
+presentation-attempt cadence is not evidence of physical display.
+
+M832-AGGREGATE-RESOURCE-BUDGET stays open: no global quota or connection cap.
+With panes P, overlapping accepted/queued/retired bodies K, pending JSON requests
+N and clients C, payload accounting is O(P*S + K*S + N*J + C*F + C*P), where
+S=16 MiB, J=1 MiB and F=32 MiB. This is not an RSS maximum; encoding and copies
+allocate before the outgoing frame check. Valid traffic can exhaust resources.
+The accepted nonblocking status depends on the flag remaining default false
+and experimental. Before changing either, resolve the budget or explicitly
+document the limitation for the changed policy; the operator retains release
+approval. Per-request tests do not establish aggregate memory safety.
+
 ## 9. Fork engineering discipline
 
 - zynk-native code in **NEW modules**: `zynk_db`, `zynk_messages`, `zynk_receipts`, `zynk_retrieval`,

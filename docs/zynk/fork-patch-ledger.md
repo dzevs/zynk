@@ -6758,3 +6758,119 @@ distinct D2 selected-cohort style-byte miss, E N-1, E Gate-2 N-3, M8-31 N-1/N-2,
 M8-31-PARENT-SPENT-ESC-HOLD and every instrument history remain separately open.
 Whole-M8 Gate-2 and fresh independent Gate-3 still precede integration. No
 merge, push, install, tag, publish, release or cleanup is authorized here.
+
+### M8-32: Owned pane graphics and retained updates
+
+Authority: `88370e1516182ab519d22a12fa82d5780a40fee6`, applied on parent
+`c2faa4b5870abb4b915712adcc6c984de87f5c95`. The operator-approved batch workflow
+uses one combined Gate-1, A/B/C implementation increments and one exact-tip
+Gate-2, not per-increment commits or approvals. Claude's combined Gate-1 is
+audited conversation `conv_840791b8cb44751d` seq1186. This entry records
+implementation, not that later implementation verdict or a whole-M8 approval.
+
+- A adds default-off static set/clear/info, bounded public decoding, pure
+  session-local layers and cell hints, plus shared B1 cache integration. B adds
+  transport and resolved-pane ownership: active claims make A's public set/clear
+  and second Open refuse with `stream_conflict`. A's no-owner controls remain,
+  with separate B active-owner/no-mutation controls, not replacements.
+- Four public wire IDs and `pane_graphics_info` are explicit. Three internal
+  variants are serde/schemars-skipped and stay on typed channels. Owner/data
+  defaults, server assignment, owner validation and serializer routing remain
+  separate obligations. Actual ApiCaller is forwarded without expanding the
+  fork's pane-bound authority set, receipt admission or binary protocol 19.
+- Each public decoded image is limited to 512 KiB, each raw stream body to
+  16 MiB; the 64 KiB header includes LF and refuses before appending beyond it.
+  PNG data is opaque. Read chunks, idle/total deadlines and upstream read-reset
+  behavior remain separately bounded; M8-36 is not silently imported.
+- App-local weak tokens replace upstream global cancellation. Exit invalidates
+  before close dispatch; inactive queued Open cannot delete a newer static
+  layer. Frames/close use resolved owner registration, and stale close cannot
+  remove a replacement claim. Finite request/event and pre-wait/render sweeps
+  propagate changed cleanup as Full work. AppState/PaneState gain no live handle.
+- C reconciles graphics-only scheduling with fork Full priority, visible/hidden
+  PTY classification, presentation cadence, atomic stops, forwarded internal
+  effects and due metadata expiry. App target membership, mixed geometry,
+  semantic baseline, reset and size guards retain full/raw fallbacks. Speculative
+  cache commits only on successful enqueue or empty output; full lanes preserve
+  old cache and strongest pending work. Enqueue is not presentation or receipt.
+- Cache policy deliberately rejects the upstream high-bit content-ID split and
+  eager removed-layer image deletion. Collection and encoding share the B1
+  resolver, tagged source/placement ownership, old terminal hash inputs,
+  adoption-before-release and pre-update upload snapshot. The new headless
+  encoder takes borrowed `state.view.tab_surface()`.
+
+The two D-M5-2 arrivals are separately reconciled against their complete earlier
+rows, not consumed by a range label: M5-15 / `8dcb75a5` supplies the borrowed
+surface at the new headless consumer; M5-21 / `81f355fa` supplies retained-graphics
+planning/cadence under the fork's hidden-output, generic-Full and stop policies.
+No spinner, early unrelated API or origin discharge follows. M832-M834-FIXTURE
+stays OPEN for M8-34 and M832-M836-READ-RESET stays OPEN for M8-36.
+
+Evidence before this documentation increment:
+
+- Fresh parent full: 4309 PASS, five ignored, qualified membership reconciled.
+  Six existing-interface controls produced three predicted reds and three
+  passes. Typed A/B/C insertions each produced compilation reds before their
+  corresponding production edits; no stub or temporarily disabled control.
+- Cumulative corrected A/B/C selections passed 1354, 1379 and 1395 respectively.
+  A excludes already-inserted B-owned controls and is not a full-suite-green
+  claim. Complete child v2 passed 4365 with five ignored, with qualified
+  membership reconciled; lint v2 passed. All 56 new controls executed green.
+- Source proof covers 587 old bodies: 585 RAW and two named B1 placement-control
+  type adapters, plus two helper adapters. An adapter does not assert behavioral
+  equivalence. The execution preservation population is separately 1339 old
+  qualified identities. New bodies are compared with frozen fragments and the
+  approved explicit adapters, not assumed valid because they were frozen.
+- Five correction events remain distinct: frozen private-helper accessibility;
+  omitted shared wire-list adaptation caught by a correct RAW parity control;
+  frozen ping JSON missing params; frozen maximum-graphics reader using 2 MiB
+  instead of the enabled production 32 MiB; and lint-only manual ceil division.
+  A's 97 compile diagnostics include 96 absent-interface diagnostics and the
+  helper fixture defect. Detection stages are recorded without earliest-possible
+  claims. E2BIG's older executed field denoted attempted dispatch, not a launched
+  candidate run; grouped selectors preserve the same qualified membership.
+- Nine separately prepared one-control faults crossed their own predicted
+  assertion sites. Nine intended FAILs, zero incidental crossings; the other
+  47 new controls have no selected fault crossing. Each failed assertion's
+  later groups stay unreached. Nine byte/mode restoration receipts precede
+  successors; the restored 1395 selection passes. Printed selected SKIPs are
+  neither executions nor a complete catalog enumeration.
+- The same isolated release scale harness ran on parent and child at 1/15/50
+  panes/workspaces. Active-pane medians in microseconds were 327/398/474 parent
+  and 326/404/472 child; background-workspace medians were 326/363/386 and
+  314/357/380. These samples support the deterministic controls, not a latency
+  guarantee, graphics-load benchmark or live-runtime experiment.
+
+Risk decisions remain explicit. Reusing the existing true kitty_graphics opt-in
+widens it from painting to upload admission on the current owner-only socket.
+The permission control tests application of the constant, not literal 0600;
+revisit the API constant and separate handoff literal if that policy changes.
+M832-AGGREGATE-RESOURCE-BUDGET stays OPEN: valid queued/concurrent uploads and
+encoding can exhaust resources despite per-request caps. Its nonblocking
+classification depends on default false and experimental presentation; resolve
+or explicitly document and submit the limitation before changing that policy,
+with the operator retaining release approval. M832-G1-N1 stays OPEN because
+public Stream is absent from generated schema discovery. Successful handoff
+intentionally loses layers/claims/sockets; reconnect/resend is required with no
+guaranteed final stream_closed. Listener rollback after failed handoff also
+does not guarantee stream continuity. No graphics handoff experiment is claimed.
+
+The documentation/NOTICE increment follows restored execution. The first final
+check passed the Rust suite but failed the unchanged maintenance guard because
+the four NOTICE-listed new modules were not yet in the index. That failed run
+and the original source/consumer reports remain retained. The approved
+index-aware sequencing addendum puts source/P7, consumer/residue, fault and
+restoration, benchmark and documentation prerequisites before explicit staging;
+fresh check then gate on the staged candidate must pass before the batch commit.
+Staging supplies tracked membership, not a passing result. A subsequent edit
+requires new source/staging records and affected verification, without replacing
+the earlier records. Exact-SHA checks and the single batch Gate-2 remain exit
+obligations. New source checks and tool reuse
+are not independent verdicts or clean successor cycles for capped instruments.
+All twenty origins, unions98/34, D's five primaries, three standing limits, D2's
+T07/T24/T26 chronology and selected-cohort style-byte miss, M8-RECT-NARROW,
+M8-33, both M9-12 secondary adaptations, M8-37, M8-65, older N1/N3 and operator
+deviation remain open. E N-1/N-3, M8-29/30 ordering deviation/omission, M8-31
+N-1/N-2/N-3/N-4, its spent-hold finding and staging-order deviation, and every
+historical instrument history stay separate and undischarged. No whole-M8,
+Gate-3, merge, push, install, tag, publish, release or cleanup approval is implied.

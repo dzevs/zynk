@@ -50,7 +50,7 @@ impl App {
     }
 
     pub(crate) fn drain_api_requests(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.sync_pane_graphics_streams();
         while let Ok(msg) = self.api_rx.try_recv() {
             changed |= self.handle_api_request_message(msg);
             self.shutdown_detached_terminal_runtimes();
@@ -62,7 +62,8 @@ impl App {
         &mut self,
         msg: crate::api::ApiRequestMessage,
     ) -> bool {
-        let mut changed = self.expire_due_metadata(Instant::now());
+        let mut changed = self.sync_pane_graphics_streams();
+        changed |= self.expire_due_metadata(Instant::now());
         changed |= crate::api::request_changes_ui(&msg.request);
         let skip_default_workspace = matches!(
             &msg.request.method,
@@ -80,12 +81,14 @@ impl App {
             self.drain_all_internal_events();
             let deferred_changed =
                 self.handle_deferred_worktree_api_request(msg.request, msg.respond_to);
+            changed |= self.sync_pane_graphics_streams();
             if !skip_default_workspace {
                 changed |= self.ensure_default_workspace();
             }
             return changed | deferred_changed;
         }
         let response = self.handle_api_request_from_socket(msg.request, msg.caller);
+        changed |= self.sync_pane_graphics_streams();
         if !skip_default_workspace {
             changed |= self.ensure_default_workspace();
         }
@@ -644,6 +647,164 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m832b_late_queued_open_preserves_future_static_layer() {
+        use crate::api::schema::*;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let (mut app, pane) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        app.state.kitty_graphics_enabled = true;
+        let target = app.public_pane_id(0, pane).unwrap();
+        let revision = app.state.pane_graphics_revision;
+        let active = Arc::new(AtomicBool::new(true));
+        let late = Request {
+            id: "late".into(),
+            method: Method::PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams {
+                params: PaneGraphicsStreamParams {
+                    pane_id: target.clone(),
+                    owner: "late".into(),
+                },
+                active: active.clone(),
+            }),
+        };
+        let retained = late.clone();
+        let set: Request = serde_json::from_value(serde_json::json!({
+            "id":"static", "method":"pane.graphics.set", "params": {
+                "pane_id":target,"format":"rgba","image_width":1,"image_height":1,
+                "data_base64":"AQIDBA=="}}))
+        .unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.api_rx = rx;
+        let (respond_to, replies) = std::sync::mpsc::channel();
+        for request in [set, late] {
+            tx.send(crate::api::ApiRequestMessage {
+                request,
+                respond_to: respond_to.clone(),
+                caller: Default::default(),
+                response_write_complete: None,
+            })
+            .unwrap();
+        }
+        active.store(false, Ordering::Release);
+        assert!(app.drain_api_requests());
+        let first: serde_json::Value = serde_json::from_str(&replies.try_recv().unwrap()).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&replies.try_recv().unwrap()).unwrap();
+        assert_eq!(first["result"]["type"], "ok");
+        assert_eq!(second["error"]["code"], "stream_closed");
+        assert!(!app.sync_pane_graphics_streams());
+        assert!(app.state.pane_graphics_streams.is_empty());
+        assert!(app.pane_graphics_stream_registrations.is_empty());
+        assert_eq!(app.state.pane_graphics_layers[&pane].data, vec![1, 2, 3, 4]);
+        assert_eq!(app.state.pane_graphics_revision, revision.wrapping_add(1));
+        drop(retained);
+    }
+
+    #[test]
+    fn m832b_idle_cleanup_is_app_local_and_requests_full_render() {
+        use crate::api::schema::*;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        for drop_token in [false, true] {
+            let (mut a, pane) = test_app_with_pane();
+            let (mut b, b_pane) = test_app_with_pane();
+            let aa = Arc::new(AtomicBool::new(true));
+            let bb = Arc::new(AtomicBool::new(true));
+            for (app, active, pane) in [(&mut a, &aa, pane), (&mut b, &bb, b_pane)] {
+                app.state.ensure_test_terminals();
+                app.state.kitty_graphics_enabled = true;
+                let target = app.public_pane_id(0, pane).unwrap();
+                let response = app.handle_api_request(Request {
+                    id: "open".into(),
+                    method: Method::PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams {
+                        params: PaneGraphicsStreamParams {
+                            pane_id: target,
+                            owner: "same".into(),
+                        },
+                        active: active.clone(),
+                    }),
+                });
+                assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
+            }
+            a.state.pane_graphics_layers.insert(
+                pane,
+                crate::app::state::PaneGraphicsLayer::new(
+                    PaneGraphicsFormat::Rgba,
+                    1,
+                    1,
+                    vec![1, 2, 3, 4],
+                    Default::default(),
+                ),
+            );
+            let revision = a.state.pane_graphics_revision;
+            let _ = a.render_dirty.take();
+            if drop_token {
+                drop(aa);
+            } else {
+                aa.store(false, Ordering::Release);
+            }
+            assert!(a.drain_api_requests(), "drop_token={drop_token}");
+            assert!(a.render_dirty.take().generic);
+            assert!(!a.state.pane_graphics_layers.contains_key(&pane));
+            assert!(a.state.pane_graphics_streams.is_empty());
+            assert!(a.pane_graphics_stream_registrations.is_empty());
+            assert_eq!(a.state.pane_graphics_revision, revision.wrapping_add(1));
+            assert!(bb.load(Ordering::Acquire));
+            assert!(!b.sync_pane_graphics_streams());
+            assert_eq!(b.state.pane_graphics_streams[&b_pane], "same");
+        }
+    }
+
+    #[test]
+    fn m832b_request_boundary_cancels_removed_owner_before_next_dequeue() {
+        use crate::api::schema::*;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let (mut app, pane) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        app.state.kitty_graphics_enabled = true;
+        let target = app.public_pane_id(0, pane).unwrap();
+        let active = Arc::new(AtomicBool::new(true));
+        let response = app.handle_api_request(Request {
+            id: "open".into(),
+            method: Method::PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams {
+                params: PaneGraphicsStreamParams {
+                    pane_id: target,
+                    owner: "removed".into(),
+                },
+                active: active.clone(),
+            }),
+        });
+        assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
+        app.state.pane_graphics_streams.remove(&pane);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.api_rx = rx;
+        let (respond_to, replies) = std::sync::mpsc::channel();
+        for n in 0..3 {
+            tx.send(crate::api::ApiRequestMessage {
+                request: serde_json::from_value(
+                    serde_json::json!({"id":format!("ping-{n}"),"method":"ping","params":{}}),
+                )
+                .unwrap(),
+                respond_to: respond_to.clone(),
+                caller: Default::default(),
+                response_write_complete: None,
+            })
+            .unwrap();
+        }
+        let first = app.api_rx.try_recv().unwrap();
+        app.handle_api_request_message(first);
+        assert!(!active.load(Ordering::Acquire));
+        assert!(app.pane_graphics_stream_registrations.is_empty());
+        assert_eq!(app.api_rx.len(), 2);
+        assert!(replies.try_recv().is_ok());
+    }
     use super::*;
     use crate::app::state;
     use crate::workspace::Workspace;

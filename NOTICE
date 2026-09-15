@@ -57,6 +57,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/api/mod.rs
 - src/api/schema/integrations.rs
 - src/api/server.rs
+- src/api/server/pane_graphics_stream.rs
 - src/app/actions.rs
 - src/app/agent_resume.rs
 - src/app/agents.rs
@@ -64,6 +65,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/api_helpers.rs
 - src/app/api/agents.rs
 - src/app/api/layouts.rs
+- src/app/api/pane_graphics.rs
 - src/app/api/panes.rs
 - src/app/api/plugins/panes.rs
 - src/app/api/tabs.rs
@@ -153,6 +155,8 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/server/client_transport.rs
 - src/server/clients.rs
 - src/server/headless.rs
+- src/server/headless/pane_graphics.rs
+- src/server/headless/tests/pane_graphics.rs
 - src/server/notifications.rs
 - src/server/render_stream.rs
 - src/server/socket_paths.rs

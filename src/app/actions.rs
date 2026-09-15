@@ -1592,6 +1592,8 @@ impl AppState {
         }
         for pane_id in pane_ids {
             self.plugin_panes.remove(&pane_id);
+            self.pane_graphics_layers.remove(&pane_id);
+            self.pane_graphics_streams.remove(&pane_id);
         }
     }
 
@@ -3274,6 +3276,94 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m832b_pane_tab_workspace_close_remove_only_their_stream_owners() {
+        for kind in [0, 1, 2] {
+            let mut state = app_with_workspaces(&["closed", "survivor"]);
+            let other_workspace = state.workspaces[1].tabs[0].root_pane;
+            let same_tab = state.workspaces[0].tabs[0].root_pane;
+            let closed = state.workspaces[0].test_split(Direction::Horizontal);
+            let tab = state.workspaces[0].test_add_tab(Some("other-tab"));
+            let other_tab = state.workspaces[0].tabs[tab].root_pane;
+            state.workspaces[0].switch_tab(0);
+            assert_eq!(state.workspaces[0].focused_pane_id(), Some(closed));
+            state.ensure_test_terminals();
+            for pane in [closed, same_tab, other_tab, other_workspace] {
+                state
+                    .pane_graphics_streams
+                    .insert(pane, format!("owner-{}", pane.raw()));
+            }
+            let mut expected = state.pane_graphics_streams.clone();
+            expected.remove(&closed);
+            if kind >= 1 {
+                expected.remove(&same_tab);
+            }
+            if kind == 2 {
+                expected.remove(&other_tab);
+            }
+            match kind {
+                0 => {
+                    state.close_pane();
+                }
+                1 => {
+                    state.close_tab();
+                }
+                _ => state.close_selected_workspace(),
+            }
+            assert_eq!(state.pane_graphics_streams, expected, "kind={kind}");
+            state.assert_invariants_for_test();
+        }
+    }
+    #[test]
+    fn m832a_pane_tab_workspace_close_remove_only_their_static_layers() {
+        for kind in [0, 1, 2] {
+            let mut state = app_with_workspaces(&["closed", "survivor"]);
+            let other_workspace = state.workspaces[1].tabs[0].root_pane;
+            let same_tab = state.workspaces[0].tabs[0].root_pane;
+            let closed = state.workspaces[0].test_split(Direction::Horizontal);
+            let tab = state.workspaces[0].test_add_tab(Some("other-tab"));
+            let other_tab = state.workspaces[0].tabs[tab].root_pane;
+            state.workspaces[0].switch_tab(0);
+            assert_eq!(state.workspaces[0].focused_pane_id(), Some(closed));
+            state.ensure_test_terminals();
+            for pane in [closed, same_tab, other_tab, other_workspace] {
+                state.pane_graphics_layers.insert(
+                    pane,
+                    crate::app::state::PaneGraphicsLayer::new(
+                        crate::api::schema::PaneGraphicsFormat::Rgba,
+                        1,
+                        1,
+                        vec![1, 2, 3, 4],
+                        crate::api::schema::PaneGraphicsPlacementParams::default(),
+                    ),
+                );
+            }
+            let mut expected = state.pane_graphics_layers.clone();
+            expected.remove(&closed);
+            if kind >= 1 {
+                expected.remove(&same_tab);
+            }
+            if kind == 2 {
+                expected.remove(&other_tab);
+            }
+            match kind {
+                0 => {
+                    state.close_pane();
+                }
+                1 => {
+                    state.close_tab();
+                }
+                _ => state.close_selected_workspace(),
+            }
+            assert!(
+                !state.pane_graphics_layers.contains_key(&closed),
+                "close kind={kind}"
+            );
+            assert_eq!(state.pane_graphics_layers, expected, "close kind={kind}");
+            state.assert_invariants_for_test();
+        }
+    }
+
     use super::*;
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
