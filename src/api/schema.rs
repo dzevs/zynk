@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
@@ -194,6 +196,8 @@ pub enum Method {
     PaneReleaseAgent(PaneReleaseAgentParams),
     #[serde(rename = "pane.close")]
     PaneClose(PaneTarget),
+    #[serde(rename = "popup.close")]
+    PopupClose(EmptyParams),
     #[serde(rename = "events.subscribe")]
     EventsSubscribe(EventsSubscribeParams),
     #[serde(rename = "events.wait")]
@@ -233,6 +237,140 @@ pub enum Method {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m833_popup_sizes_have_canonical_external_percent_syntax() {
+        use crate::popup_size::PopupSize;
+        let schema = serde_json::to_value(schemars::schema_for!(PopupSize)).unwrap();
+        assert_eq!(schema["oneOf"][0]["minimum"], 0);
+        assert_eq!(schema["oneOf"][0]["maximum"], 65535);
+        assert_eq!(schema["oneOf"][1]["pattern"], "^(100|[1-9][0-9]?)%$");
+        for cells in [0_u16, 1, 6, 120, u16::MAX] {
+            let size: PopupSize = serde_json::from_value(serde_json::json!(cells)).unwrap();
+            assert_eq!(size, PopupSize::Cells(cells));
+            assert_eq!(
+                serde_json::to_value(size).unwrap(),
+                serde_json::json!(cells)
+            );
+            assert_eq!(PopupSize::parse_cli(&cells.to_string()).unwrap(), size);
+        }
+        for percent in 1_u8..=100 {
+            let spelling = format!("{percent}%");
+            let size: PopupSize = serde_json::from_value(serde_json::json!(spelling)).unwrap();
+            assert_eq!(size, PopupSize::Percent(percent));
+            assert_eq!(PopupSize::parse_cli(&spelling).unwrap(), size);
+            assert_eq!(
+                serde_json::to_value(size).unwrap(),
+                serde_json::json!(spelling)
+            );
+        }
+        for spelling in ["0%", "101%", "01%", "+1%", "-1%", "1.0%", " 1%", "1% ", "%"] {
+            assert!(PopupSize::parse_cli(spelling).is_err(), "{spelling}");
+            assert!(
+                serde_json::from_value::<PopupSize>(serde_json::json!(spelling)).is_err(),
+                "{spelling}"
+            );
+        }
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(65536),
+            serde_json::json!(1.5),
+            serde_json::json!("120"),
+            serde_json::json!(true),
+        ] {
+            assert!(
+                serde_json::from_value::<PopupSize>(value.clone()).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn m833_popup_geometry_bounds_outer_and_inner_coordinates() {
+        use crate::popup_size::{resolve_popup_geometry, PopupSize};
+        use ratatui::layout::Rect;
+        let resolved = resolve_popup_geometry(
+            Some(PopupSize::Percent(80)),
+            Some(PopupSize::Percent(40)),
+            Rect::new(4, 2, 100, 30),
+        )
+        .unwrap();
+        assert_eq!(resolved.outer, Rect::new(14, 11, 80, 12));
+        assert_eq!(resolved.inner, Rect::new(15, 12, 77, 10));
+        let minimum = resolve_popup_geometry(
+            Some(PopupSize::Cells(0)),
+            Some(PopupSize::Cells(0)),
+            Rect::new(0, 0, 80, 24),
+        )
+        .unwrap();
+        assert_eq!(minimum.outer, Rect::new(37, 10, 6, 4));
+        assert_eq!(minimum.inner, Rect::new(38, 11, 4, 2));
+        for area in [
+            Rect::new(0, 0, 5, 24),
+            Rect::new(0, 0, 80, 3),
+            Rect::new(0, 0, 0, 0),
+            Rect {
+                x: u16::MAX - 2,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            Rect {
+                x: 0,
+                y: u16::MAX - 2,
+                width: 8,
+                height: 8,
+            },
+        ] {
+            assert!(
+                resolve_popup_geometry(None, None, area).is_none(),
+                "{area:?}"
+            );
+        }
+        let area = Rect::new(u16::MAX - 8, u16::MAX - 8, 8, 8);
+        let edge = resolve_popup_geometry(
+            Some(PopupSize::Percent(100)),
+            Some(PopupSize::Percent(100)),
+            area,
+        )
+        .unwrap();
+        assert_eq!(edge.outer, area);
+        assert!(edge.inner.x >= area.x && edge.inner.y >= area.y);
+        assert!(edge.inner.right() <= area.right() && edge.inner.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn m833_popup_public_wire_shapes_preserve_old_placements() {
+        use crate::api::schema::Request;
+        for placement in ["overlay", "split", "tab", "zoomed", "popup"] {
+            let value = serde_json::json!({
+                "id": "popup-wire", "method": "plugin.pane.open",
+                "params": {"plugin_id": "example.popup", "entrypoint": "main",
+                    "placement": placement, "focus": false}
+            });
+            let request: Request = serde_json::from_value(value).unwrap();
+            let encoded = serde_json::to_value(&request).unwrap();
+            assert_eq!(encoded["params"]["placement"], placement);
+            assert_eq!(encoded["params"]["focus"], false);
+            assert!(encoded["params"].get("width").is_none());
+            assert!(encoded["params"].get("height").is_none());
+        }
+        let close: Request = serde_json::from_value(serde_json::json!({
+            "id": "popup-close", "method": "popup.close", "params": {}
+        }))
+        .unwrap();
+        assert!(crate::api::request_changes_ui(&close));
+        assert_eq!(
+            serde_json::to_value(&close).unwrap(),
+            serde_json::json!({
+                "id": "popup-close", "method": "popup.close", "params": {}
+            })
+        );
+        assert!(serde_json::from_value::<Request>(serde_json::json!({
+            "id": "bad", "method": "popup.close"
+        }))
+        .is_err());
+    }
+
     #[test]
     fn m832b_skipped_fields_internal_serialization_and_connection_equality_are_distinct() {
         use std::sync::{
@@ -1711,6 +1849,7 @@ mod tests {
         "pane.clear_agent_authority",
         "pane.release_agent",
         "pane.close",
+        "popup.close",
         "events.subscribe",
         "events.wait",
         "pane.wait_for_output",

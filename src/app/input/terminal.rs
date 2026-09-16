@@ -16,6 +16,12 @@ struct PreparedPaneInput {
     bytes: Bytes,
 }
 
+enum PreparedPopupInput {
+    NotOpen,
+    Consumed,
+    Forward(TerminalInputTarget, Bytes),
+}
+
 fn is_modifier_only_key(code: &KeyCode) -> bool {
     matches!(code, KeyCode::Modifier(_))
 }
@@ -34,6 +40,16 @@ impl App {
         source_id: InputSourceId,
         key: TerminalKey,
     ) -> Option<TerminalInputTarget> {
+        match self.prepare_popup_key_forward(key.clone()) {
+            PreparedPopupInput::NotOpen => {}
+            PreparedPopupInput::Consumed => return None,
+            PreparedPopupInput::Forward(target, bytes) => {
+                return self
+                    .popup_runtime()
+                    .is_some_and(|runtime| runtime.try_send_bytes(bytes).is_ok())
+                    .then_some(target);
+            }
+        }
         let input = self.prepare_terminal_key_forward(source_id, key)?;
         let sent = self
             .lookup_runtime_sender(input.ws_idx, input.pane_id)
@@ -280,7 +296,17 @@ impl App {
     }
 
     pub(crate) fn release_input_target_headless(&mut self, target: &TerminalInputTarget) {
-        for pressed in self.input_leases.remove_target(target) {
+        let pressed = if self
+            .state
+            .popup_pane
+            .as_ref()
+            .is_some_and(|popup| popup.terminal_id == target.terminal_id)
+        {
+            self.input_leases.suppress_target(target)
+        } else {
+            self.input_leases.remove_target(target)
+        };
+        for pressed in pressed {
             let release = pressed
                 .key
                 .with_kind(crossterm::event::KeyEventKind::Release);
@@ -314,6 +340,18 @@ impl App {
         &mut self,
         key: TerminalKey,
     ) -> Option<TerminalInputTarget> {
+        match self.prepare_popup_key_forward(key.clone()) {
+            PreparedPopupInput::NotOpen => {}
+            PreparedPopupInput::Consumed => return None,
+            PreparedPopupInput::Forward(target, bytes) => {
+                let sent = if let Some(runtime) = self.popup_runtime() {
+                    runtime.send_bytes(bytes).await.is_ok()
+                } else {
+                    false
+                };
+                return sent.then_some(target);
+            }
+        }
         let input = self.prepare_terminal_key_forward(crate::app::LOCAL_INPUT_SOURCE, key)?;
         let sent = if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
             runtime.send_bytes(input.bytes).await.is_ok()
@@ -321,6 +359,27 @@ impl App {
             false
         };
         sent.then_some(input.target)
+    }
+
+    fn prepare_popup_key_forward(&mut self, key: TerminalKey) -> PreparedPopupInput {
+        let Some(popup) = &self.state.popup_pane else {
+            return PreparedPopupInput::NotOpen;
+        };
+        let target = TerminalInputTarget {
+            terminal_id: popup.terminal_id.clone(),
+        };
+        let Some(runtime) = self.popup_runtime() else {
+            self.close_popup_pane();
+            return PreparedPopupInput::Consumed;
+        };
+        runtime.scroll_reset();
+        let bytes = runtime.encode_terminal_key(key);
+        self.state.mode = Mode::Terminal;
+        if bytes.is_empty() {
+            PreparedPopupInput::Consumed
+        } else {
+            PreparedPopupInput::Forward(target, Bytes::from(bytes))
+        }
     }
 }
 
@@ -1785,6 +1844,8 @@ mod tests {
             command,
             action: crate::config::CustomCommandAction::Shell,
             description: None,
+            width: None,
+            height: None,
         }];
 
         app.handle_terminal_key(TerminalKey::new(
@@ -1835,6 +1896,8 @@ mod tests {
             command: "printf direct-pane".into(),
             action: crate::config::CustomCommandAction::Pane,
             description: None,
+            width: None,
+            height: None,
         }];
 
         app.handle_terminal_key(TerminalKey::new(

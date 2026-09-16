@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::collections::HashMap;
 
 use crate::app::{InputSourceId, TerminalInputContext, TerminalInputTarget};
@@ -216,6 +218,24 @@ impl InputLeaseTable {
             })
             .collect::<Vec<_>>();
         self.remove_keys(keys)
+    }
+
+    pub(crate) fn suppress_target(
+        &mut self,
+        target: &TerminalInputTarget,
+    ) -> Vec<ForwardedInputLease> {
+        let mut forwarded = Vec::new();
+        for lease in self.leases.values_mut() {
+            if matches!(lease, InputLease::Forwarded(pressed) if &pressed.target == target) {
+                if let InputLease::Forwarded(pressed) = std::mem::replace(
+                    lease,
+                    InputLease::Consumed(ConsumedInputLease::SuppressRepeats),
+                ) {
+                    forwarded.push(pressed);
+                }
+            }
+        }
+        forwarded
     }
 
     fn remove_keys(

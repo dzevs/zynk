@@ -172,6 +172,7 @@ impl TerminalRuntime {
         cwd: std::path::PathBuf,
         command: &str,
         launch_env: &crate::pane::PaneLaunchEnv,
+        agent_detection: crate::pane::AgentDetection,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -186,6 +187,7 @@ impl TerminalRuntime {
             cwd,
             command,
             launch_env,
+            agent_detection,
             scrollback_limit_bytes,
             host_terminal_theme,
             host_terminal_appearance,
@@ -205,6 +207,7 @@ impl TerminalRuntime {
         cwd: std::path::PathBuf,
         argv: &[String],
         launch_env: &crate::pane::PaneLaunchEnv,
+        agent_detection: crate::pane::AgentDetection,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -219,6 +222,7 @@ impl TerminalRuntime {
             cwd,
             argv,
             launch_env,
+            agent_detection,
             scrollback_limit_bytes,
             host_terminal_theme,
             host_terminal_appearance,
@@ -449,6 +453,10 @@ impl TerminalRuntime {
 
     pub async fn send_paste(&self, text: String) -> Result<(), mpsc::error::SendError<Bytes>> {
         self.0.send_paste(text).await
+    }
+
+    pub fn try_send_paste(&self, text: String) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.0.try_send_paste(text)
     }
 
     pub fn try_send_focus_event(&self, event: crate::ghostty::FocusEvent) -> bool {

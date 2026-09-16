@@ -85,6 +85,15 @@ pub(crate) struct RightClickPassthroughGesture {
 pub(crate) struct TerminalMouseGesture {
     pub pane_info: PaneInfo,
     pub modifiers_to_strip: KeyModifiers,
+    pub popup_terminal_id: Option<crate::terminal::TerminalId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PopupPaneState {
+    pub pane_id: PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
+    pub width: Option<crate::popup_size::PopupSize>,
+    pub height: Option<crate::popup_size::PopupSize>,
 }
 use crate::terminal_theme::{HostAppearance, TerminalTheme};
 use crate::workspace::Workspace;
@@ -838,6 +847,8 @@ pub enum ViewLayout {
 
 pub struct ViewState {
     pub layout: ViewLayout,
+    /// Popup cursor suppression sampled before computing and resizing this view.
+    pub popup_cursor_suppressed: bool,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
@@ -1645,6 +1656,8 @@ pub struct AppState {
     pub(crate) pane_graphics_layers: std::collections::HashMap<PaneId, PaneGraphicsLayer>,
     pub(crate) pane_graphics_streams: std::collections::HashMap<PaneId, String>,
     pub(crate) pane_graphics_revision: u64,
+    /// Session-local terminal, outside workspace layouts and public pane identities.
+    pub(crate) popup_pane: Option<PopupPaneState>,
     pub(crate) host_cell_size: crate::kitty_graphics::HostCellSize,
     /// Recent plugin action/event command executions.
     pub(crate) plugin_command_logs: Vec<crate::api::schema::PluginCommandLogInfo>,
@@ -1728,18 +1741,23 @@ impl AppState {
     }
 
     pub(crate) fn app_surface_pane_ids(&self) -> std::collections::HashSet<PaneId> {
+        let mut panes = std::collections::HashSet::new();
+        if let Some(popup) = &self.popup_pane {
+            panes.insert(popup.pane_id);
+        }
         let Some(tab) = self
             .active
             .and_then(|ws_idx| self.workspaces.get(ws_idx))
             .and_then(crate::workspace::Workspace::active_tab)
         else {
-            return std::collections::HashSet::new();
+            return panes;
         };
         if tab.zoomed {
-            std::collections::HashSet::from([tab.layout.focused()])
+            panes.insert(tab.layout.focused());
         } else {
-            tab.panes.keys().copied().collect()
+            panes.extend(tab.panes.keys().copied());
         }
+        panes
     }
 
     pub(crate) fn focused_pane_requests_mouse_capture_from(
@@ -1757,7 +1775,9 @@ impl AppState {
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> bool {
-        self.mouse_capture || self.focused_pane_requests_mouse_capture_from(terminal_runtimes)
+        self.mouse_capture
+            || self.popup_pane.is_some()
+            || self.focused_pane_requests_mouse_capture_from(terminal_runtimes)
     }
 
     pub fn is_prefix_key(&self, key: &crate::input::TerminalKey) -> bool {
@@ -1918,6 +1938,7 @@ impl AppState {
             mobile_switcher_scroll: 0,
             view: ViewState {
                 layout: ViewLayout::Desktop,
+                popup_cursor_suppressed: false,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
@@ -2029,6 +2050,7 @@ impl AppState {
             pane_graphics_layers: std::collections::HashMap::new(),
             pane_graphics_streams: std::collections::HashMap::new(),
             pane_graphics_revision: 0,
+            popup_pane: None,
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
@@ -2069,6 +2091,26 @@ impl AppState {
     }
 
     pub fn assert_invariants_for_test(&self) {
+        if let Some(popup) = &self.popup_pane {
+            assert!(
+                self.terminals.contains_key(&popup.terminal_id),
+                "popup metadata missing"
+            );
+            for ws in &self.workspaces {
+                for tab in &ws.tabs {
+                    assert!(
+                        !tab.panes.contains_key(&popup.pane_id),
+                        "popup must not be tiled"
+                    );
+                    assert!(
+                        !tab.panes
+                            .values()
+                            .any(|pane| pane.attached_terminal_id == popup.terminal_id),
+                        "popup terminal must not be attached to a tile"
+                    );
+                }
+            }
+        }
         if self.workspaces.is_empty() {
             assert!(
                 self.active.is_none(),
@@ -2126,8 +2168,10 @@ impl AppState {
                 "empty app state must not keep right-click passthrough gesture"
             );
             assert!(
-                self.terminal_mouse_gestures.is_empty(),
-                "empty app state must not keep terminal mouse gestures"
+                self.terminal_mouse_gestures
+                    .values()
+                    .all(|gesture| gesture.popup_terminal_id.is_some()),
+                "empty app state must not keep tiled terminal mouse gestures"
             );
             assert!(
                 self.drag.is_none(),
@@ -2291,7 +2335,9 @@ impl AppState {
             );
         }
         for gesture in self.terminal_mouse_gestures.values() {
-            assert_live_pane(gesture.pane_info.id, "terminal mouse gesture");
+            if gesture.popup_terminal_id.is_none() {
+                assert_live_pane(gesture.pane_info.id, "terminal mouse gesture");
+            }
         }
         if let Some(drag) = &self.drag {
             match &drag.target {

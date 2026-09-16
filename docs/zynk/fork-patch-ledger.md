@@ -6874,3 +6874,113 @@ deviation remain open. E N-1/N-3, M8-29/30 ordering deviation/omission, M8-31
 N-1/N-2/N-3/N-4, its spent-hold finding and staging-order deviation, and every
 historical instrument history stay separate and undischarged. No whole-M8,
 Gate-3, merge, push, install, tag, publish, release or cleanup approval is implied.
+
+### M8-33/34/35: Modal popups, short fixture sockets and CLI protocol checks
+
+IMPLEMENTED / PENDING EXACT-RANGE VERIFICATION. One combined batch on parent
+a307c40b, incorporating post-relicense sources 2c7c8beb, 2bd334b3 and 600753b4.
+The operator-approved batch model retains A/B/C implementation boundaries as
+source snapshots, not separate commits or external gates. NOTICE and per-file
+headers cover derived source. No protocol-version or native receipt change.
+
+M8-33 introduces a session-local modal terminal popup without public pane IDs,
+layout membership, pane lifecycle events or persistence. Runtime/channel handles
+remain outside pure state. Shell and argv constructors preserve host appearance,
+RenderSignal, launch policy and final environment scrubbing while disabling agent
+detection and removing pane identity. Close releases original input targets before
+runtime removal. Popup repeats use consumed suppression markers; mouse gestures
+retain source/button/TerminalId ownership rather than being retargeted by hit tests.
+The fork keeps its lease planner, scalar paste getter, passive-motion policy and
+M7 visibility/cadence/stop boundaries instead of importing older upstream paths.
+
+Geometry accepts canonical percentages or u16 cells, including zero, with checked
+coordinates, minimum/clamp semantics and independent request overrides. Existing
+overlay/zoomed behavior stays distinct. View computation resizes; draw stays pure.
+A derived ViewState flag preserves pre-resize synchronized-output cursor intent
+in monolithic desktop/mobile frames. App graphics are hidden without cancelling
+streams, accepted hidden frames stay latest-wins in the layer map, and B1 cache
+commit waits for writer acceptance. Direct-terminal frames retain their separate
+contract. Tiled OSC-8 metadata is clipped beneath the popup. Retained-PTY rendering
+declines popup state. Successful handoff intentionally does not restore the popup;
+normal runtime drop is not a detached-descendant guarantee or a live-handoff test.
+
+M8-34 changes the existing local_stream_pair test helper to short PID/counter
+filenames, preserving its ten old callers and production stream code. Its own
+source/execution disposition is retained; arbitrary TMPDIR length is not promised.
+M832-M836-READ-RESET remains outside this batch. M8-35 guards ordinary operational
+requests and subscriptions with separate protocol probes, preserving Unknown and
+F4 Failed semantics rather than inventing server denials. The typed transport error
+does not print; ordinary CLI owns protocol_mismatch output. Status/stop/handoff
+recovery paths remain explicit and nonrecursive. Ping/operation is non-atomic,
+without retry or proof of no side effect after a lost response. Resolver context
+remains unchanged by an accepted scope decision, not an impossibility argument.
+The popup-close CLI leaf is a fork convenience surface, not authority-preserved.
+
+Deferred arrivals are joined individually, not discharged by implementation:
+- 10eb0bc7's two popup constructors carry host appearance; e27a4ea4's popup
+  lifecycle/constructor portion uses runtime ownership and RenderSignal.
+- 547aba8e's popup passive-motion/visibility portion and 81f355fa's separate popup
+  visibility/lookup portion are reconciled without reopening M8-32 graphics claims.
+- b76adc15/e7fc85bf popup input source/target/context, text and release lifetime
+  use fork leases; M8-43 session fixtures and M8-50 report-all primary stay pending.
+- a5c69bea's two popup visibility sites and hidden-pending wake are covered,
+  including no-workspace state; its title/report-all arrivals stay separate.
+- a0678a38 portable popup usage is expressed through fork CLI option help and SPEC
+  examples, without upstream website files, Windows examples or generated schema.
+  This is a documentation-placement adaptation, not wholesale source preservation.
+
+Execution and source populations remain distinct. The raw parent full suite passed
+4365 with five ignored. Eleven existing-interface controls yielded ten behavioral
+reds and one pass after the named timeout fixture adapter. Typed A's corrected
+compile red had 90 missing-interface diagnostics; the earlier 91 included a frozen
+private-method accessibility defect. Typed C had its missing-module compile red.
+Corrected cumulative selections passed 2236, 2237 and 2246. Full child passed 4403
+with five ignored and complete membership reconciled, then lint passed. All 38 new
+controls execute green. Source comparison preserves 1197 RAW old scheduled bodies,
+with 17 scheduled adapters and eight additional helper adapters individually bound.
+Adapters and source equality do not establish behavioral equivalence or fixture
+validity. Shared wire-list adaptation keeps the old parity body RAW.
+
+Chronology retains actual detection stages, never earliest-possible claims:
+the LocalStream timeout API correction; private command-handler fixture adapter;
+explicit formatting adapters; append-only repeat/cursor regressions; terminal setup
+and five URI tuple-slot corrections; the second monolithic resize extension;
+the pane-list request-ID fixture correction; popup CLI route/edit-plan gap and
+appendix; and its separate formatting correction. A's unit/bool E0308 and C's
+missing import E0425 were production-draft errors with zero outcomes, not fixture
+or absent-interface evidence. Final controls compose frozen prefixes and approved
+adapters/extensions rather than being relabelled as the original frozen bodies.
+The popup CLI edit-plan inconsistency is also retained as the reviewer's note.
+
+Eleven serial declared faults scheduled 59 outcomes: 42 PASS and 17 FAIL, eleven
+intended and six incidental crossings. Per-site source bindings establish first
+stops; aggregate kinds retain six evaluated equalities, seven false predicates,
+two Empty unwraps inside equality arguments and two JSON-parse unwraps before
+later assertions. F04's predicted stop is not an evaluated byte comparison.
+F05 discriminates a direct predicate arm unreachable in that popup state from its
+current production caller; no defense-in-depth refusal claim is made. Boolean
+retained fallback results do not identify their reason. These evidence bounds
+remain explicit. Eleven complete byte/mode restoration boundaries precede
+successors; the restored 2246 selection is green. Printed selected SKIPs are not
+executions or a complete catalog; derived summaries are not independent runs.
+
+Three prerequisite-interpretation deviations remain separately OPEN: A-v1
+interpretation and its call-site edit/A-v2 dispatch in one orchestration call;
+fmt completion and A-v3 dispatch in one call; and inspector source-review receipt
+and F01 derivation in one call. Successful prerequisites and later interpretation
+do not supply the missing earlier model-read boundaries. M83335-G1-N1 retains
+future CLI route/verb coverage drift; M83335-F05-REACHABILITY-BOUND retains the
+direct-predicate versus production-call distinction. New instrument examinations
+and corrected executions do not close earlier capped tool histories.
+
+Source/consumer/residue dispositions, documentation and this append precede
+explicit staging. Staging supplies new-file membership, not a passing gate.
+Fresh just check then just gate must pass before the normal-hook batch commit;
+exact-tip check/gate/selection/catalog and batch Gate-2 remain exit obligations.
+A later edit requires new source/staging records and affected verification.
+All twenty origins, unions98/34, D's five primaries, three standing limits, D2's
+chronology/style-byte miss, M8-RECT-NARROW, E N-1/N-3, M8-29/30 ordering history,
+M8-31 findings/notes/staging deviation, M8-32 resource/schema/handoff limitations,
+M8-37/M8-65, older N1/N3, operator deviation and all instrument histories remain
+individually open on their terms. No whole-M8, independent Gate-3 or operator
+merge/push/install/tag/publish/release/cleanup approval is implied.

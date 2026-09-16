@@ -41,7 +41,7 @@ use self::mobile::{
 use self::navigator::render_navigator_overlay;
 pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
-use self::panes::render_empty;
+use self::panes::{render_empty, render_popup_pane, resize_popup_pane};
 pub(crate) use self::release_notes::{
     product_announcement_display_lines, release_notes_close_button_rect,
     release_notes_display_lines, release_notes_wrapped_line_count, PRODUCT_ANNOUNCEMENT_MODAL_SIZE,
@@ -92,7 +92,7 @@ pub(crate) use self::{
         mobile_switcher_areas, mobile_switcher_max_scroll, mobile_switcher_target_at,
         mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
     },
-    panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back},
+    panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back, popup_pane_rects},
     tabs::compute_tab_bar_view,
     widgets::{centered_popup_rect, modal_stack_areas},
 };
@@ -222,8 +222,20 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    let popup_cursor_suppressed = app
+        .popup_pane
+        .as_ref()
+        .and_then(|popup| terminal_runtimes.get(&popup.terminal_id))
+        .is_some_and(|runtime| runtime.synchronized_output_active());
     if is_mobile_width(area, app.mobile_width_threshold) {
-        compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
+        compute_mobile_view(
+            app,
+            terminal_runtimes,
+            area,
+            resize_panes,
+            cell_size,
+            popup_cursor_suppressed,
+        );
         return;
     }
 
@@ -291,6 +303,7 @@ fn compute_view_internal(
     );
     if resize_panes {
         resize_background_tab_panes_for_desktop(app, terminal_runtimes, main_area, cell_size);
+        resize_popup_pane(app, terminal_runtimes, terminal_area, cell_size);
     }
 
     let toast_hit_area = app
@@ -308,6 +321,7 @@ fn compute_view_internal(
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
+        popup_cursor_suppressed,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
         tab_bar_rect,
@@ -331,6 +345,7 @@ fn compute_mobile_view(
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
+    popup_cursor_suppressed: bool,
 ) {
     let header_h = area.height.min(2);
     let (header_rect, terminal_area) = if area.height > header_h {
@@ -359,6 +374,7 @@ fn compute_mobile_view(
     );
     if resize_panes {
         resize_background_tab_panes_to_area(app, terminal_runtimes, terminal_area, cell_size);
+        resize_popup_pane(app, terminal_runtimes, terminal_area, cell_size);
     }
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
 
@@ -370,6 +386,7 @@ fn compute_mobile_view(
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
+        popup_cursor_suppressed,
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
@@ -464,6 +481,7 @@ pub fn render_with_runtime_registry(
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::Terminal => {}
     }
+    render_popup_pane(app, terminal_runtimes, frame, terminal_area);
 }
 
 fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) {
@@ -1571,6 +1589,8 @@ mod tests {
                 command: "lazygit".to_string(),
                 action: crate::config::CustomCommandAction::Pane,
                 description: Some("open lazygit".to_string()),
+                width: None,
+                height: None,
             },
             crate::config::CustomCommandKeybind {
                 bindings: crate::config::ActionKeybinds::prefix("alt+h"),
@@ -1578,6 +1598,8 @@ mod tests {
                 command: "echo hello".to_string(),
                 action: crate::config::CustomCommandAction::Shell,
                 description: None,
+                width: None,
+                height: None,
             },
         ];
 

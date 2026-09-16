@@ -3592,6 +3592,11 @@ impl HeadlessServer {
             HashSet::new()
         };
         if !direct_terminal_targets.is_empty() {
+            if let Some(popup) = &self.app.state.popup_pane {
+                if direct_terminal_targets.contains(popup.terminal_id.as_str()) {
+                    pane_ids.insert(popup.pane_id);
+                }
+            }
             for workspace in &self.app.state.workspaces {
                 for tab in &workspace.tabs {
                     pane_ids.extend(tab.panes.iter().filter_map(|(&pane_id, pane)| {
@@ -3660,12 +3665,26 @@ impl HeadlessServer {
         &self,
         pane_id: crate::layout::PaneId,
     ) -> Option<&crate::terminal::TerminalId> {
+        if let Some(popup) = &self.app.state.popup_pane {
+            if popup.pane_id == pane_id {
+                return Some(&popup.terminal_id);
+            }
+        }
         self.app
             .find_pane(pane_id)
             .map(|(_, pane)| &pane.attached_terminal_id)
     }
 
     fn app_surface_contains_pane(&self, pane_id: crate::layout::PaneId) -> bool {
+        if self
+            .app
+            .state
+            .popup_pane
+            .as_ref()
+            .is_some_and(|popup| popup.pane_id == pane_id)
+        {
+            return true;
+        }
         let Some(workspace) = self
             .app
             .state
@@ -3811,6 +3830,7 @@ impl HeadlessServer {
 
     fn retained_pty_update_allowed_by_app_state(&self) -> bool {
         self.app.state.mode == app::Mode::Terminal
+            && self.app.state.popup_pane.is_none()
             && self.app.state.selection.is_none()
             && self.app.state.copy_mode.is_none()
             && self.app.state.context_menu.is_none()
@@ -4894,6 +4914,392 @@ fn init_logging() {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn m833_popup_visibility_and_direct_sources_survive_no_workspace() {
+        let (mut server, _rx, _) = retained_test_server(b"tile");
+        server.app.state.ensure_test_terminals();
+        let (runtime, _input) = crate::terminal::TerminalRuntime::test_with_channel(40, 12);
+        let (pane, terminal) = server.app.install_test_popup_runtime(runtime);
+        for without_workspace in [false, true] {
+            if without_workspace {
+                server.app.state.workspaces.clear();
+                server.app.state.active = None;
+            }
+            assert!(server.app.state.app_surface_pane_ids().contains(&pane));
+            server.app.state.assert_invariants_for_test();
+            for mode in [
+                ClientConnectionMode::App,
+                ClientConnectionMode::TerminalAttach {
+                    terminal_id: terminal.to_string(),
+                },
+            ] {
+                server.clients.get_mut(&1).unwrap().mode = ClientConnectionMode::TerminalPending;
+                let _ = server.app.render_dirty.take();
+                server.sync_immediate_pty_sources();
+                assert!(server.app.render_dirty.request_pty(pane));
+                assert!(!server.has_pending_presentation_work(false));
+                server.clients.get_mut(&1).unwrap().mode = mode;
+                server.sync_immediate_pty_sources();
+                assert!(
+                    server.has_pending_presentation_work(false),
+                    "without_workspace={without_workspace}"
+                );
+                assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([pane])));
+            }
+        }
+        assert!(server.app.close_popup_pane());
+        assert_eq!(server.app.state.mode, crate::app::Mode::Navigate);
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[tokio::test]
+    async fn m833_popup_render_geometry_cursor_and_sync_are_runtime_local() {
+        let (mut server, _rx, _) = retained_test_server(b"tile-cursor");
+        let runtime =
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 12, b"\x1b[6 qPOPUP");
+        let (_, terminal) = server.app.install_test_popup_runtime(runtime);
+        for (width, height) in [(120, 40), (40, 24)] {
+            let area = Rect::new(0, 0, width, height);
+            let (buffer, cursor) =
+                crate::server::render_stream::render_virtual_with_runtime_registry(
+                    &mut server.app.state,
+                    &server.app.terminal_runtimes,
+                    area,
+                    true,
+                    crate::kitty_graphics::HostCellSize::default(),
+                );
+            let (outer, inner) =
+                crate::ui::popup_pane_rects(&server.app.state, server.app.state.view.terminal_area)
+                    .unwrap();
+            assert!(outer.contains((inner.x, inner.y).into()));
+            assert_eq!(buffer[(inner.x, inner.y)].symbol(), "P");
+            assert_eq!(
+                cursor.as_ref().map(|c| (c.x, c.y, c.visible)),
+                Some((inner.x + 5, inner.y, true))
+            );
+            let runtime = server.app.terminal_runtimes.get(&terminal).unwrap();
+            assert_eq!(runtime.current_size(), (inner.height, inner.width));
+            runtime.test_process_pty_bytes(b"\x1b[?2026h\x1b[2;3H");
+            let (_, cursor) = crate::server::render_stream::render_virtual_with_runtime_registry(
+                &mut server.app.state,
+                &server.app.terminal_runtimes,
+                area,
+                false,
+                crate::kitty_graphics::HostCellSize::default(),
+            );
+            assert!(cursor.is_none());
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal)
+                .unwrap()
+                .test_process_pty_bytes(b"\x1b[?2026l\x1b[1;6H");
+        }
+        server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .insert(terminal.clone());
+        let size = server
+            .app
+            .terminal_runtimes
+            .get(&terminal)
+            .unwrap()
+            .current_size();
+        crate::ui::compute_view_with_runtime_registry(
+            &mut server.app.state,
+            &server.app.terminal_runtimes,
+            Rect::new(0, 0, 160, 60),
+        );
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal)
+                .unwrap()
+                .current_size(),
+            size
+        );
+        server.app.close_popup_pane();
+        shutdown_test_runtimes(&mut server);
+        for popup_screen in [b"\x1b[?25lHIDDEN".as_slice(), b"\x1b[?2026hSYNC".as_slice()] {
+            let (mut server, _rx, _) = retained_test_server(b"TILE-CURSOR");
+            let runtime =
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 12, popup_screen);
+            server.app.install_test_popup_runtime(runtime);
+            crate::ui::compute_view_without_resizing_panes(
+                &mut server.app.state,
+                &server.app.terminal_runtimes,
+                Rect::new(0, 0, 120, 40),
+            );
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    crate::ui::render_with_runtime_registry(
+                        &server.app.state,
+                        &server.app.terminal_runtimes,
+                        frame,
+                    )
+                })
+                .unwrap();
+            terminal.backend_mut().assert_cursor_position((0, 0));
+            server.app.close_popup_pane();
+            shutdown_test_runtimes(&mut server);
+        }
+        let (mut server, _rx, _) = retained_test_server(b"TILE-RESIZE");
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 12, b"POPUP");
+        let (_, terminal) = server.app.install_test_popup_runtime(runtime);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut server.app.state,
+            &server.app.terminal_runtimes,
+            Rect::new(0, 0, 120, 40),
+        );
+        let runtime = server.app.terminal_runtimes.get(&terminal).unwrap();
+        let old_size = runtime.current_size();
+        runtime.test_process_pty_bytes(b"\x1b[?2026h\x1b[2;3H");
+        assert!(runtime.synchronized_output_active());
+        let (_, cursor) = crate::server::render_stream::render_virtual_with_runtime_registry(
+            &mut server.app.state,
+            &server.app.terminal_runtimes,
+            Rect::new(0, 0, 160, 60),
+            true,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        assert_ne!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal)
+                .unwrap()
+                .current_size(),
+            old_size
+        );
+        assert!(
+            cursor.is_none(),
+            "pre-resize popup synchronization must suppress this frame"
+        );
+        server.app.close_popup_pane();
+        shutdown_test_runtimes(&mut server);
+        for (width, height) in [(160, 60), (40, 24)] {
+            let (mut server, _rx, _) = retained_test_server(b"TILE-MONO-RESIZE");
+            let runtime =
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 12, b"POPUP");
+            let (_, terminal_id) = server.app.install_test_popup_runtime(runtime);
+            crate::ui::compute_view_with_runtime_registry(
+                &mut server.app.state,
+                &server.app.terminal_runtimes,
+                Rect::new(0, 0, 120, 40),
+            );
+            let runtime = server.app.terminal_runtimes.get(&terminal_id).unwrap();
+            let old_size = runtime.current_size();
+            runtime.test_process_pty_bytes(b"\x1b[?2026h\x1b[2;3H");
+            assert!(runtime.synchronized_output_active());
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    crate::ui::compute_view_with_runtime_registry(
+                        &mut server.app.state,
+                        &server.app.terminal_runtimes,
+                        frame.area(),
+                    );
+                    crate::ui::render_with_runtime_registry(
+                        &server.app.state,
+                        &server.app.terminal_runtimes,
+                        frame,
+                    );
+                })
+                .unwrap();
+            assert_ne!(
+                server
+                    .app
+                    .terminal_runtimes
+                    .get(&terminal_id)
+                    .unwrap()
+                    .current_size(),
+                old_size
+            );
+            terminal.backend_mut().assert_cursor_position((0, 0));
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .test_process_pty_bytes(b"\x1b[?2026l");
+            terminal
+                .draw(|frame| {
+                    crate::ui::compute_view_with_runtime_registry(
+                        &mut server.app.state,
+                        &server.app.terminal_runtimes,
+                        frame.area(),
+                    );
+                    crate::ui::render_with_runtime_registry(
+                        &server.app.state,
+                        &server.app.terminal_runtimes,
+                        frame,
+                    );
+                })
+                .unwrap();
+            let (_, inner) =
+                crate::ui::popup_pane_rects(&server.app.state, server.app.state.view.terminal_area)
+                    .unwrap();
+            let cursor = server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .cursor_state(inner, true)
+                .unwrap();
+            assert!(cursor.visible);
+            terminal
+                .backend_mut()
+                .assert_cursor_position((cursor.x, cursor.y));
+            server.app.close_popup_pane();
+            shutdown_test_runtimes(&mut server);
+        }
+    }
+
+    #[tokio::test]
+    async fn m833_popup_hyperlinks_occlude_tile_metadata_only_inside_outer_rect() {
+        let tile = b"\x1b]8;;https://tile.invalid\x1b\\TILE-LINK\x1b]8;;\x1b\\";
+        let (mut server, _rx, pane) = retained_test_server(tile);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut server.app.state,
+            &server.app.terminal_runtimes,
+            Rect::new(0, 0, 120, 40),
+        );
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(
+            40,
+            12,
+            b"\x1b]8;;https://popup.invalid\x1b\\POPUP\x1b]8;;\x1b\\",
+        );
+        server.app.install_test_popup_runtime(runtime);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut server.app.state,
+            &server.app.terminal_runtimes,
+            Rect::new(0, 0, 120, 40),
+        );
+        let (outer, inner) =
+            crate::ui::popup_pane_rects(&server.app.state, server.app.state.view.terminal_area)
+                .unwrap();
+        let info = server
+            .app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane)
+            .unwrap();
+        let local_x = outer.x - info.inner_rect.x + 1;
+        let local_y = outer.y - info.inner_rect.y + 1;
+        server.app.state.runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane).unwrap()
+            .test_process_pty_bytes(format!("\x1b[{local_y};{local_x}H\x1b]8;;https://covered.invalid\x1b\\HIDDEN\x1b]8;;\x1b\\").as_bytes());
+        let links = crate::server::render_stream::visible_hyperlinks(
+            &server.app.state,
+            &server.app.terminal_runtimes,
+        );
+        assert!(links
+            .iter()
+            .any(|((x, y), _, url)| !outer.contains((*x, *y).into())
+                && url == "https://tile.invalid"));
+        assert!(!links
+            .iter()
+            .any(|(_, _, url)| url == "https://covered.invalid"));
+        assert!(links.iter().any(
+            |((x, y), _, url)| (*x, *y) == (inner.x, inner.y) && url == "https://popup.invalid"
+        ));
+        server.app.close_popup_pane();
+        let links = crate::server::render_stream::visible_hyperlinks(
+            &server.app.state,
+            &server.app.terminal_runtimes,
+        );
+        assert!(links
+            .iter()
+            .any(|(_, _, url)| url == "https://covered.invalid"));
+        assert!(!links
+            .iter()
+            .any(|(_, _, url)| url == "https://popup.invalid"));
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[tokio::test]
+    async fn m833_popup_does_not_bypass_observer_missing_or_stopping_input_fences() {
+        let (mut server, _rx, _) = retained_test_server(b"tile");
+        let (runtime, mut input) = crate::terminal::TerminalRuntime::test_with_channel(40, 12);
+        server.app.install_test_popup_runtime(runtime);
+        server.clients.insert(7, test_observer_client(1));
+        for client_id in [7, 99] {
+            assert!(!server.handle_server_event(ServerEvent::ClientInput {
+                client_id,
+                data: b"forbidden".to_vec()
+            }));
+            assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
+                client_id,
+                events: vec![crate::protocol::ClientInputEvent::TextCommit(
+                    "forbidden".into()
+                )],
+            }));
+            assert!(input.try_recv().is_err());
+        }
+        server.should_quit.store(true, Ordering::Release);
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"stopping".to_vec()
+        }));
+        assert!(input.try_recv().is_err());
+        server.should_quit.store(false, Ordering::Release);
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::TextCommit(
+                "allowed".into()
+            )],
+        }));
+        assert_eq!(input.try_recv().unwrap().as_ref(), b"allowed");
+        server.app.close_popup_pane();
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[tokio::test]
+    async fn m833_popup_keeps_direct_terminal_frame_separate_from_app_surface() {
+        let (mut server, rx, pane) = retained_test_server(
+            b"\x1b[6 q\x1b]8;;https://direct.invalid\x1b\\DIRECT\x1b]8;;\x1b\\",
+        );
+        server.app.state.ensure_test_terminals();
+        let terminal = server.app.state.workspaces[0]
+            .terminal_id(pane)
+            .unwrap()
+            .clone();
+        let runtime = server.app.state.workspaces[0]
+            .test_runtimes
+            .remove(&pane)
+            .unwrap();
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal.clone(), runtime);
+        server.clients.get_mut(&1).unwrap().mode = ClientConnectionMode::TerminalAttach {
+            terminal_id: terminal.to_string(),
+        };
+        server.render_and_stream();
+        let before = read_server_frame(rx.try_recv().unwrap());
+        assert!(frame_text(&before).contains("DIRECT"));
+        assert!(!before.hyperlinks.is_empty());
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 12, b"POPUP");
+        server.app.install_test_popup_runtime(runtime);
+        server.render_and_stream();
+        assert_frame_data_eq(
+            server.clients[&1].render_state.last_frame().unwrap(),
+            &before,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "unchanged direct frame should be deduplicated"
+        );
+        server.app.close_popup_pane();
+        shutdown_test_runtimes(&mut server);
+    }
+
     mod pane_graphics;
     #[test]
     fn m832a_headless_cell_size_tracks_only_known_enabled_foreground_state() {

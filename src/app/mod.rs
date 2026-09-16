@@ -16,6 +16,7 @@ mod creation;
 mod git_refresh;
 mod ids;
 mod input;
+mod popup;
 mod runtime;
 mod runtime_mutations;
 mod session;
@@ -217,6 +218,7 @@ pub(crate) struct TerminalInputTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalInputContext {
     Pane,
+    Popup(crate::terminal::TerminalId),
 }
 
 pub(crate) type InputSourceId = u64;
@@ -585,6 +587,7 @@ impl App {
             mobile_switcher_scroll: 0,
             view: state::ViewState {
                 layout: state::ViewLayout::Desktop,
+                popup_cursor_suppressed: false,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
@@ -685,6 +688,7 @@ impl App {
             pane_graphics_layers: std::collections::HashMap::new(),
             pane_graphics_streams: std::collections::HashMap::new(),
             pane_graphics_revision: 0,
+            popup_pane: None,
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
@@ -1557,10 +1561,28 @@ impl App {
     }
 
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
-        if self.state.mode == Mode::Terminal {
+        if let Some(popup) = &self.state.popup_pane {
+            Some(TerminalInputContext::Popup(popup.terminal_id.clone()))
+        } else if self.state.mode == Mode::Terminal {
             Some(TerminalInputContext::Pane)
         } else {
             None
+        }
+    }
+
+    fn discard_failed_repeat_lease(
+        &mut self,
+        lease_key: &input::InputLeaseKey,
+        target: &TerminalInputTarget,
+    ) {
+        // Keep a popup press's owner available for release and close suppression.
+        if self
+            .state
+            .popup_pane
+            .as_ref()
+            .is_none_or(|popup| popup.terminal_id != target.terminal_id)
+        {
+            self.input_leases.remove(lease_key);
         }
     }
 
@@ -1574,7 +1596,7 @@ impl App {
         match plan {
             input::RepeatPlan::Forwarded(target) => {
                 if !self.forward_terminal_key_to_target_headless(&target, key) {
-                    self.input_leases.remove(&lease_key);
+                    self.discard_failed_repeat_lease(&lease_key, &target);
                 }
             }
             input::RepeatPlan::Reprocess {
@@ -1589,7 +1611,7 @@ impl App {
                 for _ in 0..repetitions {
                     if let Some(target) = &forwarded_target {
                         if !self.forward_terminal_key_to_target_headless(target, key.clone()) {
-                            self.input_leases.remove(&lease_key);
+                            self.discard_failed_repeat_lease(&lease_key, target);
                             break;
                         }
                         continue;
@@ -1680,7 +1702,7 @@ impl App {
                     self.handle_text_commit_headless(text.as_str());
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                    if self.state.mouse_capture {
+                    if self.state.mouse_capture || self.state.popup_pane.is_some() {
                         self.handle_mouse_event_headless(source_id, mouse);
                     } else {
                         self.state.handle_pane_mouse_only(
@@ -1691,7 +1713,9 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
-                    if self.state.mode != Mode::Terminal {
+                    if self.try_route_paste_to_popup(&text) {
+                        continue;
+                    } else if self.state.mode != Mode::Terminal {
                         self.paste_into_active_text_input(&text);
                     } else {
                         if let Some(ws_idx) = self.state.active {
@@ -1861,6 +1885,444 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn m833_custom_command_opens_popup_without_replacing_old_overlay_contract() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("custom-popup")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let focused = app.state.workspaces[0].focused_pane_id();
+        app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
+            bindings: crate::config::ActionKeybinds::direct("ctrl+alt+g"),
+            label: "ctrl+alt+g".into(),
+            command: "read answer".into(),
+            action: crate::config::CustomCommandAction::Popup,
+            description: None,
+            width: Some(crate::popup_size::PopupSize::Cells(60)),
+            height: Some(crate::popup_size::PopupSize::Cells(12)),
+        }];
+        app.handle_key(crate::input::TerminalKey::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ))
+        .await;
+        let popup = app.state.popup_pane.as_ref().unwrap();
+        assert_eq!(popup.width, Some(crate::popup_size::PopupSize::Cells(60)));
+        assert_eq!(popup.height, Some(crate::popup_size::PopupSize::Cells(12)));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), focused);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert!(!app.state.workspaces[0].tabs[0].zoomed);
+        assert!(app.close_popup_pane());
+    }
+
+    #[tokio::test]
+    async fn m833_popup_is_not_a_persisted_workspace_pane() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("popup-isolation")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let capture = |app: &App| {
+            serde_json::to_value(crate::persist::capture(
+                &app.state.workspaces,
+                &app.state.terminals,
+                &app.terminal_runtimes,
+                app.state.active,
+                app.state.selected,
+                app.state.sidebar_width,
+                app.state.sidebar_section_split,
+                app.state.collapsed_space_keys.clone(),
+            ))
+            .unwrap()
+        };
+        let before = capture(&app);
+        let pane_aliases = app.state.pane_id_aliases.clone();
+        let public_aliases = app.state.public_pane_id_aliases.clone();
+        let (runtime, _rx) = TerminalRuntime::test_with_channel(40, 12);
+        let (pane, terminal) = app.install_test_popup_runtime(runtime);
+        assert!(app.state.terminals.contains_key(&terminal));
+        assert!(app.terminal_runtimes.get(&terminal).is_some());
+        assert!(!app.state.workspaces[0].tabs[0].panes.contains_key(&pane));
+        assert_eq!(app.state.pane_id_aliases, pane_aliases);
+        assert_eq!(app.state.public_pane_id_aliases, public_aliases);
+        assert_eq!(capture(&app), before);
+        app.state.assert_invariants_for_test();
+        app.state
+            .direct_attach_resize_locks
+            .insert(terminal.clone());
+        assert!(app.close_popup_pane());
+        assert!(app.state.popup_pane.is_none());
+        assert!(!app.state.terminals.contains_key(&terminal));
+        assert!(app.terminal_runtimes.get(&terminal).is_none());
+        assert!(!app.state.direct_attach_resize_locks.contains(&terminal));
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(!app.close_popup_pane());
+        assert_eq!(capture(&app), before);
+    }
+
+    #[tokio::test]
+    async fn m833_popup_close_releases_original_key_target_before_replacement() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("popup-lease")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let (runtime, mut original) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(40, 12, 0, b"\x1b[>3u", 8);
+        app.install_test_popup_runtime(runtime);
+        app.route_client_events_from(
+            11,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+        assert_eq!(original.try_recv().unwrap().as_ref(), b"\x1b[106;5:1u");
+        assert!(!app.input_leases.is_empty());
+        assert!(app.close_popup_pane());
+        assert_eq!(original.try_recv().unwrap().as_ref(), b"\x1b[106;5:3u");
+        assert!(!app.input_leases.is_empty());
+        let (runtime, mut replacement) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(40, 12, 0, b"\x1b[>3u", 8);
+        app.install_test_popup_runtime(runtime);
+        app.route_client_events_from(
+            11,
+            vec![
+                raw_key(
+                    KeyCode::Char('j'),
+                    KeyModifiers::CONTROL,
+                    KeyEventKind::Repeat,
+                ),
+                raw_key(
+                    KeyCode::Char('j'),
+                    KeyModifiers::CONTROL,
+                    KeyEventKind::Release,
+                ),
+            ],
+            false,
+        );
+        assert!(replacement.try_recv().is_err());
+        assert!(app.input_leases.is_empty());
+        app.close_popup_pane();
+        for monolithic in [false, true] {
+            let mut app = test_app();
+            app.state.workspaces = vec![Workspace::test_new("popup-repeat-failure")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            let (runtime, rx) =
+                TerminalRuntime::test_with_channel_and_scrollback_bytes(40, 12, 0, b"\x1b[>3u", 1);
+            let mut rx = Some(rx);
+            app.install_test_popup_runtime(runtime);
+            let press = raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            );
+            if monolithic {
+                app.handle_raw_input_event(press).await;
+                assert_eq!(
+                    rx.as_mut().unwrap().try_recv().unwrap().as_ref(),
+                    b"\x1b[106;5:1u"
+                );
+                drop(rx.take());
+            } else {
+                app.route_client_events_from(81, vec![press], false);
+            }
+            assert_eq!(app.input_leases.len(), 1);
+            let repeat = raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Repeat,
+            );
+            if monolithic {
+                app.handle_raw_input_event(repeat).await;
+            } else {
+                app.route_client_events_from(81, vec![repeat], false);
+                assert_eq!(
+                    rx.as_mut().unwrap().try_recv().unwrap().as_ref(),
+                    b"\x1b[106;5:1u"
+                );
+            }
+            assert_eq!(
+                app.input_leases.len(),
+                1,
+                "failed repeat monolithic={monolithic}"
+            );
+            assert!(app.close_popup_pane());
+            if let Some(rx) = &mut rx {
+                assert_eq!(rx.try_recv().unwrap().as_ref(), b"\x1b[106;5:3u");
+            }
+            assert_eq!(app.input_leases.len(), 1);
+            let (runtime, mut replacement) =
+                TerminalRuntime::test_with_channel_and_scrollback_bytes(40, 12, 0, b"\x1b[>3u", 8);
+            app.install_test_popup_runtime(runtime);
+            for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                let event = raw_key(KeyCode::Char('j'), KeyModifiers::CONTROL, kind);
+                if monolithic {
+                    app.handle_raw_input_event(event).await;
+                } else {
+                    app.route_client_events_from(81, vec![event], false);
+                }
+            }
+            assert!(replacement.try_recv().is_err(), "monolithic={monolithic}");
+            assert!(app.input_leases.is_empty());
+            app.close_popup_pane();
+        }
+    }
+
+    #[tokio::test]
+    async fn m833_popup_missing_runtime_consumes_paste_without_tile_fallthrough() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("popup-paste");
+        let pane = workspace.focused_pane_id().unwrap();
+        let terminal = workspace.tabs[0].terminal_id(pane).unwrap().clone();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let (runtime, mut tiled) = TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes.insert(terminal, runtime);
+        for monolithic in [false, true] {
+            let (runtime, _rx) = TerminalRuntime::test_with_channel(40, 12);
+            let (_, popup_terminal) = app.install_test_popup_runtime(runtime);
+            app.shutdown_terminal_runtime(popup_terminal);
+            let event = crate::raw_input::RawInputEvent::Paste("must-not-reach-tile".into());
+            if monolithic {
+                app.handle_raw_input_event(event).await;
+            } else {
+                app.route_client_events_from(23, vec![event], false);
+            }
+            assert!(app.state.popup_pane.is_none());
+            assert!(tiled.try_recv().is_err(), "monolithic={monolithic}");
+        }
+    }
+
+    #[tokio::test]
+    async fn m833_popup_preserves_old_key_owner_and_source_specific_release() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("popup-original-owner");
+        let pane = workspace.focused_pane_id().unwrap();
+        let (runtime, mut tiled) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>3u", 8);
+        workspace.insert_test_runtime(pane, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.route_client_events_from(
+            11,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+        let (runtime, mut popup) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(40, 12, 0, b"\x1b[>3u", 8);
+        app.install_test_popup_runtime(runtime);
+        app.route_client_events_from(
+            12,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+        app.route_client_events_from(
+            11,
+            vec![
+                raw_key(
+                    KeyCode::Char('j'),
+                    KeyModifiers::CONTROL,
+                    KeyEventKind::Repeat,
+                ),
+                raw_key(
+                    KeyCode::Char('j'),
+                    KeyModifiers::CONTROL,
+                    KeyEventKind::Release,
+                ),
+            ],
+            false,
+        );
+        for bytes in [
+            b"\x1b[106;5:1u".as_slice(),
+            b"\x1b[106;5:2u",
+            b"\x1b[106;5:3u",
+        ] {
+            assert_eq!(tiled.try_recv().unwrap().as_ref(), bytes);
+        }
+        assert!(tiled.try_recv().is_err());
+        assert_eq!(popup.try_recv().unwrap().as_ref(), b"\x1b[106;5:1u");
+        assert!(popup.try_recv().is_err());
+        assert_eq!(app.input_leases.len(), 1);
+        app.release_input_source_headless(12);
+        assert_eq!(popup.try_recv().unwrap().as_ref(), b"\x1b[106;5:3u");
+        assert!(app.input_leases.is_empty());
+        app.close_popup_pane();
+    }
+
+    #[tokio::test]
+    async fn m833_popup_text_paste_and_failed_press_keep_queue_contract() {
+        for monolithic in [false, true] {
+            let mut app = test_app();
+            app.state.workspaces = vec![Workspace::test_new("popup-queue")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            let (runtime, mut rx) = TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                40,
+                12,
+                0,
+                b"\x1b[>3u\x1b[?2004h",
+                1,
+            );
+            if !monolithic {
+                runtime
+                    .try_send_bytes(bytes::Bytes::from_static(b"full"))
+                    .unwrap();
+            }
+            app.install_test_popup_runtime(runtime);
+            let press = raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            );
+            if !monolithic {
+                app.route_client_events_from(77, vec![press], false);
+                assert_eq!(app.input_leases.len(), 1);
+                assert_eq!(rx.try_recv().unwrap().as_ref(), b"full");
+                app.route_client_events_from(
+                    77,
+                    vec![raw_key(
+                        KeyCode::Char('j'),
+                        KeyModifiers::CONTROL,
+                        KeyEventKind::Release,
+                    )],
+                    false,
+                );
+                assert!(app.input_leases.is_empty());
+                assert!(rx.try_recv().is_err());
+            }
+            for (event, expected) in [
+                (
+                    crate::raw_input::RawInputEvent::Text(crate::input::TextCommit::new(
+                        "committed",
+                    )),
+                    b"committed".as_slice(),
+                ),
+                (
+                    crate::raw_input::RawInputEvent::Paste("pasted".into()),
+                    b"\x1b[200~pasted\x1b[201~".as_slice(),
+                ),
+            ] {
+                if monolithic {
+                    app.handle_raw_input_event(event).await;
+                } else {
+                    app.route_client_events_from(77, vec![event], false);
+                }
+                assert_eq!(
+                    rx.try_recv().unwrap().as_ref(),
+                    expected,
+                    "monolithic={monolithic}"
+                );
+            }
+            app.close_popup_pane();
+        }
+    }
+
+    #[tokio::test]
+    async fn m833_popup_exit_is_private_and_background_workspace_removal_is_not_close() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("popup-lifetime")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let (runtime, _rx) = TerminalRuntime::test_with_channel(40, 12);
+        let (pane, terminal) = app.install_test_popup_runtime(runtime);
+        app.handle_internal_event(crate::events::AppEvent::PaneDied {
+            pane_id: crate::layout::PaneId::alloc(),
+        });
+        assert_eq!(app.state.popup_pane.as_ref().unwrap().terminal_id, terminal);
+        app.state.workspaces.clear();
+        app.state.active = None;
+        app.state.assert_invariants_for_test();
+        assert!(app.terminal_runtimes.get(&terminal).is_some());
+        app.handle_internal_event(crate::events::AppEvent::PaneDied { pane_id: pane });
+        assert!(app.state.popup_pane.is_none());
+        assert!(app.terminal_runtimes.get(&terminal).is_none());
+        assert!(!app.state.terminals.contains_key(&terminal));
+        assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[tokio::test]
+    async fn m833_popup_launch_paths_remove_identity_and_failed_launch_keeps_state() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("popup-launch")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let before = app.state.terminals.len();
+        let aliases = app.state.pane_id_aliases.clone();
+        let geometry = crate::app::popup::PopupGeometry::default();
+        assert!(app
+            .spawn_popup_argv_command(
+                &[],
+                Some(std::env::current_dir().unwrap()),
+                vec![],
+                geometry
+            )
+            .is_err());
+        assert!(app.state.popup_pane.is_none());
+        assert_eq!(app.state.terminals.len(), before);
+        assert_eq!(app.state.pane_id_aliases, aliases);
+        let script = "printf 'M833:%s:%s\\n' \"${ZYNK_PANE_ID-unset}\" \"$M833_KEEP\"; read answer";
+        for shell in [false, true] {
+            let env = vec![
+                ("ZYNK_PANE_ID".into(), "spoofed".into()),
+                ("M833_KEEP".into(), "present".into()),
+            ];
+            let cwd = Some(std::env::current_dir().unwrap());
+            if shell {
+                app.spawn_popup_shell_command(script, cwd, env, geometry)
+                    .unwrap();
+            } else {
+                app.spawn_popup_argv_command(
+                    &["/bin/sh".into(), "-c".into(), script.into()],
+                    cwd,
+                    env,
+                    geometry,
+                )
+                .unwrap();
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let text = app.popup_runtime().unwrap().recent_text(12);
+                if text.contains("M833:unset:present") {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "shell={shell}: {text}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            assert_eq!(app.state.pane_id_aliases, aliases);
+            assert_eq!(app.state.terminals.len(), before + 1);
+            app.close_popup_pane();
+            assert_eq!(app.state.terminals.len(), before);
+        }
+    }
+
     #[test]
     fn m832b_config_disable_invalidates_live_claim_without_resurrection() {
         use crate::api::schema::*;

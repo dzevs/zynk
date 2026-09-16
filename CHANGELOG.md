@@ -10,6 +10,17 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- Modal terminal popups for plugin panes and custom commands, with cell/percent
+  dimensions and `zynk popup close`. Popups leave tiled pane identities and layout
+  unchanged, receive terminal input including Escape, and close on process exit
+  or explicit request. They are not persisted or restored by live handoff.
+  App-surface graphics are hidden while a popup is open without cancelling streams;
+  accepted frames keep replacing the latest stored layer for reveal after close.
+- CLI operational requests and agent subscriptions check the server protocol
+  before connecting. Ordinary mismatches report one `protocol_mismatch` error;
+  native delivery commands retain their F4 `transport_failed` contract. Direct
+  status, stop and explicit live handoff remain recovery routes. The check and
+  operation are separate connections, with no automatic retry or version lock.
 - Experimental pane graphics socket methods: `pane.graphics.set`, `.clear`,
   `.info`, and `.stream`, with App-local stream ownership and retained graphics
   updates that respect full-render priority and writer backpressure. The existing

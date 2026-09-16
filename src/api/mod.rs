@@ -76,6 +76,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneClearAgentAuthority(_)
             | Method::PaneReleaseAgent(_)
             | Method::PaneClose(_)
+            | Method::PopupClose(_)
             | Method::PaneGraphicsSet(_)
             | Method::PaneGraphicsClear(_)
             | Method::PaneGraphicsStream(_)

@@ -537,6 +537,33 @@ fn read_should_retry(err: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m834_stream_pair_names_are_short_unique_and_independent_of_label() {
+        let long_label = "label".repeat(100);
+        let (mut first, mut first_peer, first_path) = local_stream_pair(&long_label);
+        let (mut second, mut second_peer, second_path) = local_stream_pair(&long_label);
+        assert_ne!(first_path, second_path);
+        for path in [&first_path, &second_path] {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(name.starts_with(&format!("hpg-{}-", std::process::id())));
+            assert!(name.len() <= 45);
+            assert!(!name.contains("label"));
+        }
+        first_peer
+            .set_recv_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        second_peer
+            .set_recv_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        first.write_all(b"A").unwrap();
+        second.write_all(b"B").unwrap();
+        let mut byte = [0];
+        first_peer.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [b'A']);
+        second_peer.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [b'B']);
+    }
+
     use super::*;
     use crate::api::schema::{ErrorResponse, Method, ResponseResult, SuccessResponse};
     use crate::api::{ApiRequestMessage, EventHub};
@@ -544,21 +571,19 @@ mod tests {
     use interprocess::local_socket::traits::Listener as _;
     use std::io::{BufRead, BufReader, Write};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
 
-    fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, PathBuf) {
+    static NEXT_LOCAL_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn local_stream_pair(_name: &str) -> (LocalStream, LocalStream, PathBuf) {
         let unique = format!(
-            "g32-{}-{}",
+            "hpg-{}-{}.sock",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT_LOCAL_STREAM_ID.fetch_add(1, Ordering::Relaxed)
         );
-        let _ = name;
         let path = std::env::temp_dir().join(unique);
         let listener = crate::ipc::bind_local_listener(&path).unwrap();
         let client = crate::ipc::connect_local_stream(&path).unwrap();

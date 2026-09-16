@@ -125,7 +125,7 @@ impl App {
         match plan {
             super::input::RepeatPlan::Forwarded(target) => {
                 if !self.forward_terminal_key_to_target(&target, key).await {
-                    self.input_leases.remove(&lease_key);
+                    self.discard_failed_repeat_lease(&lease_key, &target);
                 }
                 true
             }
@@ -144,7 +144,7 @@ impl App {
                             .forward_terminal_key_to_target(target, key.clone())
                             .await
                         {
-                            self.input_leases.remove(&lease_key);
+                            self.discard_failed_repeat_lease(&lease_key, target);
                             break;
                         }
                         continue;
@@ -228,7 +228,7 @@ impl App {
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
                 let changes_view = !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
                     || self.state.mode.mouse_motion_changes_view();
-                if self.state.mouse_capture {
+                if self.state.mouse_capture || self.state.popup_pane.is_some() {
                     self.handle_mouse(mouse);
                 } else {
                     self.state.handle_pane_mouse_only(

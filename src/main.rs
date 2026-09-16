@@ -79,6 +79,7 @@ mod persist;
 mod platform;
 mod plugin_command;
 mod plugin_paths;
+mod popup_size;
 mod product_announcements;
 mod protocol;
 mod pty;
@@ -501,8 +502,19 @@ fn main() -> io::Result<()> {
         std::process::exit(2);
     }
 
-    if let cli::CommandOutcome::Handled(code) = cli::maybe_run(&args)? {
-        std::process::exit(code);
+    match cli::maybe_run(&args) {
+        Ok(cli::CommandOutcome::Handled(code)) => std::process::exit(code),
+        Ok(cli::CommandOutcome::NotCli) => {}
+        Err(err) => {
+            if let Some(response) = cli::protocol_mismatch_response(&err) {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(response).map_err(io::Error::other)?
+                );
+                std::process::exit(1);
+            }
+            return Err(err);
+        }
     }
 
     // Subcommands and flags (no TUI, no logging needed)

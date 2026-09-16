@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixListener;
@@ -46,33 +48,54 @@ impl Fixture {
         let result = thread::scope(|scope| {
             let server = scope.spawn(|| {
                 let started = Instant::now();
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            if done.load(Ordering::Acquire)
-                                || started.elapsed() >= Duration::from_secs(3)
-                            {
-                                return None;
+                let mut accepted_connections = 0;
+                loop {
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                accepted_connections += 1;
+                                break stream;
                             }
-                            thread::sleep(Duration::from_millis(5));
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                if done.load(Ordering::Acquire)
+                                    || started.elapsed() >= Duration::from_secs(3)
+                                {
+                                    assert_eq!(accepted_connections, 0);
+                                    return None;
+                                }
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(error) => panic!("mock accept: {error}"),
                         }
-                        Err(error) => panic!("mock accept: {error}"),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    if request["method"] == "ping" {
+                        assert_eq!(accepted_connections, 1);
+                        assert_eq!(request["params"], json!({}));
+                        writeln!(
+                            stream,
+                            "{}",
+                            json!({"id": request["id"], "result": {
+                                "type": "pong", "version": "fixture-compatible", "protocol": support::CURRENT_PROTOCOL
+                            }})
+                        )
+                        .unwrap();
+                        continue;
                     }
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
-                stream
-                    .set_write_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
-                let mut line = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut line)
-                    .unwrap();
-                let request = serde_json::from_str(&line).unwrap();
-                writeln!(stream, "{response}").unwrap();
-                Some(request)
+                    assert_eq!(accepted_connections, 2);
+                    writeln!(stream, "{response}").unwrap();
+                    return Some(request);
+                }
             });
             // The guard lives inside the scope: panic cleanup reaps before pipe-reader joins.
             let mut child = ReapedChild(

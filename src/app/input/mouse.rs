@@ -1735,6 +1735,7 @@ impl AppState {
                 TerminalMouseGesture {
                     pane_info: info.clone(),
                     modifiers_to_strip,
+                    popup_terminal_id: None,
                 },
             );
         }
@@ -1775,7 +1776,11 @@ impl AppState {
             }
         }
 
-        let Some(runtime) = self.runtime_for_pane(terminal_runtimes, gesture.pane_info.id) else {
+        let runtime = match &gesture.popup_terminal_id {
+            Some(terminal_id) => terminal_runtimes.get(terminal_id),
+            None => self.runtime_for_pane(terminal_runtimes, gesture.pane_info.id),
+        };
+        let Some(runtime) = runtime else {
             return true;
         };
         let (rows, columns) = runtime.current_size();
@@ -2000,6 +2005,206 @@ fn apply_scroll(scroll: &mut usize, delta: i16, max_scroll: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn m833_popup_mouse_ownership_outlives_hit_testing_and_close() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("popup-mouse")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                40,
+                12,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                8,
+            );
+        app.install_test_popup_runtime(runtime);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 120, 40),
+        );
+        let (_, inner) =
+            crate::ui::popup_pane_rects(&app.state, app.state.view.terminal_area).unwrap();
+        app.handle_mouse_from_input_source(
+            91,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                inner.x + 2,
+                inner.y + 3,
+            ),
+        );
+        assert_eq!(rx.try_recv().unwrap().as_ref(), b"\x1b[<0;3;4M");
+        assert!(app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(91, MouseButton::Left)));
+        app.handle_mouse_from_input_source(92, mouse(MouseEventKind::Up(MouseButton::Left), 0, 0));
+        assert!(app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(91, MouseButton::Left)));
+        assert!(rx.try_recv().is_err());
+        app.handle_mouse_from_input_source(
+            91,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0),
+        );
+        assert_eq!(rx.try_recv().unwrap().as_ref(), b"\x1b[<32;1;1M");
+        assert!(app.close_popup_pane());
+        let (runtime, mut replacement) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                40,
+                12,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                8,
+            );
+        app.install_test_popup_runtime(runtime);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 120, 40),
+        );
+        for kind in [
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse_from_input_source(91, mouse(kind, inner.x + 2, inner.y + 3));
+        }
+        assert!(replacement.try_recv().is_err());
+        assert!(!app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(91, MouseButton::Left)));
+        app.state.assert_invariants_for_test();
+        app.close_popup_pane();
+    }
+
+    #[tokio::test]
+    async fn m833_popup_does_not_steal_existing_tiled_mouse_release() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("tile-owner");
+        let pane = workspace.tabs[0].root_pane;
+        let (runtime, mut tiled) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                8,
+            );
+        workspace.insert_test_runtime(pane, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 120, 40),
+        );
+        let inner = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane)
+            .unwrap()
+            .inner_rect;
+        app.handle_mouse_from_input_source(
+            7,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                inner.x + 1,
+                inner.y + 1,
+            ),
+        );
+        assert_eq!(tiled.try_recv().unwrap().as_ref(), b"\x1b[<0;2;2M");
+        let (runtime, mut popup) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                40,
+                12,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                8,
+            );
+        app.install_test_popup_runtime(runtime);
+        app.handle_mouse_from_input_source(
+            7,
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                inner.x + 1,
+                inner.y + 1,
+            ),
+        );
+        assert_eq!(tiled.try_recv().unwrap().as_ref(), b"\x1b[<0;2;2m");
+        assert!(popup.try_recv().is_err());
+        assert!(app.state.terminal_mouse_gestures.is_empty());
+        app.close_popup_pane();
+    }
+
+    #[tokio::test]
+    async fn m833_popup_passive_motion_and_missing_runtime_do_not_fall_through() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("popup-motion")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let screen = format!("{}\x1b[?1003h\x1b[?1006h", "scrollback\r\n".repeat(80));
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                40,
+                12,
+                1024 * 1024,
+                screen.as_bytes(),
+                8,
+            );
+        let (_, terminal) = app.install_test_popup_runtime(runtime);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 120, 40),
+        );
+        let (_, inner) =
+            crate::ui::popup_pane_rects(&app.state, app.state.view.terminal_area).unwrap();
+        app.terminal_runtimes
+            .get(&terminal)
+            .unwrap()
+            .set_scroll_offset_from_bottom(3);
+        let offset = app
+            .terminal_runtimes
+            .get(&terminal)
+            .unwrap()
+            .scroll_metrics()
+            .unwrap()
+            .offset_from_bottom;
+        assert_eq!(offset, 3);
+        let _ = app.render_dirty.take();
+        app.handle_mouse_from_input_source(
+            7,
+            mouse(MouseEventKind::Moved, inner.x + 2, inner.y + 3),
+        );
+        assert_eq!(rx.try_recv().unwrap().as_ref(), b"\x1b[<35;3;4M");
+        assert_eq!(
+            app.terminal_runtimes
+                .get(&terminal)
+                .unwrap()
+                .scroll_metrics()
+                .unwrap()
+                .offset_from_bottom,
+            offset
+        );
+        assert!(!app.render_dirty.has_immediate_work());
+        app.shutdown_terminal_runtime(terminal);
+        app.handle_mouse_from_input_source(7, mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+        assert!(app.state.popup_pane.is_none());
+        assert!(app.state.drag.is_none());
+        assert!(app.state.terminal_mouse_gestures.is_empty());
+    }
+
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::{Direction, Rect};
 

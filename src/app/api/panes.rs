@@ -5655,6 +5655,7 @@ mod tests {
             crate::app::state::TerminalMouseGesture {
                 pane_info: source_info.clone(),
                 modifiers_to_strip: KeyModifiers::ALT,
+                popup_terminal_id: None,
             },
         );
         app.state.terminal_mouse_gestures.insert(
@@ -5662,6 +5663,7 @@ mod tests {
             crate::app::state::TerminalMouseGesture {
                 pane_info: source_info.clone(),
                 modifiers_to_strip: KeyModifiers::CONTROL,
+                popup_terminal_id: None,
             },
         );
         app.state.right_click_passthrough = Some(crate::app::state::RightClickPassthroughGesture {

@@ -80,6 +80,9 @@ impl App {
         &mut self,
         key: TerminalKey,
     ) -> Option<super::TerminalInputTarget> {
+        if self.state.popup_pane.is_some() {
+            return self.handle_terminal_key(key).await;
+        }
         let key_event = key.as_key_event();
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
@@ -122,6 +125,14 @@ impl App {
     }
 
     pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
+        if self.state.popup_pane.is_some() {
+            if let Some(runtime) = self.popup_runtime() {
+                let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
+            } else {
+                self.close_popup_pane();
+            }
+            return;
+        }
         if text.is_empty() {
             return;
         }
@@ -144,6 +155,14 @@ impl App {
     }
 
     pub(super) async fn handle_text_commit(&mut self, text: String) {
+        if self.state.popup_pane.is_some() {
+            if let Some(runtime) = self.popup_runtime() {
+                let _ = runtime.send_bytes(Bytes::from(text)).await;
+            } else {
+                self.close_popup_pane();
+            }
+            return;
+        }
         if text.is_empty() {
             return;
         }
@@ -166,6 +185,14 @@ impl App {
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
+        if self.state.popup_pane.is_some() {
+            if let Some(runtime) = self.popup_runtime() {
+                let _ = runtime.send_paste(text).await;
+            } else {
+                self.close_popup_pane();
+            }
+            return;
+        }
         if self.state.mode != Mode::Terminal {
             self.paste_into_active_text_input(&text);
             return;
@@ -334,6 +361,10 @@ impl App {
             return;
         }
 
+        if self.state.popup_pane.is_some() {
+            self.handle_popup_mouse(source_id, mouse);
+            return;
+        }
         if self.handle_overlay_mouse(mouse) {
             return;
         }
@@ -483,6 +514,81 @@ impl App {
 
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
+    }
+
+    fn handle_popup_mouse(&mut self, source_id: crate::app::InputSourceId, mouse: MouseEvent) {
+        let Some(popup) = self.state.popup_pane.clone() else {
+            return;
+        };
+        let Some(rt) = self.popup_runtime() else {
+            self.close_popup_pane();
+            return;
+        };
+        let Some((outer, inner)) =
+            crate::ui::popup_pane_rects(&self.state, self.state.view.terminal_area)
+        else {
+            return;
+        };
+        if !inner.contains((mouse.column, mouse.row).into()) {
+            return;
+        }
+        let column = mouse.column.saturating_sub(inner.x);
+        let row = mouse.row.saturating_sub(inner.y);
+        let bytes = match mouse.kind {
+            MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => match rt.wheel_routing() {
+                Some(crate::pane::WheelRouting::MouseReport) => {
+                    rt.encode_mouse_wheel(mouse.kind, column, row, mouse.modifiers)
+                }
+                Some(crate::pane::WheelRouting::AlternateScroll) => {
+                    rt.encode_alternate_scroll(mouse.kind)
+                }
+                Some(crate::pane::WheelRouting::HostScroll) | None => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => rt.scroll_up(self.state.mouse_scroll_lines),
+                        MouseEventKind::ScrollDown => rt.scroll_down(self.state.mouse_scroll_lines),
+                        _ => return,
+                    }
+                    self.render_dirty.request_generic();
+                    self.render_notify.notify_one();
+                    return;
+                }
+            },
+            MouseEventKind::Down(_) => {
+                rt.encode_mouse_button(mouse.kind, column, row, mouse.modifiers)
+            }
+            MouseEventKind::Up(_) | MouseEventKind::Drag(_) => return,
+            MouseEventKind::Moved => {
+                rt.encode_mouse_motion(mouse.kind, column, row, mouse.modifiers)
+            }
+        };
+        let Some(bytes) = bytes else { return };
+        if !matches!(mouse.kind, MouseEventKind::Moved) {
+            rt.scroll_reset();
+        }
+        if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
+            tracing::warn!(err = %err, kind = ?mouse.kind, "failed to forward popup mouse event");
+            return;
+        }
+        if let MouseEventKind::Down(button) = mouse.kind {
+            self.state.terminal_mouse_gestures.insert(
+                (source_id, button),
+                crate::app::state::TerminalMouseGesture {
+                    pane_info: crate::layout::PaneInfo {
+                        id: popup.pane_id,
+                        rect: outer,
+                        inner_rect: inner,
+                        scrollbar_rect: None,
+                        borders: ratatui::widgets::Borders::ALL,
+                        is_focused: true,
+                    },
+                    modifiers_to_strip: KeyModifiers::empty(),
+                    popup_terminal_id: Some(popup.terminal_id),
+                },
+            );
+        }
     }
 
     fn handle_modified_url_click(

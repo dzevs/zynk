@@ -817,3 +817,182 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
     )
     .is_ok());
 }
+
+#[tokio::test]
+async fn m833_popup_graphics_deletion_waits_for_writer_acceptance() {
+    let (mut server, rx, pane) = retained_test_server(b"tile");
+    set_graphics_layer(&mut server, pane, vec![1, 2, 3]);
+    let baseline = enable_graphics_and_render(&mut server, &rx);
+    let before = server.clients[&1].graphics_cache.clone();
+    assert!(!before.is_empty());
+    let (runtime, _input) = crate::terminal::TerminalRuntime::test_with_channel(40, 12);
+    server.app.install_test_popup_runtime(runtime);
+    assert!(!crate::kitty_graphics::has_visible_pane_graphics(
+        &server.app.state,
+        &server.app.terminal_runtimes,
+        server.app.state.view.tab_surface(),
+        server.clients[&1].cell_size,
+    ));
+    fill_render_lane(&server);
+    assert_eq!(
+        server.render_retained_graphics_update_and_stream(),
+        RetainedGraphicsOutcome::Deferred
+    );
+    assert_eq!(server.clients[&1].graphics_cache, before);
+    assert_frame_data_eq(
+        server.clients[&1].render_state.last_frame().unwrap(),
+        &baseline,
+    );
+    assert_eq!(
+        server.clients[&1].deferred_render(),
+        DeferredRender::Graphics
+    );
+    assert!(matches!(
+        read_server_message(rx.try_recv().unwrap()),
+        ServerMessage::ReloadSoundConfig
+    ));
+    assert_eq!(
+        server.handle_server_event_with_render_impact(ServerEvent::ClientWriterDrained {
+            client_id: 1
+        }),
+        RenderImpact::Graphics
+    );
+    assert_eq!(
+        server.render_retained_graphics_update_and_stream(),
+        RetainedGraphicsOutcome::Sent
+    );
+    match read_server_message(rx.try_recv().unwrap()) {
+        ServerMessage::Graphics { bytes } => {
+            let bytes = std::str::from_utf8(&bytes).unwrap();
+            assert!(bytes.contains("a=d,d=I,"));
+            assert!(!bytes.contains("a=t,"));
+        }
+        other => panic!("expected Graphics deletion, got {other:?}"),
+    }
+    assert!(server.clients[&1].graphics_cache.is_empty());
+    assert_frame_data_eq(
+        server.clients[&1].render_state.last_frame().unwrap(),
+        &baseline,
+    );
+    assert!(server.app.close_popup_pane());
+    assert_eq!(
+        server.render_retained_graphics_update_and_stream(),
+        RetainedGraphicsOutcome::Sent
+    );
+    match read_server_message(rx.try_recv().unwrap()) {
+        ServerMessage::Graphics { bytes } => {
+            assert!(std::str::from_utf8(&bytes).unwrap().contains("a=t,"))
+        }
+        other => panic!("expected Graphics reveal, got {other:?}"),
+    }
+    assert!(!server.clients[&1].graphics_cache.is_empty());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn m833_popup_hidden_stream_replaces_data_without_losing_claim() {
+    let (mut server, rx, pane) = retained_test_server(b"tile");
+    let _ = enable_graphics_and_render(&mut server, &rx);
+    server.app.state.ensure_test_terminals();
+    let workspace = &server.app.state.workspaces[0];
+    let target = crate::workspace::public_pane_id_for_number(
+        &workspace.id,
+        workspace.public_pane_number(pane).unwrap(),
+    );
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let opened = server.app.handle_api_request(api::schema::Request {
+        id: "popup-stream".into(),
+        method: api::schema::Method::PaneGraphicsStreamOpen(
+            api::schema::PaneGraphicsStreamOpenParams {
+                params: api::schema::PaneGraphicsStreamParams {
+                    pane_id: target.clone(),
+                    owner: "popup-owner".into(),
+                },
+                active: active.clone(),
+            },
+        ),
+    });
+    assert!(serde_json::from_str::<api::schema::SuccessResponse>(&opened).is_ok());
+    let (runtime, _input) = crate::terminal::TerminalRuntime::test_with_channel(40, 12);
+    server.app.install_test_popup_runtime(runtime);
+    for data in [vec![1, 2, 3], vec![7, 8, 9]] {
+        let (message, _response) =
+            stream_set_message("frame", &target, "popup-owner", data.clone());
+        let reply = server.app.handle_api_request(message.request);
+        assert!(serde_json::from_str::<api::schema::SuccessResponse>(&reply).is_ok());
+        assert_eq!(server.app.state.pane_graphics_layers.len(), 1);
+        assert_eq!(
+            server.app.state.pane_graphics_layers[&pane].data.as_slice(),
+            data.as_slice()
+        );
+        assert_eq!(server.app.state.pane_graphics_streams[&pane], "popup-owner");
+        assert_eq!(server.app.pane_graphics_stream_registrations.len(), 1);
+        assert!(active.load(Ordering::Acquire));
+        assert!(!server.app.sync_pane_graphics_streams());
+        assert_eq!(
+            server.render_retained_graphics_update_and_stream(),
+            RetainedGraphicsOutcome::Sent
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(server.clients[&1].graphics_cache.is_empty());
+    }
+    assert!(server.app.close_popup_pane());
+    assert_eq!(
+        server.render_retained_graphics_update_and_stream(),
+        RetainedGraphicsOutcome::Sent
+    );
+    let graphics = match read_server_message(rx.try_recv().unwrap()) {
+        ServerMessage::Graphics { bytes } => String::from_utf8(bytes).unwrap(),
+        other => panic!("expected latest graphics, got {other:?}"),
+    };
+    assert!(graphics.contains("BwgJ"));
+    assert!(!graphics.contains("AQID"));
+    assert_eq!(server.app.state.pane_graphics_streams[&pane], "popup-owner");
+    assert!(active.load(Ordering::Acquire));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn m833_popup_full_frame_pressure_preserves_baseline_until_retry() {
+    let (mut server, rx, pane) = retained_test_server(b"tile");
+    set_graphics_layer(&mut server, pane, vec![1, 2, 3]);
+    let baseline = enable_graphics_and_render(&mut server, &rx);
+    let before = server.clients[&1].graphics_cache.clone();
+    let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 12, b"POPUP");
+    server.app.install_test_popup_runtime(runtime);
+    server.app.full_redraw_pending = false;
+    assert!(!server.retained_pty_update_allowed_by_app_state());
+    assert!(!server.render_retained_pty_update_and_stream());
+    fill_render_lane(&server);
+    server.render_and_stream();
+    assert_eq!(server.clients[&1].deferred_render(), DeferredRender::Full);
+    assert_eq!(server.clients[&1].graphics_cache, before);
+    assert_frame_data_eq(
+        server.clients[&1].render_state.last_frame().unwrap(),
+        &baseline,
+    );
+    assert!(matches!(
+        read_server_message(rx.try_recv().unwrap()),
+        ServerMessage::ReloadSoundConfig
+    ));
+    assert_eq!(
+        server.handle_server_event_with_render_impact(ServerEvent::ClientWriterDrained {
+            client_id: 1
+        }),
+        RenderImpact::Full
+    );
+    server.render_and_stream();
+    let shown = read_server_frame(rx.try_recv().unwrap());
+    assert!(frame_text(&shown).contains("POPUP"));
+    assert!(std::str::from_utf8(&shown.graphics)
+        .unwrap()
+        .contains("a=d,d=I,"));
+    assert!(server.clients[&1].graphics_cache.is_empty());
+    assert_eq!(server.clients[&1].deferred_render(), DeferredRender::None);
+    assert_frame_data_eq(
+        server.clients[&1].render_state.last_frame().unwrap(),
+        &shown,
+    );
+    server.app.close_popup_pane();
+    shutdown_test_runtimes(&mut server);
+}

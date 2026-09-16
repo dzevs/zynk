@@ -91,21 +91,26 @@ const CODEX_THREAD_ID_ENV_VAR: &str = "CODEX_THREAD_ID";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PaneLaunchEnv {
     extra: Vec<(String, String)>,
-    identity: Option<PaneLaunchIdentity>,
+    identity: PaneLaunchIdentity,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PaneLaunchIdentity {
-    workspace_id: String,
-    tab_id: String,
-    pane_id: String,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum PaneLaunchIdentity {
+    #[default]
+    Inherit,
+    Managed {
+        workspace_id: String,
+        tab_id: String,
+        pane_id: String,
+    },
+    OmitPane,
 }
 
 impl PaneLaunchEnv {
     pub(crate) fn from_extra(extra: Vec<(String, String)>) -> Self {
         Self {
             extra,
-            identity: None,
+            identity: PaneLaunchIdentity::Inherit,
         }
     }
 
@@ -115,11 +120,16 @@ impl PaneLaunchEnv {
         tab_id: String,
         pane_id: String,
     ) -> Self {
-        self.identity = Some(PaneLaunchIdentity {
+        self.identity = PaneLaunchIdentity::Managed {
             workspace_id,
             tab_id,
             pane_id,
-        });
+        };
+        self
+    }
+
+    pub(crate) fn without_pane_identity(mut self) -> Self {
+        self.identity = PaneLaunchIdentity::OmitPane;
         self
     }
 }
@@ -142,13 +152,20 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     }
     cmd.env(crate::ZYNK_ENV_VAR, crate::ZYNK_ENV_VALUE);
     crate::integration::apply_pane_base_env(cmd);
-    if let Some(identity) = &launch_env.identity {
-        cmd.env(
-            crate::integration::ZYNK_WORKSPACE_ID_ENV_VAR,
-            &identity.workspace_id,
-        );
-        cmd.env(crate::integration::ZYNK_TAB_ID_ENV_VAR, &identity.tab_id);
-        cmd.env(crate::integration::ZYNK_PANE_ID_ENV_VAR, &identity.pane_id);
+    match &launch_env.identity {
+        PaneLaunchIdentity::Inherit => {}
+        PaneLaunchIdentity::Managed {
+            workspace_id,
+            tab_id,
+            pane_id,
+        } => {
+            cmd.env(crate::integration::ZYNK_WORKSPACE_ID_ENV_VAR, workspace_id);
+            cmd.env(crate::integration::ZYNK_TAB_ID_ENV_VAR, tab_id);
+            cmd.env(crate::integration::ZYNK_PANE_ID_ENV_VAR, pane_id);
+        }
+        PaneLaunchIdentity::OmitPane => {
+            cmd.env_remove(crate::integration::ZYNK_PANE_ID_ENV_VAR);
+        }
     }
 }
 
@@ -162,6 +179,12 @@ struct PendingAgentRelease {
 struct SpawnInitialState<'a> {
     detected_agent: Option<Agent>,
     history_ansi: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentDetection {
+    Enabled,
+    Disabled,
 }
 
 fn active_pending_release(
@@ -1077,7 +1100,7 @@ pub struct PaneRuntime {
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
     // Task handles for deterministic shutdown
-    detect_handle: tokio::task::AbortHandle,
+    detect_handle: Option<tokio::task::AbortHandle>,
 }
 
 enum PaneRuntimeIo {
@@ -1227,7 +1250,9 @@ impl Drop for PaneRuntime {
     fn drop(&mut self) {
         // Abort detection task immediately and terminate the owned session.
         // The PTY actor shuts down before the process/session policy runs.
-        self.detect_handle.abort();
+        if let Some(handle) = &self.detect_handle {
+            handle.abort();
+        }
         self.io.shutdown();
         if !self.preserve_processes_on_drop {
             shutdown_pane_processes(
@@ -1489,7 +1514,9 @@ impl PaneRuntime {
     }
 
     pub fn shutdown(mut self) {
-        self.detect_handle.abort();
+        if let Some(handle) = self.detect_handle.take() {
+            handle.abort();
+        }
         self.io.shutdown();
         shutdown_pane_processes(
             self.pane_id,
@@ -1511,7 +1538,9 @@ impl PaneRuntime {
                 "failed to release PTY actor after handoff commit; dropping runtime will still close the actor handle"
             );
         }
-        self.detect_handle.abort();
+        if let Some(handle) = self.detect_handle.take() {
+            handle.abort();
+        }
         self.preserve_processes_on_drop = true;
     }
 
@@ -1651,6 +1680,7 @@ impl PaneRuntime {
                 detected_agent: None,
                 history_ansi: initial_history_ansi,
             },
+            AgentDetection::Enabled,
         )
     }
 
@@ -1663,6 +1693,7 @@ impl PaneRuntime {
         cwd: std::path::PathBuf,
         command: &str,
         launch_env: &PaneLaunchEnv,
+        agent_detection: AgentDetection,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -1689,6 +1720,7 @@ impl PaneRuntime {
             cmd,
             "failed to spawn command pane",
             SpawnInitialState::default(),
+            agent_detection,
         )
     }
 
@@ -1701,6 +1733,7 @@ impl PaneRuntime {
         cwd: std::path::PathBuf,
         argv: &[String],
         launch_env: &PaneLaunchEnv,
+        agent_detection: AgentDetection,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -1734,6 +1767,7 @@ impl PaneRuntime {
             cmd,
             "failed to spawn argv command pane",
             SpawnInitialState::default(),
+            agent_detection,
         )
     }
 
@@ -1900,11 +1934,13 @@ impl PaneRuntime {
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: true,
-            detect_handle,
+            detect_handle: Some(detect_handle),
         })
     }
 
     // Runtime construction threads PTY geometry, host context, launch policy, and render hooks.
+    #[allow(clippy::too_many_arguments)]
+    // Runtime construction threads geometry, host context, IO and detection policy.
     #[allow(clippy::too_many_arguments)]
     fn spawn_command_builder(
         pane_id: PaneId,
@@ -1919,6 +1955,7 @@ impl PaneRuntime {
         cmd: CommandBuilder,
         spawn_error_message: &'static str,
         initial_state: SpawnInitialState<'_>,
+        agent_detection: AgentDetection,
     ) -> std::io::Result<Self> {
         crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
@@ -1999,7 +2036,9 @@ impl PaneRuntime {
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
-                observe_detection_content_change(bytes, &detection_content_seq);
+                if agent_detection == AgentDetection::Enabled {
+                    observe_detection_content_change(bytes, &detection_content_seq);
+                }
                 if result.request_render && render_dirty.request_pty(pane_id) {
                     render_notify.notify_one();
                 }
@@ -2039,7 +2078,9 @@ impl PaneRuntime {
         };
 
         // --- Detection task ---
-        let (detect_handle, detect_reset_notify, pending_release) = {
+        let (detect_handle, detect_reset_notify, pending_release) = if agent_detection
+            == AgentDetection::Enabled
+        {
             use crate::detect;
             use std::time::{Duration, Instant};
 
@@ -2422,7 +2463,13 @@ impl PaneRuntime {
                     }
                 }
             });
-            (handle.abort_handle(), detect_reset_notify, pending_release)
+            (
+                Some(handle.abort_handle()),
+                detect_reset_notify,
+                pending_release,
+            )
+        } else {
+            (None, Arc::new(Notify::new()), Arc::new(Mutex::new(None)))
         };
 
         Ok(Self {
@@ -2719,13 +2766,21 @@ impl PaneRuntime {
     }
 
     pub async fn send_paste(&self, text: String) -> Result<(), mpsc::error::SendError<Bytes>> {
+        self.send_bytes(self.paste_payload(text)).await
+    }
+
+    pub fn try_send_paste(&self, text: String) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.try_send_bytes(self.paste_payload(text))
+    }
+
+    fn paste_payload(&self, text: String) -> Bytes {
         let bracketed = self.bracketed_paste_enabled();
         let payload = if bracketed {
             format!("\x1b[200~{text}\x1b[201~")
         } else {
             text
         };
-        self.send_bytes(Bytes::from(payload)).await
+        Bytes::from(payload)
     }
 
     pub fn try_send_focus_event(&self, event: crate::ghostty::FocusEvent) -> bool {
@@ -2978,7 +3033,7 @@ impl PaneRuntime {
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
-                detect_handle: tokio::spawn(async {}).abort_handle(),
+                detect_handle: Some(tokio::spawn(async {}).abort_handle()),
             },
             rx,
         )
@@ -2987,6 +3042,94 @@ impl PaneRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m833_popup_launch_env_removes_pane_identity_after_extra_application() {
+        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+        command.env("ZYNK_PANE_ID", "inherited");
+        let launch = PaneLaunchEnv::from_extra(vec![
+            ("ZYNK_PANE_ID".into(), "forged".into()),
+            ("M833_KEEP".into(), "present".into()),
+        ])
+        .with_identity("w1".into(), "w1:t1".into(), "w1:p1".into())
+        .without_pane_identity();
+        apply_pane_launch_env(&mut command, &launch);
+        assert!(command.get_env("ZYNK_PANE_ID").is_none());
+        assert_eq!(
+            command.get_env("M833_KEEP"),
+            Some(std::ffi::OsStr::new("present"))
+        );
+        assert_eq!(
+            command.get_env(crate::ZYNK_ENV_VAR),
+            Some(std::ffi::OsStr::new(crate::ZYNK_ENV_VALUE))
+        );
+    }
+
+    #[tokio::test]
+    async fn m833_popup_creators_disable_detection_without_dropping_host_appearance() {
+        for shell in [false, true] {
+            for appearance in [
+                crate::terminal_theme::HostAppearance::Dark,
+                crate::terminal_theme::HostAppearance::Light,
+            ] {
+                let (events, _rx) = mpsc::channel(64);
+                let pane_id = PaneId::alloc();
+                let cwd = std::env::current_dir().unwrap();
+                let launch = PaneLaunchEnv::default().without_pane_identity();
+                let notify = Arc::new(Notify::new());
+                let dirty = Arc::new(RenderSignal::new());
+                let runtime = if shell {
+                    PaneRuntime::spawn_shell_command(
+                        pane_id,
+                        12,
+                        40,
+                        cwd,
+                        "read answer",
+                        &launch,
+                        AgentDetection::Disabled,
+                        0,
+                        crate::terminal_theme::TerminalTheme::default(),
+                        Some(appearance),
+                        events.clone(),
+                        notify,
+                        dirty,
+                    )
+                } else {
+                    PaneRuntime::spawn_argv_command(
+                        pane_id,
+                        12,
+                        40,
+                        cwd,
+                        &["/bin/sh".into(), "-c".into(), "read answer".into()],
+                        &launch,
+                        AgentDetection::Disabled,
+                        0,
+                        crate::terminal_theme::TerminalTheme::default(),
+                        Some(appearance),
+                        events.clone(),
+                        notify,
+                        dirty,
+                    )
+                }
+                .unwrap();
+                assert!(runtime.detect_handle.is_none(), "shell={shell}");
+                assert!(runtime.child_pid().is_some());
+                let (responses, _response_rx) = mpsc::channel::<bytes::Bytes>(64);
+                let result =
+                    runtime
+                        .terminal
+                        .process_pty_bytes(pane_id, 0, b"\x1b[?996n", &responses);
+                assert!(
+                    result
+                        .terminal_responses
+                        .iter()
+                        .any(|bytes| bytes.as_ref() == appearance.color_scheme_report()),
+                    "shell={shell} appearance={appearance:?}"
+                );
+                runtime.shutdown();
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -3199,6 +3342,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &["/usr/bin/sleep".into(), "30".into()],
             &PaneLaunchEnv::from_extra(vec![("ZYNK_AGENT".into(), "claude".into())]),
+            AgentDetection::Enabled,
             0,
             crate::terminal_theme::TerminalTheme::default(),
             None,
@@ -3275,9 +3419,18 @@ mod tests {
     #[tokio::test]
     async fn handoff_detector_records_native_owner_process_proof() {
         let (mut runtime, _rx) = runtime_with_native_probe_child().await;
-        runtime.detect_handle.abort();
+        runtime
+            .detect_handle
+            .as_ref()
+            .expect("handoff detection enabled")
+            .abort();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !runtime.detect_handle.is_finished() {
+            while !runtime
+                .detect_handle
+                .as_ref()
+                .expect("handoff detection enabled")
+                .is_finished()
+            {
                 tokio::task::yield_now().await;
             }
         })
@@ -3297,7 +3450,7 @@ mod tests {
                 process_observation: runtime.process_observation.clone(),
             },
         );
-        runtime.detect_handle = handle;
+        runtime.detect_handle = Some(handle);
         runtime.detect_reset_notify = reset;
         runtime.pending_release = pending_release;
         wait_for_native_owner_proof(&runtime).await;
@@ -3449,6 +3602,7 @@ mod tests {
                 "-i".into(),
             ],
             &PaneLaunchEnv::default(),
+            AgentDetection::Enabled,
             0,
             crate::terminal_theme::TerminalTheme::default(),
             None,
@@ -4058,7 +4212,7 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
-            detect_handle: tokio::spawn(async {}).abort_handle(),
+            detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 
         assert!(runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
@@ -4092,7 +4246,7 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
-            detect_handle: tokio::spawn(async {}).abort_handle(),
+            detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 
         assert!(!runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));

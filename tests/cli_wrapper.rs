@@ -1200,6 +1200,20 @@ fn copilot_hook_does_not_report_lifecycle_state() {
     }
 }
 
+fn m835_reply_compatible_ping(stream: &mut UnixStream, request: &serde_json::Value) {
+    assert_eq!(request["method"], "ping");
+    assert_eq!(request["params"], serde_json::json!({}));
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({"id": request["id"], "result": {
+            "type": "pong", "version": "fixture-compatible", "protocol": support::CURRENT_PROTOCOL
+        }})
+    )
+    .unwrap();
+    stream.flush().unwrap();
+}
+
 #[test]
 fn pane_run_sends_one_send_input_request_with_enter_key() {
     let base = unique_test_dir();
@@ -1217,14 +1231,25 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
         let mut requests = Vec::new();
+        let mut accepted_connections = 0;
+        let mut pings = 0;
         let deadline = Instant::now() + Duration::from_millis(500);
         // Stop early once the submit has been observed AND the resolution settled.
         while Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    accepted_connections += 1;
                     let mut line = String::new();
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     reader.read_line(&mut line).unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if request["method"] == "ping" {
+                        assert_eq!(pings, requests.len(), "duplicate compatibility ping");
+                        pings += 1;
+                        m835_reply_compatible_ping(&mut stream, &request);
+                        continue;
+                    }
+                    assert_eq!(pings, requests.len() + 1);
                     stream
                         .write_all(br#"{"id":"cli:request","result":{"type":"ok"}}"#)
                         .unwrap();
@@ -1238,6 +1263,8 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
                 Err(err) => panic!("accept failed: {err}"),
             }
         }
+        assert_eq!(pings, requests.len());
+        assert_eq!(accepted_connections, requests.len() * 2);
         requests
     });
 
@@ -1288,7 +1315,16 @@ fn pane_report_metadata_sends_presentation_request() {
     let listener = UnixListener::bind(&socket_path).unwrap();
 
     let server = thread::spawn(move || {
+        let mut accepted_connections = 0;
+        let (mut ping_stream, _) = listener.accept().unwrap();
+        accepted_connections += 1;
+        let mut ping_line = String::new();
+        BufReader::new(ping_stream.try_clone().unwrap())
+            .read_line(&mut ping_line)
+            .unwrap();
+        m835_reply_compatible_ping(&mut ping_stream, &serde_json::from_str(&ping_line).unwrap());
         let (mut stream, _) = listener.accept().unwrap();
+        accepted_connections += 1;
         let mut line = String::new();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         reader.read_line(&mut line).unwrap();
@@ -1297,6 +1333,7 @@ fn pane_report_metadata_sends_presentation_request() {
             .unwrap();
         stream.write_all(b"\n").unwrap();
         stream.flush().unwrap();
+        assert_eq!(accepted_connections, 2);
         line
     });
 
@@ -4809,34 +4846,47 @@ fn mock_snapshot_cli(
     let result = thread::scope(|scope| {
         let server = scope.spawn(|| {
             let started = Instant::now();
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        if done.load(Ordering::Acquire)
-                            || started.elapsed() >= Duration::from_secs(3)
-                        {
-                            return None;
+            let mut accepted_connections = 0;
+            loop {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            accepted_connections += 1;
+                            break stream;
                         }
-                        thread::sleep(Duration::from_millis(5));
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            if done.load(Ordering::Acquire)
+                                || started.elapsed() >= Duration::from_secs(3)
+                            {
+                                assert_eq!(accepted_connections, 0);
+                                return None;
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(err) => panic!("snapshot mock accept: {err}"),
                     }
-                    Err(err) => panic!("snapshot mock accept: {err}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if request["method"] == "ping" {
+                    assert_eq!(accepted_connections, 1);
+                    m835_reply_compatible_ping(&mut stream, &request);
+                    continue;
                 }
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            let mut line = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut line)
-                .unwrap();
-            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-            writeln!(stream, "{response}").unwrap();
-            stream.flush().unwrap();
-            Some(request)
+                assert_eq!(accepted_connections, 2);
+                writeln!(stream, "{response}").unwrap();
+                stream.flush().unwrap();
+                return Some(request);
+            }
         });
         let output = run_snapshot_cli_bounded(&fixture.base, &socket, args);
         done.store(true, Ordering::Release);
@@ -5333,32 +5383,44 @@ fn mock_event_wait_cli(response: serde_json::Value) -> (serde_json::Value, std::
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
         let started = Instant::now();
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(
-                        started.elapsed() < Duration::from_secs(3),
-                        "CLI did not connect"
-                    );
-                    thread::sleep(Duration::from_millis(5));
+        let mut accepted_connections = 0;
+        loop {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        accepted_connections += 1;
+                        break stream;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            started.elapsed() < Duration::from_secs(3),
+                            "CLI did not connect"
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("mock accept: {err}"),
                 }
-                Err(err) => panic!("mock accept: {err}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if request["method"] == "ping" {
+                assert_eq!(accepted_connections, 1);
+                m835_reply_compatible_ping(&mut stream, &request);
+                continue;
             }
-        };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(stream.try_clone().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-        let mut response = response;
-        response["id"] = request["id"].clone();
-        writeln!(stream, "{response}").unwrap();
-        stream.flush().unwrap();
-        request
+            assert_eq!(accepted_connections, 2);
+            let mut response = response;
+            response["id"] = request["id"].clone();
+            writeln!(stream, "{response}").unwrap();
+            stream.flush().unwrap();
+            return request;
+        }
     });
     let output = run_event_wait_cli_bounded(&socket, "caller:p7", "4321");
     let request = server.join().unwrap();
@@ -5764,4 +5826,448 @@ fn read_help_flag_as_option_value_is_not_hijacked() {
         code, 0,
         "`pane read w1:p1 --lines --help` must not be treated as help"
     );
+}
+
+fn m835_scripted_cli(
+    args: &[&str],
+    responses: Vec<serde_json::Value>,
+    replace_after_first_accept: bool,
+) -> (Vec<serde_json::Value>, std::process::Output) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fixture = SnapshotCliFixture::new();
+    let socket = fixture.base.join("compat.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let done = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let mut listener = listener;
+            let mut requests = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if done.load(Ordering::Acquire) { break; }
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(e) => panic!("compat accept: {e}"),
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if replace_after_first_accept && requests.is_empty() {
+                    drop(listener);
+                    fs::remove_file(&socket).unwrap();
+                    listener = UnixListener::bind(&socket).unwrap();
+                    listener.set_nonblocking(true).unwrap();
+                }
+                let mut response = responses.get(requests.len()).cloned().unwrap_or_else(|| serde_json::json!({"error":{"code":"unexpected_request", "message":"unexpected additional connection"}}));
+                requests.push(request.clone());
+                if let Some(raw) = response.as_str() { writeln!(stream, "{raw}").unwrap(); }
+                else if !response.is_null() {
+                    response["id"] = request["id"].clone();
+                    writeln!(stream, "{response}").unwrap();
+                }
+            }
+            requests
+        });
+        let output = run_snapshot_cli_bounded(&fixture.base, &socket, args);
+        done.store(true, Ordering::Release);
+        (worker.join().unwrap(), output)
+    })
+}
+
+#[test]
+fn m835_ordinary_mismatch_has_one_json_error_and_no_operational_request() {
+    for args in [
+        vec!["pane", "list"],
+        vec![
+            "wait",
+            "agent-status",
+            "w1:p1",
+            "--status",
+            "idle",
+            "--timeout",
+            "100",
+        ],
+    ] {
+        for protocol in [18, 20] {
+            let (requests, output) = m835_scripted_cli(
+                &args,
+                vec![
+                    serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":protocol}}),
+                ],
+                false,
+            );
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|r| r["method"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["ping"],
+                "{args:?}"
+            );
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(output.stdout.is_empty());
+            let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(error["error"]["code"], "protocol_mismatch");
+            assert_eq!(
+                error["id"],
+                if args[0] == "pane" {
+                    "cli:pane:list"
+                } else {
+                    "cli:wait:agent-status"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn m835_matching_protocol_ignores_package_version_and_replacement_is_not_rechecked() {
+    let (requests, output) = m835_scripted_cli(
+        &["pane", "list"],
+        vec![
+            serde_json::json!({"result":{"type":"pong", "version":"999.999.999", "protocol":19}}),
+            serde_json::json!({"result":{"type":"pane_list", "panes":[]}, "replacement":"observed"}),
+        ],
+        true,
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["ping", "pane.list"]
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["replacement"], "observed");
+    let (requests, output) = m835_scripted_cli(
+        &["pane", "list"],
+        vec![
+            serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}}),
+            serde_json::Value::Null,
+        ],
+        true,
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["ping", "pane.list"]
+    );
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("protocol_mismatch"));
+}
+
+#[test]
+fn m835_invalid_status_never_guesses_compatibility() {
+    for response in [
+        serde_json::json!({"result":{"type":"pong", "version":"fixture"}}),
+        serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":"19"}}),
+        serde_json::json!("{not-json"),
+        serde_json::Value::Null,
+    ] {
+        let (requests, output) = m835_scripted_cli(&["pane", "list"], vec![response], false);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["ping"]
+        );
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn m835_subscription_rechecks_after_resolution_without_opening_mismatched_stream() {
+    let (requests, output) = m835_scripted_cli(
+        &[
+            "agent",
+            "wait",
+            "w1:p1",
+            "--status",
+            "idle",
+            "--timeout",
+            "100",
+        ],
+        vec![
+            serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}}),
+            serde_json::json!({"result":{"type":"agent_info", "agent":{"pane_id":"w1:p1", "agent_status":"working"}}}),
+            serde_json::json!({"result":{"type":"pong", "version":"replacement", "protocol":20}}),
+        ],
+        false,
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["ping", "agent.get", "ping"]
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["id"], "cli:agent:wait");
+    assert_eq!(error["error"]["code"], "protocol_mismatch");
+}
+
+#[test]
+fn m835_status_and_handoff_are_explicit_unchecked_recovery_routes() {
+    let (requests, output) = m835_scripted_cli(
+        &["status", "server", "--json"],
+        vec![serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":18}})],
+        false,
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["ping"]
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(status.to_string().contains("18"));
+    let (requests, output) = m835_scripted_cli(
+        &["server", "live-handoff"],
+        vec![
+            serde_json::json!({"error":{"code":"fixture_handoff_denied", "message":"unchecked request reached listener"}}),
+        ],
+        false,
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["server.live_handoff"]
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("fixture_handoff_denied"));
+}
+
+const M835_MUTATING_VERBS: &[&[&str]] = &[
+    &["send"],
+    &["reply"],
+    &["agent", "send"],
+    &["pane", "run"],
+    &["pane", "send-text"],
+];
+
+fn m835_f4_refusal(verb: &[&str], late: bool, wrong_protocol: u32) {
+    use serde_json::{json, Value};
+    use sqlx::Connection;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fixture = SnapshotCliFixture::new();
+    let socket = fixture.base.join("f4-guard.sock");
+    let db = fixture.base.join("cli-sqlite/zynk.db");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    if late {
+        fs::write(fixture.base.join("runtime.id"), "rt_m835\n").unwrap();
+    }
+    let (key, resolve) = if verb[0] == "pane" {
+        ("pane", "pane.get")
+    } else {
+        ("agent", "agent.get")
+    };
+    let expected = if late {
+        vec!["ping", resolve, "ping"]
+    } else {
+        vec!["ping"]
+    };
+    let done = AtomicBool::new(false);
+    let (output, requests, recorded) = thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let mut requests = Vec::new();
+            let mut recorded = None;
+            while Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if done.load(Ordering::Acquire) { break; }
+                        thread::sleep(Duration::from_millis(5)); continue;
+                    }
+                    Err(e) => panic!("F4 accept: {e}"),
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                requests.push(request.clone());
+                let n = requests.len();
+                if late && n == expected.len() && request["method"] == "ping" {
+                    recorded = Some(sqlite_block_on(async {
+                        tokio::time::timeout(Duration::from_secs(1), async {
+                            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                                .filename(&db).read_only(true).busy_timeout(Duration::from_millis(200));
+                            let mut conn = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
+                            let ids = sqlx::query_scalar::<_, String>("SELECT id FROM messages").fetch_all(&mut conn).await.unwrap();
+                            let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM delivery_events")
+                                .fetch_one(&mut conn).await.unwrap();
+                            assert_eq!(count, 0);
+                            conn.close().await.unwrap();
+                            ids
+                        }).await.expect("bounded pre-refusal DB observation")
+                    }));
+                }
+                let result = if request["method"] == "ping" {
+                    json!({"type":"pong", "version":"fixture", "protocol":if n == expected.len() { wrong_protocol } else { 19 }})
+                } else {
+                    json!({"type":format!("{key}_info"), (key):{"pane_id":"w1:p1", "terminal_id":"term_m835", "workspace_id":"w1", "tab_id":"w1:t1"}})
+                };
+                writeln!(stream, "{}", json!({"id":request["id"], "result":result})).unwrap();
+            }
+            (requests, recorded)
+        });
+        let mut args = verb.to_vec();
+        args.extend(["w1:p1", "--", "body"]);
+        let output = run_snapshot_cli_bounded(&fixture.base, &socket, &args);
+        done.store(true, Ordering::Release);
+        let (requests, recorded) = worker.join().unwrap();
+        (output, requests, recorded)
+    });
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        expected,
+        "{verb:?}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["command"],
+        if verb.len() == 1 {
+            format!("zynk {}", verb[0])
+        } else {
+            verb.join(" ")
+        }
+    );
+    assert_eq!(value["result"], "failed");
+    assert_eq!(
+        value["target_resolution"],
+        if late { "resolved" } else { "unknown" }
+    );
+    assert_eq!(value["error"]["code"], "transport_failed");
+    assert!(value["error"].get("context").is_none());
+    for field in ["delivery_status", "proof", "submitted_at"] {
+        assert!(value.get(field).is_none(), "{value}");
+    }
+    if late {
+        let id = value["message_id"].as_str().unwrap();
+        assert_eq!(recorded.unwrap(), vec![id.to_owned()]);
+        assert_eq!(delivery_events_of(&db, id), vec!["failed".to_owned()]);
+    } else {
+        assert!(value.get("conversation_id").is_none());
+        assert_eq!(
+            value["error"]["message"],
+            if verb[0] == "pane" {
+                "could not reach zynk to resolve pane 'w1:p1'"
+            } else {
+                "could not reach zynk to resolve the target 'w1:p1'"
+            }
+        );
+        fixture.assert_no_runtime_created();
+    }
+}
+
+#[test]
+fn m835_pre_resolution_mismatch_preserves_unknown_f4_without_attempt() {
+    for verb in M835_MUTATING_VERBS {
+        for protocol in [18, 20] {
+            m835_f4_refusal(verb, false, protocol);
+        }
+    }
+}
+
+#[test]
+fn m835_post_recorded_attempt_mismatch_appends_failed_without_submit_or_receipt() {
+    for verb in M835_MUTATING_VERBS {
+        for protocol in [18, 20] {
+            m835_f4_refusal(verb, true, protocol);
+        }
+    }
+}
+
+#[test]
+fn m833_popup_cli_preserves_dimensions_and_close_wire_shape_under_guard() {
+    for (args, expected) in [
+        (
+            vec![
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "example.popup",
+                "--entrypoint",
+                "board",
+                "--placement",
+                "popup",
+                "--width",
+                "80%",
+                "--height",
+                "12",
+                "--no-focus",
+            ],
+            "plugin.pane.open",
+        ),
+        (vec!["popup", "close"], "popup.close"),
+    ] {
+        let (requests, output) = m835_scripted_cli(
+            &args,
+            vec![
+                serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}}),
+                serde_json::json!({"result":{"type":"ok"}}),
+            ],
+            false,
+        );
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["ping", expected]
+        );
+        if expected == "plugin.pane.open" {
+            assert_eq!(requests[1]["params"]["placement"], "popup");
+            assert_eq!(requests[1]["params"]["width"], "80%");
+            assert_eq!(requests[1]["params"]["height"], 12);
+            assert_eq!(requests[1]["params"]["focus"], false);
+        } else {
+            assert_eq!(requests[1]["params"], serde_json::json!({}));
+        }
+    }
+
+    for (args, expected_code) in [
+        (vec!["popup"], 2),
+        (vec!["popup", "unknown"], 2),
+        (vec!["popup", "close", "extra"], 2),
+        (vec!["popup", "--help"], 0),
+        (vec!["popup", "close", "--help"], 0),
+    ] {
+        let (requests, output) = m835_scripted_cli(&args, vec![], false);
+        assert!(requests.is_empty(), "{args:?}: {requests:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(expected_code),
+            "{args:?}: {output:?}"
+        );
+    }
 }

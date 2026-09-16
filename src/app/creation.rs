@@ -642,6 +642,7 @@ pub(super) mod tests {
                     "-i".into(),
                 ],
                 &crate::pane::PaneLaunchEnv::default(),
+                crate::pane::AgentDetection::Enabled,
                 0,
                 self.app.state.host_terminal_theme,
                 self.app.state.host_terminal_appearance,

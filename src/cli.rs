@@ -1,12 +1,15 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::api::client::{ApiClient, ApiClientError};
 use crate::api::schema::{
-    AgentStatus, EventData, EventKind, EventMatch, EventsWaitParams, Method, OutputMatch,
-    PaneAgentState, PaneWaitForOutputParams, ReadFormat, ReadSource, Request, ResponseResult,
-    SplitDirection, SubscriptionEventData, SubscriptionEventEnvelope, SubscriptionEventKind,
+    AgentStatus, EmptyParams, ErrorResponse, EventData, EventKind, EventMatch, EventsWaitParams,
+    Method, OutputMatch, PaneAgentState, PaneWaitForOutputParams, ReadFormat, ReadSource, Request,
+    ResponseResult, SplitDirection, SubscriptionEventData, SubscriptionEventEnvelope,
+    SubscriptionEventKind,
 };
 
 mod agent;
@@ -17,6 +20,7 @@ mod native;
 mod notification;
 mod pane;
 mod plugin;
+mod protocol_guard;
 mod runtime;
 mod server;
 mod skill;
@@ -99,6 +103,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "agent" => agent::run_agent_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
         "pane" => pane::run_pane_command(&args[2..])?,
+        "popup" => run_popup_command(&args[2..])?,
         "wait" => run_wait_command(&args[2..])?,
         "integration" => integration::run_integration_command(&args[2..])?,
         "skill" => skill::run_skill_command(&args[2..])?,
@@ -125,6 +130,26 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     };
 
     Ok(CommandOutcome::Handled(exit_code))
+}
+
+fn run_popup_command(args: &[String]) -> std::io::Result<i32> {
+    match args {
+        [command] if command == "close" => {
+            send_ok_request(Method::PopupClose(EmptyParams::default()))
+        }
+        [flag] if matches!(flag.as_str(), "help" | "--help" | "-h") => {
+            eprintln!("usage: zynk popup close");
+            Ok(0)
+        }
+        [command, flag] if command == "close" && is_help_flag(flag) => {
+            eprintln!("usage: zynk popup close");
+            Ok(0)
+        }
+        _ => {
+            eprintln!("usage: zynk popup close");
+            Ok(2)
+        }
+    }
 }
 
 fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
@@ -956,7 +981,9 @@ pub(super) fn wait_for_agent_change(
     timeout_message: &str,
 ) -> std::io::Result<i32> {
     let read_timeout = timeout_ms.map(Duration::from_millis);
-    let (ack, mut stream) = ApiClient::local()
+    let client = ApiClient::local();
+    ensure_server_protocol_compatible(&client, &request.id)?;
+    let (ack, mut stream) = client
         .subscribe_value(&request, read_timeout)
         .map_err(api_client_error_to_io)?;
     if let Err(err) = crate::api::client::parse_response_value(ack) {
@@ -1009,9 +1036,36 @@ pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
 }
 
 pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
+    let client = ApiClient::local();
+    ensure_server_protocol_compatible(&client, &request.id)?;
+    client
+        .request_value(request)
+        .map_err(api_client_error_to_io)
+}
+
+pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde_json::Value> {
     ApiClient::local()
         .request_value(request)
         .map_err(api_client_error_to_io)
+}
+
+fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> std::io::Result<()> {
+    let status = client.status().map_err(api_client_error_to_io)?;
+    let server_protocol = status
+        .protocol
+        .ok_or_else(|| std::io::Error::other("server ping did not include a protocol version"))?;
+    match protocol_guard::mismatch_response(
+        request_id,
+        server_protocol,
+        &crate::session::active_restart_after_update_guidance(),
+    ) {
+        Some(response) => Err(protocol_guard::mismatch_error(response)),
+        None => Ok(()),
+    }
+}
+
+pub(crate) fn protocol_mismatch_response(err: &std::io::Error) -> Option<&ErrorResponse> {
+    protocol_guard::error_response(err)
 }
 
 fn api_timeout_error(err: &std::io::Error) -> bool {
@@ -1208,6 +1262,41 @@ fn _print_json<T: Serialize>(value: &T) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m835_mismatch_response_pins_protocol_not_package_and_keeps_typed_error() {
+        use super::protocol_guard::{error_response, mismatch_error, mismatch_response};
+        let current = crate::protocol::PROTOCOL_VERSION;
+        assert_eq!(current, 19);
+        assert!(mismatch_response("same", current, "restart-fixture").is_none());
+        for (server, guidance_present) in [(current - 1, true), (current + 1, false)] {
+            let response = mismatch_response("original-id", server, "restart-fixture").unwrap();
+            assert_eq!(response.id, "original-id");
+            assert_eq!(response.error.code, "protocol_mismatch");
+            assert!(response
+                .error
+                .message
+                .contains(&format!("server protocol {server}")));
+            assert_eq!(
+                response.error.message.contains("restart-fixture"),
+                guidance_present
+            );
+            assert!(response.error.message.contains(if guidance_present {
+                "restart"
+            } else {
+                "upgrade"
+            }));
+            let expected = serde_json::to_value(&response).unwrap();
+            let error = mismatch_error(response);
+            assert_eq!(
+                serde_json::to_value(error_response(&error).unwrap()).unwrap(),
+                expected
+            );
+            assert!(error.to_string().contains("protocol"));
+            assert!(error_response(&std::io::Error::other(error.to_string())).is_none());
+        }
+        assert!(error_response(&std::io::Error::other("ordinary failure")).is_none());
+    }
+
     #[test]
     fn terminal_session_options_default_and_override_dimensions() {
         let defaults =

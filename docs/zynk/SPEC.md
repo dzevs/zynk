@@ -404,6 +404,99 @@ and experimental. Before changing either, resolve the budget or explicitly
 document the limitation for the changed policy; the operator retains release
 approval. Per-request tests do not establish aggregate memory safety.
 
+### Modal terminal popups
+
+`plugin.pane.open` accepts placement `popup`, optional `width` and `height`, and
+the existing plugin trust/platform/entrypoint checks. A popup is session-modal,
+not a tile or plugin-owned public pane. It leaves underlying focus, layout and
+plugin context unchanged, has no public pane ID, and emits no pane lifecycle
+events. Only one popup may exist; plugin opening requires Terminal mode and
+rejects workspace, target-pane or split-direction options. `focus=false` does
+not make it non-modal. Non-popup sizes are invalid rather than silently ignored.
+
+Dimensions describe the outer rectangle: unsigned cell counts through 65535
+(including zero) or canonical percent strings `"1%"` through `"100%"`. Signs and
+leading zeros in percentages are rejected. Omitted dimensions default to half
+the available area; small values clamp to a 6-column by 4-row minimum, then to
+the available area. An area too small for that minimum is refused. Request
+dimensions override manifest dimensions independently. For example:
+
+```sh
+zynk plugin pane open --plugin example.picker --entrypoint picker --placement popup --width 80% --height 20
+zynk popup close
+```
+
+The plugin must already be installed and enabled with the named entrypoint.
+Manifest `[[panes]]` entries may set `placement = "popup"`, `width` and `height`.
+Custom commands use the same dimensions without changing the old `pane` action:
+
+```toml
+[[keys.command]]
+key = "prefix+t"
+type = "popup"
+command = "exec \"${SHELL:-sh}\""
+description = "open scratch terminal"
+width = "80%"
+height = "80%"
+```
+
+Popup commands receive host appearance and existing plugin/workspace context but
+not `ZYNK_PANE_ID`, even when supplied in extra environment. Agent detection is
+disabled. This is identity isolation, not a process or resource sandbox.
+Terminal keys, text, paste and fresh mouse input go to the popup; Escape is input,
+not a universal close shortcut. Existing key/mouse gestures retain their original
+source and target. Closing releases forwarded keys before removing the runtime
+and suppresses later repeats until the existing release/teardown policy clears
+their ownership. A failed repeat does not erase its original forwarded lease.
+
+Process exit or `{"id":"close","method":"popup.close","params":{}}` closes
+the popup. Close returns `ok`, or `popup_not_open` when absent. The fork convenience
+route `zynk popup close` uses that same API and compatibility guard; its help and
+invalid arguments do not connect. Background removal of the opening workspace
+does not itself close a popup. Popup state and runtime handles are excluded from
+persisted/handoff snapshots. Successful handoff drops the popup through ordinary
+runtime shutdown; early failure before that commit path does not. No guarantee
+is made about arbitrary detached descendants or an untested live popup handoff.
+
+View computation resizes popup runtimes; rendering remains read-only. Popup text
+and cursor replace the tiled presentation within its rectangle. Hidden cursor,
+scrollback and synchronized output suppress cursor intent without tile fallback.
+Tiled OSC-8 link metadata inside the popup rectangle is removed, not merely hidden
+by text clearing; outside links remain. Retained-PTY rendering declines an app
+popup. App-surface graphics are suppressed through normal cache deletion and
+writer acceptance, without cancelling streams. Valid hidden stream frames still
+replace the latest layer; close reveals surviving current data, not frame history.
+No per-frame acknowledgment, instantaneous erasure at a blocked writer, popup
+image support, or aggregate resource bound is added. Direct-terminal clients
+retain their separate text/frame behavior. The resource and handoff limitations
+in the graphics section remain in force.
+
+### CLI protocol compatibility
+
+Operational CLI `send_request` and agent subscription paths obtain server status
+on a separate connection and require protocol equality (currently 19), independent
+of package version. Missing/malformed/unreachable ping is a transport error, not
+assumed compatibility. Ordinary mismatch output is one JSON `protocol_mismatch`
+error with the request ID and restart/upgrade guidance. The transport returns a
+typed error and prints nothing itself, including during plugin rollback.
+
+Native/agent/pane delivery routes retain F4: pre-resolution refusal yields
+`transport_failed`, unknown target resolution, the existing generic message and
+no structured mismatch context or recorded send attempt. Direct status provides
+the detailed diagnostic route. A refusal after a recorded attempt reaches the
+existing Failed append and F4 error; healthy-database controls observe Failed
+and no Submitted/Received. The attempt itself creates no Submitted event.
+Existing append failures are not made durably successful by this guard.
+
+Direct status, explicit live handoff and direct server stop bypass the guard for
+recovery; they are not invoked automatically. Low-level API and direct binary
+clients remain separate. Ping and operation are not an atomic version lock:
+ordinary live handoff can replace the server between them. The operation may
+succeed or fail against the replacement, and a lost response is not proof of no
+side effect. No retry, replay, recursion, new overall timeout or receipt authority
+is introduced. Future low-level CLI routes require an explicit admission decision;
+the present guard placement is not compiler-enforced route enumeration.
+
 ## 9. Fork engineering discipline
 
 - zynk-native code in **NEW modules**: `zynk_db`, `zynk_messages`, `zynk_receipts`, `zynk_retrieval`,

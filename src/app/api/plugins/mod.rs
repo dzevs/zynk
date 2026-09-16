@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 mod context;
 mod env;
 mod manifest;
@@ -349,8 +351,25 @@ impl App {
             return encode_error(id, code, message);
         }
         let placement = params.placement.unwrap_or(pane.placement);
+        if placement != PluginPanePlacement::Popup
+            && (params.width.is_some() || params.height.is_some())
+        {
+            return encode_error(
+                id,
+                "invalid_params",
+                "width and height are only supported when placement is popup",
+            );
+        }
+        if placement == PluginPanePlacement::Popup && self.state.mode != crate::app::Mode::Terminal
+        {
+            return encode_error(
+                id,
+                "ui_busy",
+                "popup panes can only open from the normal workspace view",
+            );
+        }
         match placement {
-            PluginPanePlacement::Overlay => {
+            PluginPanePlacement::Overlay | PluginPanePlacement::Popup => {
                 if params.workspace_id.is_some()
                     || params.target_pane_id.is_some()
                     || params.direction.is_some()
@@ -358,7 +377,7 @@ impl App {
                     return encode_error(
                         id,
                         "invalid_params",
-                        "overlay plugin panes target the active pane",
+                        "overlay and popup plugin panes target the active pane",
                     );
                 }
             }
@@ -386,6 +405,7 @@ impl App {
             PluginPanePlacement::Overlay => {
                 self.open_plugin_overlay_pane(id, params, &plugin, pane)
             }
+            PluginPanePlacement::Popup => self.open_plugin_popup_pane(id, params, &plugin, pane),
             PluginPanePlacement::Split | PluginPanePlacement::Zoomed => {
                 self.open_plugin_split_pane(id, params, &plugin, pane, placement)
             }
@@ -667,6 +687,165 @@ fn manifest_actions(
 
 #[cfg(test)]
 mod tests {
+    fn m833_plugin_fixture() -> (App, std::path::PathBuf) {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("popup-plugin")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let root = unique_temp_path("m833-popup-plugin");
+        write_manifest_content(
+            &root,
+            r#"
+    id = "example.m833-popup"
+    name = "Popup Fixture"
+    version = "0.1.0"
+    min_zynk_version = "0.6.10"
+    platforms = ["linux"]
+    [[panes]]
+    id = "board"
+    title = "Popup"
+    placement = "popup"
+    width = "80%"
+    height = "40%"
+    command = ["sh", "-c", "read answer"]
+    "#,
+        );
+        link_manifest(&mut app, &root);
+        (app, root)
+    }
+
+    fn m833_open(app: &mut App, extra: serde_json::Value) -> serde_json::Value {
+        let mut params = serde_json::json!({"plugin_id":"example.m833-popup", "entrypoint":"board", "focus":false});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let request = serde_json::from_value(
+            serde_json::json!({"id":"m833-open", "method":"plugin.pane.open", "params":params}),
+        )
+        .unwrap();
+        serde_json::from_str(&app.handle_api_request(request)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn m833_popup_plugin_admission_refuses_without_mutating_tile_or_popup() {
+        let (mut app, _root) = m833_plugin_fixture();
+        let pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        let aliases = app.state.pane_id_aliases.clone();
+        for mode in [crate::app::Mode::Navigate, crate::app::Mode::Settings] {
+            app.state.mode = mode;
+            assert_eq!(
+                m833_open(&mut app, serde_json::json!({}))["error"]["code"],
+                "ui_busy"
+            );
+            assert_eq!(app.state.mode, mode);
+            assert!(app.state.popup_pane.is_none());
+        }
+        app.state.mode = crate::app::Mode::Terminal;
+        for extra in [
+            serde_json::json!({"workspace_id":"w1"}),
+            serde_json::json!({"target_pane_id":"w1:p1"}),
+            serde_json::json!({"direction":"right"}),
+            serde_json::json!({"placement":"split", "width":20}),
+        ] {
+            assert_eq!(
+                m833_open(&mut app, extra)["error"]["code"],
+                "invalid_params"
+            );
+            assert!(app.state.popup_pane.is_none());
+            assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane));
+            assert_eq!(app.state.pane_id_aliases, aliases);
+        }
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(40, 12);
+        let (_, terminal) = app.install_test_popup_runtime(runtime);
+        assert_eq!(
+            m833_open(&mut app, serde_json::json!({}))["error"]["code"],
+            "plugin_pane_open_failed"
+        );
+        assert_eq!(app.state.popup_pane.as_ref().unwrap().terminal_id, terminal);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane));
+        assert_eq!(app.state.pane_id_aliases, aliases);
+        app.close_popup_pane();
+    }
+
+    #[tokio::test]
+    async fn m833_popup_plugin_dimensions_override_independently_and_focus_false_is_modal() {
+        let (mut app, _root) = m833_plugin_fixture();
+        let pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        for (extra, width, height) in [
+            (
+                serde_json::json!({}),
+                crate::popup_size::PopupSize::Percent(80),
+                crate::popup_size::PopupSize::Percent(40),
+            ),
+            (
+                serde_json::json!({"width":60}),
+                crate::popup_size::PopupSize::Cells(60),
+                crate::popup_size::PopupSize::Percent(40),
+            ),
+            (
+                serde_json::json!({"height":10}),
+                crate::popup_size::PopupSize::Percent(80),
+                crate::popup_size::PopupSize::Cells(10),
+            ),
+        ] {
+            assert_eq!(m833_open(&mut app, extra)["result"]["type"], "ok");
+            let popup = app.state.popup_pane.as_ref().unwrap();
+            assert_eq!((popup.width, popup.height), (Some(width), Some(height)));
+            assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane));
+            assert_eq!(app.state.mode, crate::app::Mode::Terminal);
+            assert!(!app.state.plugin_panes.contains_key(&popup.pane_id));
+            let (runtime, mut input) = crate::terminal::TerminalRuntime::test_with_channel(40, 12);
+            let terminal = popup.terminal_id.clone();
+            app.terminal_runtimes.remove(&terminal).unwrap().shutdown();
+            app.terminal_runtimes.insert(terminal, runtime);
+            app.route_client_events_from(
+                33,
+                vec![crate::raw_input::RawInputEvent::Paste("modal".into())],
+                false,
+            );
+            assert_eq!(input.try_recv().unwrap().as_ref(), b"modal");
+            assert!(app.close_popup_pane());
+        }
+    }
+
+    #[test]
+    fn m833_non_popup_manifest_size_is_a_named_link_refusal() {
+        let mut app = test_app();
+        let root = unique_temp_path("m833-invalid-manifest");
+        write_manifest_content(
+            &root,
+            r#"
+    id = "example.m833-invalid"
+    name = "Invalid Popup Size"
+    version = "0.1.0"
+    min_zynk_version = "0.6.10"
+    [[panes]]
+    id = "board"
+    title = "Board"
+    placement = "split"
+    width = "80%"
+    command = ["sh", "-c", "exit 0"]
+    "#,
+        );
+        let response = app.handle_api_request(Request {
+            id: "m833-invalid".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.display().to_string(),
+                enabled: true,
+                source: None,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "invalid_plugin_pane_size");
+        assert!(!app
+            .state
+            .installed_plugins
+            .contains_key("example.m833-invalid"));
+    }
+
     use super::*;
     use crate::api::schema::{
         Method, PluginSourceInfo, PluginSourceKind, Request, SuccessResponse,
@@ -1150,6 +1329,8 @@ command = ["echo", "b"]
                 plugin_id: "example.missing".into(),
                 entrypoint: "ui".into(),
                 placement: Some(PluginPanePlacement::Split),
+                width: None,
+                height: None,
                 workspace_id: None,
                 target_pane_id: None,
                 direction: None,
@@ -1205,6 +1386,8 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$ZYNK_P
                 plugin_id: "example.pane".into(),
                 entrypoint: "board".into(),
                 placement: Some(PluginPanePlacement::Overlay),
+                width: None,
+                height: None,
                 workspace_id: None,
                 target_pane_id: None,
                 direction: None,
@@ -1304,6 +1487,8 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$ZYNK_PLUGIN_ROOT\" \"$ZYNK_PLUG
                 plugin_id: "example.path-env".into(),
                 entrypoint: "board".into(),
                 placement: Some(PluginPanePlacement::Overlay),
+                width: None,
+                height: None,
                 workspace_id: None,
                 target_pane_id: None,
                 direction: None,
@@ -1404,6 +1589,8 @@ command = ["sh", "-c", "sleep 1"]
                 plugin_id: "example.tab".into(),
                 entrypoint: "board".into(),
                 placement: None,
+                width: None,
+                height: None,
                 workspace_id: None,
                 target_pane_id: None,
                 direction: None,
@@ -1568,6 +1755,8 @@ command = ["sh", "-c", "sleep 1"]
                 plugin_id: "example.worktree-bootstrap".into(),
                 entrypoint: "board".into(),
                 placement: None,
+                width: None,
+                height: None,
                 workspace_id: None,
                 target_pane_id: None,
                 direction: None,
@@ -2353,6 +2542,8 @@ command = ["sh", "-c", "true"]
                 plugin_id: "example.layout".into(),
                 entrypoint: "view".into(),
                 placement: Some(placement),
+                width: None,
+                height: None,
                 workspace_id: (placement == PluginPanePlacement::Tab)
                     .then(|| app.public_workspace_id(1)),
                 target_pane_id: matches!(
