@@ -6271,3 +6271,77 @@ fn m833_popup_cli_preserves_dimensions_and_close_wire_shape_under_guard() {
         );
     }
 }
+
+fn m837_exchange(socket: &Path, request: serde_json::Value) -> serde_json::Value {
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(stream, "{request}").unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+fn m837_delivery_count(db: &Path) -> i64 {
+    use sqlx::Connection;
+    sqlite_block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .read_only(true)
+                .busy_timeout(Duration::from_millis(200));
+            let mut connection = sqlx::SqliteConnection::connect_with(&options)
+                .await
+                .unwrap();
+            let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM delivery_events")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+            connection.close().await.unwrap();
+            count
+        })
+        .await
+        .expect("bounded delivery-event observation")
+    })
+}
+
+#[test]
+fn m837_real_wait_setup_error_writes_no_delivery_events() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket = runtime_dir.join("zynk.sock");
+    let zynk = spawn_zynk(&config_home, &runtime_dir, &socket);
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let created = m837_exchange(
+        &socket,
+        serde_json::json!({
+            "id": "m837:create", "method": "workspace.create", "params": {"cwd": base, "focus": true}
+        }),
+    );
+    assert!(created["result"]["workspace"]["workspace_id"].is_string());
+    let db = config_home.join("sqlite/zynk.db");
+    let before = m837_delivery_count(&db);
+    let response = m837_exchange(
+        &socket,
+        serde_json::json!({
+            "id": "m837:wait", "method": "events.wait", "params": {
+                "match_event": {"event": "pane_agent_status_changed",
+                    "pane_id": "missing-m837", "agent_status": "idle"},
+                "timeout_ms": 100
+            }
+        }),
+    );
+    assert_eq!(
+        response,
+        serde_json::json!({"id": "m837:wait", "error": {
+            "code": "pane_not_found", "message": "pane missing-m837 not found"
+        }})
+    );
+    assert_eq!(m837_delivery_count(&db), before);
+    cleanup_spawned_zynk(zynk, base);
+}

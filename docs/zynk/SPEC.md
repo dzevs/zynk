@@ -280,6 +280,18 @@ not denormalized onto every message.
 - zynk has NO native conversation persistence → F1/F2/F3/F4 + delivery records are 100% zynk-layer.
   (zynk's `src/persist*` is session/layout state, not messages — a pattern to learn from, not reuse.)
 
+Public `events.wait` accepts agent-status event matches; other event matches
+are refused before subscription setup. Setup errors return immediately with
+the original wait request ID. During agent-status polling, only `pane_not_found`
+ends the wait with an error; other poll errors continue toward a match or timeout.
+If the event sequence changes during a pane snapshot, its result, including an
+error, is discarded and re-derived on the next stable poll. Ordinary subscription
+polling continues to suppress snapshot errors. The internal `pane_get` helper
+decodes the existing `ErrorResponse` and preserves its remote ID; the wait path
+then rebinds that ID to the original wait request. These are separate contracts,
+not a new error envelope or wire method. Read-only waits create no new delivery
+events. The binary client protocol remains 19.
+
 Dedicated `custom_status` and `clear_custom_status` presentation are retired. JSON request decoding
 keeps its existing unknown-field policy: retired keys are ignored, even in otherwise valid mixed
 reports, with no alias or ignored-key signal in the legacy contentless `Ok {}` API response.
@@ -362,6 +374,15 @@ connection awaiting its first header has no header deadline. These are configure
 receive bounds, not scheduling-independent completion guarantees. Successful
 frames do not receive individual `ok` replies. Frame errors end the stream.
 Public Stream remains omitted from generated schema discovery (M832-G1-N1).
+
+The dedicated stream's timed-read wrapper does not reset the socket mode when
+the read returns its terminal no-data result (`None`). A successful value resets
+the mode and propagates a reset error; a read error attempts reset while retaining
+the original read error regardless of whether reset succeeds. These terminal streams
+are not reused after `None`.
+Linux setup errors, including `InvalidInput`, remain errors. The existing
+`Unsupported` fallback uses nonblocking polling; this does not change framing,
+payload caps, deadlines or cancellation policy.
 
 Internal Open/Set/Close Method variants are skipped by both serde and schemars;
 attempted serialization of such a typed variant intentionally fails. Transport

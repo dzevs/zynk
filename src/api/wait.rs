@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -164,8 +166,16 @@ pub(super) fn wait_for_event(
         if should_stop_connection(stream, running)? {
             return Ok(None);
         }
-        if let Some(event) = active.poll(api_tx, event_hub) {
-            return wait_matched_response(&request_id, event).map(Some);
+        match active.poll_for_wait(api_tx, event_hub) {
+            Ok(Some(event)) => return wait_matched_response(&request_id, event).map(Some),
+            Ok(None) => {}
+            Err(mut response) if response.error.code == "pane_not_found" => {
+                response.id = request_id;
+                return serde_json::to_string(&response)
+                    .map(Some)
+                    .map_err(std::io::Error::other);
+            }
+            Err(_) => {}
         }
         if params
             .timeout_ms

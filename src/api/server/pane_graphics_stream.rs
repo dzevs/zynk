@@ -472,30 +472,46 @@ impl PollBackoff {
 
 fn with_timed_reads<T>(
     stream: &mut LocalStream,
-    read: impl FnOnce(&mut LocalStream, ReadWait) -> std::io::Result<T>,
-) -> std::io::Result<T> {
-    match stream.set_recv_timeout(Some(CONNECTION_POLL_INTERVAL)) {
+    read: impl FnOnce(&mut LocalStream, ReadWait) -> std::io::Result<Option<T>>,
+) -> std::io::Result<Option<T>> {
+    let setup = stream.set_recv_timeout(Some(CONNECTION_POLL_INTERVAL));
+    with_timed_read_setup(stream, setup, read)
+}
+
+fn with_timed_read_setup<T>(
+    stream: &mut LocalStream,
+    setup: std::io::Result<()>,
+    read: impl FnOnce(&mut LocalStream, ReadWait) -> std::io::Result<Option<T>>,
+) -> std::io::Result<Option<T>> {
+    match setup {
         Ok(()) => {
             let result = read(stream, ReadWait::SocketTimeout);
-            merge_read_reset_result(result, stream.set_recv_timeout(None))
+            finish_timed_read(result, || stream.set_recv_timeout(None))
         }
         Err(err) if err.kind() == io::ErrorKind::Unsupported => {
             stream.set_nonblocking(true)?;
             let result = read(stream, ReadWait::Poll(PollBackoff::new()));
-            merge_read_reset_result(result, stream.set_nonblocking(false))
+            finish_timed_read(result, || stream.set_nonblocking(false))
         }
         Err(err) => Err(err),
     }
 }
 
-fn merge_read_reset_result<T>(
-    result: std::io::Result<T>,
-    reset_result: std::io::Result<()>,
-) -> std::io::Result<T> {
-    match (result, reset_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(err)) => Err(err),
-        (Err(err), _) => Err(err),
+fn finish_timed_read<T>(
+    result: std::io::Result<Option<T>>,
+    reset: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<Option<T>> {
+    match result {
+        // None is terminal for this dedicated stream.
+        Ok(None) => Ok(None),
+        Ok(value) => {
+            reset()?;
+            Ok(value)
+        }
+        Err(err) => {
+            let _ = reset();
+            Err(err)
+        }
     }
 }
 
@@ -537,6 +553,171 @@ fn read_should_retry(err: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m836_terminal_none_never_invokes_reset() {
+        for reset_fails in [false, true] {
+            let mut calls = 0;
+            let result = finish_timed_read::<u8>(Ok(None), || {
+                calls += 1;
+                if reset_fails {
+                    Err(io::Error::new(io::ErrorKind::InvalidInput, "reset-error"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!((calls, result.map_err(m836_error)), (0, Ok(None)));
+        }
+    }
+
+    #[test]
+    fn m836_some_resets_once_and_preserves_value() {
+        let mut calls = 0;
+        let result = finish_timed_read(Ok(Some(17)), || {
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!((calls, result.map_err(m836_error)), (1, Ok(Some(17))));
+    }
+
+    #[test]
+    fn m836_some_propagates_reset_error() {
+        let mut calls = 0;
+        let result = finish_timed_read(Ok(Some(17)), || {
+            calls += 1;
+            Err(io::Error::new(io::ErrorKind::InvalidInput, "reset-error"))
+        });
+        assert_eq!(
+            (calls, result.map_err(m836_error)),
+            (1, Err((io::ErrorKind::InvalidInput, "reset-error".into())))
+        );
+    }
+
+    #[test]
+    fn m836_read_error_wins_after_one_reset_attempt() {
+        for reset_fails in [false, true] {
+            let mut calls = 0;
+            let result = finish_timed_read::<u8>(
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "read-error")),
+                || {
+                    calls += 1;
+                    if reset_fails {
+                        Err(io::Error::new(io::ErrorKind::InvalidInput, "reset-error"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(
+                (calls, result.map_err(m836_error)),
+                (1, Err((io::ErrorKind::BrokenPipe, "read-error".into())))
+            );
+        }
+    }
+
+    #[test]
+    fn m836_setup_errors_propagate_without_read_or_mode_change() {
+        let (_peer, mut stream, _path) = local_stream_pair("m836-setup-errors");
+        for kind in [io::ErrorKind::InvalidInput, io::ErrorKind::PermissionDenied] {
+            assert!(!m836_nonblocking(&stream));
+            let mut reads = 0;
+            let result = with_timed_read_setup(
+                &mut stream,
+                Err(io::Error::new(kind, "setup-error")),
+                |_, _| {
+                    reads += 1;
+                    Ok(Some(17))
+                },
+            );
+            assert_eq!(
+                (reads, result.map_err(m836_error)),
+                (0, Err((kind, "setup-error".into())))
+            );
+            assert!(!m836_nonblocking(&stream));
+        }
+    }
+
+    #[test]
+    fn m836_injected_unsupported_executes_poll_strategy_and_completion() {
+        for outcome in [0, 1, 2] {
+            let (_peer, mut stream, _path) = local_stream_pair("m836-fallback");
+            let mut reads = 0;
+            let result = with_timed_read_setup(
+                &mut stream,
+                Err(io::Error::new(io::ErrorKind::Unsupported, "injected")),
+                |stream, wait| {
+                    reads += 1;
+                    assert!(matches!(wait, ReadWait::Poll(_)));
+                    assert!(m836_nonblocking(stream));
+                    match outcome {
+                        0 => Ok(None),
+                        1 => Ok(Some(17)),
+                        _ => Err(io::Error::new(io::ErrorKind::BrokenPipe, "read-error")),
+                    }
+                },
+            );
+            let expected = match outcome {
+                0 => Ok(None),
+                1 => Ok(Some(17)),
+                _ => Err((io::ErrorKind::BrokenPipe, "read-error".into())),
+            };
+            assert_eq!((reads, result.map_err(m836_error)), (1, expected));
+            assert_eq!(m836_nonblocking(&stream), outcome == 0);
+        }
+    }
+
+    fn m836_error(error: io::Error) -> (io::ErrorKind, String) {
+        (error.kind(), error.to_string())
+    }
+
+    fn m836_nonblocking(stream: &LocalStream) -> bool {
+        use std::os::fd::AsRawFd;
+        let LocalStream::UdSocket(socket) = stream;
+        // SAFETY: the borrowed socket owns the live descriptor throughout this query.
+        let flags = unsafe { libc::fcntl(socket.inner().as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0, "F_GETFL: {}", io::Error::last_os_error());
+        flags & libc::O_NONBLOCK != 0
+    }
+
+    fn m836_timeout(stream: &LocalStream) -> Option<Duration> {
+        let LocalStream::UdSocket(socket) = stream;
+        socket.inner().read_timeout().unwrap()
+    }
+
+    #[test]
+    fn m836_real_timeout_setup_selects_timed_read() {
+        for outcome in [0, 1, 2] {
+            let (mut peer, mut stream, _path) = local_stream_pair("m836-timed");
+            assert_eq!(m836_timeout(&stream), None);
+            peer.write_all(b"T").unwrap();
+            let mut reads = 0;
+            let mut installed = None;
+            let result = with_timed_reads(&mut stream, |stream, wait| {
+                reads += 1;
+                assert!(matches!(wait, ReadWait::SocketTimeout));
+                installed = m836_timeout(stream);
+                assert!(installed.is_some());
+                let mut byte = [0];
+                stream.read_exact(&mut byte)?;
+                assert_eq!(byte, [b'T']);
+                match outcome {
+                    0 => Ok(None),
+                    1 => Ok(Some(byte)),
+                    _ => Err(io::Error::new(io::ErrorKind::BrokenPipe, "read-error")),
+                }
+            });
+            let expected = match outcome {
+                0 => Ok(None),
+                1 => Ok(Some(*b"T")),
+                _ => Err((io::ErrorKind::BrokenPipe, "read-error".into())),
+            };
+            assert_eq!((reads, result.map_err(m836_error)), (1, expected));
+            assert_eq!(
+                m836_timeout(&stream),
+                if outcome == 0 { installed } else { None }
+            );
+        }
+    }
+
     #[test]
     fn m834_stream_pair_names_are_short_unique_and_independent_of_label() {
         let long_label = "label".repeat(100);

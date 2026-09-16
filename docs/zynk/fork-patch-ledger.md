@@ -6984,3 +6984,110 @@ M8-31 findings/notes/staging deviation, M8-32 resource/schema/handoff limitation
 M8-37/M8-65, older N1/N3, operator deviation and all instrument histories remain
 individually open on their terms. No whole-M8, independent Gate-3 or operator
 merge/push/install/tag/publish/release/cleanup approval is implied.
+
+### M8-36/37/38: Timed-read completion and wait error fidelity
+
+One combined batch against ee294c588244159b33ae24fc3b5f0533ae359462, with
+A/B implementation increments and C a measured Linux no-op. The approved
+operator batch policy does not require an intermediate commit or review per
+increment. This append records implemented behavior and retained observations;
+the exact-tip batch Gate-2 and later gates remain due.
+
+M8-36, e9cbcf2f6f8654dd41b10826ef6aecd526f6b0b0, adopts the Option-returning
+timed-read completion contract. None skips reset, Some resets once and propagates
+reset failure, and Err attempts reset while retaining the original read error.
+The whole setup-result match is extracted into production with_timed_read_setup,
+a declared fork-local structural adaptation. Unsupported remains before the
+catch-all and installs nonblocking mode before its Poll read. Both read callers,
+size caps, chunking, framing, deadlines, cancellation and ownership stay RAW.
+Do not import the authority's InvalidInput suppression: its rationale is
+"macOS reports that closed-socket race as EINVAL." Linux errors propagate.
+Injected setup errors exercise the actual branch helper and socket side effects,
+not a kernel reproduction of Unsupported or InvalidInput. The real timed path
+uses a prequeued byte and observes installed timeout state without injecting Ok.
+
+Both M832-M836-READ-RESET arrivals are joined independently: the decomposition
+row and completed implementation-disposition row. Their complete terms remain
+retained; this source arrival makes no unexecuted Linux race-repair claim and
+does not discharge historical origins or prior approvals' limits.
+
+M8-37, 8915f01c6577b5507d1dd1a7851ec3ecb9154189, decodes pane_get errors as
+the existing ErrorResponse, preserving the remote ID. Four consumers are named:
+scroll setup and agent setup preserve refusal and error fidelity; scroll
+snapshot retains suppression; agent snapshot exposes stable errors to wait
+while ordinary poll still suppresses them. A sequence change drops the snapshot
+Result before applying its error; the next stable poll re-derives it. Only
+pane_not_found terminates polling, with the outer wait request ID. Setup already
+returns any error under that outer ID. The fork's fallible matched-response
+encoding, elapsed deadline, caller identity and stop/disconnect fences remain.
+No new wire shape/ID, protocol change, delivery event or database schema follows.
+The analogous pane_read error branch stays RAW and is not silently corrected.
+
+The complete M821 ledger obligation at parent lines 5049-5068 is retained and
+joined. Its old control passed RAW on the parent, failed RAW after the error fix,
+then received only its approved comment and expected code/message adapter.
+Refusal, scroll:sub:0:probe, one request and the RAW helper's no-EventHub-write
+assertion remain. No parent red was manufactured. This arrival is implemented
+and submitted for range review, not a blanket discharge of M8-21 history.
+
+M8-38, a723dc8852f761b65b2f4cd25e958bf656278074, requires no Linux production
+substitution. Seven current std::process constructor sites stay RAW: two plugin,
+one integration-version and four worktree sites. checkout_has_dirty_files and
+run_windows_player are absent constructor targets; the additional configure
+hunk targets absent detached_custom_command_process. Actual fork
+spawn_custom_command stays RAW, with no rename-equivalence claim. The retained
+authority wrapper delegates to an empty non-Windows configuration body. Clap
+builders are excluded by explicit path/import/scope, not purported Syn type
+resolution. Post-B to post-C compares all 276 tracked Rust payloads and observes
+zero byte/mode changes; this is not zero change against the batch parent. Later
+production formatting and the approved control literal adapter remain separate.
+
+Eighteen new controls execute in staged order, with future B bodies inserted
+but excluded by qualified identity during A. Parent full passed 4403 with five
+ignored; A's TARGETED 182 and adapted B's TARGETED 193 passed. Child full-v1,
+full-v2 and full-v3 each passed 4421 with five ignored. The first lint stop was
+an omitted new-production format wrap; the second was byte_char_slices in one
+frozen control expectation. The separately approved [b'T'] to *b"T" adapter
+changes one expected literal only; the original fragment remains retained.
+Final composition is frozen bodies plus that named adapter, not original byte
+identity or semantic validation by freezing. Fresh full-v3 and lint-v3 passed.
+
+Eleven serial variants each scheduled the same TARGETED 193 identities, not the
+full suite: 2123 observations, 2099 PASS and 24 FAIL, eleven intended and thirteen
+incidental crossings. All intended sites and predicted kinds matched in their
+own variants. The aggregate carries 23 evaluated equalities and one evaluated
+false predicate from its first version; secondary panic text is not another
+outcome. Per-site records retain masking, including the real-DB F11 stop before
+its after-count assertion. Fault evidence does not establish DB non-write there.
+Eleven full byte/mode restorations precede successors; the restored TARGETED
+193 pass with per-qualified membership checked. Printed SKIPs are not executions
+or a complete catalog. Structured summaries are not independent replications.
+
+M83638-BOUNDARY-F01-APPLY remains OPEN: green validation and patch consumption
+occurred inside one orchestration without the promised intervening model read.
+The later applied check and successful outcomes do not repair that history.
+It joins the three M8-33/34/35 instances as a four-instance pattern, each retained
+separately alongside older chronology carries. Receipt dependencies alone do
+not enforce model-turn separation. Narrow derivative instrument examinations
+do not supply clean successor verdicts for old capped tools.
+
+The isolated real-DB control covers setup refusal and unchanged delivery-event
+count in its green runs, not stable polling-close DB coverage or all-table
+non-write. Polling-close's source exclusion is not a resolved call-graph proof.
+M83335-EXACT-PAINT-ABSENCE stays OPEN with both exact-check records mandatory;
+the prior v1 red is not erased by its v2 green. The watched paint identity passed
+this batch's parent and three child full runs, as whole-test outcomes, not paint
+latency measurements. Any recurrence stops the sequence for diagnosis and scope
+decision. The separate retention/replay diagnostic follows this batch before
+whole-M8 Gate-2 and before later work touching the named PTY/read/render paths.
+No inference about unchanged recurrence probability is made from the edit set.
+
+Source/consumer/arrival dispositions and documentation precede explicit staging;
+fresh check then gate precede the normal-hook commit. Exact-tip verification and
+one combined Gate-2 remain required, not claimed by this append. All twenty
+origins, three standing limits, M8-RECT-NARROW, D2/E and M8-29/30 chronology,
+M8-31 notes/staging and capped instrument histories, M8-32 membership-ordering,
+resource/schema/handoff limits, M83335 F05/coverage/doc limits, reviewer Gate-1
+gaps including M7-20 propagation, and all other inherited carries remain on their
+recorded terms. No whole-M8, independent Gate-3 or operator integration/release
+approval is implied. No merge, push, install, tag, publish or cleanup follows.

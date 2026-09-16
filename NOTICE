@@ -60,6 +60,8 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/api/schema/plugins.rs
 - src/api/server.rs
 - src/api/server/pane_graphics_stream.rs
+- src/api/subscriptions.rs
+- src/api/wait.rs
 - src/app/actions.rs
 - src/app/agent_resume.rs
 - src/app/agents.rs

@@ -173,6 +173,13 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Pane graphics stream reads skip mode reset on terminal no-data completion.
+  Successful reads still reset their mode; a read error remains the reported
+  error if the reset attempt also fails. Linux setup errors remain visible.
+- `events.wait` returns `pane_not_found` when a stable agent-status poll finds
+  the target gone, using the original wait request ID. Other polling errors
+  continue waiting; setup errors still refuse immediately. Subscription setup
+  now preserves the decoded application error instead of misdecoding it as pane data.
 - Incomplete full SGR mouse prefixes get a 150-ms first reassembly poll under
   active client mouse capture, and in the legacy reader. Timed-out full prefixes
   use a prefix-inclusive 128-byte drain budget; uninspected surplus is retained.

@@ -773,6 +773,88 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn m837_socket_wait_close_preserves_error_and_outer_id() {
+        let hub = EventHub::default();
+        let publisher = hub.clone();
+        let closed = crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::PaneClosed,
+            data: crate::api::schema::EventData::PaneClosed {
+                pane_id: "pane_1".into(),
+                workspace_id: "ws_1".into(),
+            },
+        };
+        let expected_event = serde_json::to_value(&closed).unwrap();
+        let mut connection = EventWaitConnection::start(
+            event_wait_params(Some(500)),
+            hub.clone(),
+            false,
+            move |id, count| {
+                if count == 0 {
+                    return event_wait_pane_response(id, "working");
+                }
+                if count == 1 {
+                    publisher.push(closed.clone());
+                }
+                error_response_json(id, "pane_not_found", "closed target".into())
+            },
+        );
+        assert_eq!(
+            connection.response(),
+            serde_json::json!({"id": "event_wait", "error": {
+                "code": "pane_not_found", "message": "closed target"
+            }})
+        );
+        assert_eq!(connection.requests.load(Ordering::Relaxed), 3);
+        let events: Vec<_> = hub.events_after(0).into_iter().map(|(_, e)| e).collect();
+        assert_eq!(
+            serde_json::to_value(events).unwrap(),
+            serde_json::json!([expected_event])
+        );
+    }
+
+    #[test]
+    fn m837_socket_wait_non_not_found_poll_error_continues_to_match() {
+        let hub = EventHub::default();
+        let mut connection = EventWaitConnection::start(
+            event_wait_params(Some(500)),
+            hub.clone(),
+            false,
+            |id, count| match count {
+                0 => event_wait_pane_response(id, "working"),
+                1 => error_response_json(id, "access_denied", "transient poll error".into()),
+                _ => event_wait_pane_response(id, "idle"),
+            },
+        );
+        let response = connection.response();
+        assert_eq!(response["id"], "event_wait");
+        assert_eq!(response["result"]["type"], "wait_matched", "{response}");
+        assert_eq!(response["result"]["event"], event_wait_wire_event("idle"));
+        assert_eq!(connection.requests.load(Ordering::Relaxed), 3);
+        assert!(hub.events_after(0).is_empty());
+    }
+
+    #[test]
+    fn m837_socket_wait_setup_errors_are_not_poll_errors() {
+        for code in ["pane_not_found", "access_denied"] {
+            let hub = EventHub::default();
+            let mut connection = EventWaitConnection::start(
+                event_wait_params(Some(0)),
+                hub.clone(),
+                false,
+                move |id, _| error_response_json(id, code, "setup refusal".into()),
+            );
+            assert_eq!(
+                connection.response(),
+                serde_json::json!({"id": "event_wait", "error": {
+                    "code": code, "message": "setup refusal"
+                }})
+            );
+            assert_eq!(connection.requests.load(Ordering::Relaxed), 1);
+            assert!(hub.events_after(0).is_empty());
+        }
+    }
+
+    #[test]
     fn m832b_header_limit_counts_lf_and_unterminated_input() {
         let running = Arc::new(AtomicBool::new(true));
         let active = Arc::new(AtomicBool::new(true));

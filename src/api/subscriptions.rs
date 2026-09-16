@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use regex::Regex;
 
 use crate::api::schema::{
@@ -301,6 +303,19 @@ impl ActiveSubscription {
             }
         }
     }
+
+    pub(super) fn poll_for_wait(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+    ) -> Result<Option<serde_json::Value>, ErrorResponse> {
+        match self {
+            Self::AgentStatusChanged(subscription) => Ok(subscription
+                .poll_result(api_tx, event_hub)?
+                .and_then(|event| serde_json::to_value(event).ok())),
+            _ => Ok(self.poll(api_tx, event_hub)),
+        }
+    }
 }
 
 impl ActiveEventSubscription {
@@ -389,6 +404,14 @@ impl ActiveAgentStatusChangedSubscription {
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
     ) -> Option<SubscriptionEventEnvelope> {
+        self.poll_result(api_tx, event_hub).ok().flatten()
+    }
+
+    fn poll_result(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+    ) -> Result<Option<SubscriptionEventEnvelope>, ErrorResponse> {
         let mut saw_status_event = false;
         for (sequence, event) in event_hub.events_after(self.last_sequence) {
             self.last_sequence = sequence;
@@ -425,7 +448,7 @@ impl ActiveAgentStatusChangedSubscription {
             }
 
             self.initial_event = None;
-            return Some(SubscriptionEventEnvelope {
+            return Ok(Some(SubscriptionEventEnvelope {
                 event: SubscriptionEventKind::PaneAgentStatusChanged,
                 data: SubscriptionEventData::PaneAgentStatusChanged(PaneAgentStatusChangedEvent {
                     pane_id,
@@ -437,18 +460,18 @@ impl ActiveAgentStatusChangedSubscription {
 
                     state_labels,
                 }),
-            });
+            }));
         }
 
         if saw_status_event {
             self.initial_event = None;
         } else if event_hub.current_sequence() != self.last_sequence {
-            return None;
+            return Ok(None);
         } else if let Some(event) = self.initial_event.take() {
-            return Some(SubscriptionEventEnvelope {
+            return Ok(Some(SubscriptionEventEnvelope {
                 event: SubscriptionEventKind::PaneAgentStatusChanged,
                 data: SubscriptionEventData::PaneAgentStatusChanged(event),
-            });
+            }));
         }
 
         let before_snapshot_sequence = self.last_sequence;
@@ -456,18 +479,18 @@ impl ActiveAgentStatusChangedSubscription {
             format!("{}:pane", self.request_prefix),
             &self.pane_id,
             api_tx,
-        )
-        .ok()?;
+        );
         let after_snapshot_sequence = event_hub.current_sequence();
         if after_snapshot_sequence != before_snapshot_sequence {
-            return None;
+            return Ok(None);
         }
+        let pane = pane?;
 
         let event = self.event_from_snapshot(pane);
         if event.is_some() {
             self.last_sequence = after_snapshot_sequence;
         }
-        event
+        Ok(event)
     }
 
     fn event_from_snapshot(
@@ -586,13 +609,15 @@ fn pane_get(
         },
     })?;
     if value.get("error").is_some() {
-        return serde_json::from_value(value).map_err(|_| ErrorResponse {
-            id: request_id,
-            error: ErrorBody {
-                code: "internal_error".into(),
-                message: "failed to decode pane get error".into(),
-            },
-        });
+        let response =
+            serde_json::from_value::<ErrorResponse>(value).map_err(|_| ErrorResponse {
+                id: request_id,
+                error: ErrorBody {
+                    code: "internal_error".into(),
+                    message: "failed to decode pane get error".into(),
+                },
+            })?;
+        return Err(response);
     }
     serde_json::from_value(value["result"]["pane"].clone()).map_err(|_| ErrorResponse {
         id: request_id,
@@ -605,6 +630,273 @@ fn pane_get(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m837_raced_not_found_is_dropped_then_rederived() {
+        let closed = EventEnvelope {
+            event: EventKind::PaneClosed,
+            data: EventData::PaneClosed {
+                pane_id: "w2:p4".into(),
+                workspace_id: "w2".into(),
+            },
+        };
+        let requests = m837_responses(
+            vec![
+                (m837_error_value("pane_not_found"), Some(closed)),
+                (m837_error_value("pane_not_found"), None),
+            ],
+            |tx, hub| {
+                let mut subscription = m837_agent_subscription();
+                let raced = subscription.poll_for_wait(tx, hub);
+                assert_eq!(
+                    raced.map_err(|e| serde_json::to_value(e).unwrap()),
+                    Ok(None)
+                );
+                assert_eq!(hub.current_sequence(), 1);
+                let stable = subscription.poll_for_wait(tx, hub);
+                assert_eq!(
+                    stable.map_err(|e| serde_json::to_value(e).unwrap()),
+                    Err(serde_json::json!({"id": "m837:pane", "error": {
+                        "code": "pane_not_found", "message": "retained app error"
+                    }}))
+                );
+            },
+        );
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.id == "m837:pane"));
+    }
+
+    #[test]
+    fn m837_wait_helper_scroll_fallthrough_suppresses_snapshot_errors() {
+        let baseline = m821_metrics(12, 240, 30);
+        let requests = m837_responses(
+            vec![
+                (m837_error_value("pane_not_found"), None),
+                (m821_response(Some(baseline)).unwrap(), None),
+            ],
+            |tx, hub| {
+                let mut subscription =
+                    ActiveSubscription::ScrollChanged(ActiveScrollChangedSubscription {
+                        pane_id: "w2:p4".into(),
+                        last_scroll: Some(baseline),
+                        request_prefix: "scroll".into(),
+                    });
+                for _ in 0..2 {
+                    let result = subscription.poll_for_wait(tx, hub);
+                    assert_eq!(
+                        result.map_err(|e| serde_json::to_value(e).unwrap()),
+                        Ok(None)
+                    );
+                }
+            },
+        );
+        assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn m837_wait_helper_replays_fork_presentation_without_probe() {
+        let hub = EventHub::default();
+        let mut event = status_event(Some("queued title"));
+        if let EventData::PaneAgentStatusChanged {
+            pane_id,
+            agent_status,
+            display_agent,
+            state_labels,
+            ..
+        } = &mut event.data
+        {
+            *pane_id = "w2:p4".into();
+            *agent_status = AgentStatus::Idle;
+            *display_agent = Some("Reviewer".into());
+            state_labels.insert("idle".into(), "Ready".into());
+        } else {
+            panic!("wrong fixture event");
+        }
+        let stimulus = serde_json::to_value(&event).unwrap();
+        hub.push(event);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = m837_agent_subscription();
+        let result = subscription.poll_for_wait(&tx, &hub);
+        assert_eq!(
+            result.map_err(|e| serde_json::to_value(e).unwrap()),
+            Ok(Some(
+                serde_json::json!({"event": "pane.agent_status_changed", "data": {
+                    "pane_id": "w2:p4", "workspace_id": "workspace_1", "agent_status": "idle",
+                    "agent": "pi", "title": "queued title", "display_agent": "Reviewer",
+                    "state_labels": {"idle": "Ready"}
+                }})
+            ))
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        let recorded: Vec<_> = hub.events_after(0).into_iter().map(|(_, e)| e).collect();
+        assert_eq!(
+            serde_json::to_value(recorded).unwrap(),
+            serde_json::json!([stimulus])
+        );
+    }
+
+    fn m837_error_value(code: &str) -> serde_json::Value {
+        serde_json::json!({"error": {"code": code, "message": "retained app error"}})
+    }
+
+    fn m837_agent_subscription() -> ActiveSubscription {
+        ActiveSubscription::AgentStatusChanged(Box::new(ActiveAgentStatusChangedSubscription {
+            pane_id: "w2:p4".into(),
+            status_filter: Some(AgentStatus::Idle),
+            last_status: Some(AgentStatus::Unknown),
+            last_presentation: Some(PanePresentationSnapshot {
+                title: None,
+                display_agent: None,
+                state_labels: HashMap::new(),
+            }),
+            last_sequence: 0,
+            initial_event: None,
+            request_prefix: "m837".into(),
+        }))
+    }
+
+    fn m837_responses(
+        responses: Vec<(serde_json::Value, Option<EventEnvelope>)>,
+        run: impl FnOnce(&ApiRequestSender, &EventHub),
+    ) -> Vec<Request> {
+        let expected_events: Vec<_> = responses.iter().filter_map(|(_, e)| e.clone()).collect();
+        let hub = EventHub::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::api::ApiRequestMessage>();
+        std::thread::scope(|scope| {
+            let publisher = hub.clone();
+            let responder = scope.spawn(move || {
+                let mut requests = Vec::new();
+                for (mut response, event) in responses {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    let message = loop {
+                        match rx.try_recv() {
+                            Ok(message) => break message,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                                if std::time::Instant::now() < deadline =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            }
+                            Err(error) => panic!("bounded m837 responder: {error:?}"),
+                        }
+                    };
+                    assert!(matches!(&message.request.method, Method::PaneGet(_)));
+                    if response.get("id").is_none() {
+                        response["id"] = message.request.id.clone().into();
+                    }
+                    if let Some(event) = event {
+                        publisher.push(event);
+                    }
+                    message.respond_to.send(response.to_string()).unwrap();
+                    requests.push(message.request);
+                }
+                requests
+            });
+            run(&tx, &hub);
+            drop(tx);
+            let requests = responder.join().unwrap();
+            let actual_events: Vec<_> = hub.events_after(0).into_iter().map(|(_, e)| e).collect();
+            assert_eq!(
+                serde_json::to_value(actual_events).unwrap(),
+                serde_json::to_value(expected_events).unwrap()
+            );
+            requests
+        })
+    }
+
+    #[test]
+    fn m837_pane_get_preserves_typed_remote_error_envelope() {
+        for code in ["pane_not_found", "access_denied"] {
+            let mut response = m837_error_value(code);
+            response["id"] = "remote-id".into();
+            let expected = response.clone();
+            let requests = m837_responses(vec![(response, None)], |tx, _| {
+                let result = pane_get("local-probe".into(), "missing", tx);
+                let observed = result.map_err(|error| serde_json::to_value(error).unwrap());
+                assert_eq!(observed.map(|_| ()), Err(expected));
+            });
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].id, "local-probe");
+        }
+    }
+
+    #[test]
+    fn m837_pane_get_malformed_error_still_refuses() {
+        let requests = m837_responses(
+            vec![(serde_json::json!({"error": {"code": 42}}), None)],
+            |tx, _| {
+                let result = pane_get("malformed-probe".into(), "missing", tx);
+                assert_eq!(
+                    result
+                        .map(|_| ())
+                        .map_err(|error| serde_json::to_value(error).unwrap()),
+                    Err(serde_json::json!({"id": "malformed-probe", "error": {
+                        "code": "internal_error", "message": "failed to decode pane get error"
+                    }}))
+                );
+            },
+        );
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
+    fn m837_agent_setup_preserves_refusal_and_probe_id() {
+        let requests = m837_responses(
+            vec![(m837_error_value("pane_not_found"), None)],
+            |tx, hub| {
+                let result = ActiveSubscription::new(
+                    Subscription::PaneAgentStatusChanged {
+                        pane_id: "missing".into(),
+                        agent_status: Some(AgentStatus::Idle),
+                    },
+                    "setup",
+                    0,
+                    tx,
+                    hub,
+                );
+                assert_eq!(
+                    result
+                        .map(|_| ())
+                        .map_err(|error| serde_json::to_value(error).unwrap()),
+                    Err(serde_json::json!({"id": "setup:sub:0:probe", "error": {
+                        "code": "pane_not_found", "message": "retained app error"
+                    }}))
+                );
+            },
+        );
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
+    fn m837_ordinary_agent_poll_suppresses_errors_and_keeps_presentation() {
+        let mut pane = m821_pane(None);
+        pane.agent_status = AgentStatus::Idle;
+        pane.title = Some("new title".into());
+        pane.display_agent = Some("Reviewer".into());
+        pane.state_labels.insert("idle".into(), "Ready".into());
+        let expected = serde_json::json!({"event": "pane.agent_status_changed", "data": {
+            "pane_id": "w2:p4", "workspace_id": "w2", "agent_status": "idle",
+            "title": "new title", "display_agent": "Reviewer",
+            "state_labels": {"idle": "Ready"}
+        }});
+        let requests = m837_responses(
+            vec![
+                (m837_error_value("pane_not_found"), None),
+                (
+                    serde_json::json!({"result": {"type": "pane_info", "pane": pane}}),
+                    None,
+                ),
+            ],
+            |tx, hub| {
+                let mut subscription = m837_agent_subscription();
+                assert_eq!(subscription.poll(tx, hub), None);
+                assert_eq!(subscription.poll(tx, hub), Some(expected));
+            },
+        );
+        assert_eq!(requests.len(), 2);
+    }
+
     use std::collections::HashMap;
 
     use super::*;
@@ -918,8 +1210,7 @@ mod tests {
 
     #[test]
     fn m821_scroll_setup_error_preserves_existing_probe_error_contract() {
-        // Known inherited pane_get defect: M8-37 must replace this internal_error expectation
-        // with the real App error, preserving refusal, probe ID, one request and no hub writes.
+        // M8-37 preserves the real App error, refusal, probe ID, one request and no hub writes.
         let requests = m821_responses(
             vec![Some(serde_json::json!({"error": {
                 "code": "pane_not_found", "message": "missing scroll target"
@@ -942,7 +1233,7 @@ mod tests {
                     serde_json::to_value(error).unwrap(),
                     serde_json::json!({
                         "id": "scroll:sub:0:probe", "error": {
-                            "code": "internal_error", "message": "failed to decode pane get error"
+                            "code": "pane_not_found", "message": "missing scroll target"
                         }
                     })
                 );
