@@ -533,6 +533,60 @@ the present guard placement is not compiler-enforced route enumeration.
   construction, + an isolated `CARGO_TARGET_DIR`, + the fail-closed preflight. (No binary rename in M0;
   broad `ZYNK_*` explicit-override env aliasing is a later complete rebrand task.)
 
+### Test-only paint evidence
+
+The monolithic paint regression may retain its evaluated outer-PTY capture when
+`ZYNK_TEST_PAINT_EVIDENCE_ROOT` names an existing canonical, current-user-owned
+mode-0700 directory. The isolated verification runner supplies a fresh on-disk
+root explicitly after clearing inherited `ZYNK_*` variables. An unset input
+means `NOT_REQUESTED`; invalid input or a returned storage error means
+`RETENTION_FAILED`, with no temporary-directory fallback. This input is read
+only in test code, not a production or debug-build configuration seam.
+
+The reader retains ordered chunk endpoints, its state and a metadata-completeness
+flag alongside the original bytes. It still appends before checking the two-MiB
+cap, permitting one 8192-byte read of overshoot, and records at most 4096 chunk
+endpoints. Metadata loss does not discard raw bytes. At either instrumented
+failure site, the exact snapshot used by the assertion supplies the digest:
+emit `MPD_EVALUATED`, attempt retention, emit `MPD_RETENTION`, then execute the
+unchanged assertion or panic. There is no post-panic snapshot. Returned diagnostic
+errors do not replace the original panic; blocked synchronous storage, abort and
+OOM are outside that guarantee. Metadata bookkeeping may affect test timing.
+
+A successful receipt binds private `raw.bin`, `manifest.json` and `complete.json`
+files, including geometry 106x34, trigger, watermark and nullable clean length.
+Files and directories are synced before success; the completion file alone does
+not prove the final directory sync. The evidence root is outside fixture cleanup.
+The cooperating single-writer assumption does not defend against hostile
+same-UID path replacement. Raw evidence is binary terminal output, not text to
+print directly into a terminal.
+
+The test-only `ZYNK_TEST_PAINT_REPLAY` input names a private bounded JSON request
+with `artifact_directory` and the independently supplied `evaluated_sha256`.
+Explicit invalid input fails instead of falling back to the driver's always-run
+synthetic control. An external replay requires `MPD_REPLAY` with `requested=true`
+and matching input/artifact digests, not merely a passing driver test.
+
+Replay uses the vendored parser and fallible viewport, active-screen and
+synchronized-output queries. Zero scrollback is a declared outer-terminal
+observer parameter, not the inner panes' configuration. Reader chunk endpoints
+are samples, not displayed frames. A separate byte-prefix pass is capped at
+65536 observations; legacy regex observations at chunk endpoints have a 64-MiB
+cumulative prefix budget. Both passes record actual submitted-byte counts and
+hashes. Geometry, ordering and artifact integrity are checked before accepting
+completion; constructor/query errors, capture cap/error, missing metadata and
+budget exhaustion retain positive observations but make results indeterminate.
+
+Facts are independent: `RAW_LITERAL_ABSENT`,
+`NO_CELL_MATCH_AT_OBSERVED_PREFIXES`, `CELL_MATCH_OBSERVED`,
+`LATER_CELL_ABSENCE`, `CELL_REGEX_DISAGREEMENT` and `INDETERMINATE`.
+Disagreement means cells match while the same-prefix legacy regex does not;
+the watermark applies only to its cleaned-text predicate. Neither raw absence
+nor sampled absence establishes never-painted output. Later absence does not
+distinguish clearing, scrolling or a screen switch. `READING` and even `EOF` do
+not establish that every intended producer byte was captured. These prospective
+observations do not recover or explain the earlier unretained paint failure.
+
 ## 10. Open / deferred (named)
 
 - Embedding model final pick (bge-m3 vs multilingual-e5-small) — bench on-device at impl.

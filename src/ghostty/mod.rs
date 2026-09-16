@@ -3158,6 +3158,9 @@ impl<'a> RowCellIter<'a> {
 }
 
 #[cfg(test)]
+mod paint_replay;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

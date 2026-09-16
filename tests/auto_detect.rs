@@ -2,6 +2,11 @@
 
 mod support;
 
+#[path = "support/paint_capture.rs"]
+mod paint_capture;
+
+use paint_capture::{paint_sha256, report_paint_failure, PaintCapture, PaintFailure, ReaderStop};
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -97,22 +102,30 @@ fn m828d2_monolithic_title_rows_reach_owned_pty_paint_output() {
     register_spawned_zynk_pid(Some(pid));
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().unwrap();
-    let captured = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::new(Mutex::new(PaintCapture::new(4096)));
     let output = captured.clone();
     let reading = thread::spawn(move || {
         let mut bytes = [0; 8192];
         loop {
             match reader.read(&mut bytes) {
-                Ok(0) => break,
+                Ok(0) => {
+                    output.lock().unwrap().finish(ReaderStop::Eof);
+                    break;
+                }
                 Ok(count) => {
                     let mut output = output.lock().unwrap();
-                    output.extend_from_slice(&bytes[..count]);
-                    if output.len() > 2 * 1024 * 1024 {
+                    if !output.append(&bytes[..count]) {
                         break;
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+                Err(error) => {
+                    output.lock().unwrap().finish(ReaderStop::ReadError {
+                        kind: format!("{:?}", error.kind()),
+                        raw_os_error: error.raw_os_error(),
+                    });
+                    break;
+                }
             }
         }
     });
@@ -218,9 +231,25 @@ fn m828d2_monolithic_title_rows_reach_owned_pty_paint_output() {
     let wait_for_paint = |needle: &str, watermark: usize| {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            let bytes = captured.lock().unwrap().clone();
+            let evaluated = captured.lock().unwrap().clone();
+            let bytes = &evaluated.bytes;
+            if bytes.len() > 2 * 1024 * 1024 {
+                let digest = paint_sha256(bytes);
+                report_paint_failure(
+                    &evaluated,
+                    &digest,
+                    &PaintFailure {
+                        trigger: "SIZE_BOUND".into(),
+                        cols: 106,
+                        rows: 34,
+                        needle: needle.into(),
+                        watermark,
+                        clean_length: None,
+                    },
+                );
+            }
             assert!(bytes.len() <= 2 * 1024 * 1024, "bounded PTY capture");
-            let text = paint(&bytes);
+            let text = paint(bytes);
             if text
                 .get(watermark..)
                 .is_some_and(|tail| tail.contains(needle))
@@ -228,6 +257,19 @@ fn m828d2_monolithic_title_rows_reach_owned_pty_paint_output() {
                 return text.len();
             }
             if Instant::now() >= deadline {
+                let digest = paint_sha256(bytes);
+                report_paint_failure(
+                    &evaluated,
+                    &digest,
+                    &PaintFailure {
+                        trigger: "PAINT_DEADLINE".into(),
+                        cols: 106,
+                        rows: 34,
+                        needle: needle.into(),
+                        watermark,
+                        clean_length: Some(text.len()),
+                    },
+                );
                 panic!("configured paint {needle:?} absent after OSC/CSI removal; raw bytes={}, clean bytes={}, watermark={watermark}", bytes.len(), text.len());
             }
             thread::sleep(Duration::from_millis(10));

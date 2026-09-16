@@ -7091,3 +7091,102 @@ resource/schema/handoff limits, M83335 F05/coverage/doc limits, reviewer Gate-1
 gaps including M7-20 propagation, and all other inherited carries remain on their
 recorded terms. No whole-M8, independent Gate-3 or operator integration/release
 approval is implied. No merge, push, install, tag, publish or cleanup follows.
+
+### M8 diagnostic: Evaluated paint retention and parser replay
+
+Separate fork-original test-observability slice at parent
+18781dab4d212f294d878c2614bfe937127413a4, not another authority import or a
+production correction. Claude executable Gate-1 msg_b00a0876bd3b142c approves
+the design, addendum, frozen controls, exact old-body adapter and eight faults;
+msg_07bdf8cb241d2d81 approves only the later exhibited assertion-wrap adapter.
+Implementation and exact-tip gates remain separate from those permissions.
+
+New tests/support/paint_capture.rs is reachable from tests/auto_detect.rs only;
+new src/ghostty/paint_replay.rs is a cfg(test) child declaration. The watched
+body receives its named observability adapter, preserving original assertion
+and panic payloads, clocks, sleeps, stimuli and readiness predicate. There is
+no new production environment reader, visibility change, CLI/wire method,
+database format or dependency. The modules are fork-original and receive no
+upstream attribution marker or NOTICE entry.
+
+Capture records outer monolithic PTY bytes, not an inner pane stream. Bounded
+live metadata tracks ordered reader chunks and stop state; the exact evaluated
+clone supplies both predicate bytes and digest. Original append-before-cap
+behavior remains, including one 8192-byte overshoot above two MiB. At most 4096
+endpoints are retained, with raw bytes preserved after metadata exhaustion.
+Failure ordering is explicit: emit MPD_EVALUATED, attempt retention, emit
+MPD_RETENTION, then the unchanged assertion or panic. Size failures report an
+explicitly unavailable clean length. No teardown snapshot substitutes for the
+evaluated one. Returned diagnostic errors preserve the original panic; blocked
+storage, abort and OOM remain outside that contract. No unchanged-scheduling
+claim is made for the metadata work.
+
+Retention requires a supplied canonical private on-disk root under the isolated
+runner; absence is NOT_REQUESTED and unsafe or failed retention never falls
+back. Private raw/manifest/completion files bind the evaluated bytes and model
+metadata, with file and directory sync before successful receipt. A completion
+file alone does not prove that final sync. The replay request independently
+supplies the evaluated digest and validates the three files before parser entry.
+Same-UID hostile path races and arbitrary hardware durability are not claimed.
+
+The real parser observes the fixed 106x34 outer viewport, active screen and
+synchronized-output mode with fallible queries. Zero scrollback is an explicit
+observer model parameter, not the server's inner scrollback setting. Chunk-end
+samples are not frames; a bounded byte-prefix pass can observe same-chunk
+transients that chunk samples miss. Legacy regex observations remain separate.
+Both passes hash their actual submission arguments, with pre-work limits of
+65536 byte samples and 64 MiB cumulative regex-prefix bytes. Capture/query/budget
+incompleteness preserves positive prefix facts but reports INDETERMINATE. Later
+absence has no asserted cause, and raw absence does not imply absent cells.
+
+Fresh parent catalog had 4426 members and five ignored; parent full passed 4421.
+Typed insertion produced 78 missing-interface compiler diagnostics and zero
+test outcomes, not a behavioral red. After helpers and the bound old adapter,
+the child catalog reconciled 4448 members with the same five ignored: 22 new
+controls, eight capture and fourteen replay. TARGETED 76 passed, comprising 54
+old identities plus those 22. The separate synthetic bridge retained the exact
+evaluated title-only snapshot through cleanup and the original panic, then the
+other binary replayed that artifact with matching digests and requested=true.
+The retained stderr shows the required evaluated/retention/panic order. This
+is not a forced failure of the watched identity or historical recovery.
+
+Child full passed 4443 with five ignored, then fmt and clippy -D warnings passed.
+Eight serial variants each scheduled TARGETED 76, not the full suite: 608
+observations, 574 PASS and 34 FAIL, eight intended and 26 incidental. First-site
+and kind bindings matched for all eight intended stops. Actual crossings remain
+classified as 13 evaluated equalities, ten evaluated false predicates and eleven
+unwrap stops; the latter are F06 helper/report refusals, not executed comparison
+assertions. Per-site masking is retained. F07 stops on the first READ_ERROR row
+and does not discriminate its later CAP_STOP case. F08 observes the outer
+original-panic predicate failing, but its log does not identify the loop mode
+or retain the child's replacement panic; the predicted second-iteration path
+is not promoted to an observation. Every failed qualified identity has an
+explicit green counterpart. Eight complete byte/mode restorations preceded
+successors; restored TARGETED 76 passed. Printed SKIPs are not the full catalog,
+and machine summaries are derived reports, not independent replications.
+
+MPD-FORMAT-APPROVAL-ORDER remains OPEN. Frozen wrappers had been prepared using
+edition 2024 while this crate declares edition 2021; cargo fmt wrote five wraps
+in four control bodies before a named adapter approval, and the exact body
+comparison caught that change before any child catalog or behavioral run.
+The later exact wrapping approval does not repair the earlier ordering. Final
+bodies compose frozen fragments with this adapter, not byte-identical or literal
+append-only prefixes. F03's body-scoped locator and all four body digests were
+rebound before faults. The original fragments and failed comparison chronology
+remain retained. This is an approval-order item, not a fifth prerequisite-read
+boundary; the four prior implementation-side boundary occurrences stay OPEN.
+
+M83335-EXACT-PAINT-ABSENCE remains OPEN with its exact red/green pair mandatory.
+No prior raw buffer is recovered and no root cause, recurrence rate or paint
+latency is established. Full-invocation watched results retain PRINTED, DEDUCED
+or NOT_OBSERVED with their completeness basis; a fail-fast absence is never a
+deduced PASS. Only explicitly configured program invocations request retention,
+and a request is not a completed classification. The diagnostic ordering arrival
+is implemented for range review, not a discharge of that failure or the old
+origins, standing limits, reviewer gaps and capped instrument histories.
+
+Source/consumer dispositions, documentation and explicit staging precede fresh
+check and gate; a normal-hook commit and exact-tip chain follow only after those
+checks. This append does not claim an unexecuted check or verdict. Whole-M8
+Gate-2, independent Gate-3 and all operator integration/release/runtime gates
+remain due. No merge, push, install, tag, publish or cleanup is authorized.
