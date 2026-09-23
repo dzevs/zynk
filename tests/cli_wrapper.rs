@@ -5182,6 +5182,15 @@ fn run_cli_child_bounded(
 }
 
 fn run_snapshot_cli_bounded(base: &Path, socket: &Path, args: &[&str]) -> std::process::Output {
+    run_snapshot_cli_with_timeout(base, socket, args, Duration::from_secs(3))
+}
+
+fn run_snapshot_cli_with_timeout(
+    base: &Path,
+    socket: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
     command
         .args(args)
@@ -5202,7 +5211,7 @@ fn run_snapshot_cli_bounded(base: &Path, socket: &Path, args: &[&str]) -> std::p
     let database = base.join("cli-sqlite/zynk.db");
     run_cli_child_bounded(
         command,
-        Duration::from_secs(3),
+        timeout,
         CliChildDiagnostics {
             args,
             socket,
@@ -6865,26 +6874,110 @@ fn m837_exchange(socket: &Path, request: serde_json::Value) -> serde_json::Value
     serde_json::from_str(&line).unwrap()
 }
 
-fn m837_delivery_count(db: &Path) -> i64 {
+const M839_SQLITE_PHASE_TIMEOUT: Duration = Duration::from_secs(5);
+const M839_CLI_CHILD_TIMEOUT: Duration = Duration::from_secs(12);
+const M839_MOCK_SERVER_TIMEOUT: Duration = Duration::from_secs(13);
+
+#[derive(Debug)]
+struct M839SqlitePhaseObservation {
+    phase: String,
+    elapsed: Duration,
+    attempts: u32,
+}
+
+struct M839SqlitePhaseResult<T> {
+    value: T,
+    observation: M839SqlitePhaseObservation,
+}
+
+impl<T> M839SqlitePhaseResult<T> {
+    fn into_value(self) -> T {
+        self.value
+    }
+
+    fn record(self, observations: &mut Vec<M839SqlitePhaseObservation>) -> T {
+        observations.push(self.observation);
+        self.value
+    }
+}
+
+fn m839_sqlite_is_busy(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database) => {
+            matches!(database.code().as_deref(), Some("5" | "6"))
+        }
+        _ => false,
+    }
+}
+
+fn m839_sqlite_phase<T, F, Fut>(phase: &str, mut operation: F) -> M839SqlitePhaseResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, sqlx::Error>>,
+{
+    let phase = phase.to_owned();
+    sqlite_block_on(async move {
+        let started = Instant::now();
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let remaining = M839_SQLITE_PHASE_TIMEOUT.saturating_sub(started.elapsed());
+            assert!(
+                !remaining.is_zero(),
+                "SQLite fixture phase timed out; phase={phase:?}; elapsed_ms={}; attempts={attempts}",
+                started.elapsed().as_millis()
+            );
+            match tokio::time::timeout(remaining, operation()).await {
+                Ok(Ok(value)) => {
+                    return M839SqlitePhaseResult {
+                        value,
+                        observation: M839SqlitePhaseObservation {
+                            phase,
+                            elapsed: started.elapsed(),
+                            attempts,
+                        },
+                    };
+                }
+                Ok(Err(error))
+                    if m839_sqlite_is_busy(&error)
+                        && started.elapsed() < M839_SQLITE_PHASE_TIMEOUT =>
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Ok(Err(error)) => {
+                    panic!(
+                        "SQLite fixture phase failed; phase={phase:?}; elapsed_ms={}; attempts={attempts}; error={error}",
+                        started.elapsed().as_millis()
+                    );
+                }
+                Err(_) => {
+                    panic!(
+                        "SQLite fixture phase timed out; phase={phase:?}; elapsed_ms={}; attempts={attempts}",
+                        started.elapsed().as_millis()
+                    );
+                }
+            }
+        }
+    })
+}
+
+fn m837_delivery_count(db: &Path, phase: &str) -> M839SqlitePhaseResult<i64> {
     use sqlx::Connection;
-    sqlite_block_on(async {
-        tokio::time::timeout(Duration::from_secs(1), async {
+    let db = db.to_owned();
+    m839_sqlite_phase(phase, move || {
+        let db = db.clone();
+        async move {
             let options = sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(db)
                 .read_only(true)
                 .busy_timeout(Duration::from_millis(200));
-            let mut connection = sqlx::SqliteConnection::connect_with(&options)
-                .await
-                .unwrap();
+            let mut connection = sqlx::SqliteConnection::connect_with(&options).await?;
             let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM delivery_events")
                 .fetch_one(&mut connection)
-                .await
-                .unwrap();
-            connection.close().await.unwrap();
-            count
-        })
-        .await
-        .expect("bounded delivery-event observation")
+                .await?;
+            connection.close().await?;
+            Ok(count)
+        }
     })
 }
 
@@ -6904,7 +6997,8 @@ fn m837_real_wait_setup_error_writes_no_delivery_events() {
     );
     assert!(created["result"]["workspace"]["workspace_id"].is_string());
     let db = config_home.join("sqlite/zynk.db");
-    let before = m837_delivery_count(&db);
+    let before =
+        m837_delivery_count(&db, "workspace.create response received; server live").into_value();
     let response = m837_exchange(
         &socket,
         serde_json::json!({
@@ -6921,7 +7015,10 @@ fn m837_real_wait_setup_error_writes_no_delivery_events() {
             "code": "pane_not_found", "message": "pane missing-m837 not found"
         }})
     );
-    assert_eq!(m837_delivery_count(&db), before);
+    assert_eq!(
+        m837_delivery_count(&db, "events.wait response received; server live").into_value(),
+        before
+    );
     cleanup_spawned_zynk(zynk, base);
 }
 
@@ -6961,7 +7058,7 @@ where
     let done = AtomicBool::new(false);
     let (requests, output) = thread::scope(|scope| {
         let worker = scope.spawn(|| {
-            let deadline = Instant::now() + Duration::from_secs(4);
+            let deadline = Instant::now() + M839_MOCK_SERVER_TIMEOUT;
             let mut requests = Vec::new();
             while Instant::now() < deadline {
                 let (mut stream, _) = match listener.accept() {
@@ -6997,7 +7094,8 @@ where
             }
             requests
         });
-        let output = run_snapshot_cli_bounded(&fixture.base, &socket, args);
+        let output =
+            run_snapshot_cli_with_timeout(&fixture.base, &socket, args, M839_CLI_CHILD_TIMEOUT);
         done.store(true, Ordering::Release);
         (worker.join().unwrap(), output)
     });
@@ -7705,15 +7803,19 @@ fn m839_original_party(session: Option<&str>) -> serde_json::Value {
     party
 }
 
-fn m839_delivery_rows(db: &Path) -> Vec<serde_json::Value> {
+fn m839_delivery_rows(db: &Path, phase: &str) -> M839SqlitePhaseResult<Vec<serde_json::Value>> {
     use sqlx::{Connection, Row};
-    sqlite_block_on(async {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(db).read_only(true)
+    let db = db.to_owned();
+    m839_sqlite_phase(phase, move || {
+        let db = db.clone();
+        async move {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .read_only(true)
                 .busy_timeout(Duration::from_millis(200));
-            let mut connection = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
+            let mut connection = sqlx::SqliteConnection::connect_with(&options).await?;
             let rows = sqlx::query("SELECT message_id, event_type, proof_source, timestamp, payload_json FROM delivery_events ORDER BY message_id, seq")
-                .fetch_all(&mut connection).await.unwrap();
+                .fetch_all(&mut connection).await?;
             let result = rows.into_iter().map(|row| serde_json::json!({
                 "message_id":row.get::<String,_>("message_id"),
                 "event_type":row.get::<String,_>("event_type"),
@@ -7721,21 +7823,25 @@ fn m839_delivery_rows(db: &Path) -> Vec<serde_json::Value> {
                 "timestamp":row.get::<String,_>("timestamp"),
                 "payload":serde_json::from_str::<serde_json::Value>(&row.get::<String,_>("payload_json")).unwrap()
             })).collect();
-            connection.close().await.unwrap();
-            result
-        }).await.expect("bounded m839 delivery snapshot")
+            connection.close().await?;
+            Ok(result)
+        }
     })
 }
 
-fn m839_message_rows(db: &Path) -> Vec<serde_json::Value> {
+fn m839_message_rows(db: &Path, phase: &str) -> M839SqlitePhaseResult<Vec<serde_json::Value>> {
     use sqlx::{Connection, Row};
-    sqlite_block_on(async {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(db).read_only(true)
+    let db = db.to_owned();
+    m839_sqlite_phase(phase, move || {
+        let db = db.clone();
+        async move {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .read_only(true)
                 .busy_timeout(Duration::from_millis(200));
-            let mut connection = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
+            let mut connection = sqlx::SqliteConnection::connect_with(&options).await?;
             let rows = sqlx::query("SELECT m.id, m.body, m.body_hash, m.type, m.meta_json, p.agent_label, p.terminal_id, p.agent_session_source, p.agent_session_kind, p.agent_session_value FROM messages m JOIN conversation_participants p ON p.id=m.to_participant_id ORDER BY m.conversation_seq")
-                .fetch_all(&mut connection).await.unwrap();
+                .fetch_all(&mut connection).await?;
             let result = rows.into_iter().map(|row| serde_json::json!({
                 "id":row.get::<String,_>("id"), "body":row.get::<String,_>("body"),
                 "body_hash":row.get::<String,_>("body_hash"), "type":row.get::<Option<String>,_>("type"),
@@ -7745,9 +7851,9 @@ fn m839_message_rows(db: &Path) -> Vec<serde_json::Value> {
                 "session_kind":row.get::<Option<String>,_>("agent_session_kind"),
                 "session_value":row.get::<Option<String>,_>("agent_session_value")
             })).collect();
-            connection.close().await.unwrap();
-            result
-        }).await.expect("bounded m839 message snapshot")
+            connection.close().await?;
+            Ok(result)
+        }
     })
 }
 
@@ -7789,13 +7895,22 @@ fn m839c_prompt_persists_pure_body_and_resolved_party_before_single_dispatch() {
             assert_eq!(request["params"]["target"], "worker");
             assert_eq!(request["params"]["expected_terminal_id"], "term_original");
             let db = base.join("cli-sqlite/zynk.db");
-            let messages = m839_message_rows(&db);
+            let messages = m839_message_rows(
+                &db,
+                "agent.prompt request received; CLI child blocked before response",
+            )
+            .into_value();
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0]["body"], pure);
             assert_eq!(messages[0]["agent"], "codex");
             assert_eq!(messages[0]["terminal_id"], "term_original");
             assert_eq!(messages[0]["session_value"], serde_json::Value::Null);
-            assert!(m839_delivery_rows(&db).is_empty());
+            assert!(m839_delivery_rows(
+                &db,
+                "agent.prompt request received; CLI child blocked before response",
+            )
+            .into_value()
+            .is_empty());
             let wire = request["params"]["text"].as_str().unwrap();
             assert!(wire.ends_with(pure), "{wire:?}");
             assert!(wire.contains(messages[0]["id"].as_str().unwrap()));
@@ -7820,14 +7935,22 @@ fn m839c_prompt_persists_pure_body_and_resolved_party_before_single_dispatch() {
         assert_eq!(value["type"], "note");
         assert_eq!(value["to"], m839_original_party(None));
         assert!(value.get("wait").is_none());
-        let messages = m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        let messages = m839_message_rows(
+            &fixture.base.join("cli-sqlite/zynk.db"),
+            "agent.prompt CLI child reaped",
+        )
+        .into_value();
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0]["body_hash"],
             format!("{:x}", Sha256::digest(pure.as_bytes()))
         );
         assert_eq!(messages[0]["meta"]["trace_id"], "M839_TRACE");
-        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        let events = m839_delivery_rows(
+            &fixture.base.join("cli-sqlite/zynk.db"),
+            "agent.prompt CLI child reaped",
+        )
+        .into_value();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event_type"], "submitted");
         assert_eq!(events[0]["proof_source"], "agent.prompt");
@@ -7851,7 +7974,11 @@ fn m839c_prompt_persists_pure_body_and_resolved_party_before_single_dispatch() {
         },
     );
     assert_eq!(output.status.code(), Some(0), "{output:?}");
-    let messages = m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+    let messages = m839_message_rows(
+        &fixture.base.join("cli-sqlite/zynk.db"),
+        "explicit-trace CLI child reaped",
+    )
+    .into_value();
     assert_eq!(
         messages[0]["meta"]["trace_id"], "inherit",
         "explicit trace remains explicit after trimming"
@@ -7865,7 +7992,12 @@ fn m839c_prompt_persists_pure_body_and_resolved_party_before_single_dispatch() {
         1
     );
     assert_eq!(
-        m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db")).len(),
+        m839_delivery_rows(
+            &fixture.base.join("cli-sqlite/zynk.db"),
+            "explicit-trace CLI child reaped",
+        )
+        .into_value()
+        .len(),
         1
     );
 }
@@ -7916,7 +8048,13 @@ fn m839c_prompt_wait_failures_preserve_one_durable_submission_and_exit_three() {
             |request, base| {
                 if request["method"] == "ping" {
                     if prompts == 1 {
-                        before_wait = Some(m839_delivery_rows(&base.join("cli-sqlite/zynk.db")));
+                        before_wait = Some(
+                            m839_delivery_rows(
+                                &base.join("cli-sqlite/zynk.db"),
+                                "post-submit ping received; CLI child blocked after durable submit",
+                            )
+                            .into_value(),
+                        );
                         if case == "protocol" {
                             return serde_json::json!({"result":{"type":"pong", "version":"replacement", "protocol":20}});
                         }
@@ -7926,7 +8064,12 @@ fn m839c_prompt_wait_failures_preserve_one_durable_submission_and_exit_three() {
                 if request["method"] == "agent.prompt" {
                     prompts += 1;
                     assert_eq!(prompts, 1);
-                    assert!(m839_delivery_rows(&base.join("cli-sqlite/zynk.db")).is_empty());
+                    assert!(m839_delivery_rows(
+                        &base.join("cli-sqlite/zynk.db"),
+                        "agent.prompt request received; CLI child blocked before response",
+                    )
+                    .into_value()
+                    .is_empty());
                     let mut agent = m839_agent_json("idle", "worker", "term_original", 7);
                     agent["agent_session"] = m839_session("submission-session-B");
                     return serde_json::json!({"result":{"type":"agent_prompted", "agent":agent, "baseline_state_change_seq":7}});
@@ -7990,8 +8133,16 @@ fn m839c_prompt_wait_failures_preserve_one_durable_submission_and_exit_three() {
             effect
         );
         assert!(value["next"].as_str().unwrap().contains("do not resubmit"));
-        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
-        let messages = m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        let events = m839_delivery_rows(
+            &fixture.base.join("cli-sqlite/zynk.db"),
+            "prompt-wait CLI child reaped",
+        )
+        .into_value();
+        let messages = m839_message_rows(
+            &fixture.base.join("cli-sqlite/zynk.db"),
+            "prompt-wait CLI child reaped",
+        )
+        .into_value();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["agent"], "codex");
         assert_eq!(messages[0]["terminal_id"], "term_original");
@@ -8074,7 +8225,11 @@ fn m839c_prompt_wait_failures_preserve_one_durable_submission_and_exit_three() {
                 .count(),
             1
         );
-        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        let events = m839_delivery_rows(
+            &fixture.base.join("cli-sqlite/zynk.db"),
+            "invalid-poll-response CLI child reaped",
+        )
+        .into_value();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event_type"], "submitted");
         assert_eq!(events[0]["message_id"], value["message_id"]);
@@ -8101,7 +8256,13 @@ fn m839c_prompt_wait_requires_new_sequence_and_keeps_original_party() {
         |request, base| {
             if request["method"] == "ping" {
                 if prompts == 1 {
-                    before_wait = Some(m839_delivery_rows(&base.join("cli-sqlite/zynk.db")));
+                    before_wait = Some(
+                        m839_delivery_rows(
+                            &base.join("cli-sqlite/zynk.db"),
+                            "post-submit ping received; CLI child blocked after durable submit",
+                        )
+                        .into_value(),
+                    );
                 }
                 return m839_pong();
             }
@@ -8146,14 +8307,22 @@ fn m839c_prompt_wait_requires_new_sequence_and_keeps_original_party() {
         value["to"],
         m839_original_party(Some("resolution-session-A"))
     );
-    let messages = m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+    let messages = m839_message_rows(
+        &fixture.base.join("cli-sqlite/zynk.db"),
+        "sequence-wait CLI child reaped",
+    )
+    .into_value();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["agent"], "codex");
     assert_eq!(messages[0]["terminal_id"], "term_original");
     assert_eq!(messages[0]["session_source"], "fixture-hook");
     assert_eq!(messages[0]["session_kind"], "id");
     assert_eq!(messages[0]["session_value"], "resolution-session-A");
-    let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+    let events = m839_delivery_rows(
+        &fixture.base.join("cli-sqlite/zynk.db"),
+        "sequence-wait CLI child reaped",
+    )
+    .into_value();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["event_type"], "submitted");
     assert_eq!(events[0]["proof_source"], "agent.prompt");
@@ -8183,16 +8352,23 @@ fn m839c_prompt_known_submit_append_failure_never_waits_or_records_failed() {
             assert_eq!(request["method"], "agent.prompt");
             prompts += 1;
             assert_eq!(prompts, 1);
-            sqlite_block_on(async {
-                let options = sqlx::sqlite::SqliteConnectOptions::new()
-                    .filename(base.join("cli-sqlite/zynk.db"))
-                    .busy_timeout(Duration::from_millis(200));
-                let mut conn = sqlx::SqliteConnection::connect_with(&options)
-                    .await
-                    .unwrap();
-                conn.execute("CREATE TRIGGER m839_reject_submit BEFORE INSERT ON delivery_events WHEN NEW.event_type='submitted' BEGIN SELECT RAISE(ABORT, 'm839 intentional append refusal'); END;").await.unwrap();
-                conn.close().await.unwrap();
-            });
+            let db = base.join("cli-sqlite/zynk.db");
+            m839_sqlite_phase(
+                "agent.prompt request received; CLI child blocked before response",
+                move || {
+                    let db = db.clone();
+                    async move {
+                        let options = sqlx::sqlite::SqliteConnectOptions::new()
+                            .filename(db)
+                            .busy_timeout(Duration::from_millis(200));
+                        let mut conn = sqlx::SqliteConnection::connect_with(&options).await?;
+                        conn.execute("CREATE TRIGGER m839_reject_submit BEFORE INSERT ON delivery_events WHEN NEW.event_type='submitted' BEGIN SELECT RAISE(ABORT, 'm839 intentional append refusal'); END;").await?;
+                        conn.close().await?;
+                        Ok(())
+                    }
+                },
+            )
+            .into_value();
             serde_json::json!({"result":{"type":"agent_prompted", "agent":m839_agent_json("idle", "worker", "term_original", 7), "baseline_state_change_seq":7}})
         },
     );
@@ -8211,10 +8387,20 @@ fn m839c_prompt_known_submit_append_failure_never_waits_or_records_failed() {
     assert!(value.get("wait").is_none());
     assert!(value.get("delivery_status").is_none());
     assert_eq!(
-        m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db")).len(),
+        m839_message_rows(
+            &fixture.base.join("cli-sqlite/zynk.db"),
+            "append-failure CLI child reaped",
+        )
+        .into_value()
+        .len(),
         1
     );
-    assert!(m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db")).is_empty());
+    assert!(m839_delivery_rows(
+        &fixture.base.join("cli-sqlite/zynk.db"),
+        "append-failure CLI child reaped",
+    )
+    .into_value()
+    .is_empty());
 }
 
 #[test]
@@ -8297,13 +8483,22 @@ fn m839c_prompt_unverified_response_never_claims_submitted_or_waits() {
         assert!(value.get("submitted_at").is_none());
         assert!(value.get("wait").is_none());
         assert!(value["next"].as_str().unwrap().contains("do not resubmit"));
-        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        let events = m839_delivery_rows(
+            &fixture.base.join("cli-sqlite/zynk.db"),
+            "unverified-response CLI child reaped",
+        )
+        .into_value();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event_type"], "failed");
         assert_eq!(events[0]["proof_source"], "agent.prompt");
         assert_eq!(events[0]["message_id"], value["message_id"]);
         assert_eq!(
-            m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db")).len(),
+            m839_message_rows(
+                &fixture.base.join("cli-sqlite/zynk.db"),
+                "unverified-response CLI child reaped",
+            )
+            .into_value()
+            .len(),
             1
         );
     }
@@ -8344,7 +8539,11 @@ fn m839c_prompt_unverified_response_never_claims_submitted_or_waits() {
         assert!(value.get("wait").is_none());
         assert_eq!(value["to"], m839_original_party(None));
         assert_eq!(requests.len(), 4);
-        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        let events = m839_delivery_rows(
+            &fixture.base.join("cli-sqlite/zynk.db"),
+            "malformed-response CLI child reaped",
+        )
+        .into_value();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event_type"], "failed");
         assert_eq!(events[0]["proof_source"], "agent.prompt");
@@ -8378,7 +8577,11 @@ fn m839c_prompt_precondition_refusal_and_unresolved_transport_stay_distinct() {
     assert_eq!(value["to"], m839_original_party(None));
     assert!(value.get("delivery_status").is_none());
     assert!(value.get("wait").is_none());
-    let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+    let events = m839_delivery_rows(
+        &fixture.base.join("cli-sqlite/zynk.db"),
+        "precondition-refusal CLI child reaped",
+    )
+    .into_value();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["event_type"], "failed");
     assert_eq!(events[0]["proof_source"], "agent.prompt");
@@ -8407,17 +8610,27 @@ fn m839c_prompt_precondition_refusal_and_unresolved_transport_stay_distinct() {
     }
 }
 
-fn m839_named_table_counts(db: &Path) -> Vec<(String, i64)> {
-    use sqlx::Connection;
-    sqlite_block_on(async {
-        tokio::time::timeout(Duration::from_secs(1), async {
+#[derive(Debug, PartialEq)]
+struct M839PersistenceSnapshot {
+    named_table_counts: Vec<(String, i64)>,
+    delivery_rows: Vec<serde_json::Value>,
+}
+
+fn m839_persistence_snapshot(
+    db: &Path,
+    phase: &str,
+) -> M839SqlitePhaseResult<M839PersistenceSnapshot> {
+    use sqlx::{Connection, Row};
+    let db = db.to_owned();
+    m839_sqlite_phase(phase, move || {
+        let db = db.clone();
+        async move {
             let options = sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(db)
                 .read_only(true)
                 .busy_timeout(Duration::from_millis(200));
-            let mut connection = sqlx::SqliteConnection::connect_with(&options)
-                .await
-                .unwrap();
+            let mut connection = sqlx::SqliteConnection::connect_with(&options).await?;
+            let mut transaction = connection.begin().await?;
             let mut counts = Vec::new();
             for table in [
                 "conversations",
@@ -8430,34 +8643,115 @@ fn m839_named_table_counts(db: &Path) -> Vec<(String, i64)> {
                 "_sqlx_migrations",
             ] {
                 let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-                    .fetch_one(&mut connection)
-                    .await
-                    .unwrap();
+                    .fetch_one(&mut *transaction)
+                    .await?;
                 counts.push((table.into(), count));
             }
-            connection.close().await.unwrap();
-            counts
-        })
-        .await
-        .expect("bounded m839 named-table snapshot")
+            let delivery_rows = sqlx::query("SELECT message_id, event_type, proof_source, timestamp, payload_json FROM delivery_events ORDER BY message_id, seq")
+                .fetch_all(&mut *transaction)
+                .await?
+                .into_iter()
+                .map(|row| serde_json::json!({
+                    "message_id":row.get::<String,_>("message_id"),
+                    "event_type":row.get::<String,_>("event_type"),
+                    "proof_source":row.get::<String,_>("proof_source"),
+                    "timestamp":row.get::<String,_>("timestamp"),
+                    "payload":serde_json::from_str::<serde_json::Value>(&row.get::<String,_>("payload_json")).unwrap()
+                }))
+                .collect();
+            transaction.commit().await?;
+            connection.close().await?;
+            Ok(M839PersistenceSnapshot {
+                named_table_counts: counts,
+                delivery_rows,
+            })
+        }
     })
 }
 
-fn m839_seed_aged_read_orphan(db: &Path) {
-    use sqlx::{Connection, Executor};
-    sqlite_block_on(async {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(db).create_if_missing(false).busy_timeout(Duration::from_millis(200));
-            let mut connection = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
-            connection.execute("INSERT INTO conversations (id,runtime_session_id,socket_namespace,workspace_id,tab_id,created_at,last_message_at) VALUES ('m839-read-c','rt','ns','w','t','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z')").await.unwrap();
+fn m839_seed_aged_read_orphan(db: &Path, phase: &str) -> M839SqlitePhaseResult<()> {
+    use sqlx::Connection;
+    let db = db.to_owned();
+    m839_sqlite_phase(phase, move || {
+        let db = db.clone();
+        async move {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .create_if_missing(false)
+                .busy_timeout(Duration::from_millis(200));
+            let mut connection = sqlx::SqliteConnection::connect_with(&options).await?;
+            let mut transaction = connection.begin().await?;
+            sqlx::query("INSERT INTO conversations (id,runtime_session_id,socket_namespace,workspace_id,tab_id,created_at,last_message_at) VALUES ('m839-read-c','rt','ns','w','t','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z')")
+                .execute(&mut *transaction).await?;
             for id in ["m839-read-from", "m839-read-to"] {
                 sqlx::query("INSERT INTO conversation_participants (id,conversation_id,agent_label,participant_key,joined_at) VALUES (?,'m839-read-c',?,?,'2000-01-01T00:00:00Z')")
-                    .bind(id).bind(id).bind(id).execute(&mut connection).await.unwrap();
+                    .bind(id).bind(id).bind(id).execute(&mut *transaction).await?;
             }
-            connection.execute("INSERT INTO messages (id,conversation_id,conversation_seq,runtime_session_id,socket_namespace,created_at,target_arg,from_participant_id,to_participant_id,body,body_hash,workspace_id,tab_id) VALUES ('m839-read-orphan','m839-read-c',1,'rt','ns','2000-01-01T00:00:00Z','worker','m839-read-from','m839-read-to','body','hash','w','t')").await.unwrap();
+            sqlx::query("INSERT INTO messages (id,conversation_id,conversation_seq,runtime_session_id,socket_namespace,created_at,target_arg,from_participant_id,to_participant_id,body,body_hash,workspace_id,tab_id) VALUES ('m839-read-orphan','m839-read-c',1,'rt','ns','2000-01-01T00:00:00Z','worker','m839-read-from','m839-read-to','body','hash','w','t')")
+                .execute(&mut *transaction).await?;
+            transaction.commit().await?;
+            connection.close().await?;
+            Ok(())
+        }
+    })
+}
+
+#[test]
+fn m840_sqlite_fixture_wait_records_busy_attempts_and_phase() {
+    use sqlx::{Connection, Executor};
+    use std::sync::mpsc;
+
+    let base = unique_test_dir();
+    let db = base.join("fixture-wait.db");
+    plant_sqlite(&db, "CREATE TABLE probe (value TEXT NOT NULL)");
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let holder_db = db.clone();
+    let holder = thread::spawn(move || {
+        sqlite_block_on(async move {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(holder_db)
+                .busy_timeout(Duration::from_millis(200));
+            let mut connection = sqlx::SqliteConnection::connect_with(&options)
+                .await
+                .unwrap();
+            connection.execute("BEGIN IMMEDIATE").await.unwrap();
+            locked_tx.send(()).unwrap();
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            connection.execute("ROLLBACK").await.unwrap();
             connection.close().await.unwrap();
-        }).await.expect("bounded m839 orphan seed");
+        });
     });
+    locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    let write_db = db.clone();
+    let result = m839_sqlite_phase("fixture write-lock holder active", move || {
+        let db = write_db.clone();
+        async move {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .busy_timeout(Duration::from_millis(200));
+            let mut connection = sqlx::SqliteConnection::connect_with(&options).await?;
+            sqlx::query("INSERT INTO probe (value) VALUES ('recorded')")
+                .execute(&mut connection)
+                .await?;
+            connection.close().await?;
+            Ok(())
+        }
+    });
+    holder.join().unwrap();
+    assert_eq!(result.observation.phase, "fixture write-lock holder active");
+    assert!(
+        result.observation.attempts >= 2,
+        "the held lock did not exercise the retry boundary: {:?}",
+        result.observation
+    );
+    assert!(
+        result.observation.elapsed >= Duration::from_millis(200)
+            && result.observation.elapsed < M839_SQLITE_PHASE_TIMEOUT,
+        "unexpected diagnosed wait: {:?}",
+        result.observation
+    );
+    cleanup_test_base(&base);
 }
 
 #[test]
@@ -8508,14 +8802,20 @@ fn m839c_real_agent_reads_with_managed_state_add_no_persistence_rows() {
     assert_eq!(started["result"]["type"], "agent_started", "{started}");
     let terminal = started["result"]["agent"]["terminal_id"].as_str().unwrap();
     let db = config_home.join("sqlite/zynk.db");
-    m839_seed_aged_read_orphan(&db);
-    let before = m839_named_table_counts(&db);
-    let deliveries = m839_delivery_rows(&db);
+    let mut database_phases = Vec::new();
+    m839_seed_aged_read_orphan(&db, "agent.start response received; server live")
+        .record(&mut database_phases);
+    let before = m839_persistence_snapshot(&db, "orphan seed committed; server live")
+        .record(&mut database_phases);
     assert!(
-        deliveries.is_empty(),
-        "fixture orphan must have no delivery event: {deliveries:?}"
+        before.delivery_rows.is_empty(),
+        "fixture orphan must have no delivery event: {:?}",
+        before.delivery_rows
     );
-    for method in ["agent.get", "agent.list", "agent.get", "agent.list"] {
+    for (index, method) in ["agent.get", "agent.list", "agent.get", "agent.list"]
+        .into_iter()
+        .enumerate()
+    {
         let params = if method == "agent.get" {
             serde_json::json!({"target":terminal})
         } else {
@@ -8536,9 +8836,27 @@ fn m839c_real_agent_reads_with_managed_state_add_no_persistence_rows() {
                 .iter()
                 .any(|agent| agent["terminal_id"] == terminal && agent["name"] == "worker"));
         }
-        assert_eq!(m839_named_table_counts(&db), before, "{method}");
-        assert_eq!(m839_delivery_rows(&db), deliveries, "{method}");
+        let phase = format!("{method} response {index} received; server live");
+        let after = m839_persistence_snapshot(&db, &phase).record(&mut database_phases);
+        assert_eq!(after, before, "{method} response {index}");
     }
+    assert_eq!(
+        database_phases
+            .iter()
+            .map(|observation| observation.phase.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "agent.start response received; server live",
+            "orphan seed committed; server live",
+            "agent.get response 0 received; server live",
+            "agent.list response 1 received; server live",
+            "agent.get response 2 received; server live",
+            "agent.list response 3 received; server live",
+        ]
+    );
+    assert!(database_phases.iter().all(|observation| {
+        observation.attempts >= 1 && observation.elapsed < M839_SQLITE_PHASE_TIMEOUT
+    }));
     cleanup_spawned_zynk(zynk, base);
 }
 

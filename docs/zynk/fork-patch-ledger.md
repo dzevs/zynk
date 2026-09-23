@@ -7299,6 +7299,21 @@ explicit isolated root, and executable fixtures use a short-lived writer process
 write across an unrelated concurrent fork, not unrelated test noise. ADR 0015 was accepted by the operator on
 2026-09-23 in its distinct documentation commit.
 
+B1.1's SQLite fixture boundary also applies to the retained M8-37/M8-39 controls. Every helper that keeps the
+200 ms SQLite busy timeout now runs inside one test-only five-second boundary that retries only SQLite
+BUSY/LOCKED and reports the named child/server phase, elapsed time, attempt count, and final error. The
+real-server read control records the completed `agent.start`, orphan-seed commit, and each completed
+`agent.get`/`agent.list` response, and reads table counts plus delivery rows from one transaction. Mock-responder
+observations are explicitly not called post-exit: the CLI child is alive but blocked on the named response after
+the relevant durable commit; they use the same diagnosed boundary. Their M8-39-only child and mock-server
+watchdogs are 12 and 13 seconds respectively, so two bounded database observations cannot be preempted by the
+generic three-second CLI watchdog, which remains unchanged. Observations after `m839_cli_exchange` returns are
+post-reap. The real `events.wait` fixture records completed server responses while the server stays live, also
+through that boundary. A deterministic held-write-lock control proves that the retry path records at least two
+attempts and a bounded wait. The prior exact-tip FULL stop remains retained and OPEN with the F21/F23
+lock/deadline carry; this correction is a fixture-instrument change, not a cause assignment or a production
+timeout/retry change.
+
 Pre-final characterization on the documented source bytes enumerated 4561 catalog members. The explicit
 fixture-lifecycle selection passed 10/10, the schema/help population passed 97/97, and the cumulative B1
 selection passed all 2415 scheduled identities with 1848 printed skips. The render-scale control remained
