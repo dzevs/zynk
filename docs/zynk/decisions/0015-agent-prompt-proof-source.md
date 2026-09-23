@@ -1,6 +1,6 @@
 # ADR 0015 - Agent prompt submission proof
 
-- **Status:** Proposed for the M8-39 exact-tip review
+- **Status:** Accepted by operator on 2026-09-23
 - **Date:** 2026-09-23
 - **Refines:** ADR 0003 (delivery-event provenance), ADR 0014 (receiver authority)
 
