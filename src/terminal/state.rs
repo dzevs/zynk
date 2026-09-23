@@ -438,6 +438,7 @@ pub struct EffectiveStateChange {
 pub struct TerminalStateMutation {
     pub effective_state_change: Option<EffectiveStateChange>,
     pub session_ref_changed: bool,
+    pub agent_released: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -661,6 +662,11 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
         let previous_session = self.current_session_identity_for_persistence();
+        let mut agent_released = process_exited
+            && self
+                .managed_agent
+                .is_none_or(|managed| now >= managed.observation_floor)
+            && (previous_agent_label.is_some() || self.agent_name.is_some());
         // The detector is the process oracle, so a RUNNING observation is what answers
         // an exit a hook report was accepted across. It is settled first, before any
         // early return: a live full-lifecycle authority makes this function ignore the
@@ -689,6 +695,7 @@ impl TerminalState {
                 ),
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
+                agent_released: false,
             };
         }
         if !process_exited && self.detected_state_observed_before_release_suppression(agent, now) {
@@ -702,6 +709,7 @@ impl TerminalState {
                 ),
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
+                agent_released: false,
             };
         }
         self.detected_agent = agent;
@@ -744,6 +752,7 @@ impl TerminalState {
                 self.hook_authority = None;
             } else {
                 self.hold_hook_owner_unconfirmed(&owner_source, &owner_label, now);
+                agent_released = false;
             }
         }
         // A session-identity-only integration lives and dies with its process: it
@@ -771,6 +780,7 @@ impl TerminalState {
                 self.retire_hook_identity(HookSuppressionReason::ProcessExit, now);
             } else {
                 self.hold_hook_owner_unconfirmed(&owner_source, &owner_label, now);
+                agent_released = false;
             }
         } else if self.hook_identity_not_newer_than(now)
             && self.hook_identity_conflicts_with_detected_agent(agent)
@@ -831,6 +841,24 @@ impl TerminalState {
             ),
             session_ref_changed: previous_session
                 != self.current_session_identity_for_persistence(),
+            agent_released,
+        }
+    }
+
+    pub(crate) fn unchanged_effective_state_change_at(&self, now: Instant) -> EffectiveStateChange {
+        let agent_label = self.effective_agent_label().map(str::to_string);
+        let known_agent = self.effective_known_agent();
+        let state = self.state;
+        let presentation = self.effective_presentation_for_state_at(state, now);
+        EffectiveStateChange {
+            previous_agent_label: agent_label.clone(),
+            previous_known_agent: known_agent,
+            previous_state: state,
+            previous_presentation: presentation.clone(),
+            agent_label,
+            known_agent,
+            state,
+            presentation,
         }
     }
 
@@ -973,6 +1001,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            agent_released: false,
         })
     }
 
@@ -1073,6 +1102,7 @@ impl TerminalState {
         (identity_changed || session_ref_changed).then_some(TerminalStateMutation {
             effective_state_change: None,
             session_ref_changed,
+            agent_released: false,
         })
     }
 
@@ -2615,6 +2645,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            agent_released: false,
         })
     }
 
@@ -2783,6 +2814,7 @@ impl TerminalState {
             ),
             session_ref_changed: previous_session
                 != self.current_session_identity_for_persistence(),
+            agent_released: false,
         })
     }
 
@@ -2871,6 +2903,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            agent_released: true,
         })
     }
 

@@ -16,7 +16,7 @@ use crate::api::schema::{
     ErrorBody, ErrorResponse, Method, Request, ResponseResult, ServerCapabilities, SuccessResponse,
 };
 use crate::api::subscriptions::ActiveSubscription;
-use crate::api::wait::{wait_for_event, wait_for_output};
+use crate::api::wait::{prompt_agent, wait_for_agent, wait_for_event, wait_for_output};
 use crate::api::{
     request_changes_ui, socket_path, ApiCaller, ApiRequestMessage, ApiRequestSender, EventHub,
 };
@@ -270,6 +270,71 @@ fn handle_connection_with_stop(
             }
             result
         }
+        Method::AgentPrompt(params) if params.wait.is_some() => {
+            let Some(response) = prompt_agent(
+                request_id.clone(),
+                params,
+                &mut stream,
+                api_tx,
+                event_hub,
+                running,
+                caller,
+            )?
+            else {
+                crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "client_disconnected",
+                    changes_ui,
+                );
+                return Ok(());
+            };
+            let result = write_text_line_allow_disconnect(&mut stream, &response);
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    api_response_outcome(&response),
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
+        }
+        Method::AgentWait(params) => {
+            let Some(response) = wait_for_agent(
+                request_id.clone(),
+                params,
+                &mut stream,
+                api_tx,
+                event_hub,
+                running,
+            )?
+            else {
+                crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "client_disconnected",
+                    changes_ui,
+                );
+                return Ok(());
+            };
+            let result = write_text_line_allow_disconnect(&mut stream, &response);
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    api_response_outcome(&response),
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
+        }
         Method::EventsWait(params) => {
             let Some(response) = wait_for_event(
                 request_id.clone(),
@@ -464,10 +529,12 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentRead(_) => "agent.read",
         Method::AgentExplain(_) => "agent.explain",
         Method::AgentSend(_) => "agent.send",
+        Method::AgentSendKeys(_) => "agent.send_keys",
         Method::AgentRename(_) => "agent.rename",
         Method::AgentFocus(_) => "agent.focus",
         Method::AgentStart(_) => "agent.start",
         Method::AgentPrompt(_) => "agent.prompt",
+        Method::AgentWait(_) => "agent.wait",
         Method::PaneSplit(_) => "pane.split",
         Method::PaneSwap(_) => "pane.swap",
         Method::PaneMove(_) => "pane.move",
@@ -1453,6 +1520,228 @@ mod tests {
                 (Ok(Some("\n".to_string())), false),
             ]
         );
+    }
+
+    fn m840_agent_info(
+        terminal_id: &str,
+        status: crate::api::schema::AgentStatus,
+        state_change_seq: u64,
+    ) -> crate::api::schema::AgentInfo {
+        serde_json::from_value(serde_json::json!({
+            "terminal_id": terminal_id,
+            "name": "worker",
+            "agent": "codex",
+            "agent_status": status,
+            "state_change_seq": state_change_seq,
+            "workspace_id": "workspace-1",
+            "tab_id": "tab-1",
+            "pane_id": "pane-1",
+            "focused": true,
+            "revision": 0
+        }))
+        .unwrap()
+    }
+
+    fn m840_reply(message: ApiRequestMessage, result: ResponseResult) {
+        let response = serde_json::to_string(&SuccessResponse {
+            id: message.request.id,
+            result,
+        })
+        .unwrap();
+        message.respond_to.send(response).unwrap();
+    }
+
+    fn m840_agent_status_event(
+        status: crate::api::schema::AgentStatus,
+    ) -> crate::api::schema::EventEnvelope {
+        crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::PaneAgentStatusChanged,
+            data: crate::api::schema::EventData::PaneAgentStatusChanged {
+                pane_id: "pane-1".into(),
+                workspace_id: "workspace-1".into(),
+                agent_status: status,
+                agent: Some("codex".into()),
+                title: None,
+                display_agent: None,
+                state_labels: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn m840_agent_wait_is_server_owned_and_returns_an_immediate_match() {
+        let mut connection = M827InitialConnection::start();
+        let request = Request {
+            id: "agent-wait".into(),
+            method: Method::AgentWait(crate::api::schema::AgentWaitParams {
+                target: "worker".into(),
+                until: vec![crate::api::schema::AgentStatus::Idle],
+                timeout_ms: Some(100),
+            }),
+        };
+        writeln!(
+            connection.client.as_mut().unwrap(),
+            "{}",
+            serde_json::to_string(&request).unwrap()
+        )
+        .unwrap();
+        let message = recv_api_request_for(&mut connection.requests, Duration::from_secs(2))
+            .expect("agent.get should resolve the wait target");
+        assert!(matches!(message.request.method, Method::AgentGet(_)));
+        m840_reply(
+            message,
+            ResponseResult::AgentInfo {
+                agent: m840_agent_info("term-1", crate::api::schema::AgentStatus::Idle, 4),
+            },
+        );
+
+        let response = connection.response();
+        assert_eq!(response["id"], "agent-wait");
+        assert_eq!(response["result"]["type"], "agent_info");
+        assert_eq!(response["result"]["agent"]["terminal_id"], "term-1");
+        assert!(connection.requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn m840_agent_wait_refuses_retargeting_after_an_event() {
+        let mut connection = M827InitialConnection::start();
+        let request = Request {
+            id: "agent-wait-retarget".into(),
+            method: Method::AgentWait(crate::api::schema::AgentWaitParams {
+                target: "worker".into(),
+                until: vec![crate::api::schema::AgentStatus::Idle],
+                timeout_ms: Some(500),
+            }),
+        };
+        writeln!(
+            connection.client.as_mut().unwrap(),
+            "{}",
+            serde_json::to_string(&request).unwrap()
+        )
+        .unwrap();
+        let initial = recv_api_request_for(&mut connection.requests, Duration::from_secs(2))
+            .expect("initial agent.get");
+        m840_reply(
+            initial,
+            ResponseResult::AgentInfo {
+                agent: m840_agent_info("term-1", crate::api::schema::AgentStatus::Working, 4),
+            },
+        );
+        connection.hub.push(m840_agent_status_event(
+            crate::api::schema::AgentStatus::Idle,
+        ));
+        let probe = recv_api_request_for(&mut connection.requests, Duration::from_secs(2))
+            .expect("event should trigger a pinned probe");
+        m840_reply(
+            probe,
+            ResponseResult::AgentInfo {
+                agent: m840_agent_info("term-2", crate::api::schema::AgentStatus::Idle, 5),
+            },
+        );
+
+        let response = connection.response();
+        assert_eq!(response["id"], "agent-wait-retarget");
+        assert_eq!(response["error"]["code"], "agent_not_running");
+    }
+
+    #[test]
+    fn m840_agent_wait_accepts_a_requested_final_release_status() {
+        let mut connection = M827InitialConnection::start();
+        let request = Request {
+            id: "agent-wait-release".into(),
+            method: Method::AgentWait(crate::api::schema::AgentWaitParams {
+                target: "worker".into(),
+                until: vec![crate::api::schema::AgentStatus::Done],
+                timeout_ms: Some(500),
+            }),
+        };
+        writeln!(
+            connection.client.as_mut().unwrap(),
+            "{}",
+            serde_json::to_string(&request).unwrap()
+        )
+        .unwrap();
+        let initial = recv_api_request_for(&mut connection.requests, Duration::from_secs(2))
+            .expect("initial agent.get");
+        m840_reply(
+            initial,
+            ResponseResult::AgentInfo {
+                agent: m840_agent_info("term-1", crate::api::schema::AgentStatus::Working, 4),
+            },
+        );
+        connection.hub.push(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::PaneAgentDetected,
+            data: crate::api::schema::EventData::PaneAgentDetected {
+                pane_id: "pane-1".into(),
+                workspace_id: "workspace-1".into(),
+                agent: Some("codex".into()),
+                released: true,
+                final_status: Some(crate::api::schema::AgentStatus::Done),
+            },
+        });
+
+        let response = connection.response();
+        assert_eq!(response["id"], "agent-wait-release");
+        assert_eq!(response["result"]["agent"]["agent_status"], "done");
+        assert!(connection.requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn m840_prompt_wait_requires_a_post_submission_sequence() {
+        let mut connection = M827InitialConnection::start();
+        let request = Request {
+            id: "prompt-wait".into(),
+            method: Method::AgentPrompt(crate::api::schema::AgentPromptParams {
+                target: "worker".into(),
+                text: "continue".into(),
+                expected_terminal_id: Some("term-1".into()),
+                wait: Some(crate::api::schema::AgentPromptWaitOptions {
+                    until: vec![crate::api::schema::AgentStatus::Working],
+                    timeout_ms: Some(500),
+                }),
+            }),
+        };
+        writeln!(
+            connection.client.as_mut().unwrap(),
+            "{}",
+            serde_json::to_string(&request).unwrap()
+        )
+        .unwrap();
+        let initial = recv_api_request_for(&mut connection.requests, Duration::from_secs(2))
+            .expect("pre-prompt agent.get");
+        m840_reply(
+            initial,
+            ResponseResult::AgentInfo {
+                agent: m840_agent_info("term-1", crate::api::schema::AgentStatus::Idle, 7),
+            },
+        );
+        let prompt = recv_api_request_for(&mut connection.requests, Duration::from_secs(2))
+            .expect("agent.prompt dispatch");
+        assert!(matches!(prompt.request.method, Method::AgentPrompt(_)));
+        m840_reply(
+            prompt,
+            ResponseResult::AgentPrompted {
+                agent: m840_agent_info("term-1", crate::api::schema::AgentStatus::Idle, 7),
+                baseline_state_change_seq: 7,
+            },
+        );
+        connection.hub.push(m840_agent_status_event(
+            crate::api::schema::AgentStatus::Working,
+        ));
+        let probe = recv_api_request_for(&mut connection.requests, Duration::from_secs(2))
+            .expect("post-prompt event should trigger a sequence probe");
+        m840_reply(
+            probe,
+            ResponseResult::AgentInfo {
+                agent: m840_agent_info("term-1", crate::api::schema::AgentStatus::Working, 8),
+            },
+        );
+
+        let response = connection.response();
+        assert_eq!(response["id"], "prompt-wait");
+        assert_eq!(response["result"]["type"], "agent_prompted");
+        assert_eq!(response["result"]["baseline_state_change_seq"], 7);
+        assert_eq!(response["result"]["agent"]["agent_status"], "working");
     }
 
     struct EventWaitConnection {

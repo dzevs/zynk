@@ -245,6 +245,8 @@ pub struct PaneStateUpdate {
     pub state: AgentState,
     pub seen: bool,
     pub presentation: crate::terminal::EffectivePresentation,
+    pub agent_released: bool,
+    pub agent_release_status: Option<crate::api::schema::AgentStatus>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,6 +1090,8 @@ impl AppState {
                     state: change.state,
                     seen,
                     presentation: change.presentation.clone(),
+                    agent_released: false,
+                    agent_release_status: None,
                 };
                 Some(update)
             })
@@ -2932,16 +2936,20 @@ impl AppState {
             .attached_terminal_id
             .clone();
         let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
-        let (mutation, managed_changed) = {
+        let (mutation, managed_changed, unchanged_change) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let mutation = update(terminal)?;
             let managed_changed = terminal.reconcile_managed_agent_at(now, exit_observed_at);
-            (mutation, managed_changed)
+            let unchanged_change = mutation
+                .agent_released
+                .then(|| terminal.unchanged_effective_state_change_at(now));
+            (mutation, managed_changed, unchanged_change)
         };
         if mutation.session_ref_changed || managed_changed {
             self.mark_session_dirty();
         }
-        let change = mutation.effective_state_change?;
+        let agent_released = mutation.agent_released;
+        let change = mutation.effective_state_change.or(unchanged_change)?;
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
@@ -2962,6 +2970,9 @@ impl AppState {
             state: change.state,
             seen,
             presentation: change.presentation.clone(),
+            agent_released,
+            agent_release_status: agent_released
+                .then(|| crate::app::api_helpers::pane_agent_status(change.state, seen)),
         };
         Some(update)
     }
@@ -3008,21 +3019,23 @@ impl AppState {
         pane_id: PaneId,
     ) -> Option<PaneStateUpdate> {
         let observed_at = std::time::Instant::now();
-        self.update_terminal_state_at(pane_id, observed_at, Some(observed_at), |terminal| {
-            let agent = terminal.effective_known_agent().or(terminal.detected_agent);
-            if agent.is_none() && !terminal.full_lifecycle_hook_authority_active() {
-                return None;
-            }
-            Some(terminal.set_detected_state_with_screen_signals_at(
-                agent,
-                AgentState::Idle,
-                false,
-                true,
-                false,
-                true,
-                observed_at,
-            ))
-        })
+        let update =
+            self.update_terminal_state_at(pane_id, observed_at, Some(observed_at), |terminal| {
+                let agent = terminal.effective_known_agent().or(terminal.detected_agent);
+                if agent.is_none() && !terminal.full_lifecycle_hook_authority_active() {
+                    return None;
+                }
+                Some(terminal.set_detected_state_with_screen_signals_at(
+                    agent,
+                    AgentState::Idle,
+                    false,
+                    true,
+                    false,
+                    true,
+                    observed_at,
+                ))
+            })?;
+        update.agent_released.then_some(update)
     }
 
     fn apply_pane_state_change(
@@ -3379,6 +3392,8 @@ mod tests {
                 state: change.state,
                 seen,
                 presentation: change.presentation.clone(),
+                agent_released: false,
+                agent_release_status: None,
             };
             Some(update)
         }
@@ -3394,6 +3409,7 @@ mod tests {
             1 | 2 => Some(TerminalStateMutation {
                 effective_state_change: None,
                 session_ref_changed: case == 2,
+                agent_released: false,
             }),
             3 | 4 => {
                 let mut mutation = terminal.set_detected_state_with_screen_signals_at(
@@ -3543,6 +3559,7 @@ mod tests {
                 Some(TerminalStateMutation {
                     effective_state_change: None,
                     session_ref_changed: false,
+                    agent_released: false,
                 })
             },
         );

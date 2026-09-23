@@ -229,6 +229,7 @@ impl TerminalState {
         Some(TerminalStateMutation {
             effective_state_change,
             session_ref_changed: false,
+            agent_released: false,
         })
     }
     pub fn effective_title(&self) -> Option<String> {
@@ -311,6 +312,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: false,
+            agent_released: false,
         })
     }
 

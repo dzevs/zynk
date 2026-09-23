@@ -316,6 +316,13 @@ fn agent_command() -> Command {
                 .arg(required("text", "TEXT").num_args(1..).last(true)),
         )
         .subcommand(
+            Command::new("send-keys")
+                .about("Send key presses to an agent")
+                .arg(required("target", "TARGET"))
+                .arg(required("key", "KEY").num_args(1..))
+                .after_help("Use esc as the canonical Escape key name; escape is also accepted."),
+        )
+        .subcommand(
             Command::new("rename")
                 .about("Rename an agent")
                 .arg(required("target", "TARGET"))
@@ -329,6 +336,13 @@ fn agent_command() -> Command {
                 .arg(option("type", "TYPE"))
                 .arg(option("trace", "ID|inherit"))
                 .arg(flag("wait"))
+                .arg(
+                    option("until", "STATUS")
+                        .action(ArgAction::Append)
+                        .requires("wait")
+                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
+                        .help("State to match after --wait; repeat for more than one state"),
+                )
                 .arg(option("timeout", "MS").requires("wait"))
                 .arg(required("text", "TEXT").num_args(1..).last(true)),
         )
@@ -337,6 +351,12 @@ fn agent_command() -> Command {
             Command::new("wait")
                 .about("Wait for a named agent to be idle, done or blocked; use agent start for launch readiness")
                 .arg(required("name", "NAME"))
+                .arg(
+                    option("until", "STATUS")
+                        .action(ArgAction::Append)
+                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
+                        .help("State to match; repeat for more than one state"),
+                )
                 .arg(option("timeout", "MS")),
         )
         .subcommand(
@@ -1058,7 +1078,7 @@ mod tests {
             ("worktree", "list create open remove"),
             ("tab", "list create get focus rename close"),
             ("notification", "show"),
-            ("agent", "list get read send prompt rename focus wait attach start explain"),
+            ("agent", "list get read send send-keys prompt rename focus wait attach start explain"),
             ("pane", "list get layout neighbor edges focus resize zoom read rename split swap move close send-text send-keys report-agent report-agent-session release-agent report-metadata run"),
             ("wait", "output agent-status"),
             ("terminal", "attach session"),
@@ -1116,7 +1136,8 @@ mod tests {
             ("send", "type trace"), ("reply", "type trace"),
             ("pane send-text", "type trace"), ("pane run", "type trace"),
             ("agent send", "type"),
-            ("agent wait", "timeout"),
+            ("agent prompt", "type trace wait until timeout"),
+            ("agent wait", "until timeout"),
             ("thread", "json"), ("trace", "json"), ("whoami", "json"), ("who", "json"),
             ("inbox", "agent limit json"),
             ("query", "workspace conversation agent since type branch cwd trace limit exact json"),
@@ -1159,6 +1180,8 @@ mod tests {
                 "source",
                 "visible recent recent-unwrapped detection",
             ),
+            ("agent prompt", "until", "idle working blocked done unknown"),
+            ("agent wait", "until", "idle working blocked done unknown"),
             ("plugin pane open", "placement", "overlay split tab zoomed"),
         ] {
             assert_eq!(
@@ -1270,6 +1293,10 @@ mod tests {
         let wait = command_path(&cmd, &["agent", "wait"]);
         assert!(!has_option(wait, "status"));
         assert!(has_option(wait, "timeout"));
+        assert_eq!(
+            option_values(wait, "until"),
+            ["idle", "working", "blocked", "done", "unknown"]
+        );
         let help = wait
             .get_about()
             .expect("agent wait completion description")

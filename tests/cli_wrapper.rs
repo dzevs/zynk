@@ -5212,6 +5212,24 @@ fn m814_cli_snapshot_sends_exact_request_and_preserves_complete_response() {
 }
 
 #[test]
+fn m840_agent_send_keys_is_raw_and_keeps_agent_send_separate() {
+    let (request, output) = mock_snapshot_cli(
+        &["agent", "send-keys", "worker", "Escape", "Enter"],
+        serde_json::json!({"id":"cli:request", "result":{"type":"ok"}}),
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        request.unwrap(),
+        serde_json::json!({
+            "id":"cli:request", "method":"agent.send_keys",
+            "params":{"target":"worker", "keys":["Escape", "Enter"]}
+        })
+    );
+}
+
+#[test]
 fn m828b_pane_token_cli_preserves_legacy_request_and_output() {
     let response = serde_json::json!({"id": "cli:request", "result": {"type": "ok"}, "future_envelope": "kept silent"});
     let (request, output) = mock_snapshot_cli(
@@ -6754,6 +6772,11 @@ fn m839c_agent_grammar_refuses_before_resolution_or_persistence() {
             "agent", "prompt", "worker", "--trace", "a", "--trace", "b", "body",
         ],
         vec!["agent", "prompt", "worker", "--timeout", "100", "body"],
+        vec!["agent", "prompt", "worker", "--until", "blocked", "body"],
+        vec!["agent", "prompt", "worker", "--wait", "--until", "body"],
+        vec![
+            "agent", "prompt", "worker", "--wait", "--until", "invalid", "body",
+        ],
         vec![
             "agent",
             "prompt",
@@ -6765,6 +6788,8 @@ fn m839c_agent_grammar_refuses_before_resolution_or_persistence() {
         ],
         vec!["agent", "wait"],
         vec!["agent", "wait", "worker", "--status", "idle"],
+        vec!["agent", "wait", "worker", "--until"],
+        vec!["agent", "wait", "worker", "--until", "invalid"],
         vec!["agent", "wait", "worker", "--timeout"],
         vec!["agent", "wait", "worker", "--timeout", "-1"],
         vec![
@@ -6817,6 +6842,35 @@ fn m839c_wait_current_completes_without_relabeling_blocked_or_receipts() {
         assert_eq!(result["result"]["agent"]["terminal_id"], "term_original");
         assert!(result.get("message_id").is_none());
         assert!(result.get("delivery_status").is_none());
+        fixture.assert_no_runtime_created();
+    }
+}
+
+#[test]
+fn m840_wait_accepts_working_and_unknown_only_when_explicitly_requested() {
+    for status in ["working", "unknown"] {
+        let agent = m839_agent_json(status, "worker", "term_original", 7);
+        let (fixture, requests, output) = m839_cli_exchange(
+            &[
+                "agent",
+                "wait",
+                "worker",
+                "--until",
+                status,
+                "--timeout",
+                "500",
+            ],
+            |request, _| match request["method"].as_str().unwrap() {
+                "ping" => m839_pong(),
+                "agent.get" => m839_agent_reply(agent.clone()),
+                other => panic!("unexpected {other}"),
+            },
+        );
+        assert_eq!(output.status.code(), Some(0), "{status}: {output:?}");
+        assert!(output.stderr.is_empty(), "{status}: {output:?}");
+        assert_eq!(requests.len(), 2);
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["result"]["agent"]["agent_status"], status);
         fixture.assert_no_runtime_created();
     }
 }
@@ -7613,6 +7667,8 @@ fn m839c_prompt_wait_requires_new_sequence_and_keeps_original_party() {
             "prompt",
             "worker",
             "--wait",
+            "--until",
+            "blocked",
             "--timeout",
             "1500",
             "body",

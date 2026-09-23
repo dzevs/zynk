@@ -1,7 +1,7 @@
 use crate::api::schema::{
-    AgentInfo, AgentPromptParams, AgentReadParams, AgentRenameParams, AgentStartParams,
-    AgentStatus, AgentTarget, EmptyParams, ErrorBody, ErrorResponse, Method, ReadFormat,
-    ReadSource, Request, ResponseResult, SuccessResponse,
+    AgentInfo, AgentPromptParams, AgentReadParams, AgentRenameParams, AgentSendKeysParams,
+    AgentStartParams, AgentStatus, AgentTarget, EmptyParams, ErrorBody, ErrorResponse, Method,
+    ReadFormat, ReadSource, Request, ResponseResult, SuccessResponse,
 };
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "get" => agent_get(&args[1..]),
         "read" => agent_read(&args[1..]),
         "send" => agent_send(&args[1..]),
+        "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
@@ -553,18 +554,47 @@ fn agent_attach(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
+fn agent_wait_status_matches(status: AgentStatus, until: &[AgentStatus]) -> bool {
+    if until.is_empty() {
+        matches!(
+            status,
+            AgentStatus::Idle | AgentStatus::Done | AgentStatus::Blocked
+        )
+    } else {
+        until.contains(&status)
+    }
+}
+
 fn agent_wait(args: &[String]) -> std::io::Result<i32> {
     let Some(name) = args
         .first()
         .filter(|name| !name.is_empty() && !name.starts_with('-'))
     else {
-        eprintln!("usage: zynk agent wait <name> [--timeout MS]");
+        eprintln!("usage: zynk agent wait <name> [--until STATUS]... [--timeout MS]");
         return Ok(2);
     };
+    let mut until = Vec::new();
     let mut timeout = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
+            "--until" => {
+                let Some(value) = args
+                    .get(index + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                else {
+                    eprintln!("--until requires at least one status");
+                    return Ok(2);
+                };
+                match super::parse_agent_status(value) {
+                    Ok(status) => until.push(status),
+                    Err(err) => {
+                        eprintln!("{err}");
+                        return Ok(2);
+                    }
+                }
+                index += 2;
+            }
             "--timeout" if timeout.is_none() => {
                 let Some(ms) = args
                     .get(index + 1)
@@ -582,7 +612,7 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
                 index += 2;
             }
             "help" | "--help" | "-h" => {
-                eprintln!("usage: zynk agent wait <name> [--timeout MS]");
+                eprintln!("usage: zynk agent wait <name> [--until STATUS]... [--timeout MS]");
                 return Ok(0);
             }
             other => {
@@ -651,6 +681,7 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
             Ok(agent) => agent,
             Err(error) => return super::print_response(&cli_agent_error(&request.id, error)),
         };
+        let status_matches = agent_wait_status_matches(agent.agent_status, &until);
         let error = if initial && agent.terminal_id.is_empty() {
             Some(invalid_agent_response())
         } else if terminal_id
@@ -662,7 +693,7 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
                 code: "agent_name_not_found".into(),
                 message: format!("named agent {name} no longer owns the target terminal"),
             })
-        } else if agent.agent_status == AgentStatus::Unknown {
+        } else if agent.agent_status == AgentStatus::Unknown && !status_matches {
             Some(ErrorBody {
                 code: "agent_not_running".into(),
                 message: "agent is no longer running".into(),
@@ -673,10 +704,7 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
         if let Some(error) = error {
             return super::print_response(&cli_agent_error(&request.id, error));
         }
-        if matches!(
-            agent.agent_status,
-            AgentStatus::Idle | AgentStatus::Done | AgentStatus::Blocked
-        ) {
+        if status_matches {
             return super::print_response(&response);
         }
         if initial {
@@ -741,6 +769,7 @@ struct PromptArgs {
     message_type: Option<String>,
     trace: Option<crate::zynk::message::TraceSpec>,
     wait: bool,
+    until: Vec<AgentStatus>,
     timeout_ms: Option<u64>,
 }
 
@@ -748,13 +777,14 @@ fn parse_prompt_args(args: &[String]) -> Result<PromptArgs, String> {
     use crate::zynk::message::TraceSpec;
 
     let name = args.first().filter(|name| !name.is_empty() && !name.starts_with('-'))
-        .ok_or("usage: zynk agent prompt <name> [--type T] [--trace ID|inherit] [--wait] [--timeout MS] [--] <text>")?;
+        .ok_or("usage: zynk agent prompt <name> [--type T] [--trace ID|inherit] [--wait] [--until STATUS]... [--timeout MS] [--] <text>")?;
     let mut parsed = PromptArgs {
         name: name.clone(),
         text: String::new(),
         message_type: None,
         trace: None,
         wait: false,
+        until: Vec::new(),
         timeout_ms: None,
     };
     let mut index = 1;
@@ -767,6 +797,16 @@ fn parse_prompt_args(args: &[String]) -> Result<PromptArgs, String> {
             "--wait" if !parsed.wait => {
                 parsed.wait = true;
                 index += 1;
+            }
+            "--until" => {
+                let value = args
+                    .get(index + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                    .ok_or("--until requires at least one status")?;
+                parsed
+                    .until
+                    .push(super::parse_agent_status(value).map_err(|error| error.to_string())?);
+                index += 2;
             }
             option @ ("--type" | "--trace" | "--timeout") => {
                 let value = args
@@ -808,6 +848,9 @@ fn parse_prompt_args(args: &[String]) -> Result<PromptArgs, String> {
     }
     if parsed.timeout_ms.is_some() && !parsed.wait {
         return Err("--timeout requires --wait".into());
+    }
+    if !parsed.until.is_empty() && !parsed.wait {
+        return Err("--until requires --wait".into());
     }
     parsed.text = args[index..].join(" ");
     if parsed.text.is_empty() {
@@ -891,6 +934,7 @@ fn wait_after_prompt(
     terminal_id: &str,
     name: &str,
     baseline: u64,
+    until: &[AgentStatus],
     timeout_ms: Option<u64>,
 ) -> Result<AgentInfo, crate::zynk::message::SendError> {
     use crate::zynk::message::SendError;
@@ -963,17 +1007,15 @@ fn wait_after_prompt(
                 message: format!("named agent {name} changed terminal or name"),
             }));
         }
-        if agent.agent_status == AgentStatus::Unknown {
+        let status_matches = agent_wait_status_matches(agent.agent_status, until)
+            && agent.state_change_seq > baseline;
+        if agent.agent_status == AgentStatus::Unknown && !status_matches {
             return Err(error(ErrorBody {
                 code: "agent_not_running".into(),
                 message: format!("agent {name} is not running"),
             }));
         }
-        if matches!(
-            agent.agent_status,
-            AgentStatus::Idle | AgentStatus::Done | AgentStatus::Blocked
-        ) && agent.state_change_seq > baseline
-        {
+        if status_matches {
             return Ok(agent);
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -1113,6 +1155,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
             target: args.name.clone(),
             text,
             expected_terminal_id: Some(terminal_id.into()),
+            wait: None,
         }),
     });
     let baseline = match response
@@ -1208,7 +1251,13 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let mut exit = 0;
     let wait = if args.wait {
         Some(
-            match wait_after_prompt(terminal_id, &args.name, baseline, args.timeout_ms) {
+            match wait_after_prompt(
+                terminal_id,
+                &args.name,
+                baseline,
+                &args.until,
+                args.timeout_ms,
+            ) {
                 Ok(agent) => AgentPromptWaitOutcome::Ok {
                     agent: Box::new(agent),
                 },
@@ -1493,6 +1542,18 @@ fn agent_send(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
+fn agent_send_keys(args: &[String]) -> std::io::Result<i32> {
+    if args.len() < 2 {
+        eprintln!("usage: zynk agent send-keys <target> <key> [key ...]");
+        return Ok(2);
+    }
+
+    super::send_ok_request(Method::AgentSendKeys(AgentSendKeysParams {
+        target: args[0].clone(),
+        keys: args[1..].to_vec(),
+    }))
+}
+
 fn agent_read(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!("usage: zynk agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
@@ -1568,11 +1629,12 @@ fn print_agent_help() {
     eprintln!("  zynk agent get <target>");
     eprintln!("  zynk agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  zynk agent send <target> [--type T] [--] <text>");
-    eprintln!("  zynk agent prompt <name> [--type T] [--trace ID|inherit] [--wait] [--timeout MS] [--] <text>");
+    eprintln!("  zynk agent send-keys <target> <key> [key ...]");
+    eprintln!("  zynk agent prompt <name> [--type T] [--trace ID|inherit] [--wait] [--until STATUS]... [--timeout MS] [--] <text>");
     eprintln!("    Submit only when ready; --wait observes later idle/done/blocked. Exit 3 means submitted but waiting failed: do not resubmit.");
     eprintln!("  zynk agent rename <target> <name>|--clear");
     eprintln!("  zynk agent focus <target>");
-    eprintln!("  zynk agent wait <name> [--timeout MS]");
+    eprintln!("  zynk agent wait <name> [--until STATUS]... [--timeout MS]");
     eprintln!("    Completes on idle, done or blocked, including Pending idle; use agent start for launch readiness.");
     eprintln!("  zynk agent attach <target> [--takeover]");
     eprintln!("  zynk agent start <name> --kind KIND --pane ID [--timeout MS] [-- <args...>]");

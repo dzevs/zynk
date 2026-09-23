@@ -116,6 +116,8 @@ pub enum Method {
     AgentExplain(AgentTarget),
     #[serde(rename = "agent.send")]
     AgentSend(AgentSendParams),
+    #[serde(rename = "agent.send_keys")]
+    AgentSendKeys(AgentSendKeysParams),
     #[serde(rename = "agent.rename")]
     AgentRename(AgentRenameParams),
     #[serde(rename = "agent.focus")]
@@ -124,6 +126,8 @@ pub enum Method {
     AgentStart(AgentStartParams),
     #[serde(rename = "agent.prompt")]
     AgentPrompt(AgentPromptParams),
+    #[serde(rename = "agent.wait")]
+    AgentWait(AgentWaitParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
@@ -240,6 +244,53 @@ pub enum Method {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn m840_agent_automation_wire_additions_preserve_message_send() {
+        let cases = [
+            serde_json::json!({
+                "id":"send", "method":"agent.send",
+                "params":{"target":"worker", "text":"keep the durable message path"}
+            }),
+            serde_json::json!({
+                "id":"keys", "method":"agent.send_keys",
+                "params":{"target":"worker", "keys":["Escape", "Enter"]}
+            }),
+            serde_json::json!({
+                "id":"wait", "method":"agent.wait",
+                "params":{"target":"worker", "until":["idle", "blocked"], "timeout_ms":1250}
+            }),
+            serde_json::json!({
+                "id":"prompt", "method":"agent.prompt",
+                "params":{
+                    "target":"worker", "text":"continue", "expected_terminal_id":"term_worker",
+                    "wait":{"until":["done"], "timeout_ms":2500}
+                }
+            }),
+        ];
+        for case in cases {
+            let request: Request = serde_json::from_value(case.clone()).unwrap();
+            assert_eq!(serde_json::to_value(request).unwrap(), case);
+        }
+
+        let wire_ids = serde_declared_method_wire_ids();
+        for wire_id in [
+            "agent.send",
+            "agent.send_keys",
+            "agent.wait",
+            "agent.prompt",
+        ] {
+            assert_eq!(
+                wire_ids
+                    .iter()
+                    .filter(|candidate| **candidate == wire_id)
+                    .count(),
+                1,
+                "{wire_id}"
+            );
+        }
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 19);
+    }
+
+    #[test]
     fn m839b_prompt_wire_optional_target_binding_and_ui_classification() {
         let minimum = serde_json::json!({
             "id":"prompt", "method":"agent.prompt", "params":{"target":"worker", "text":"line\nnext"}
@@ -251,6 +302,7 @@ mod tests {
         assert_eq!(params.target, "worker");
         assert_eq!(params.text, "line\nnext");
         assert_eq!(params.expected_terminal_id, None);
+        assert_eq!(params.wait, None);
         assert!(crate::api::request_changes_ui(&request));
         assert_eq!(serde_json::to_value(&request).unwrap(), minimum);
         let mut pinned = minimum.clone();
@@ -2140,10 +2192,12 @@ mod tests {
         "agent.read",
         "agent.explain",
         "agent.send",
+        "agent.send_keys",
         "agent.rename",
         "agent.focus",
         "agent.start",
         "agent.prompt",
+        "agent.wait",
         "pane.split",
         "pane.swap",
         "pane.move",

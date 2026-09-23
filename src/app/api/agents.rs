@@ -3,8 +3,8 @@
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendParams, AgentStartParams, AgentTarget,
-    PaneReadResult, ReadFormat, ReadSource, ResponseResult,
+    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentSendParams, AgentStartParams,
+    AgentTarget, PaneReadResult, ReadFormat, ReadSource, ResponseResult,
 };
 use crate::app::App;
 
@@ -297,6 +297,48 @@ impl App {
 
         encode_success(id, ResponseResult::Ok {})
     }
+
+    pub(super) fn handle_agent_send_keys(
+        &mut self,
+        id: String,
+        params: AgentSendKeysParams,
+    ) -> String {
+        let resolved = match self.resolve_terminal_target(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(resolved.ws_idx)
+            .and_then(|workspace| workspace.terminal_id(resolved.pane_id))
+        else {
+            return agent_not_found(id, &params.target);
+        };
+        let Some(expected_agent) = self
+            .state
+            .terminals
+            .get(terminal_id)
+            .and_then(|terminal| terminal.effective_known_agent())
+        else {
+            return agent_not_ready(id, &params.target);
+        };
+        let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id) else {
+            return agent_not_found(id, &params.target);
+        };
+        if !runtime_hosts_agent(runtime, expected_agent) {
+            return agent_not_ready(id, &params.target);
+        }
+        let encoded = match crate::app::api_helpers::encode_api_keys(runtime, &params.keys) {
+            Ok(encoded) => encoded,
+            Err(key) => return encode_error(id, "invalid_key", format!("unsupported key {key}")),
+        };
+        let bytes = encoded.into_iter().flatten().collect::<Vec<_>>();
+        if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+            return encode_error(id, "agent_send_keys_failed", err.to_string());
+        }
+        encode_success(id, ResponseResult::Ok {})
+    }
 }
 
 fn runtime_hosts_agent(
@@ -349,6 +391,7 @@ mod tests {
             target: "worker".into(),
             text: text.into(),
             expected_terminal_id: terminal,
+            wait: None,
         }
     }
 
@@ -528,6 +571,38 @@ mod tests {
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].outcome, crate::pane::TestInputOutcome::Accepted);
         assert_eq!(attempts[0].bytes.as_ref(), b"body\r");
+    }
+
+    #[tokio::test]
+    async fn m840_agent_send_keys_validates_all_keys_before_one_enqueue() {
+        let mut fixture = m839_real_agent_fixture(false).await;
+        m839_name_detected_fixture(&mut fixture);
+
+        let (rejected, attempts) = crate::pane::test_observe_try_sends(|| {
+            m839_call(
+                &mut fixture.app,
+                Method::AgentSendKeys(AgentSendKeysParams {
+                    target: "worker".into(),
+                    keys: vec!["up".into(), "not-a-key".into()],
+                }),
+            )
+        });
+        assert_eq!(rejected["error"]["code"], "invalid_key");
+        assert!(attempts.is_empty());
+
+        let (sent, attempts) = crate::pane::test_observe_try_sends(|| {
+            m839_call(
+                &mut fixture.app,
+                Method::AgentSendKeys(AgentSendKeysParams {
+                    target: "worker".into(),
+                    keys: vec!["up".into(), "enter".into()],
+                }),
+            )
+        });
+        assert_eq!(sent["result"]["type"], "ok");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].outcome, crate::pane::TestInputOutcome::Accepted);
+        assert_eq!(attempts[0].bytes.as_ref(), b"\x1b[A\r");
     }
 
     #[tokio::test]
