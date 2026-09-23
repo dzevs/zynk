@@ -27,6 +27,37 @@ fn command_for_program(program: &OsStr) -> Command {
 mod tests {
     use super::*;
 
+    fn write_executable_script(path: &Path, contents: &[u8]) {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        // Opening an executable for writing in this process lets an unrelated
+        // concurrent fork inherit that descriptor and can make exec fail with
+        // ETXTBSY. Keep the writer in a short-lived child instead.
+        let mut child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "umask 077; cat > \"$1\" && chmod 700 \"$1\"",
+                "zynk-plugin-command-fixture",
+            ])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn script fixture writer");
+        child
+            .stdin
+            .take()
+            .expect("script fixture writer stdin")
+            .write_all(contents)
+            .expect("write script fixture");
+        let output = child
+            .wait_with_output()
+            .expect("wait for script fixture writer");
+        assert!(output.status.success(), "{output:?}");
+    }
+
     #[test]
     fn m857_relative_program_resolves_from_plugin_root_without_retokenizing_args() {
         let root = std::env::temp_dir().join(format!(
@@ -39,13 +70,10 @@ mod tests {
         ));
         std::fs::create_dir_all(root.join("bin")).unwrap();
         let script = root.join("bin/capture");
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$1\" \"$2\"\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            b"#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$1\" \"$2\"\n",
+        );
 
         let output = command_for_argv_in_dir(
             "./bin/capture",

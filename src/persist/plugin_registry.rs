@@ -46,10 +46,15 @@ pub(crate) fn set_test_registry_dir(path: PathBuf) -> TestRegistryDirGuard {
 
 fn effective_registry_dir() -> PathBuf {
     #[cfg(test)]
-    if let Some(path) = TEST_REGISTRY_DIR.with(|slot| slot.borrow().clone()) {
-        return path;
+    {
+        TEST_REGISTRY_DIR
+            .with(|slot| slot.borrow().clone())
+            .expect("test plugin registry access requires an explicit thread-local root")
     }
-    crate::config::config_dir()
+    #[cfg(not(test))]
+    {
+        crate::config::config_dir()
+    }
 }
 
 struct BoundedJson {
@@ -301,6 +306,18 @@ mod tests {
             source: Default::default(),
             warnings: vec![],
         }
+    }
+
+    #[test]
+    fn m844_registry_access_without_a_thread_local_root_fails_closed() {
+        let root = temp_registry_path("thread-local-root");
+        let _registry = set_test_registry_dir(root.parent().unwrap().join("config"));
+
+        let result = std::thread::spawn(try_load).join();
+        assert!(
+            result.is_err(),
+            "a registry call on an unconfigured test thread must not fall back to the live config"
+        );
     }
 
     #[test]
