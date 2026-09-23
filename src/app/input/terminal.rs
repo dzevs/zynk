@@ -726,6 +726,7 @@ mod tests {
                 enabled: true,
                 platforms: None,
                 build: Vec::new(),
+                startup: Vec::new(),
                 actions: vec![crate::api::schema::PluginManifestAction {
                     id: "open".into(),
                     title: "Open link".into(),

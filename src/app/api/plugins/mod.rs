@@ -15,9 +15,9 @@ use crate::api::schema::{
     ResponseResult,
 };
 use crate::app::App;
+pub(super) use manifest::normalize_plugin_id;
 use manifest::{
-    effective_platforms, ensure_platform_supported, normalize_action_id, normalize_plugin_id,
-    normalize_plugin_source,
+    effective_platforms, ensure_platform_supported, normalize_action_id, normalize_plugin_source,
 };
 
 #[cfg(test)]
@@ -132,6 +132,7 @@ impl App {
             self.state
                 .plugin_panes
                 .retain(|_, record| record.plugin_id != plugin_id);
+            self.clear_agent_view_for_source(&format!("plugin:{plugin_id}"));
         }
         encode_success(id, ResponseResult::PluginUnlinked { plugin_id, removed })
     }
@@ -643,6 +644,9 @@ impl App {
         let Some(plugin) = self.state.installed_plugins.get(&plugin_id).cloned() else {
             return encode_error(id, "plugin_not_found", "plugin not found");
         };
+        if !enabled {
+            self.clear_agent_view_for_source(&format!("plugin:{plugin_id}"));
+        }
         if enabled {
             encode_success(id, ResponseResult::PluginEnabled { plugin })
         } else {
@@ -907,6 +911,24 @@ mod tests {
             .unwrap_or_else(|_| path.to_path_buf())
             .display()
             .to_string()
+    }
+
+    fn assert_private_plugin_path(path: &str, segments: &[&str]) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = std::path::Path::new(path);
+        let expected_suffix = segments.iter().fold(
+            std::path::PathBuf::from(crate::config::app_dir_name()).join("plugins"),
+            |suffix, segment| suffix.join(segment),
+        );
+        assert!(path.is_absolute(), "plugin path must be absolute: {path:?}");
+        assert!(
+            path.ends_with(&expected_suffix),
+            "plugin path {path:?} must end with {expected_suffix:?}"
+        );
+        let metadata = path.metadata().unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
     }
 
     /// Wait for non-empty contents at `path`. Shell `>` creates the file empty
@@ -1220,6 +1242,76 @@ platforms = ["linux", "macos", "windows"]
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn m844_startup_manifest_runs_once_isolates_failures_and_redacts_argv() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-startup");
+        let capture = root.join("startup.txt");
+        write_manifest_content(
+            &root,
+            &format!(
+                r#"
+id = "example.startup"
+name = "Startup"
+version = "0.1.0"
+min_zynk_version = "0.6.10"
+platforms = ["linux"]
+
+[[startup]]
+command = ["missing-zynk-startup-program", "private-argument"]
+
+[[startup]]
+command = ["sh", "-c", "printf started > {}"]
+"#,
+                capture.display()
+            ),
+        );
+        link_manifest(&mut app, &root);
+        assert!(
+            !capture.exists(),
+            "linking or other CLI-only paths must not run startup hooks"
+        );
+
+        app.run_plugin_startup_hooks();
+        app.run_plugin_startup_hooks();
+
+        assert_eq!(
+            read_capture_when_ready(&capture, || {
+                app.drain_all_internal_events();
+            }),
+            "started"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.state.plugin_commands_in_flight > 0 && std::time::Instant::now() < deadline {
+            app.drain_all_internal_events();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        app.drain_all_internal_events();
+        let logs = app
+            .state
+            .plugin_command_logs
+            .iter()
+            .filter(|log| log.event.as_deref() == Some("startup"))
+            .collect::<Vec<_>>();
+        assert_eq!(logs.len(), 2);
+        assert!(logs
+            .iter()
+            .all(|log| log.command == ["<startup command redacted>"]));
+        assert!(logs
+            .iter()
+            .any(|log| { matches!(log.status, crate::api::schema::PluginCommandStatus::Failed) }));
+        assert!(logs.iter().any(|log| {
+            matches!(
+                log.status,
+                crate::api::schema::PluginCommandStatus::Succeeded
+            )
+        }));
+        assert_eq!(app.state.plugin_commands_in_flight, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn plugin_link_rejects_invalid_github_source_path() {
         let mut app = test_app();
@@ -1405,6 +1497,12 @@ command = ["echo", "b"]
         let root = unique_temp_path("plugin-enable-disable");
         write_manifest(&root);
         link_manifest(&mut app, &root);
+        app.state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "plugin:example.worktree-bootstrap".into(),
+            label: None,
+            filter: None,
+            sort: Vec::new(),
+        });
 
         let disabled = app.handle_api_request(Request {
             id: "disable".into(),
@@ -1416,6 +1514,19 @@ command = ["echo", "b"]
             panic!("expected disabled response: {disabled}");
         };
         assert!(!plugin.enabled);
+        assert!(app.state.agent_view_override.is_none());
+        let delayed_restore = app.handle_api_request(Request {
+            id: "delayed-restore".into(),
+            method: Method::AgentViewSet(crate::api::schema::AgentViewSetParams {
+                source: "plugin:example.worktree-bootstrap".into(),
+                label: None,
+                filter: None,
+                sort: Vec::new(),
+            }),
+        });
+        let delayed_restore: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&delayed_restore).unwrap();
+        assert_eq!(delayed_restore.error.code, "plugin_disabled");
 
         let enabled = app.handle_api_request(Request {
             id: "enable".into(),
@@ -1628,28 +1739,13 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$ZYNK_PLUGIN_ROOT\" \"$ZYNK_PLUG
         let text = read_capture_when_ready(&capture, || {});
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some(canonical_path_string(&root).as_str()));
-        assert_eq!(
-            lines.next(),
-            Some(
-                crate::config::config_dir()
-                    .join("plugins")
-                    .join("config")
-                    .join("example.path-env")
-                    .display()
-                    .to_string()
-                    .as_str()
-            )
+        assert_private_plugin_path(
+            lines.next().expect("plugin config path"),
+            &["config", "example.path-env"],
         );
-        assert_eq!(
-            lines.next(),
-            Some(
-                crate::config::state_dir()
-                    .join("plugins")
-                    .join("example.path-env")
-                    .display()
-                    .to_string()
-                    .as_str()
-            )
+        assert_private_plugin_path(
+            lines.next().expect("plugin state path"),
+            &["example.path-env"],
         );
 
         for (_, runtime) in app.terminal_runtimes.drain() {
@@ -2007,28 +2103,13 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$ZYNK_PLUGIN_ROOT\" \"$ZYNK_PLUGIN
         assert_eq!(finished.status, PluginCommandStatus::Succeeded);
         let mut lines = finished.stdout.as_deref().unwrap_or_default().lines();
         assert_eq!(lines.next(), Some(canonical_path_string(&root).as_str()));
-        assert_eq!(
-            lines.next(),
-            Some(
-                crate::config::config_dir()
-                    .join("plugins")
-                    .join("config")
-                    .join("example.action-paths")
-                    .display()
-                    .to_string()
-                    .as_str()
-            )
+        assert_private_plugin_path(
+            lines.next().expect("plugin config path"),
+            &["config", "example.action-paths"],
         );
-        assert_eq!(
-            lines.next(),
-            Some(
-                crate::config::state_dir()
-                    .join("plugins")
-                    .join("example.action-paths")
-                    .display()
-                    .to_string()
-                    .as_str()
-            )
+        assert_private_plugin_path(
+            lines.next().expect("plugin state path"),
+            &["example.action-paths"],
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -3018,10 +3099,9 @@ command = ["sh", "-c", "printf allowed"]
 
     #[test]
     fn m847_live_plugin_consumers_refresh_global_enabled_state() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         let base = unique_temp_path("plugin-global-refresh");
-        std::env::set_var("XDG_CONFIG_HOME", &base);
+        let _registry =
+            crate::persist::plugin_registry::set_test_registry_dir(base.join("registry"));
         let root = base.join("plugin");
         write_manifest(&root);
         let plugin = load_plugin_manifest(&root.display().to_string(), false).unwrap();
@@ -3092,10 +3172,6 @@ command = ["sh", "-c", "printf allowed"]
         assert_eq!(app.state.plugin_command_logs.len(), logs_before);
 
         let _ = std::fs::remove_dir_all(&base);
-        match previous_config_home {
-            Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     // ── Platform compatibility tests ─────────────────────────────────────────

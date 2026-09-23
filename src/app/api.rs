@@ -2,6 +2,7 @@
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::time::{Duration, Instant};
 
+mod agent_view;
 mod agents;
 pub(crate) mod caller;
 mod env;
@@ -1067,6 +1068,10 @@ impl App {
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
             Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
+            Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
+            Method::AgentViewClear(params) => {
+                return self.handle_agent_view_clear(request.id, params)
+            }
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentPrompt(params) => return self.handle_agent_prompt(request.id, params),
             Method::AgentWait(_) => {

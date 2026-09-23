@@ -1579,6 +1579,8 @@ pub struct AppState {
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
+    /// Transient session-wide projection override for the built-in Agents view.
+    pub agent_view_override: Option<crate::api::schema::AgentViewSetParams>,
     pub status_indicators: crate::config::StatusIndicatorStyle,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Zynk's own mouse UI. When false, Zynk only
@@ -1650,6 +1652,8 @@ pub struct AppState {
     pub integration_install_messages: Vec<String>,
     /// Installed or linked plugins known to this running zynk instance.
     pub(crate) installed_plugins: InstalledPluginRegistry,
+    /// Guards startup hooks so each actual server process dispatches them once.
+    pub(crate) plugin_startup_hooks_started: bool,
     /// Pane ids opened through the plugin pane API.
     pub(crate) plugin_panes: std::collections::HashMap<PaneId, PluginPaneRecord>,
     /// Session-local API image layers, excluded from persistence and handoff.
@@ -1983,6 +1987,7 @@ impl AppState {
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             sidebar_section_split: 0.5,
             agent_panel_sort: AgentPanelSort::Spaces,
+            agent_view_override: None,
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
             next_agent_state_change_seq: 0,
             mouse_capture: true,
@@ -2046,6 +2051,7 @@ impl AppState {
                 crate::detect::manifest_update::ManifestUpdateStatus::default(),
             integration_install_messages: Vec::new(),
             installed_plugins: std::collections::HashMap::new(),
+            plugin_startup_hooks_started: false,
             plugin_panes: std::collections::HashMap::new(),
             pane_graphics_layers: std::collections::HashMap::new(),
             pane_graphics_streams: std::collections::HashMap::new(),

@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use super::manifest::{effective_platforms, ensure_platform_supported};
 use super::plugin_manifest_available;
@@ -11,6 +12,7 @@ use crate::app::App;
 const PLUGIN_COMMAND_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 pub(super) const MAX_PLUGIN_COMMANDS_IN_FLIGHT: usize = 32;
 const PLUGIN_COMMAND_LOG_LIMIT: usize = 200;
+const PLUGIN_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl App {
     pub(super) fn start_plugin_command(
@@ -27,6 +29,12 @@ impl App {
                 "invalid_plugin_command",
                 "command must not be empty".to_string(),
             ));
+        };
+        let is_startup = event.as_deref() == Some("startup");
+        let logged_command = if is_startup {
+            vec!["<startup command redacted>".to_string()]
+        } else {
+            command.clone()
         };
         let args = command.iter().skip(1).cloned().collect::<Vec<_>>();
         let context_json = serde_json::to_string(context)
@@ -88,7 +96,7 @@ impl App {
                 plugin_id: plugin.plugin_id.clone(),
                 action_id,
                 event,
-                command,
+                command: logged_command,
                 status: PluginCommandStatus::Failed,
                 started_unix_ms,
                 finished_unix_ms: Some(started_unix_ms),
@@ -106,7 +114,7 @@ impl App {
             plugin_id: plugin.plugin_id.clone(),
             action_id,
             event,
-            command: command.clone(),
+            command: logged_command,
             status: PluginCommandStatus::Running,
             started_unix_ms,
             finished_unix_ms: None,
@@ -119,12 +127,17 @@ impl App {
         self.state.plugin_commands_in_flight += 1;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let child =
-                crate::plugin_command::command_for_argv_in_dir(&program, &args, &plugin_root)
-                    .envs(env)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn();
+            let mut command =
+                crate::plugin_command::command_for_argv_in_dir(&program, &args, &plugin_root);
+            if is_startup {
+                use std::os::unix::process::CommandExt as _;
+                command.process_group(0);
+            }
+            let child = command
+                .envs(env)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
             let finished = match child {
                 Ok(mut child) => {
                     let stdout = child.stdout.take();
@@ -139,19 +152,42 @@ impl App {
                             read_capped_plugin_output(stderr, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
                         })
                     });
-                    match child.wait() {
-                        Ok(status) => crate::events::AppEvent::PluginCommandFinished {
-                            log_id,
-                            finished_unix_ms: current_unix_ms(),
-                            exit_code: status.code(),
-                            stdout: stdout_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            stderr: stderr_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            error: None,
-                        },
+                    match wait_for_plugin_child(
+                        &mut child,
+                        is_startup.then_some(PLUGIN_STARTUP_TIMEOUT),
+                        is_startup,
+                    ) {
+                        Ok(PluginChildWait::Exited(status)) => {
+                            crate::events::AppEvent::PluginCommandFinished {
+                                log_id,
+                                finished_unix_ms: current_unix_ms(),
+                                exit_code: status.code(),
+                                stdout: stdout_reader
+                                    .and_then(|reader| reader.join().ok())
+                                    .unwrap_or_default(),
+                                stderr: stderr_reader
+                                    .and_then(|reader| reader.join().ok())
+                                    .unwrap_or_default(),
+                                error: None,
+                            }
+                        }
+                        Ok(PluginChildWait::TimedOut(status)) => {
+                            crate::events::AppEvent::PluginCommandFinished {
+                                log_id,
+                                finished_unix_ms: current_unix_ms(),
+                                exit_code: status.code(),
+                                stdout: stdout_reader
+                                    .and_then(|reader| reader.join().ok())
+                                    .unwrap_or_default(),
+                                stderr: stderr_reader
+                                    .and_then(|reader| reader.join().ok())
+                                    .unwrap_or_default(),
+                                error: Some(format!(
+                                    "plugin startup command timed out after {} ms",
+                                    PLUGIN_STARTUP_TIMEOUT.as_millis()
+                                )),
+                            }
+                        }
                         Err(err) => crate::events::AppEvent::PluginCommandFinished {
                             log_id,
                             finished_unix_ms: current_unix_ms(),
@@ -178,6 +214,50 @@ impl App {
             let _ = event_tx.blocking_send(finished);
         });
         Ok(log)
+    }
+
+    pub(crate) fn run_plugin_startup_hooks(&mut self) {
+        if self.state.plugin_startup_hooks_started {
+            return;
+        }
+        self.state.plugin_startup_hooks_started = true;
+        if let Err(err) = self.refresh_installed_plugins() {
+            tracing::warn!(err = %err, "failed to refresh plugin registry before startup hooks");
+            return;
+        }
+
+        let mut context = self.current_plugin_context("plugin.startup");
+        context.invocation_source = Some("startup".to_string());
+        let mut plugins = self
+            .state
+            .installed_plugins
+            .values()
+            .filter(|plugin| {
+                plugin.enabled && plugin_manifest_available(plugin) && !plugin.startup.is_empty()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        plugins.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
+        for plugin in plugins {
+            for startup in plugin.startup.clone() {
+                if ensure_platform_supported(
+                    &effective_platforms(&startup.platforms, &plugin.platforms).clone(),
+                    "startup",
+                )
+                .is_err()
+                {
+                    continue;
+                }
+                let _ = self.start_plugin_command(
+                    &plugin,
+                    None,
+                    Some("startup".to_string()),
+                    startup.command,
+                    &context,
+                    None,
+                );
+            }
+        }
     }
 
     pub(crate) fn run_plugin_event_hooks(&mut self, event: &crate::api::schema::EventEnvelope) {
@@ -239,6 +319,50 @@ impl App {
     }
 }
 
+enum PluginChildWait {
+    Exited(std::process::ExitStatus),
+    TimedOut(std::process::ExitStatus),
+}
+
+fn wait_for_plugin_child(
+    child: &mut std::process::Child,
+    timeout: Option<Duration>,
+    terminate_process_group: bool,
+) -> std::io::Result<PluginChildWait> {
+    let Some(timeout) = timeout else {
+        return child.wait().map(PluginChildWait::Exited);
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(PluginChildWait::Exited(status));
+        }
+        if Instant::now() >= deadline {
+            if terminate_process_group {
+                let process_group = i32::try_from(child.id()).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "plugin process id exceeds Linux pid range",
+                    )
+                })?;
+                let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+                if result != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(err);
+                    }
+                }
+            } else if let Err(err) = child.kill() {
+                if err.kind() != std::io::ErrorKind::InvalidInput {
+                    return Err(err);
+                }
+            }
+            return child.wait().map(PluginChildWait::TimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn current_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -273,4 +397,30 @@ pub(super) fn read_capped_plugin_output(mut reader: impl Read, cap: usize) -> St
         ));
     }
     output
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn m844_startup_wait_kills_a_command_at_the_runtime_bound() {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 5 & wait"])
+            .process_group(0)
+            .stdout(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let started = Instant::now();
+        let outcome =
+            wait_for_plugin_child(&mut child, Some(Duration::from_millis(30)), true).unwrap();
+        assert!(matches!(outcome, PluginChildWait::TimedOut(_)));
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(child.try_wait().unwrap().is_some());
+    }
 }

@@ -13,6 +13,45 @@ const PLUGIN_REGISTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const REGISTRY_LOCK_FILE: &str = ".plugins.lock";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+thread_local! {
+    static TEST_REGISTRY_DIR: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) struct TestRegistryDirGuard {
+    previous: Option<PathBuf>,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl Drop for TestRegistryDirGuard {
+    fn drop(&mut self) {
+        TEST_REGISTRY_DIR.with(|slot| {
+            *slot.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_registry_dir(path: PathBuf) -> TestRegistryDirGuard {
+    let previous = TEST_REGISTRY_DIR.with(|slot| slot.borrow_mut().replace(path));
+    TestRegistryDirGuard {
+        previous,
+        _not_send: std::marker::PhantomData,
+    }
+}
+
+fn effective_registry_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_REGISTRY_DIR.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
+    crate::config::config_dir()
+}
+
 struct BoundedJson {
     bytes: Vec<u8>,
 }
@@ -35,11 +74,11 @@ impl std::io::Write for BoundedJson {
 }
 
 fn registry_path() -> PathBuf {
-    crate::config::config_dir().join("plugins.json")
+    effective_registry_dir().join("plugins.json")
 }
 
 fn registry_lock_path() -> PathBuf {
-    crate::config::config_dir().join(REGISTRY_LOCK_FILE)
+    effective_registry_dir().join(REGISTRY_LOCK_FILE)
 }
 
 fn open_private_file(path: &Path, create: bool) -> std::io::Result<File> {
@@ -254,6 +293,7 @@ mod tests {
             enabled: true,
             platforms: None,
             build: vec![],
+            startup: vec![],
             actions: vec![],
             events: vec![],
             panes: vec![],
@@ -338,6 +378,7 @@ mod tests {
                 enabled: true, // caller would pass stored enabled; fresh parse returns true
                 platforms: None,
                 build: vec![],
+                startup: vec![],
                 actions: vec![],
                 events: vec![],
                 panes: vec![],
@@ -397,11 +438,8 @@ mod tests {
     fn m847_global_registry_updates_atomically_with_private_modes() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let previous = std::env::var_os("XDG_CONFIG_HOME");
         let root = temp_registry_path("global-private");
-        let config_home = root.parent().unwrap().join("config");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        let _registry = set_test_registry_dir(root.parent().unwrap().join("config"));
 
         update(|plugins| plugins.push(sample_plugin("example.private"))).unwrap();
         let loaded = try_load().unwrap();
@@ -447,9 +485,5 @@ mod tests {
         assert_eq!(std::fs::read(&symlink_target).unwrap(), b"outside");
 
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
-        match previous {
-            Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 }

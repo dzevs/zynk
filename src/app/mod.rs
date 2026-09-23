@@ -8,6 +8,7 @@
 
 pub(crate) mod actions;
 mod agent_resume;
+pub(crate) mod agent_view;
 mod agents;
 mod api;
 mod api_helpers;
@@ -632,6 +633,7 @@ impl App {
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
             sidebar_section_split,
             agent_panel_sort,
+            agent_view_override: None,
             status_indicators: config.ui.status_indicators,
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
@@ -684,6 +686,7 @@ impl App {
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
             integration_install_messages: Vec::new(),
             installed_plugins: load_plugin_registry(no_session),
+            plugin_startup_hooks_started: false,
             plugin_panes: std::collections::HashMap::new(),
             pane_graphics_layers: std::collections::HashMap::new(),
             pane_graphics_streams: std::collections::HashMap::new(),

@@ -64,8 +64,10 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/api/wait.rs
 - src/app/actions.rs
 - src/app/agent_resume.rs
+- src/app/agent_view.rs
 - src/app/agents.rs
 - src/app/api.rs
+- src/app/api/agent_view.rs
 - src/app/api_helpers.rs
 - src/app/api/agents.rs
 - src/app/api/layouts.rs

@@ -122,6 +122,10 @@ pub enum Method {
     AgentRename(AgentRenameParams),
     #[serde(rename = "agent.focus")]
     AgentFocus(AgentTarget),
+    #[serde(rename = "agent.view.set")]
+    AgentViewSet(AgentViewSetParams),
+    #[serde(rename = "agent.view.clear")]
+    AgentViewClear(AgentViewClearParams),
     #[serde(rename = "agent.start")]
     AgentStart(AgentStartParams),
     #[serde(rename = "agent.prompt")]
@@ -243,6 +247,58 @@ pub enum Method {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m844_agent_view_wire_contract_is_recursive_typed_and_ui_changing() {
+        let request = serde_json::json!({
+            "id": "view-set",
+            "method": "agent.view.set",
+            "params": {
+                "source": "plugin:focus",
+                "label": "current blocked",
+                "filter": {
+                    "op": "all",
+                    "filters": [
+                        {
+                            "op": "eq",
+                            "field": "workspace_id",
+                            "value": {"context": "current_workspace_id"}
+                        },
+                        {
+                            "op": "not",
+                            "filter": {
+                                "op": "in",
+                                "field": "status",
+                                "values": ["idle", "done"]
+                            }
+                        }
+                    ]
+                },
+                "sort": [
+                    {"field": "attention", "order": "desc"},
+                    {"field": {"token": "queue"}, "order": "asc"}
+                ]
+            }
+        });
+        let decoded: super::Request = serde_json::from_value(request.clone()).unwrap();
+        let super::Method::AgentViewSet(params) = &decoded.method else {
+            panic!("agent.view.set shape");
+        };
+        assert_eq!(params.source, "plugin:focus");
+        assert_eq!(params.sort.len(), 2);
+        assert!(crate::api::request_changes_ui(&decoded));
+        assert_eq!(serde_json::to_value(decoded).unwrap(), request);
+
+        let clear = serde_json::json!({
+            "id": "view-clear",
+            "method": "agent.view.clear",
+            "params": {"source": "plugin:focus"}
+        });
+        let decoded: super::Request = serde_json::from_value(clear.clone()).unwrap();
+        assert!(matches!(decoded.method, super::Method::AgentViewClear(_)));
+        assert!(crate::api::request_changes_ui(&decoded));
+        assert_eq!(serde_json::to_value(decoded).unwrap(), clear);
+    }
+
     #[test]
     fn m840_agent_automation_wire_additions_preserve_message_send() {
         let cases = [
@@ -2195,6 +2251,8 @@ mod tests {
         "agent.send_keys",
         "agent.rename",
         "agent.focus",
+        "agent.view.set",
+        "agent.view.clear",
         "agent.start",
         "agent.prompt",
         "agent.wait",

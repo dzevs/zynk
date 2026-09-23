@@ -234,7 +234,7 @@ impl AppState {
     }
 
     pub(super) fn on_sidebar_divider(&self, col: u16, row: u16) -> bool {
-        if self.sidebar_collapsed {
+        if self.sidebar_collapsed || self.agent_view_override.is_some() {
             return false;
         }
         let sidebar = self.view.sidebar_rect;

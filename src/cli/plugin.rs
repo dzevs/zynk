@@ -1243,6 +1243,7 @@ fn print_install_preview(
         eprintln!("  commit: {commit}");
     }
     eprintln!("  actions: {}", plugin.actions.len());
+    eprintln!("  startup commands: {}", plugin.startup.len());
     eprintln!("  events: {}", plugin.events.len());
     eprintln!("  panes: {}", plugin.panes.len());
     eprintln!("  link handlers: {}", plugin.link_handlers.len());
@@ -1690,6 +1691,7 @@ mod tests {
             enabled: true,
             platforms: None,
             build: vec![],
+            startup: vec![],
             actions: vec![],
             events: vec![],
             panes: vec![],

@@ -33,6 +33,7 @@ pub(crate) struct AgentPanelEntry {
     /// (unlike `primary_tab_label`, which the flat/mobile path sets for multiple or renamed tabs).
     pub tab_label: String,
     pub agent_label: Option<String>,
+    pub agent_kind_label: Option<String>,
     pub agent: Option<crate::detect::Agent>,
     pub pane_label: Option<String>,
     pub terminal_title: Option<String>,
@@ -92,11 +93,14 @@ fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
 }
 
 pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect {
+    agent_panel_header_label_rect(area, agent_panel_sort_label(sort))
+}
+
+fn agent_panel_header_label_rect(area: Rect, label: &str) -> Rect {
     if area.width == 0 || area.height < 2 {
         return Rect::default();
     }
 
-    let label = agent_panel_sort_label(sort);
     let width = display_width_u16(label).min(area.width);
     Rect::new(
         area.x + area.width.saturating_sub(width),
@@ -106,8 +110,18 @@ pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect 
     )
 }
 
+fn active_agent_view_label(app: &AppState) -> Option<&str> {
+    app.agent_view_override
+        .as_ref()
+        .map(|view| view.label.as_deref().unwrap_or("filtered"))
+}
+
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
+}
+
+pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+    collect_agent_panel_entries_with_runtimes(app, None)
 }
 
 pub(crate) fn agent_panel_entries_from(
@@ -121,6 +135,15 @@ fn agent_panel_entries_with_runtimes(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
 ) -> Vec<AgentPanelEntry> {
+    let mut entries = collect_agent_panel_entries_with_runtimes(app, terminal_runtimes);
+    crate::app::agent_view::apply_agent_view(app, &mut entries);
+    entries
+}
+
+fn collect_agent_panel_entries_with_runtimes(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+) -> Vec<AgentPanelEntry> {
     let empty_runtimes;
     let terminal_runtimes = match terminal_runtimes {
         Some(terminal_runtimes) => terminal_runtimes,
@@ -130,8 +153,7 @@ fn agent_panel_entries_with_runtimes(
         }
     };
 
-    let mut entries: Vec<_> = app
-        .workspaces
+    app.workspaces
         .iter()
         .enumerate()
         .flat_map(|(ws_idx, ws)| {
@@ -153,6 +175,7 @@ fn agent_panel_entries_with_runtimes(
                         tab_label: detail.tab_label.clone(),
                         primary_tab_label: show_tab.then_some(detail.tab_label),
                         agent_label: Some(detail.agent_label),
+                        agent_kind_label: detail.agent_kind_label,
                         agent: detail.agent,
                         pane_label: detail.pane_label,
                         terminal_title: detail.terminal_title,
@@ -166,18 +189,7 @@ fn agent_panel_entries_with_runtimes(
                     }
                 })
         })
-        .collect();
-
-    if matches!(app.agent_panel_sort, AgentPanelSort::Priority) {
-        entries.sort_by_key(|entry| {
-            (
-                std::cmp::Reverse(workspace_attention_priority(entry.state, entry.seen)),
-                std::cmp::Reverse(entry.last_agent_state_change_seq),
-            )
-        });
-    }
-
-    entries
+        .collect()
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -829,10 +841,15 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     }
 
     if let Some(divider_y) = divider_y {
+        let divider_color = if app.agent_view_override.is_some() {
+            p.accent
+        } else {
+            p.surface_dim
+        };
         let buf = frame.buffer_mut();
         for x in ws_area.x..ws_area.x + ws_area.width {
             buf[(x, divider_y)].set_symbol("─");
-            buf[(x, divider_y)].set_style(Style::default().fg(p.surface_dim));
+            buf[(x, divider_y)].set_style(Style::default().fg(divider_color));
         }
     }
 
@@ -1541,12 +1558,19 @@ fn render_agent_detail(
         )])),
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
-    let toggle_rect = agent_panel_toggle_rect(area, app.agent_panel_sort);
+    let control_label = active_agent_view_label(app)
+        .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
+    let toggle_rect = agent_panel_header_label_rect(area, control_label);
     if toggle_rect != Rect::default() {
+        let color = if app.agent_view_override.is_some() {
+            p.accent
+        } else {
+            p.overlay0
+        };
         frame.render_widget(
             Paragraph::new(Span::styled(
-                agent_panel_sort_label(app.agent_panel_sort),
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                control_label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             ))
             .alignment(Alignment::Right),
             toggle_rect,
@@ -1558,6 +1582,14 @@ fn render_agent_detail(
     let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
     let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
     if body == Rect::default() {
+        return;
+    }
+    if details.is_empty() && app.agent_view_override.is_some() {
+        frame.render_widget(
+            Paragraph::new(" no matching agents")
+                .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
+            Rect::new(body.x, body.y, body.width, 1),
+        );
         return;
     }
 
@@ -6179,6 +6211,7 @@ mod tests {
             primary_tab_label: None,
             tab_label: format!("tab {}", tab_idx + 1),
             agent_label: Some(agent.into()),
+            agent_kind_label: Some(agent.into()),
             state: AgentState::Idle,
             seen: true,
             last_agent_state_change_seq: None,
@@ -6322,6 +6355,37 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn m844_active_view_renders_label_and_empty_state() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        app.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "manual.view".to_string(),
+            label: Some("blocked only".to_string()),
+            filter: Some(crate::api::schema::AgentViewFilter::Eq {
+                field: crate::api::schema::AgentViewField::Builtin(
+                    crate::api::schema::AgentViewBuiltinField::Status,
+                ),
+                value: crate::api::schema::AgentViewValue::String("blocked".to_string()),
+            }),
+            sort: Vec::new(),
+        });
+
+        let joined = render_agent_detail_to_lines(&mut app, 30, 8).join("\n");
+        assert!(joined.contains("blocked only"), "{joined}");
+        assert!(joined.contains("no matching agents"), "{joined}");
     }
 
     #[test]

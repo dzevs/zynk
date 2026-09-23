@@ -131,6 +131,7 @@ mod tests {
             primary_tab_label: Some("tab-value".into()),
             tab_label: "group-header-value".into(),
             agent_label: Some("renamed-claude".into()),
+            agent_kind_label: Some("claude".into()),
             agent: Some(Agent::Claude),
             pane_label: Some("pane-value".into()),
             terminal_title: Some("\u{280b} raw-title".into()),

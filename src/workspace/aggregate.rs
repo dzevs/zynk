@@ -18,6 +18,7 @@ pub struct PaneDetail {
     pub terminal_title: Option<String>,
     pub terminal_title_stripped: Option<String>,
     pub agent_label: String,
+    pub agent_kind_label: Option<String>,
     pub agent: Option<Agent>,
     pub state: AgentState,
     pub seen: bool,
@@ -40,10 +41,11 @@ impl Tab {
             .filter_map(|id| {
                 let pane = self.panes.get(id)?;
                 let terminal = terminals.get(&pane.attached_terminal_id)?;
+                let agent_kind_label = terminal.effective_agent_label().map(str::to_string);
                 let fallback_agent_label = terminal
                     .agent_name
                     .as_deref()
-                    .or_else(|| terminal.effective_agent_label())?
+                    .or(agent_kind_label.as_deref())?
                     .to_string();
                 let agent_label = terminal
                     .effective_display_agent()
@@ -60,6 +62,7 @@ impl Tab {
                     terminal_title: terminal.terminal_title().map(str::to_owned),
                     terminal_title_stripped: terminal.terminal_title_stripped(),
                     agent_label,
+                    agent_kind_label,
                     agent: terminal.effective_known_agent(),
                     state: terminal.state,
                     seen: pane.seen,
