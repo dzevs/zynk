@@ -10,6 +10,17 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- First-class agent automation now includes raw `agent send-keys`, typed multi-state `agent wait`, bounded
+  prompt waiting, readiness-gated prompt submission, Copilot focus, supported-shell startup waits, and clear
+  blocked/working refusal codes. Raw keys create no message row; prompt wait failures preserve the one durable
+  submission and must not be resubmitted.
+- Plugins now share one private global registry across named sessions. Local links work without a running
+  server; manifest commands preserve argv and resolve relative programs from the plugin root. Linux startup
+  hooks run once per server process with bounded, isolated failures, and typed agent views can filter/sort the
+  displayed agent list without changing identity, receipts, global counts, or underlying state.
+- `zynk --skill` prints the bundled root agent skill. Commands that need a local server now report one typed
+  `server_not_running` diagnostic with startup guidance, without masking protocol or API errors. Codex
+  trust-directory prompts are recognized as Blocked observations through manifest engine version 3.
 - Managed-agent launch and prompt automation. `agent start` reserves a name while Pending, launches
   into an existing supported shell, and waits for interactive readiness; `agent prompt` persists the
   resolved Party, enforces terminal and foreground readiness, submits once, and can optionally wait
@@ -130,6 +141,8 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Changed**
 
+- `agent prompt` now queues text and a 300 ms delayed Enter as one ordered PTY actor command, so later input
+  cannot overtake submission. GitHub Copilot receives focus before the prompt text on the same command.
 - `pane.send_input`, `agent send`, `agent prompt`, and `pane run` now enqueue one encoded byte vector
   after validating all keys. Empty text with no keys is one empty queue item rather than no item.
 - Migration 0005 adds `agent.prompt` to delivery-event proof provenance by rebuilding the constrained

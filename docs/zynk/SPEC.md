@@ -228,6 +228,29 @@ typed-refused rather than launched. The later protocol-20 port must absorb this 
 `AgentPromptParams.expected_terminal_id` is an optional fork wire precondition; the fork CLI always
 supplies it from the same resolution that produced the persisted Party.
 
+### B1 agent automation refinements
+
+`agent.send_keys` is the raw automation counterpart to the fork's persisted `agent.send`: it resolves the
+agent target, validates every key before mutation, sends no text, and creates no message or delivery event.
+`agent.wait` accepts repeated `--until` states and otherwise defaults to Idle, Done, or Blocked. Prompt
+`--wait` uses the same status vocabulary but still requires the post-submission sequence gate described above.
+These four B1 wire additions (`agent.send_keys`, `agent.wait`, `agent.view.set`, and `agent.view.clear`) remain
+on protocol 19 only as an uninstalled port intermediate; protocol 20 absorbs them in B2.
+
+Prompt submission separates the encoded text from Enter and schedules Enter 300 ms later through one ordered
+PTY actor command. Input queued after that command remains behind the delayed suffix. GitHub Copilot receives
+a focus-gained sequence before the prompt text on that same submission. A Working target returns
+`agent_working`; a Blocked target returns `agent_blocked`; neither path writes input or records Submitted.
+The Codex `trust_directory` detector rule is a priority-950 `visible_blocker` over the top 20
+nonempty lines. It is status evidence only: it may gate prompt admission but cannot mint identity,
+`agent_session`, managed ownership, proof, or receipt authority.
+
+Newly launched panes are polled until the same terminal exposes one of the accepted Linux foreground shells
+before `agent.start` is submitted. The client never retargets during that wait. A missing local server produces
+one typed `server_not_running` diagnostic with a concrete start command; protocol mismatches and typed API
+errors retain their own diagnostics. `zynk --skill` prints the bundled root `SKILL.md`; release preparation
+continues to use the repository's `zynk-pre-release-audit` skill.
+
 **Send response (F4):** every send returns the persisted record + delivery state:
 ```json
 { "result": "ok", "command": "agent send", "message_id": "...", "conversation_id": "...",
@@ -481,6 +504,28 @@ The accepted nonblocking status depends on the flag remaining default false
 and experimental. Before changing either, resolve the budget or explicitly
 document the limitation for the changed policy; the operator retains release
 approval. Per-request tests do not establish aggregate memory safety.
+
+### Global plugins, startup hooks, and agent views
+
+The installed-plugin registry is global across named sessions under zynk's private config directory. Registry
+and lock files are same-user regular files, capped and opened without following symlinks; updates serialize
+through the lock, write a private temporary file, sync it, rename atomically, and sync the directory. A corrupt
+registry is never overwritten by a mutation. `plugin link` can validate and persist a local manifest without a
+running server, and live sessions refresh the shared registry before plugin operations. Tests must provide an
+explicit isolated registry root; test code never falls back to the user's live config directory.
+
+Manifest build, action, event, pane, and startup commands are nonempty argv vectors. Arguments are never
+flattened into a shell string. A relative program containing `/` resolves from the plugin root while its
+arguments and environment remain distinct. Startup commands are Linux-filtered, failure-isolated, capped to 32
+concurrent plugin commands and 64 KiB per output stream, and bounded to 10 seconds. They run once per actual
+server process after registry refresh, not during CLI-only linking, restore replay, or handoff import. Startup
+logs redact command argv; one failed hook does not prevent another hook or server readiness.
+
+`agent.view.set` installs one bounded, typed projection with recursive filters over status, workspace, tab,
+pane, agent kind, seen state, state sequence, or metadata tokens, plus stable sort fields. `agent.view.clear`
+is source-guarded. A view changes only sidebar/mobile projection, scroll selection, and the displayed label or
+empty state; global counts and underlying agent state stay unchanged. Plugin disable/unlink clears that
+plugin's view. Detection-labelled view data remains observation and never creates receiver or receipt authority.
 
 ### Modal terminal popups
 

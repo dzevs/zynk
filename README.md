@@ -54,6 +54,8 @@ zynk gives the terminal that missing coordination layer:
 - **Detach / reattach + restore** — pane processes survive client detach; sessions restore panes after a full
   restart, with opt-in recent screen history.
 - **Integrations** — official agent hooks add native session identity and semantic state reporting.
+- **Agent automation** — typed raw keys, bounded status waits, readiness-gated prompts, and managed launches.
+- **Global plugins** — shared private registry, argv-preserving commands, startup hooks, and agent-view filters.
 - Mouse-native throughout, 18 built-in themes, keyboard copy mode, and sound/toast notifications.
 
 ## Install
@@ -143,6 +145,9 @@ zynk thread <conversation>                             # read-only: walk a conve
 zynk inbox                                             # read-only: messages addressed to you
 zynk who                                               # live agents / panes in the session
 zynk query <text> [--workspace|--conversation|--agent|--since|--limit]   # hybrid retrieval
+zynk agent send-keys <target> <key> [key ...]                           # raw keys; no message row
+zynk agent wait <name> [--until STATUS]... [--timeout MS]               # pin target; wait for state
+zynk agent prompt <name> [--wait] [--timeout MS] -- <text>              # readiness-gated submit
 ```
 
 Design guarantees (binding):
@@ -171,6 +176,22 @@ between bounded requests/polls, not as a hard wall-clock deadline. Status fields
 not authenticated identity or receipt evidence. `agent wait` completes on Idle, Done, or Blocked,
 including an already-idle Pending managed agent; use `agent start` when interactive launch readiness
 is required.
+
+`agent send-keys` is raw terminal automation and does not create a message or delivery event. `agent prompt`
+submits only when the named agent is on the same terminal, in the foreground, interactive-ready when managed,
+and neither Working nor Blocked. Prompt text and the delayed Enter remain one ordered PTY actor command; later
+input cannot overtake Enter. A wait failure preserves the submitted message id and must not be retried as a new
+prompt. Codex trust-directory prompts are detected as Blocked observations, not authenticated identity.
+
+Plugin installation state is shared across named sessions in the private zynk config directory. Local
+`zynk plugin link PATH` works without starting a server. Manifest commands are argv arrays, relative programs
+resolve from the plugin root, and arguments are never re-tokenized by a shell. Linux startup hooks run once per
+server process, are bounded and failure-isolated, and do not run for CLI-only linking, restore replay, or
+handoff import. Plugins may install a typed agent-view filter/sort projection; views change presentation only
+and never grant agent identity or receipt authority.
+
+Run `zynk --skill` to print the bundled automation skill. Commands that require a local server report one
+`server_not_running` diagnostic with a start command; protocol mismatches and typed API errors remain distinct.
 
 Explicit `pane.focus` and `agent.focus` API requests mark every unseen pane in the
 destination tab seen, including when the target is already focused. An idle sibling

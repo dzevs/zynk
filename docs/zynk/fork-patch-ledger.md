@@ -7207,6 +7207,12 @@ correction absent from upstream `e0758c32` and `v0.8.2`; future ports of upstrea
 `7e4ab7b0`, and `e48d8306` must preserve it. The no-managed-state path retains the parent's update and
 early-return effects.
 
+N23 correction: primary future preservation inputs also include M8-44 `d30ab1b5`, M8-58 `bc1c052d`,
+M8-65 `6f311498`, and M8-67 `1777e9bb`. Preservation is by region, not commit-name memory:
+`src/app/runtime.rs` keeps the shared managed deadline and due helper; `src/server/headless.rs` invokes that
+helper after metadata expiry and before geometry/resume work; and the settle/expiry headless timer controls
+retain progress, idempotence, dirty/save/render, manual-label, and no-authority assertions.
+
 `agent.prompt` persists the resolved Party, checks the same terminal and foreground process before one
 submission, records Submitted before optional waiting, and preserves the message id and submitted status
 when waiting fails. Malformed, contradictory, or lost responses remain submission-unverified and advise
@@ -7242,3 +7248,59 @@ prerequisite-interpretation occurrences, the preparation occurrence, reviewer ga
 three standing limits, capped instrument histories, resource/schema/handoff limits,
 `M83335-EXACT-PAINT-ABSENCE`, and `MPD-FORMAT-APPROVAL-ORDER` retain their recorded terms. This range
 authorizes no merge, push, install, tag, publish, release, cleanup, or live-runtime action.
+
+### B1 end-state batch - agent automation and plugins (M8-42 through M8-75 subset)
+
+The operator-approved end-state batch starts from `bb6fc7abdb4a062d8c3e2e759416a87c68afa596`. Its coherent
+implementation commits through the documentation decision are `3443f877a52133115935224350c124be87e2cc04`,
+`8ceabc2d26c81aeb6cb0034eaf56e5bee580989c`, `175a04d21a628035b94962efef646df15a835b08`,
+`a8525cb532832538f42f0926619f8a870a0fc134`, `4633f0aaf420377416ffbc524c5f60be13a6f754`,
+`06a212fb15554b693131ede254a96359affc9240`, and
+`742d75f3fc9d63b437f5f05d8f5a9fa903e8cce5`. The exact batch tip, tree, final checks, packet, and Gate-2
+remain due until the B1 seal; no passing outcome is pre-recorded here.
+
+Authority rows, each applied once to its final B1 region:
+
+- M8-42 `f76f895efe5b9f19aa9db909354c6c0f2195630b` (PORT): preserve plugin command argv.
+- M8-43 `3f80947678a9723434aa7fddfe23750b5393e24c` (ADAPT_FORK): typed agent automation while retaining
+  `agent.send`, F4, authoritative identity, managed launch, and protocol 19.
+- M8-44 `d30ab1b54f6b6be95a0cb47ddc38da1d5e088700` (ADAPT_FORK): plugin agent views and startup hooks while
+  preserving authority and the fork-owned headless managed scheduler.
+- M8-45 `6f7ef04e7dd5a8ec35c5aac8c9b6be1447290399` and M8-46
+  `d956a6b56dabac9690260e50a9e03372510877d4` (PORT): bounded waits and target-before-options help.
+- M8-47 `69d07dba84411db33bf1f5191a69f80e5069c6ea` (ADAPT_FORK): global private plugin registry with
+  atomic, same-user, no-symlink persistence and live refresh.
+- M8-48 `1955406eafa37ae3d02d433d043b476e4a9a0bc4` (PORT): offline local plugin linking.
+- M8-53 `cb2e17a4a56be1434a42532d37c99fe8d7b60407` (ADAPT_FORK): root zynk skill output.
+- M8-55 `bb29eedb7209a0d5e91052458ce76bc7e4259d18` (ADAPT_FORK): delayed submission while retaining
+  ADR-0015 Submitted-before-wait and no-resubmit semantics.
+- M8-57 `b499e611b6a983ce6077da555ad55c1fd58b1387` (PORT): plugin-root relative executable resolution
+  without argument re-tokenization.
+- M8-59 `f99647b2c2d7fbfd11269330a25ea4f9be59bafa` (ADAPT_FORK): one zynk-native server-not-running
+  diagnostic without masking protocol or typed API errors.
+- M8-70 `7ae4b056a0ca478e584fa282c45b528134cc80c9` (ADAPT_FORK): readiness and Codex manifest engine 3,
+  with the website copy omitted and detection remaining observation only.
+- M8-71 `8b635c918066dd184bacc29b4c06c40a3efea3f5` (PORT): Copilot focus on the same resolved terminal.
+- M8-73 `37644cabe0d0f8c96f3ae7cc2a985f54d631adff`, M8-74
+  `9351b058f34973016a5d5973297d0567513e67a4`, and M8-75
+  `1af1a5b86f642ae7b053037bc472913cfbc1e206` (ADAPT_FORK): supported-shell readiness, blocked prompt
+  refusal, and zynk-native guidance while preserving reservations, proof, identity, and fork resource paths.
+
+Deferred arrival `b76adc155d979705a353fd6dc87c702f9dfc6c22` is discharged at M8-43 by carrying all six status
+protocol expectations into the fork CLI harness at the actual current protocol 19. The source's broader native
+input lifecycle remains assigned to B2 and is not imported by that narrow discharge.
+
+Fork adaptations retain the M8-39 CLI Contract V1 and Addendum V2, Pending/Active and restore behavior,
+authoritative receiver/receipt ownership, proof-source migration, message delivery, one-queue submission,
+headless deadline reconciliation, M7 input/render constraints, paint retention, and zynk naming. Protocol 19
+is an uninstalled intermediate; B2 owns the direct bump to 20. Plugin registry tests fail closed without an
+explicit isolated root, and executable fixtures use a short-lived writer process to avoid inherited write-FD
+`ETXTBSY` races. ADR 0015 was accepted by the operator on 2026-09-23 in its distinct documentation commit.
+
+The parent-vs-v0.8.2 residue table was generated from parent commit blobs, never the worktree. The binding
+candidate-vs-v0.8.2 table, final targeted/full/check/gate records, bounded critical faults, and exact packet are
+recorded only after execution. `M839-F21-UNATTRIBUTED-LOCK-DEADLINE-PAIR`, its F23/green-byte companions,
+`M839-G1-N1`, `M83335-EXACT-PAINT-ABSENCE`, `MPD-FORMAT-APPROVAL-ORDER`, N14 through N23, prerequisite and
+approval-order histories, reviewer gaps, M7-20, origins, standing limits, capped instruments, and
+resource/schema/handoff bounds all remain OPEN. This batch authorizes no merge, push, install, tag, publish,
+release, cleanup, or live-runtime action.

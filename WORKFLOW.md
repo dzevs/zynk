@@ -47,6 +47,32 @@ Gate-3: a swarm independently verifies the change.
 Operator: merge/push approval only after Gate-1 + Gate-2 + Gate-3 approve.
 ```
 
+## Linux v0.8.2 end-state port batch protocol
+
+For the operator-approved M8-40 through M9-31 end-state port, the combined specification and source map replace
+per-upstream-commit implementation gates. Work is divided into B1 (agent/plugins), B2
+(input/protocol/render/server/graphics), and B3 (Linux platform/remote/update/config). The combined spec and
+plan receive one Claude Gate-1 followed by one explicit operator sign-off before B1. Before B2 and B3, Claude
+reviews a concise batch-start binding against the unchanged combined design; this does not require renewed
+operator sign-off unless a material spec amendment is needed. Each batch has one implementation, one sealed
+packet, and one exact-tip Claude Gate-2. Gate-3 runs once at M-FINAL after all three exact-tip Gate-2 approvals.
+
+Changed behavior is developed red then green. `just lint` runs at the first compile-green before any full-suite
+run; final candidate bytes must pass targeted tests, `just check`, and `just gate`. Mutation faults are limited
+to at most five predeclared critical fork-owned production units per batch. Frozen controls and RAW-red are
+required only when they prove a behavior change; controls are never deleted, ignored, excluded, or weakened to
+obtain green.
+
+The batch protocol removes routine 35-second gaps, dual inspection chains, per-step boundary receipts, and
+per-source gates. It does not relax source accounting, isolated runtime/build requirements, candidate freeze,
+failure handling, reviewer independence, exact-SHA review, or operator gates. Every covered upstream source
+is listed in the batch ledger; every parent/final hunk against v0.8.2 has one documented residue disposition;
+fork-owned deviations are itemized; incomplete evidence is NOT_OBSERVED; and a failure still stops for
+interpretation before any rerun or correction.
+
+This override ends at M-FINAL. No merge, push, install, tag, publish, release, or live-runtime action is implied
+by a batch gate.
+
 ## Full workflow
 
 ```mermaid
