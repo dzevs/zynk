@@ -17,6 +17,7 @@ pub(super) fn command() -> Command {
         )
         .arg(flag("handoff").help("Opt into live handoff for update or remote attach"))
         .arg(flag("default-config").help("Print default configuration and exit"))
+        .arg(flag("skill").help("Print the bundled agent skill and exit"))
         .arg(
             Arg::new("version")
                 .short('V')
@@ -302,6 +303,7 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("read")
                 .about("Read agent terminal output")
+                .override_usage("zynk agent read <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(read_source_option(true))
                 .arg(option("lines", "N"))
@@ -332,6 +334,7 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("prompt")
                 .about("Submit to a ready named agent; optional wait observes later idle/done/blocked, with exit 3 on wait failure after submission")
+                .override_usage("zynk agent prompt <NAME> [OPTIONS] -- <TEXT>")
                 .arg(required("name", "NAME"))
                 .arg(option("type", "TYPE"))
                 .arg(option("trace", "ID|inherit"))
@@ -350,6 +353,7 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("wait")
                 .about("Wait for a named agent to be idle, done or blocked; use agent start for launch readiness")
+                .override_usage("zynk agent wait <NAME> [OPTIONS]")
                 .arg(required("name", "NAME"))
                 .arg(
                     option("until", "STATUS")
@@ -362,12 +366,14 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("attach")
                 .about("Attach directly to an agent terminal")
+                .override_usage("zynk agent attach <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(flag("takeover")),
         )
         .subcommand(
             Command::new("start")
                 .about("Launch in an existing pane and wait for interactive readiness; timeout keeps the label and does not prove the command did not run")
+                .override_usage("zynk agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]")
                 .arg(required("name", "NAME"))
                 .arg(option("kind", "KIND").required(true).value_parser(crate::detect::Agent::ALL.map(crate::detect::agent_label)))
                 .arg(option("pane", "ID").required(true))
@@ -1305,6 +1311,29 @@ mod tests {
             assert!(
                 help.contains(state),
                 "completion state {state} absent: {help}"
+            );
+        }
+    }
+
+    #[test]
+    fn m875_agent_usages_put_the_target_before_options() {
+        let cmd = super::command();
+        assert!(has_option(&cmd, "skill"));
+        for (name, target) in [
+            ("read", "<TARGET>"),
+            ("prompt", "<NAME>"),
+            ("wait", "<NAME>"),
+            ("attach", "<TARGET>"),
+            ("start", "<NAME>"),
+        ] {
+            let command = command_path(&cmd, &["agent", name]);
+            let usage = command
+                .get_overridden_usage()
+                .expect("agent command override usage")
+                .to_string();
+            assert!(
+                usage.find(target) < usage.find("[OPTIONS]"),
+                "target must precede options: {usage}"
             );
         }
     }

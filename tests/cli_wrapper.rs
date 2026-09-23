@@ -6309,6 +6309,54 @@ fn root_help_common_rows_show_type_for_send_and_reply() {
     );
 }
 
+#[test]
+fn m875_root_skill_and_help_guidance_are_bundled_and_local() {
+    let skill = Command::new(env!("CARGO_BIN_EXE_zynk"))
+        .arg("--skill")
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(skill.status.success(), "{skill:?}");
+    assert_eq!(skill.stdout, include_bytes!("../SKILL.md"));
+    assert!(skill.stderr.is_empty());
+
+    for args in [vec!["--help"], vec!["agent", "--help"]] {
+        let help = run_zynk_help(&args);
+        assert!(help.contains("zynk --skill"), "{args:?}: {help}");
+        assert!(help.contains("zynk-pre-release-audit"), "{args:?}: {help}");
+        assert!(!help.contains("herdr"), "{args:?}: {help}");
+    }
+}
+
+#[test]
+fn m875_missing_and_stale_sockets_report_one_typed_error() {
+    for stale in [false, true] {
+        let fixture = SnapshotCliFixture::new();
+        let socket = fixture
+            .base
+            .join(if stale { "stale.sock" } else { "missing.sock" });
+        if stale {
+            drop(UnixListener::bind(&socket).unwrap());
+        }
+        let output = run_snapshot_cli_bounded(&fixture.base, &socket, &["workspace", "list"]);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr.iter().filter(|byte| **byte == b'\n').count(),
+            1
+        );
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["id"], "cli:workspace:list");
+        assert_eq!(error["error"]["code"], "server_not_running");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&socket.display().to_string())),
+            "{error}"
+        );
+    }
+}
+
 fn run_zynk_help_status(args: &[&str]) -> (i32, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_zynk"))
         .args(args)
@@ -7373,6 +7421,8 @@ fn m839c_start_waits_for_ready_and_refuses_nonpending_failure() {
             ],
             vec![
                 m839_pong(),
+                serde_json::json!({"result":{"type":"pane_info", "pane":{"terminal_id":"term_original"}}}),
+                m839_pong(),
                 started,
                 m839_pong(),
                 m839_agent_reply(pending),
@@ -7388,6 +7438,8 @@ fn m839c_start_waits_for_ready_and_refuses_nonpending_failure() {
                 .collect::<Vec<_>>(),
             [
                 "ping",
+                "pane.get",
+                "ping",
                 "agent.start",
                 "ping",
                 "agent.get",
@@ -7395,7 +7447,7 @@ fn m839c_start_waits_for_ready_and_refuses_nonpending_failure() {
                 "agent.get"
             ]
         );
-        assert_eq!(requests[5]["params"]["target"], "term_original");
+        assert_eq!(requests[7]["params"]["target"], "term_original");
         assert_eq!(
             output.status.code(),
             Some(if failed { 1 } else { 0 }),
@@ -7411,6 +7463,135 @@ fn m839c_start_waits_for_ready_and_refuses_nonpending_failure() {
             assert_eq!(response["result"]["agent"]["interactive_ready"], true);
         }
     }
+}
+
+#[test]
+fn m874_start_retries_a_pinned_pane_while_its_shell_is_initializing() {
+    let mut pending = m839_agent_json("unknown", "worker", "term_original", 0);
+    pending["launch_pending"] = serde_json::json!(true);
+    let ready = m839_agent_json("idle", "worker", "term_original", 1);
+    let pane = serde_json::json!({"result":{"type":"pane_info", "pane":{
+        "terminal_id":"term_original"
+    }}});
+    let process_info = serde_json::json!({"result":{"type":"pane_process_info", "process_info":{
+        "pane_id":"w1:p1", "shell_pid":42, "foreground_process_group_id":42,
+        "foreground_processes":[{"pid":42, "name":"bash", "argv0":"/bin/bash", "argv":["bash"]}]
+    }}});
+    let (requests, output) = m835_scripted_cli(
+        &[
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "codex",
+            "--pane",
+            "w1:p1",
+            "--timeout",
+            "3001",
+        ],
+        vec![
+            m839_pong(),
+            pane.clone(),
+            m839_pong(),
+            serde_json::json!({"error":{"code":"agent_target_busy", "message":"shell is still starting"}}),
+            m839_pong(),
+            pane.clone(),
+            m839_pong(),
+            process_info,
+            m839_pong(),
+            serde_json::json!({"result":{"type":"pane_info", "pane":{
+                "terminal_id":"term_original"
+            }}}),
+            m839_pong(),
+            serde_json::json!({"result":{"type":"pane_process_info", "process_info":{
+                "pane_id":"w1:p1", "shell_pid":42, "foreground_process_group_id":42,
+                "foreground_processes":[{"pid":42, "name":"bash"}]
+            }}}),
+            m839_pong(),
+            serde_json::json!({"result":{"type":"agent_started", "agent":pending, "argv":["codex"]}}),
+            m839_pong(),
+            m839_agent_reply(ready),
+        ],
+        false,
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "ping",
+            "pane.get",
+            "ping",
+            "agent.start",
+            "ping",
+            "pane.get",
+            "ping",
+            "pane.process_info",
+            "ping",
+            "pane.get",
+            "ping",
+            "pane.process_info",
+            "ping",
+            "agent.start",
+            "ping",
+            "agent.get",
+        ]
+    );
+    assert_eq!(requests[13]["params"]["pane_id"], "w1:p1");
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["result"]["agent"]["interactive_ready"], true);
+}
+
+#[test]
+fn m874_start_never_retries_after_the_pinned_pane_changes() {
+    let pane = |terminal: &str| {
+        serde_json::json!({"result":{"type":"pane_info", "pane":{
+            "terminal_id":terminal
+        }}})
+    };
+    let (requests, output) = m835_scripted_cli(
+        &[
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "codex",
+            "--pane",
+            "w1:p1",
+            "--timeout",
+            "3001",
+        ],
+        vec![
+            m839_pong(),
+            pane("term_original"),
+            m839_pong(),
+            serde_json::json!({"error":{"code":"agent_target_busy", "message":"shell is still starting"}}),
+            m839_pong(),
+            pane("term_replacement"),
+        ],
+        false,
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "ping",
+            "pane.get",
+            "ping",
+            "agent.start",
+            "ping",
+            "pane.get"
+        ]
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "agent_target_busy");
 }
 
 #[test]
@@ -7464,6 +7645,8 @@ fn m839c_start_preserves_argv_and_checks_kind_before_name_after_terminal_pin() {
             ],
             vec![
                 m839_pong(),
+                serde_json::json!({"result":{"type":"pane_info", "pane":{"terminal_id":"term_original"}}}),
+                m839_pong(),
                 serde_json::json!({"result":{"type":"agent_started", "agent":launched, "argv":["qwen", "", "two words", "a'b", "$HOME", "one\\two"]}}),
                 m839_pong(),
                 m839_agent_reply(polled),
@@ -7475,13 +7658,20 @@ fn m839c_start_preserves_argv_and_checks_kind_before_name_after_terminal_pin() {
                 .iter()
                 .map(|r| r["method"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["ping", "agent.start", "ping", "agent.get"]
+            [
+                "ping",
+                "pane.get",
+                "ping",
+                "agent.start",
+                "ping",
+                "agent.get"
+            ]
         );
         assert_eq!(
-            requests[1]["params"],
+            requests[3]["params"],
             serde_json::json!({"name":"worker", "kind":"qwen", "pane_id":"w1:p1", "timeout_ms":3001, "args":["", "two words", "a'b", "$HOME", "one\\two"]})
         );
-        assert_eq!(requests[3]["params"]["target"], "term_original");
+        assert_eq!(requests[5]["params"]["target"], "term_original");
         assert_eq!(
             output.status.code(),
             Some(if code.is_some() { 1 } else { 0 }),

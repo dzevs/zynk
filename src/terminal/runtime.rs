@@ -451,6 +451,16 @@ impl TerminalRuntime {
         self.0.try_send_bytes(bytes)
     }
 
+    pub fn try_send_bytes_with_delayed_suffix(
+        &self,
+        immediate: Bytes,
+        delayed: Bytes,
+        delay: std::time::Duration,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.0
+            .try_send_bytes_with_delayed_suffix(immediate, delayed, delay)
+    }
+
     pub async fn send_paste(&self, text: String) -> Result<(), mpsc::error::SendError<Bytes>> {
         self.0.send_paste(text).await
     }

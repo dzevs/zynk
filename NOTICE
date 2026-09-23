@@ -102,6 +102,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/cli/plugin.rs
 - src/cli/protocol_guard.rs
 - src/cli/server.rs
+- src/cli/server_not_running.rs
 - src/client/input.rs
 - src/client/mod.rs
 - src/config.rs

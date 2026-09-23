@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use super::{terminal_targets::TerminalTargetError, App};
 use crate::api::schema::AgentStartParams;
 
-const AGENT_START_SETTLE_DELAY: Duration = Duration::from_secs(3);
+pub(crate) const AGENT_START_SETTLE_DELAY: Duration = Duration::from_secs(3);
 const DEFAULT_AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_AGENT_START_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const MAX_AGENT_START_TIMEOUT: Duration = Duration::from_secs(300);
 
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {

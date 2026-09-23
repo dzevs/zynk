@@ -51,17 +51,24 @@ pub(super) fn encode_api_submission(
     runtime: &crate::terminal::TerminalRuntime,
     text: &str,
 ) -> Vec<u8> {
-    let mut bytes = encode_api_text(runtime, text);
-    bytes.extend(
-        runtime.encode_terminal_key(
-            crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Enter,
-                crossterm::event::KeyModifiers::NONE,
-            )
-            .into(),
-        ),
+    let (mut text, enter) = encode_api_submission_parts(runtime, text);
+    text.extend_from_slice(&enter);
+    text
+}
+
+pub(super) fn encode_api_submission_parts(
+    runtime: &crate::terminal::TerminalRuntime,
+    text: &str,
+) -> (Vec<u8>, Vec<u8>) {
+    let text = encode_api_text(runtime, text);
+    let enter = runtime.encode_terminal_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        )
+        .into(),
     );
-    bytes
+    (text, enter)
 }
 
 pub(super) fn detect_state_from_api(

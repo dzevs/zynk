@@ -1237,6 +1237,26 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
         }
     }
+
+    fn try_send_bytes_with_delayed_suffix(
+        &self,
+        immediate: Bytes,
+        delayed: Bytes,
+        delay: std::time::Duration,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => {
+                actor.try_write_user_input_with_delayed_suffix(immediate, delayed, delay)
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { sender, .. } => {
+                let mut combined = Vec::with_capacity(immediate.len() + delayed.len());
+                combined.extend_from_slice(&immediate);
+                combined.extend_from_slice(&delayed);
+                sender.try_send(Bytes::from(combined))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2766,6 +2786,41 @@ impl PaneRuntime {
         let observed =
             TEST_INPUT_ATTEMPTS.with(|slot| slot.borrow().as_ref().map(|_| bytes.clone()));
         let result = self.io.try_send_bytes(bytes);
+        #[cfg(test)]
+        if let Some(bytes) = observed {
+            let outcome = match &result {
+                Ok(()) => TestInputOutcome::Accepted,
+                Err(mpsc::error::TrySendError::Full(_)) => TestInputOutcome::Full,
+                Err(mpsc::error::TrySendError::Closed(_)) => TestInputOutcome::Closed,
+            };
+            TEST_INPUT_ATTEMPTS.with(|slot| {
+                slot.borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .push(TestInputAttempt { bytes, outcome });
+            });
+        }
+        result
+    }
+
+    pub fn try_send_bytes_with_delayed_suffix(
+        &self,
+        immediate: Bytes,
+        delayed: Bytes,
+        delay: std::time::Duration,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        #[cfg(test)]
+        let observed = TEST_INPUT_ATTEMPTS.with(|slot| {
+            slot.borrow().as_ref().map(|_| {
+                let mut combined = Vec::with_capacity(immediate.len() + delayed.len());
+                combined.extend_from_slice(&immediate);
+                combined.extend_from_slice(&delayed);
+                Bytes::from(combined)
+            })
+        });
+        let result = self
+            .io
+            .try_send_bytes_with_delayed_suffix(immediate, delayed, delay);
         #[cfg(test)]
         if let Some(bytes) = observed {
             let outcome = match &result {

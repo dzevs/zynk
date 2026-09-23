@@ -59,6 +59,7 @@ bench-render-scale:
 release-audit:
     cargo build --release --locked
     python3 scripts/release_binary_audit.py "${CARGO_TARGET_DIR:-target}/release/zynk"
+    @echo "release review required: verify SKILL.md and .agents/skills/zynk-pre-release-audit/SKILL.md match the current CLI, IDs, agent lifecycle semantics, and safety guidance."
 
 # Build the vendored libghostty-vt source dist
 build-libghostty-vt:

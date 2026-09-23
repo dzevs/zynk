@@ -23,6 +23,7 @@ mod plugin;
 mod protocol_guard;
 mod runtime;
 mod server;
+mod server_not_running;
 mod skill;
 mod spec;
 mod status;
@@ -35,6 +36,14 @@ const TERMINAL_SESSION_OBSERVE_USAGE: &str =
 const TERMINAL_SESSION_CONTROL_USAGE: &str =
     "usage: zynk terminal session control <target> [--takeover] [--cols N] [--rows N]";
 mod zynk;
+
+pub(crate) const AGENT_HELP_FOOTER: &str = concat!(
+    "Are you an AI? Use these resources only when the task calls for them:\n",
+    "  Control Zynk panes, agents, workspaces, or messages:\n",
+    "    Skip this if the zynk skill is already in context; otherwise run `zynk --skill`.\n",
+    "  Confirm this build's exact command surface with `zynk <command> --help`.\n",
+    "  Before release preparation, use the repository's `zynk-pre-release-audit` skill."
+);
 
 pub enum CommandOutcome {
     Handled(i32),
@@ -128,6 +137,37 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "query" => native::run_query_command(&args[2..])?,
         _ => return Ok(CommandOutcome::NotCli),
     };
+
+    if exit_code == 0
+        && args.len() == 3
+        && is_help_flag(&args[2])
+        && matches!(
+            command,
+            "api"
+                | "server"
+                | "status"
+                | "config"
+                | "channel"
+                | "workspace"
+                | "worktree"
+                | "tab"
+                | "notification"
+                | "agent"
+                | "terminal"
+                | "pane"
+                | "popup"
+                | "wait"
+                | "integration"
+                | "skill"
+                | "plugin"
+                | "session"
+                | "zynk"
+                | "db"
+        )
+    {
+        eprintln!();
+        eprintln!("{AGENT_HELP_FOOTER}");
+    }
 
     Ok(CommandOutcome::Handled(exit_code))
 }
@@ -1004,17 +1044,20 @@ pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Val
     ensure_server_protocol_compatible(&client, &request.id)?;
     client
         .request_value(request)
-        .map_err(api_client_error_to_io)
+        .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
 }
 
 pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde_json::Value> {
-    ApiClient::local()
+    let client = ApiClient::local();
+    client
         .request_value(request)
-        .map_err(api_client_error_to_io)
+        .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
 }
 
 fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> std::io::Result<()> {
-    let status = client.status().map_err(api_client_error_to_io)?;
+    let status = client
+        .status()
+        .map_err(|err| map_server_not_running_or_io(err, request_id, client))?;
     let server_protocol = status
         .protocol
         .ok_or_else(|| std::io::Error::other("server ping did not include a protocol version"))?;
@@ -1030,6 +1073,33 @@ fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> st
 
 pub(crate) fn protocol_mismatch_response(err: &std::io::Error) -> Option<&ErrorResponse> {
     protocol_guard::error_response(err)
+}
+
+pub(crate) fn server_not_running_response(err: &std::io::Error) -> Option<&ErrorResponse> {
+    server_not_running::reported_response(err)
+}
+
+pub(super) fn server_not_running_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
+fn map_server_not_running_or_io(
+    err: ApiClientError,
+    request_id: &str,
+    client: &ApiClient,
+) -> std::io::Error {
+    match err {
+        ApiClientError::Io(err) if server_not_running_error(&err) => {
+            server_not_running::reported_error(server_not_running::response(
+                request_id,
+                &client.socket_path(),
+            ))
+        }
+        err => api_client_error_to_io(err),
+    }
 }
 
 fn api_client_error_to_io(err: ApiClientError) -> std::io::Error {

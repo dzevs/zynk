@@ -1,5 +1,7 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
+use std::time::Duration;
+
 use bytes::Bytes;
 
 use crate::api::schema::{
@@ -9,6 +11,8 @@ use crate::api::schema::{
 use crate::app::App;
 
 use super::responses::{encode_error, encode_error_body, encode_success};
+
+const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
 impl App {
     pub(super) fn handle_agent_list(&mut self, id: String) -> String {
@@ -125,6 +129,16 @@ impl App {
                 ),
             );
         }
+        if terminal.state == crate::detect::AgentState::Blocked {
+            return encode_error(
+                id,
+                "agent_blocked",
+                format!(
+                    "agent {} is blocked and needs user input before it can accept a prompt",
+                    params.target
+                ),
+            );
+        }
         if terminal.managed_agent_kind().is_some() && !terminal.managed_agent_interactive_ready() {
             return agent_not_ready(id, &params.target);
         }
@@ -144,8 +158,23 @@ impl App {
                 ),
             );
         }
-        let bytes = crate::app::api_helpers::encode_api_submission(runtime, &params.text);
-        if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+        let (mut text, enter) =
+            crate::app::api_helpers::encode_api_submission_parts(runtime, &params.text);
+        if expected_agent == crate::detect::Agent::GithubCopilot {
+            let focus = match crate::ghostty::encode_focus(crate::ghostty::FocusEvent::Gained) {
+                Ok(focus) => focus,
+                Err(err) => return encode_error(id, "agent_prompt_failed", err.to_string()),
+            };
+            let mut focused = Vec::with_capacity(focus.len() + text.len());
+            focused.extend_from_slice(&focus);
+            focused.append(&mut text);
+            text = focused;
+        }
+        if let Err(err) = runtime.try_send_bytes_with_delayed_suffix(
+            Bytes::from(text),
+            Bytes::from(enter),
+            AGENT_PROMPT_SUBMIT_DELAY,
+        ) {
             return encode_error(id, "agent_prompt_failed", err.to_string());
         }
         let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
@@ -571,6 +600,64 @@ mod tests {
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].outcome, crate::pane::TestInputOutcome::Accepted);
         assert_eq!(attempts[0].bytes.as_ref(), b"body\r");
+    }
+
+    #[tokio::test]
+    async fn m870_blocked_detection_refuses_prompt_without_minting_receiver_authority() {
+        let mut fixture = m839_real_agent_fixture(false).await;
+        m839_name_detected_fixture(&mut fixture);
+        let (_, terminal, pane) = m839_fixture_target(&fixture.app);
+        fixture
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Codex),
+                AgentState::Blocked,
+                false,
+                true,
+                false,
+                false,
+                std::time::Instant::now(),
+            );
+
+        let (response, attempts) = crate::pane::test_observe_try_sends(|| {
+            m839_call(
+                &mut fixture.app,
+                Method::AgentPrompt(m839_prompt_params(Some(terminal.to_string()), "body")),
+            )
+        });
+
+        assert_eq!(response["error"]["code"], "agent_blocked");
+        assert!(attempts.is_empty());
+        let state = &fixture.app.state.terminals[&terminal];
+        assert_eq!(state.confirmed_hook_owner(), None);
+        assert_eq!(state.persisted_agent_session, None);
+        assert!(fixture.app.authoritative_receiver_identity(&pane).is_none());
+    }
+
+    #[tokio::test]
+    async fn m871_copilot_focus_and_prompt_share_one_delayed_submission() {
+        let mut fixture = m839_real_program_fixture("copilot").await;
+        let (_, terminal, pane) = m839_fixture_target(&fixture.app);
+        let state = fixture.app.state.terminals.get_mut(&terminal).unwrap();
+        state.set_agent_name("worker".into());
+        state.set_detected_state(Some(Agent::GithubCopilot), AgentState::Idle);
+
+        let (response, attempts) = crate::pane::test_observe_try_sends(|| {
+            m839_call(
+                &mut fixture.app,
+                Method::AgentPrompt(m839_prompt_params(Some(terminal.to_string()), "body")),
+            )
+        });
+
+        assert_eq!(response["result"]["type"], "agent_prompted", "{response}");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].outcome, crate::pane::TestInputOutcome::Accepted);
+        assert_eq!(attempts[0].bytes.as_ref(), b"\x1b[Ibody\r");
+        assert!(fixture.app.authoritative_receiver_identity(&pane).is_none());
     }
 
     #[tokio::test]
@@ -1227,9 +1314,9 @@ mod tests {
         use std::time::{Duration, Instant};
         let bin = fixture.root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        assert!(matches!(program, "shell" | "codex" | "cat"));
+        assert!(matches!(program, "shell" | "codex" | "copilot" | "cat"));
         let shell = program == "shell";
-        let executable = bin.join(if program == "cat" { "cat" } else { "codex" });
+        let executable = bin.join(if program == "shell" { "codex" } else { program });
         if shell {
             std::fs::write(
                 &executable,
@@ -1308,9 +1395,13 @@ mod tests {
                             .ok()
                             .as_deref()
                             == Some(b"ready".as_slice())
-                } else if program == "codex" {
+                } else if matches!(program, "codex" | "copilot") {
                     crate::detect::identify_agent_in_job(&job).map(|(agent, _)| agent)
-                        == Some(Agent::Codex)
+                        == Some(if program == "codex" {
+                            Agent::Codex
+                        } else {
+                            Agent::GithubCopilot
+                        })
                 } else {
                     crate::detect::identify_agent_in_job(&job).is_none()
                         && job

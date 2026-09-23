@@ -1617,14 +1617,15 @@ fn current_unix_ms() -> u64 {
 }
 
 fn is_connection_error(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::BrokenPipe
-    )
+    super::server_not_running_response(err).is_some()
+        || matches!(
+            err.kind(),
+            std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+        )
 }
 
 fn print_plugin_response(method: Method) -> std::io::Result<i32> {

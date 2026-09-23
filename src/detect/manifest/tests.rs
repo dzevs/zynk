@@ -301,6 +301,19 @@ fn all_bundled_manifests_parse_and_validate() {
             agent_label(agent)
         );
     }
+
+    let codex = bundled_manifest(Agent::Codex).expect("bundled codex manifest");
+    assert_eq!(
+        codex.version.as_ref().map(ToString::to_string).as_deref(),
+        Some("2026.08.09.1")
+    );
+    assert_eq!(codex.min_engine_version, Some(3));
+    assert!(codex.rules.iter().any(|rule| {
+        rule.id == "trust_directory"
+            && rule.priority == 950
+            && rule.region == "top_non_empty_lines(20)"
+            && rule.visible_blocker
+    }));
 }
 
 #[test]
@@ -1589,6 +1602,48 @@ fn codex_osc_title_plain_is_idle() {
         Some("osc_title_idle")
     );
     assert!(result.visible_idle);
+}
+
+#[test]
+fn codex_trust_directory_is_a_bounded_visible_blocker() {
+    let prompt = "> You are in /tmp/project\n\nDo you trust the contents of this directory?\n";
+    let blocked = osc_explain(Agent::Codex, prompt, "project", "");
+    assert_eq!(blocked.state, AgentState::Blocked);
+    assert_eq!(
+        blocked.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("trust_directory")
+    );
+    assert!(blocked.visible_blocker);
+
+    for near_miss in [
+        "You are in /tmp/project\nDo you trust the contents of this directory?\n",
+        "> You are in /tmp/project\nDo you trust this directory?\n",
+    ] {
+        let result = osc_explain(Agent::Codex, near_miss, "project", "");
+        assert_ne!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("trust_directory"),
+            "near miss matched: {near_miss:?}"
+        );
+    }
+
+    let mut outside_window = String::new();
+    for line in 0..20 {
+        outside_window.push_str(&format!("line {line}\n"));
+    }
+    outside_window.push_str(prompt);
+    let outside = osc_explain(Agent::Codex, &outside_window, "project", "");
+    assert_ne!(
+        outside.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("trust_directory")
+    );
+
+    let working = osc_explain(Agent::Codex, prompt, "⠸ project", "");
+    assert_eq!(working.state, AgentState::Working);
+    assert_eq!(
+        working.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("osc_title_working")
+    );
 }
 
 #[test]

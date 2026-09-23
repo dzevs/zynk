@@ -75,6 +75,12 @@ pub(crate) struct PtyIoActorConfig {
 
 enum PtyIoDataCommand {
     WriteUserInput(Bytes),
+    WriteUserInputWithDelayedSuffix {
+        immediate: Bytes,
+        delayed: Bytes,
+        delay: Duration,
+        combined: Bytes,
+    },
 }
 
 enum PtyIoControlCommand {
@@ -158,6 +164,45 @@ impl PtyIoActorHandle {
             Err(mpsc::error::TrySendError::Closed(PtyIoDataCommand::WriteUserInput(bytes))) => {
                 Err(mpsc::error::TrySendError::Closed(bytes))
             }
+            Err(_) => unreachable!("queued input preserves its command variant"),
+        }
+    }
+
+    pub(crate) fn try_write_user_input_with_delayed_suffix(
+        &self,
+        immediate: Bytes,
+        delayed: Bytes,
+        delay: Duration,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        let mut combined = Vec::with_capacity(immediate.len() + delayed.len());
+        combined.extend_from_slice(&immediate);
+        combined.extend_from_slice(&delayed);
+        let combined = Bytes::from(combined);
+        let user_writes = self
+            .user_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !user_writes.accepting {
+            return Err(mpsc::error::TrySendError::Closed(combined));
+        }
+        let command = PtyIoDataCommand::WriteUserInputWithDelayedSuffix {
+            immediate,
+            delayed,
+            delay,
+            combined,
+        };
+        match self.data_tx.try_send(command) {
+            Ok(()) => {
+                self.wake_actor();
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Full(
+                PtyIoDataCommand::WriteUserInputWithDelayedSuffix { combined, .. },
+            )) => Err(mpsc::error::TrySendError::Full(combined)),
+            Err(mpsc::error::TrySendError::Closed(
+                PtyIoDataCommand::WriteUserInputWithDelayedSuffix { combined, .. },
+            )) => Err(mpsc::error::TrySendError::Closed(combined)),
+            Err(_) => unreachable!("queued delayed input preserves its command variant"),
         }
     }
 
@@ -417,13 +462,28 @@ impl PtyIoActor {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingWrite {
+    bytes: Bytes,
+    not_before: Option<Instant>,
+}
+
+impl PendingWrite {
+    fn immediate(bytes: Bytes) -> Self {
+        Self {
+            bytes,
+            not_before: None,
+        }
+    }
+}
+
 struct PtyIoActorRunner {
     pane_id: u32,
     file: std::fs::File,
     data_rx: mpsc::Receiver<PtyIoDataCommand>,
     control_rx: std_mpsc::Receiver<PtyIoControlCommand>,
     state: ActorState,
-    pending_writes: VecDeque<Bytes>,
+    pending_writes: VecDeque<PendingWrite>,
     current_write_offset: usize,
     wake_read_fd: OwnedFd,
     controls: Arc<Mutex<SharedPtyControls>>,
@@ -436,8 +496,43 @@ struct PtyIoActorRunner {
 impl PtyIoActorRunner {
     fn enqueue_write(&mut self, bytes: Bytes) {
         if !bytes.is_empty() {
-            self.pending_writes.push_back(bytes);
+            self.pending_writes
+                .push_back(PendingWrite::immediate(bytes));
         }
+    }
+
+    fn enqueue_delayed_write(&mut self, bytes: Bytes, delay: Duration) {
+        if !bytes.is_empty() {
+            self.pending_writes.push_back(PendingWrite {
+                bytes,
+                not_before: Some(Instant::now() + delay),
+            });
+        }
+    }
+
+    fn pending_write_ready(&self) -> bool {
+        self.pending_writes.front().is_some_and(|pending| {
+            pending
+                .not_before
+                .is_none_or(|deadline| Instant::now() >= deadline)
+        })
+    }
+
+    fn poll_timeout_ms(&self, maximum_ms: i32) -> i32 {
+        let Some(deadline) = self
+            .pending_writes
+            .front()
+            .and_then(|pending| pending.not_before)
+        else {
+            return maximum_ms;
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return 0;
+        }
+        let rounded_ms =
+            remaining.as_millis() + u128::from(remaining.subsec_nanos() % 1_000_000 != 0);
+        rounded_ms.min(maximum_ms as u128).max(1) as i32
     }
 
     fn run(&mut self) {
@@ -450,7 +545,7 @@ impl PtyIoActorRunner {
 
             self.apply_pending_controls();
 
-            if !self.pending_writes.is_empty() {
+            if self.pending_write_ready() {
                 self.flush_pending_writes_once();
             }
 
@@ -458,12 +553,13 @@ impl PtyIoActorRunner {
                 let _ = poll_observer.send(());
             }
 
+            let pending_write_ready = self.pending_write_ready();
             match fd::poll_pty_and_wake(
                 self.file.as_raw_fd(),
                 self.wake_read_fd.as_raw_fd(),
                 self.state == ActorState::Running,
-                !self.pending_writes.is_empty(),
-                ACTOR_IDLE_POLL_MS,
+                pending_write_ready,
+                self.poll_timeout_ms(ACTOR_IDLE_POLL_MS),
             ) {
                 Ok(readiness) => {
                     if readiness.wake_ready {
@@ -479,7 +575,7 @@ impl PtyIoActorRunner {
                     {
                         break;
                     }
-                    if readiness.pty_write_ready && !self.pending_writes.is_empty() {
+                    if readiness.pty_write_ready && self.pending_write_ready() {
                         self.flush_pending_writes_once();
                     }
                 }
@@ -550,6 +646,17 @@ impl PtyIoActorRunner {
                     self.enqueue_write(bytes);
                 }
             }
+            PtyIoDataCommand::WriteUserInputWithDelayedSuffix {
+                immediate,
+                delayed,
+                delay,
+                ..
+            } => {
+                if self.state == ActorState::Running {
+                    self.enqueue_write(immediate);
+                    self.enqueue_delayed_write(delayed, delay);
+                }
+            }
         }
         false
     }
@@ -610,6 +717,10 @@ impl PtyIoActorRunner {
         let deadline = Instant::now() + HANDOFF_DRAIN_TIMEOUT;
         self.flush_pending_writes_once();
         while !self.pending_writes.is_empty() {
+            self.flush_pending_writes_once();
+            if self.pending_writes.is_empty() {
+                break;
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(std::io::Error::new(
@@ -617,11 +728,12 @@ impl PtyIoActorRunner {
                     "timed out draining PTY writes before handoff",
                 ));
             }
-            let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+            let timeout_ms =
+                self.poll_timeout_ms(remaining.as_millis().min(i32::MAX as u128).max(1) as i32);
             let readiness = fd::poll_pty_and_wake(
                 self.file.as_raw_fd(),
                 self.wake_read_fd.as_raw_fd(),
-                true,
+                self.pending_write_ready(),
                 true,
                 timeout_ms,
             )?;
@@ -643,9 +755,21 @@ impl PtyIoActorRunner {
     }
 
     fn drain_pre_quiesce_commands(&mut self) {
-        while let Ok(PtyIoDataCommand::WriteUserInput(bytes)) = self.data_rx.try_recv() {
-            if self.state != ActorState::Released {
-                self.enqueue_write(bytes);
+        while let Ok(command) = self.data_rx.try_recv() {
+            if self.state == ActorState::Released {
+                continue;
+            }
+            match command {
+                PtyIoDataCommand::WriteUserInput(bytes) => self.enqueue_write(bytes),
+                PtyIoDataCommand::WriteUserInputWithDelayedSuffix {
+                    immediate,
+                    delayed,
+                    delay,
+                    ..
+                } => {
+                    self.enqueue_write(immediate);
+                    self.enqueue_delayed_write(delayed, delay);
+                }
             }
         }
     }
@@ -720,8 +844,14 @@ impl PtyIoActorRunner {
     }
 
     fn flush_pending_writes_once(&mut self) {
-        while let Some(bytes) = self.pending_writes.front() {
-            let chunk = &bytes[self.current_write_offset..];
+        while let Some(pending) = self.pending_writes.front() {
+            if pending
+                .not_before
+                .is_some_and(|deadline| Instant::now() < deadline)
+            {
+                return;
+            }
+            let chunk = &pending.bytes[self.current_write_offset..];
             match self.file.write(chunk) {
                 Ok(0) => {
                     warn!(pane = self.pane_id, "PTY actor write returned zero bytes");
@@ -729,7 +859,7 @@ impl PtyIoActorRunner {
                 }
                 Ok(written) => {
                     self.current_write_offset += written;
-                    if self.current_write_offset >= bytes.len() {
+                    if self.current_write_offset >= pending.bytes.len() {
                         self.pending_writes.pop_front();
                         self.current_write_offset = 0;
                     }
@@ -914,6 +1044,46 @@ mod tests {
         handle.shutdown();
     }
 
+    #[test]
+    fn delayed_suffix_holds_later_input_behind_one_actor_command() {
+        let (mut runner, mut peer) = actor_runner_for_unit_test();
+        runner.handle_data_command(PtyIoDataCommand::WriteUserInputWithDelayedSuffix {
+            immediate: Bytes::from_static(b"text"),
+            delayed: Bytes::from_static(b"\r"),
+            delay: Duration::from_millis(300),
+            combined: Bytes::from_static(b"text\r"),
+        });
+        runner.handle_data_command(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
+            b"tail",
+        )));
+
+        assert_eq!(runner.pending_writes.len(), 3);
+        assert_eq!(runner.pending_writes[0].bytes.as_ref(), b"text");
+        assert!(runner.pending_writes[0].not_before.is_none());
+        assert_eq!(runner.pending_writes[1].bytes.as_ref(), b"\r");
+        assert!(runner.pending_writes[1].not_before.is_some());
+        assert_eq!(runner.pending_writes[2].bytes.as_ref(), b"tail");
+        assert!(runner.poll_timeout_ms(ACTOR_IDLE_POLL_MS) > 0);
+
+        runner.flush_pending_writes_once();
+        let mut immediate = [0; 4];
+        peer.read_exact(&mut immediate).unwrap();
+        assert_eq!(&immediate, b"text");
+        peer.set_nonblocking(true).unwrap();
+        let mut blocked = [0; 1];
+        assert_eq!(
+            peer.read(&mut blocked).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        runner.pending_writes.front_mut().unwrap().not_before = None;
+        runner.flush_pending_writes_once();
+        peer.set_nonblocking(false).unwrap();
+        let mut rest = [0; 5];
+        peer.read_exact(&mut rest).unwrap();
+        assert_eq!(&rest, b"\rtail");
+    }
+
     fn fill_socket_send_buffer(writer: &mut impl Write) -> usize {
         let mut filled = 0;
         for _ in 0..1024 {
@@ -1043,7 +1213,10 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
         assert_eq!(runner.state, ActorState::Running);
-        assert_eq!(runner.pending_writes.front().unwrap().as_ref(), b"pending");
+        assert_eq!(
+            runner.pending_writes.front().unwrap().bytes.as_ref(),
+            b"pending"
+        );
     }
 
     #[test]
@@ -1350,8 +1523,8 @@ mod tests {
         assert_eq!(
             runner.pending_writes,
             VecDeque::from([
-                Bytes::from_static(b"live-light"),
-                Bytes::from_static(b"query-light"),
+                PendingWrite::immediate(Bytes::from_static(b"live-light")),
+                PendingWrite::immediate(Bytes::from_static(b"query-light")),
             ])
         );
     }

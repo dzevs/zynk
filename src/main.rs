@@ -440,6 +440,8 @@ pane_history = false
 # scrollback_limit_bytes = 10000000
 "##;
 
+const SKILL: &str = include_str!("../SKILL.md");
+
 fn should_block_nested(config: &config::Config) -> bool {
     should_block_nested_for_env(config, host_protocol_env().as_deref())
 }
@@ -493,7 +495,7 @@ fn main() -> io::Result<()> {
         && !args.iter().any(|a| {
             matches!(
                 a.as_str(),
-                "--help" | "-h" | "--version" | "-V" | "--default-config"
+                "--help" | "-h" | "--version" | "-V" | "--default-config" | "--skill"
             )
         })
     {
@@ -507,6 +509,13 @@ fn main() -> io::Result<()> {
         Ok(cli::CommandOutcome::NotCli) => {}
         Err(err) => {
             if let Some(response) = cli::protocol_mismatch_response(&err) {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(response).map_err(io::Error::other)?
+                );
+                std::process::exit(1);
+            }
+            if let Some(response) = cli::server_not_running_response(&err) {
                 eprintln!(
                     "{}",
                     serde_json::to_string(response).map_err(io::Error::other)?
@@ -708,6 +717,7 @@ fn main() -> io::Result<()> {
         println!("                      Keybindings for --remote app attach (default: local)");
         println!("  --handoff           Opt into live handoff for update or remote attach");
         println!("  --default-config    Print default configuration and exit");
+        println!("  --skill             Print the bundled agent skill and exit");
         println!("  --version, -V       Print version and exit");
         println!("  --help, -h          Show this help");
         println!();
@@ -715,6 +725,8 @@ fn main() -> io::Result<()> {
         println!("Logs:   {}", logging::help_log_paths_summary());
         println!("Env:    ZYNK_CONFIG_PATH overrides config file path");
         println!("Home:   https://github.com/dzevs/zynk");
+        println!();
+        println!("{}", cli::AGENT_HELP_FOOTER);
         return Ok(());
     }
 
@@ -728,6 +740,11 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    if args.iter().any(|a| a == "--skill") {
+        print!("{SKILL}");
+        return Ok(());
+    }
+
     // Reject unknown flags
     let known_flags = [
         "--no-session",
@@ -737,6 +754,7 @@ fn main() -> io::Result<()> {
         "--version",
         "-V",
         "--default-config",
+        "--skill",
         "--help",
         "-h",
     ];

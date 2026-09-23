@@ -18,7 +18,7 @@ Input rules (reading is always safe; sending input is what needs care):
 
 You are running inside zynk, a terminal-native workspace manager for AI coding agents. zynk gives you workspaces, tabs, and panes — each pane is a real terminal with its own shell, agent, server, or log stream — plus a native conversation layer for audited messages between agents. Drive all of it from the `zynk` binary, which is on your PATH and talks to the running instance over a local unix socket (`ZYNK_SOCKET_PATH`).
 
-Run `zynk <command> --help` for exact flags. The public socket-API reference at https://zynk.dev/docs/socket-api/ covers released commands; net-new conversation commands are best confirmed with `--help` on this build. The wire protocol is version 14.
+Run `zynk <command> --help` for exact flags. The public socket-API reference at https://zynk.dev/docs/socket-api/ covers released commands; net-new conversation commands are best confirmed with `--help` on this build. The wire protocol is version 19.
 
 ## Concepts
 
