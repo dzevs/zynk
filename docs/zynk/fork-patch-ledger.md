@@ -7295,7 +7295,25 @@ authoritative receiver/receipt ownership, proof-source migration, message delive
 headless deadline reconciliation, M7 input/render constraints, paint retention, and zynk naming. Protocol 19
 is an uninstalled intermediate; B2 owns the direct bump to 20. Plugin registry tests fail closed without an
 explicit isolated root, and executable fixtures use a short-lived writer process to avoid inherited write-FD
-`ETXTBSY` races. ADR 0015 was accepted by the operator on 2026-09-23 in its distinct documentation commit.
+`ETXTBSY` races. The observed `ETXTBSY` was the Linux fixture race caused by an executable remaining open for
+write across an unrelated concurrent fork, not unrelated test noise. ADR 0015 was accepted by the operator on
+2026-09-23 in its distinct documentation commit.
+
+Pre-final characterization on the documented source bytes enumerated 4561 catalog members. The explicit
+fixture-lifecycle selection passed 10/10, the schema/help population passed 97/97, and the cumulative B1
+selection passed all 2415 scheduled identities with 1848 printed skips. The render-scale control remained
+bounded at fixed geometry: 15 active panes were 1.22x the one-pane median and p95, while 15 one-pane background
+workspaces were 0.91x median and 0.90x p95. These records precede the final documentation commit and do not
+substitute for the exact-tip checks.
+
+All five approved critical fault themes discriminated after source-local application and exact restoration.
+The prompt fence, Submitted-before-wait ordering, plugin argv, and agent-view authority variants each stopped
+their named control once; removing the headless reconcile call stopped both retained timer controls. The paint
+watched identity printed PASS in every fault invocation. The first Submitted-order variant was retained as a
+preparation compile stop because moving the block also moved its owned timestamp; the corrected variant cloned
+that timestamp and then stopped at the declared durable-before-wait assertion. It is not counted as a
+discrimination or rerun-to-green. The machine summary binds five fault invocations, six discriminating failures,
+the retained preparation stop, and byte-exact restoration.
 
 The parent-vs-v0.8.2 residue table was generated from parent commit blobs, never the worktree. The binding
 candidate-vs-v0.8.2 table, final targeted/full/check/gate records, bounded critical faults, and exact packet are
