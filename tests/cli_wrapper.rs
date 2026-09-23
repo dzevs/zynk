@@ -3769,64 +3769,95 @@ fn tab_management_commands_work() {
 }
 
 #[test]
-fn agent_start_command_works() {
+fn m839a_agent_start_cli_uses_existing_pane_and_preserves_child_arguments() {
+    use std::os::unix::fs::PermissionsExt;
     let base = unique_test_dir();
+    fs::create_dir_all(base.join("bin")).unwrap();
+    let shell = base.join("shell");
+    fs::write(&shell, b"#!/bin/sh\nroot=${0%/*}\nexport HOME=\"$root\" PATH=\"$root/bin\" ZYNK_AGENT= ENV=/dev/null BASH_ENV=/dev/null INPUTRC=/dev/null PROMPT_COMMAND= PS1= PS2=\nexec /bin/bash --noprofile --norc --noediting -i\n").unwrap();
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    let agent = base.join("bin/codex");
+    fs::write(&agent, b"#!/bin/sh\nexport ZYNK_AGENT=codex\nprintf '%s\\n' \"$@\" > \"$HOME/child-args\"\nprintf '\\033]2;m839-native-idle\\007'\nexec /bin/cat\n").unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
     let config_home = base.join("config");
-    let runtime_dir = base.join("runtime");
-    let socket_path = runtime_dir.join("zynk.sock");
-
-    let zynk = spawn_zynk(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
-
-    let started = run_cli_json(
-        &socket_path,
+    let runtime = base.join("runtime");
+    let socket = runtime.join("zynk.sock");
+    let config = toml::to_string(&serde_json::json!({"onboarding":false,"terminal":{"default_shell":shell,"shell_mode":"non_login"}})).unwrap();
+    let server = spawn_zynk_with_config(
+        &config_home,
+        &runtime,
+        &socket,
+        Some(&base.join("bin")),
+        &config,
+    );
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let created = m837_exchange(
+        &socket,
+        serde_json::json!({"id":"m839-create","method":"workspace.create","params":{"cwd":base,"focus":true}}),
+    );
+    let pane = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let terminal = created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .unwrap();
+    let setup = m837_exchange(
+        &socket,
+        serde_json::json!({"id":"m839-shell","method":"pane.send_input","params":{"pane_id":pane,"text":"printf ready > \"$HOME/ready\"","keys":["Enter"]}}),
+    );
+    assert_eq!(setup["result"]["type"], "ok");
+    support::wait_for_file(&base.join("ready"), Duration::from_secs(5));
+    let output = m839_managed_cli_bounded(
+        &base,
+        &socket,
         &[
             "agent",
             "start",
             "main",
-            "--cwd",
-            base.to_str().unwrap(),
+            "--kind",
+            "codex",
+            "--pane",
+            pane,
+            "--timeout",
+            "8000",
             "--",
-            "/bin/sh",
-            "-c",
-            "printf cli-agent-start-ok; sleep 2",
             "--session",
             "child-session",
         ],
     );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let started: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(started["result"]["type"], "agent_started");
     assert_eq!(started["result"]["agent"]["name"], "main");
-    assert_eq!(started["result"]["argv"][0], "/bin/sh");
-    assert_eq!(started["result"]["argv"][3], "--session");
-    assert_eq!(started["result"]["argv"][4], "child-session");
-    let terminal_id = started["result"]["agent"]["terminal_id"]
+    assert_eq!(started["result"]["agent"]["terminal_id"], terminal);
+    assert_eq!(started["result"]["agent"]["pane_id"], pane);
+    assert_eq!(started["result"]["agent"]["interactive_ready"], true);
+    assert!(started["result"]["agent"].get("agent_session").is_none());
+    assert_eq!(
+        started["result"]["argv"],
+        serde_json::json!(["codex", "--session", "child-session"])
+    );
+    assert_eq!(
+        fs::read(base.join("child-args")).unwrap(),
+        b"--session\nchild-session\n"
+    );
+    let listed = m839_managed_cli_bounded(&base, &socket, &["agent", "list"]);
+    assert_eq!(listed.status.code(), Some(0));
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["result"]["agents"][0]["terminal_id"], terminal);
+    assert_eq!(listed["result"]["agents"][0]["name"], "main");
+    let duplicate = m839_managed_cli_bounded(
+        &base,
+        &socket,
+        &["agent", "start", "main", "--kind", "codex", "--pane", pane],
+    );
+    assert_eq!(duplicate.status.code(), Some(1));
+    let duplicate: serde_json::Value = serde_json::from_slice(&duplicate.stderr).unwrap();
+    assert_eq!(duplicate["error"]["code"], "agent_name_taken");
+    assert!(duplicate["error"]["message"]
         .as_str()
         .unwrap()
-        .to_string();
-
-    let listed = run_cli_json(&socket_path, &["agent", "list"]);
-    assert_eq!(listed["result"]["agents"][0]["terminal_id"], terminal_id);
-    assert_eq!(listed["result"]["agents"][0]["name"], "main");
-
-    let duplicate = run_cli(
-        &socket_path,
-        &[
-            "agent",
-            "start",
-            "main",
-            "--cwd",
-            base.to_str().unwrap(),
-            "--",
-            "/bin/sh",
-            "-c",
-            "true",
-        ],
-    );
-    assert!(!duplicate.status.success());
-    let duplicate_json: serde_json::Value = serde_json::from_slice(&duplicate.stderr).unwrap();
-    assert_eq!(duplicate_json["error"]["code"], "agent_name_taken");
-
-    cleanup_spawned_zynk(zynk, base);
+        .contains(terminal));
+    cleanup_spawned_zynk(server, base);
 }
 
 #[test]
@@ -3865,19 +3896,14 @@ fn agent_commands_work() {
     let fetched = run_cli_json(&socket_path, &["agent", "get", "worker"]);
     assert_eq!(fetched["result"]["agent"]["pane_id"], root_pane_id);
 
-    let waited = run_cli_json(
+    let waited = run_cli(
         &socket_path,
-        &[
-            "agent",
-            "wait",
-            "worker",
-            "--status",
-            "unknown",
-            "--timeout",
-            "100",
-        ],
+        &["agent", "wait", "worker", "--timeout", "100"],
     );
-    assert_eq!(waited["result"]["agent"]["pane_id"], root_pane_id);
+    assert_eq!(waited.status.code(), Some(1));
+    assert!(waited.stdout.is_empty());
+    let waited: serde_json::Value = serde_json::from_slice(&waited.stderr).unwrap();
+    assert_eq!(waited["error"]["code"], "agent_not_running");
 
     let read = run_cli_json(
         &socket_path,
@@ -5989,20 +6015,12 @@ fn m835_invalid_status_never_guesses_compatibility() {
 }
 
 #[test]
-fn m835_subscription_rechecks_after_resolution_without_opening_mismatched_stream() {
+fn m839c_poll_rechecks_after_resolution_without_opening_mismatched_request() {
     let (requests, output) = m835_scripted_cli(
-        &[
-            "agent",
-            "wait",
-            "w1:p1",
-            "--status",
-            "idle",
-            "--timeout",
-            "100",
-        ],
+        &["agent", "wait", "worker", "--timeout", "100"],
         vec![
             serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}}),
-            serde_json::json!({"result":{"type":"agent_info", "agent":{"pane_id":"w1:p1", "agent_status":"working"}}}),
+            m839_agent_reply(m839_agent_json("working", "worker", "term_original", 7)),
             serde_json::json!({"result":{"type":"pong", "version":"replacement", "protocol":20}}),
         ],
         false,
@@ -6344,4 +6362,1488 @@ fn m837_real_wait_setup_error_writes_no_delivery_events() {
     );
     assert_eq!(m837_delivery_count(&db), before);
     cleanup_spawned_zynk(zynk, base);
+}
+
+fn m839_agent_json(status: &str, name: &str, terminal: &str, sequence: u64) -> serde_json::Value {
+    serde_json::json!({
+        "terminal_id": terminal, "name": name, "agent": "codex", "agent_status": status,
+        "workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1",
+        "focused": false, "revision": 0, "state_change_seq": sequence,
+        "interactive_ready": status == "idle" || status == "blocked" || status == "done"
+    })
+}
+
+fn m839_pong() -> serde_json::Value {
+    serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}})
+}
+
+fn m839_agent_reply(agent: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"result":{"type":"agent_info", "agent":agent}})
+}
+
+fn m839_cli_exchange<F>(
+    args: &[&str],
+    mut respond: F,
+) -> (
+    SnapshotCliFixture,
+    Vec<serde_json::Value>,
+    std::process::Output,
+)
+where
+    F: FnMut(&serde_json::Value, &Path) -> serde_json::Value + Send,
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fixture = SnapshotCliFixture::new();
+    let socket = fixture.base.join("m839.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let done = AtomicBool::new(false);
+    let (requests, output) = thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let mut requests = Vec::new();
+            while Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if done.load(Ordering::Acquire) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(err) => panic!("m839 accept: {err}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let mut response = respond(&request, &fixture.base);
+                requests.push(request.clone());
+                if let Some(raw) = response.as_str() {
+                    writeln!(stream, "{raw}").unwrap();
+                } else if !response.is_null() {
+                    response["id"] = request["id"].clone();
+                    writeln!(stream, "{response}").unwrap();
+                }
+            }
+            requests
+        });
+        let output = run_snapshot_cli_bounded(&fixture.base, &socket, args);
+        done.store(true, Ordering::Release);
+        (worker.join().unwrap(), output)
+    });
+    (fixture, requests, output)
+}
+
+#[test]
+fn m839c_agent_grammar_refuses_before_resolution_or_persistence() {
+    for args in [
+        vec!["agent", "start"],
+        vec!["agent", "start", "worker", "--pane", "w1:p1"],
+        vec!["agent", "start", "worker", "--kind", "codex"],
+        vec![
+            "agent", "start", "worker", "--kind", "omp", "--pane", "w1:p1",
+        ],
+        vec![
+            "agent", "start", "worker", "--kind", "codex", "--pane", "w1:p1", "--cwd", "/tmp",
+        ],
+        vec![
+            "agent", "start", "worker", "--kind", "codex", "--kind", "qwen", "--pane", "w1:p1",
+        ],
+        vec![
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "codex",
+            "--pane",
+            "w1:p1",
+            "--timeout",
+            "-1",
+        ],
+        vec![
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "codex",
+            "--pane",
+            "w1:p1",
+            "--timeout",
+            "18446744073709551616",
+        ],
+        vec!["agent", "prompt"],
+        vec!["agent", "prompt", "worker"],
+        vec!["agent", "prompt", "worker", ""],
+        vec!["agent", "prompt", "worker", "--unknown", "body"],
+        vec!["agent", "prompt", "worker", "--type"],
+        vec!["agent", "prompt", "worker", "--trace"],
+        vec!["agent", "prompt", "worker", "--wait", "--wait", "body"],
+        vec![
+            "agent", "prompt", "worker", "--type", "note", "--type", "status", "body",
+        ],
+        vec![
+            "agent", "prompt", "worker", "--trace", "a", "--trace", "b", "body",
+        ],
+        vec!["agent", "prompt", "worker", "--timeout", "100", "body"],
+        vec![
+            "agent",
+            "prompt",
+            "worker",
+            "--wait",
+            "--timeout",
+            "no",
+            "body",
+        ],
+        vec!["agent", "wait"],
+        vec!["agent", "wait", "worker", "--status", "idle"],
+        vec!["agent", "wait", "worker", "--timeout"],
+        vec!["agent", "wait", "worker", "--timeout", "-1"],
+        vec![
+            "agent",
+            "wait",
+            "worker",
+            "--timeout",
+            "1",
+            "--timeout",
+            "2",
+        ],
+    ] {
+        let (fixture, requests, output) =
+            m839_cli_exchange(&args, |_, _| panic!("syntax dispatched"));
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(requests.is_empty(), "{args:?}");
+        fixture.assert_no_runtime_created();
+    }
+    let help = run_zynk_help(&["agent", "--help"]);
+    assert!(help.contains("agent prompt <name>"));
+    assert!(help.contains("idle, done or blocked"));
+    assert!(!help.contains("agent wait <target> --status"));
+}
+
+#[test]
+fn m839c_wait_current_completes_without_relabeling_blocked_or_receipts() {
+    for status in ["idle", "done", "blocked"] {
+        let mut agent = m839_agent_json(status, "worker", "term_original", 7);
+        agent["interactive_ready"] = serde_json::json!(false);
+        let (fixture, requests, output) = m839_cli_exchange(
+            &["agent", "wait", "worker", "--timeout", "500"],
+            |request, _| match request["method"].as_str().unwrap() {
+                "ping" => m839_pong(),
+                "agent.get" => m839_agent_reply(agent.clone()),
+                other => panic!("unexpected {other}"),
+            },
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["ping", "agent.get"]
+        );
+        assert_eq!(requests[1]["params"]["target"], "worker");
+        assert_eq!(output.status.code(), Some(0), "{status}: {output:?}");
+        assert!(output.stderr.is_empty());
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["result"]["agent"]["agent_status"], status);
+        assert_eq!(result["result"]["agent"]["terminal_id"], "term_original");
+        assert!(result.get("message_id").is_none());
+        assert!(result.get("delivery_status").is_none());
+        fixture.assert_no_runtime_created();
+    }
+}
+
+#[test]
+fn m839c_wait_pins_terminal_once_and_guards_only_the_first_poll() {
+    let working = m839_agent_json("working", "worker", "term_original", 7);
+    let mut done = m839_agent_json("done", "worker", "term_original", 7);
+    done["interactive_ready"] = serde_json::json!(false);
+    let (requests, output) = m835_scripted_cli(
+        &["agent", "wait", "worker", "--timeout", "1500"],
+        vec![
+            m839_pong(),
+            m839_agent_reply(working.clone()),
+            m839_pong(),
+            m839_agent_reply(working),
+            m839_agent_reply(done.clone()),
+        ],
+        false,
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ping", "agent.get", "ping", "agent.get", "agent.get"]
+    );
+    assert_eq!(requests[1]["params"]["target"], "worker");
+    for index in [3, 4] {
+        assert_eq!(requests[index]["params"]["target"], "term_original");
+        assert_eq!(requests[index]["id"], "cli:agent:wait");
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["result"]["agent"]["state_change_seq"], 7);
+    assert!(matches!(
+        value["result"]["agent"].get("interactive_ready"),
+        None | Some(serde_json::Value::Bool(false))
+    ));
+    assert_eq!(value["result"]["agent"]["agent_status"], "done");
+    assert_eq!(value["result"]["agent"]["terminal_id"], "term_original");
+    assert_eq!(value["result"]["agent"]["name"], "worker");
+}
+
+#[test]
+fn m839c_wait_checks_later_unchecked_responses_and_first_poll_guard() {
+    for (reply, code) in [
+        (m839_agent_reply(m839_agent_json("done", "worker", "term_replacement", 9)), "agent_name_not_found"),
+        (serde_json::json!({"id":"wrong", "result":{"type":"agent_info", "agent":m839_agent_json("done", "worker", "term_original", 9)}}).to_string().into(), "invalid_response"),
+    ] {
+        let working = m839_agent_reply(m839_agent_json("working", "worker", "term_original", 7));
+        let (requests, output) = m835_scripted_cli(
+            &["agent", "wait", "worker", "--timeout", "1500"],
+            vec![m839_pong(), working.clone(), m839_pong(), working, reply], false,
+        );
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[4]["params"]["target"], "term_original");
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], code);
+    }
+    let mut incompatible = m839_pong();
+    incompatible["result"]["protocol"] = serde_json::json!(20);
+    let (requests, output) = m835_scripted_cli(
+        &["agent", "wait", "worker", "--timeout", "1500"],
+        vec![
+            m839_pong(),
+            m839_agent_reply(m839_agent_json("working", "worker", "term_original", 7)),
+            incompatible,
+        ],
+        false,
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ping", "agent.get", "ping"]
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "protocol_mismatch");
+}
+
+#[test]
+fn m839c_wait_typed_identity_checks_precede_completion() {
+    let valid = m839_agent_json("idle", "worker", "term_original", 7);
+    let mut cases = Vec::new();
+    for field in ["terminal_id", "agent_status", "focused", "revision"] {
+        let mut agent = valid.clone();
+        agent.as_object_mut().unwrap().remove(field);
+        cases.push((m839_agent_reply(agent), "invalid_response"));
+    }
+    let mut empty_terminal = valid.clone();
+    empty_terminal["terminal_id"] = serde_json::json!("");
+    cases.push((m839_agent_reply(empty_terminal), "invalid_response"));
+    let mut bad_sequence = valid.clone();
+    bad_sequence["state_change_seq"] = serde_json::json!("7");
+    cases.push((m839_agent_reply(bad_sequence), "invalid_response"));
+    cases.push((
+        serde_json::json!({"result":{"type":"pane_info", "agent":valid}}),
+        "invalid_response",
+    ));
+    cases.push((
+        m839_agent_reply(m839_agent_json("idle", "reused", "term_original", 7)),
+        "agent_name_not_found",
+    ));
+    let wrong_id = serde_json::json!({"id":"wrong", "result":{"type":"agent_info", "agent":m839_agent_json("idle", "worker", "term_original", 7)}});
+    cases.push((serde_json::json!(wrong_id.to_string()), "invalid_response"));
+    for (response, code) in cases {
+        let (requests, output) = m835_scripted_cli(
+            &["agent", "wait", "worker"],
+            vec![m839_pong(), response],
+            false,
+        );
+        assert_eq!(requests.len(), 2);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], code);
+    }
+}
+
+#[test]
+fn m839c_wait_poll_error_precedence_refuses_retargeting() {
+    for (reply, code) in [
+        (m839_agent_reply(m839_agent_json("unknown", "reused", "term_replacement", 9)), "agent_name_not_found"),
+        (m839_agent_reply(m839_agent_json("unknown", "reused", "term_original", 9)), "agent_name_not_found"),
+        (m839_agent_reply(m839_agent_json("unknown", "worker", "term_original", 9)), "agent_not_running"),
+        (m839_agent_reply(m839_agent_json("done", "worker", "term_replacement", 9)), "agent_name_not_found"),
+        (serde_json::json!({"error":{"code":"agent_not_found", "message":"lost terminal"}}), "agent_not_found"),
+        (serde_json::json!({"id":"wrong", "result":{"type":"agent_info", "agent":m839_agent_json("unknown", "reused", "term_replacement", 9)}}).to_string().into(), "invalid_response"),
+    ] {
+        let (requests, output) = m835_scripted_cli(
+            &["agent", "wait", "worker", "--timeout", "1500"],
+            vec![m839_pong(), m839_agent_reply(m839_agent_json("working", "worker", "term_original", 7)), m839_pong(), reply], false,
+        );
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[3]["params"]["target"], "term_original");
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], code);
+        assert_eq!(error["id"], "cli:agent:wait");
+    }
+
+    let (requests, output) = m835_scripted_cli(
+        &["agent", "wait", "worker", "--timeout", "1500"],
+        vec![
+            m839_pong(),
+            m839_agent_reply(m839_agent_json("working", "worker", "term_original", 7)),
+            m839_pong(),
+            m839_agent_reply(m839_agent_json("done", "worker", "", 9)),
+        ],
+        false,
+    );
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[3]["params"]["target"], "term_original");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(
+        (error["id"].as_str(), error["error"]["code"].as_str()),
+        (Some("cli:agent:wait"), Some("agent_name_not_found"))
+    );
+}
+
+#[test]
+fn m839c_wait_zero_timeout_precedes_poll_and_does_not_bound_inflight_read() {
+    let (requests, output) = m835_scripted_cli(
+        &["agent", "wait", "worker", "--timeout", "0"],
+        vec![
+            m839_pong(),
+            m839_agent_reply(m839_agent_json("working", "worker", "term_original", 7)),
+        ],
+        false,
+    );
+    assert_eq!(requests.len(), 2);
+    assert_eq!(output.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "timeout");
+
+    let mut gets = 0;
+    let (fixture, requests, output) = m839_cli_exchange(
+        &["agent", "wait", "worker", "--timeout", "500"],
+        |request, _| {
+            if request["method"] == "ping" {
+                return m839_pong();
+            }
+            assert_eq!(request["method"], "agent.get");
+            gets += 1;
+            if gets == 1 {
+                return m839_agent_reply(m839_agent_json("working", "worker", "term_original", 7));
+            }
+            assert_eq!(gets, 2);
+            assert_eq!(request["params"]["target"], "term_original");
+            thread::sleep(Duration::from_millis(600));
+            m839_agent_reply(m839_agent_json("done", "worker", "term_original", 8))
+        },
+    );
+    assert_eq!(gets, 2);
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "late response, not request deadline: {output:?}"
+    );
+    fixture.assert_no_runtime_created();
+
+    let mut gets = 0;
+    let (fixture, requests, output) = m839_cli_exchange(
+        &["agent", "wait", "worker", "--timeout", "500"],
+        |request, _| {
+            if request["method"] == "ping" {
+                return m839_pong();
+            }
+            assert_eq!(request["method"], "agent.get");
+            gets += 1;
+            assert!(gets <= 2, "positive deadline ignored");
+            if gets == 2 {
+                thread::sleep(Duration::from_millis(600));
+            }
+            m839_agent_reply(m839_agent_json("working", "worker", "term_original", 7))
+        },
+    );
+    assert_eq!(gets, 2);
+    assert_eq!(requests.len(), 4);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "timeout");
+    fixture.assert_no_runtime_created();
+}
+
+#[test]
+fn m839c_start_waits_for_ready_and_refuses_nonpending_failure() {
+    for failed in [false, true] {
+        let mut pending = m839_agent_json("unknown", "worker", "term_original", 0);
+        pending["launch_pending"] = serde_json::json!(true);
+        let mut settled = m839_agent_json(
+            if failed { "unknown" } else { "idle" },
+            "worker",
+            "term_original",
+            1,
+        );
+        settled["launch_pending"] = serde_json::json!(false);
+        let mut not_ready = m839_agent_json("idle", "worker", "term_original", 1);
+        not_ready["interactive_ready"] = serde_json::json!(false);
+        not_ready["launch_pending"] = serde_json::json!(true);
+        let started = serde_json::json!({"result":{"type":"agent_started", "agent":pending, "argv":["codex"]}});
+        let (requests, output) = m835_scripted_cli(
+            &[
+                "agent",
+                "start",
+                "worker",
+                "--kind",
+                "codex",
+                "--pane",
+                "w1:p1",
+                "--timeout",
+                "3001",
+            ],
+            vec![
+                m839_pong(),
+                started,
+                m839_pong(),
+                m839_agent_reply(pending),
+                m839_agent_reply(not_ready),
+                m839_agent_reply(settled),
+            ],
+            false,
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "ping",
+                "agent.start",
+                "ping",
+                "agent.get",
+                "agent.get",
+                "agent.get"
+            ]
+        );
+        assert_eq!(requests[5]["params"]["target"], "term_original");
+        assert_eq!(
+            output.status.code(),
+            Some(if failed { 1 } else { 0 }),
+            "{output:?}"
+        );
+        if failed {
+            assert!(output.stdout.is_empty());
+            let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(error["error"]["code"], "agent_start_failed");
+        } else {
+            assert!(output.stderr.is_empty());
+            let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(response["result"]["agent"]["interactive_ready"], true);
+        }
+    }
+}
+
+#[test]
+fn m839c_start_preserves_argv_and_checks_kind_before_name_after_terminal_pin() {
+    for (terminal, kind, name, status, code) in [
+        ("term_original", "qwen", "worker", "idle", None),
+        (
+            "term_original",
+            "codex",
+            "reused",
+            "unknown",
+            Some("agent_kind_mismatch"),
+        ),
+        (
+            "term_replacement",
+            "codex",
+            "reused",
+            "unknown",
+            Some("agent_name_not_found"),
+        ),
+        (
+            "term_original",
+            "qwen",
+            "reused",
+            "idle",
+            Some("agent_name_not_found"),
+        ),
+    ] {
+        let mut launched = m839_agent_json("unknown", "worker", "term_original", 0);
+        launched["agent"] = serde_json::json!("qwen");
+        launched["launch_pending"] = serde_json::json!(true);
+        let mut polled = m839_agent_json(status, name, terminal, 1);
+        polled["agent"] = serde_json::json!(kind);
+        let (requests, output) = m835_scripted_cli(
+            &[
+                "agent",
+                "start",
+                "worker",
+                "--kind",
+                "qwen",
+                "--pane",
+                "w1:p1",
+                "--timeout",
+                "3001",
+                "--",
+                "",
+                "two words",
+                "a'b",
+                "$HOME",
+                "one\\two",
+            ],
+            vec![
+                m839_pong(),
+                serde_json::json!({"result":{"type":"agent_started", "agent":launched, "argv":["qwen", "", "two words", "a'b", "$HOME", "one\\two"]}}),
+                m839_pong(),
+                m839_agent_reply(polled),
+            ],
+            false,
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["ping", "agent.start", "ping", "agent.get"]
+        );
+        assert_eq!(
+            requests[1]["params"],
+            serde_json::json!({"name":"worker", "kind":"qwen", "pane_id":"w1:p1", "timeout_ms":3001, "args":["", "two words", "a'b", "$HOME", "one\\two"]})
+        );
+        assert_eq!(requests[3]["params"]["target"], "term_original");
+        assert_eq!(
+            output.status.code(),
+            Some(if code.is_some() { 1 } else { 0 }),
+            "{output:?}"
+        );
+        if let Some(code) = code {
+            assert!(output.stdout.is_empty());
+            let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(error["error"]["code"], code);
+        } else {
+            assert!(output.stderr.is_empty());
+            let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(response["result"]["agent"]["name"], "worker");
+            assert_eq!(response["result"]["agent"]["agent"], "qwen");
+        }
+    }
+}
+
+fn m839_session(value: &str) -> serde_json::Value {
+    serde_json::json!({"source":"fixture-hook", "agent":"codex", "kind":"id", "value":value})
+}
+
+fn m839_original_party(session: Option<&str>) -> serde_json::Value {
+    let mut party = serde_json::json!({
+        "agent":"codex", "pane":"w1:p1", "terminal_id":"term_original",
+        "workspace":"w1", "tab":"w1:t1"
+    });
+    if let Some(session) = session {
+        party["agent_session"] = m839_session(session);
+    }
+    party
+}
+
+fn m839_delivery_rows(db: &Path) -> Vec<serde_json::Value> {
+    use sqlx::{Connection, Row};
+    sqlite_block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(db).read_only(true)
+                .busy_timeout(Duration::from_millis(200));
+            let mut connection = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
+            let rows = sqlx::query("SELECT message_id, event_type, proof_source, timestamp, payload_json FROM delivery_events ORDER BY message_id, seq")
+                .fetch_all(&mut connection).await.unwrap();
+            let result = rows.into_iter().map(|row| serde_json::json!({
+                "message_id":row.get::<String,_>("message_id"),
+                "event_type":row.get::<String,_>("event_type"),
+                "proof_source":row.get::<String,_>("proof_source"),
+                "timestamp":row.get::<String,_>("timestamp"),
+                "payload":serde_json::from_str::<serde_json::Value>(&row.get::<String,_>("payload_json")).unwrap()
+            })).collect();
+            connection.close().await.unwrap();
+            result
+        }).await.expect("bounded m839 delivery snapshot")
+    })
+}
+
+fn m839_message_rows(db: &Path) -> Vec<serde_json::Value> {
+    use sqlx::{Connection, Row};
+    sqlite_block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(db).read_only(true)
+                .busy_timeout(Duration::from_millis(200));
+            let mut connection = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
+            let rows = sqlx::query("SELECT m.id, m.body, m.body_hash, m.type, m.meta_json, p.agent_label, p.terminal_id, p.agent_session_source, p.agent_session_kind, p.agent_session_value FROM messages m JOIN conversation_participants p ON p.id=m.to_participant_id ORDER BY m.conversation_seq")
+                .fetch_all(&mut connection).await.unwrap();
+            let result = rows.into_iter().map(|row| serde_json::json!({
+                "id":row.get::<String,_>("id"), "body":row.get::<String,_>("body"),
+                "body_hash":row.get::<String,_>("body_hash"), "type":row.get::<Option<String>,_>("type"),
+                "meta":serde_json::from_str::<serde_json::Value>(&row.get::<String,_>("meta_json")).unwrap(),
+                "agent":row.get::<String,_>("agent_label"), "terminal_id":row.get::<Option<String>,_>("terminal_id"),
+                "session_source":row.get::<Option<String>,_>("agent_session_source"),
+                "session_kind":row.get::<Option<String>,_>("agent_session_kind"),
+                "session_value":row.get::<Option<String>,_>("agent_session_value")
+            })).collect();
+            connection.close().await.unwrap();
+            result
+        }).await.expect("bounded m839 message snapshot")
+    })
+}
+
+#[test]
+fn m839c_prompt_persists_pure_body_and_resolved_party_before_single_dispatch() {
+    use sha2::{Digest, Sha256};
+    for (body_args, pure) in [
+        (vec!["body\nwith spaces"], "body\nwith spaces"),
+        (vec!["two", "parts"], "two parts"),
+        (vec!["--", "--dash body"], "--dash body"),
+        (vec!["   "], "   "),
+    ] {
+        let mut args = vec![
+            "agent",
+            "prompt",
+            "worker",
+            "--type",
+            "note",
+            "--trace",
+            "M839_TRACE",
+        ];
+        args.extend(body_args);
+        let mut resolved = 0;
+        let mut submitted = 0;
+        let (fixture, requests, output) = m839_cli_exchange(&args, |request, base| {
+            if request["method"] == "ping" {
+                return m839_pong();
+            }
+            if request["method"] == "agent.get" {
+                resolved += 1;
+                assert_eq!(resolved, 1);
+                assert_eq!(request["params"]["target"], "worker");
+                fs::write(base.join("runtime.id"), "rt_m839\n").unwrap();
+                return m839_agent_reply(m839_agent_json("idle", "worker", "term_original", 7));
+            }
+            assert_eq!(request["method"], "agent.prompt");
+            submitted += 1;
+            assert_eq!(submitted, 1);
+            assert_eq!(request["params"]["target"], "worker");
+            assert_eq!(request["params"]["expected_terminal_id"], "term_original");
+            let db = base.join("cli-sqlite/zynk.db");
+            let messages = m839_message_rows(&db);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["body"], pure);
+            assert_eq!(messages[0]["agent"], "codex");
+            assert_eq!(messages[0]["terminal_id"], "term_original");
+            assert_eq!(messages[0]["session_value"], serde_json::Value::Null);
+            assert!(m839_delivery_rows(&db).is_empty());
+            let wire = request["params"]["text"].as_str().unwrap();
+            assert!(wire.ends_with(pure), "{wire:?}");
+            assert!(wire.contains(messages[0]["id"].as_str().unwrap()));
+            assert_eq!(wire.matches("Zynk message").count(), 1, "{wire:?}");
+            serde_json::json!({"result":{"type":"agent_prompted", "agent":m839_agent_json("idle", "worker", "term_original", 7), "baseline_state_change_seq":7}})
+        });
+        assert_eq!((resolved, submitted), (1, 1));
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["ping", "agent.get", "ping", "agent.prompt"]
+        );
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(output.stderr.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["command"], "agent prompt");
+        assert_eq!(value["result"], "ok");
+        assert_eq!(value["delivery_status"], "submitted");
+        assert_eq!(value["proof"]["proof_source"], "agent.prompt");
+        assert_eq!(value["type"], "note");
+        assert_eq!(value["to"], m839_original_party(None));
+        assert!(value.get("wait").is_none());
+        let messages = m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0]["body_hash"],
+            format!("{:x}", Sha256::digest(pure.as_bytes()))
+        );
+        assert_eq!(messages[0]["meta"]["trace_id"], "M839_TRACE");
+        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_type"], "submitted");
+        assert_eq!(events[0]["proof_source"], "agent.prompt");
+        assert_eq!(events[0]["payload"]["terminal_id"], "term_original");
+        assert_eq!(events[0]["message_id"], value["message_id"]);
+        assert_eq!(events[0]["timestamp"], value["submitted_at"]);
+    }
+
+    let (fixture, requests, output) = m839_cli_exchange(
+        &["agent", "prompt", "worker", "--trace", " inherit ", "body"],
+        |request, base| {
+            if request["method"] == "ping" {
+                return m839_pong();
+            }
+            if request["method"] == "agent.get" {
+                fs::write(base.join("runtime.id"), "rt_m839\n").unwrap();
+                return m839_agent_reply(m839_agent_json("idle", "worker", "term_original", 7));
+            }
+            assert_eq!(request["method"], "agent.prompt");
+            serde_json::json!({"result":{"type":"agent_prompted", "agent":m839_agent_json("idle", "worker", "term_original", 7), "baseline_state_change_seq":7}})
+        },
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let messages = m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+    assert_eq!(
+        messages[0]["meta"]["trace_id"], "inherit",
+        "explicit trace remains explicit after trimming"
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    assert_eq!(
+        m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db")).len(),
+        1
+    );
+}
+
+#[test]
+fn m839c_prompt_wait_failures_preserve_one_durable_submission_and_exit_three() {
+    for (case, code, effect) in [
+        ("timeout", "timeout", "submitted_wait_timeout"),
+        (
+            "transport",
+            "transport_failed",
+            "submitted_wait_transport_failed",
+        ),
+        (
+            "protocol",
+            "protocol_mismatch",
+            "submitted_wait_protocol_mismatch",
+        ),
+        ("name", "agent_name_not_found", "submitted_wait_name_lost"),
+        (
+            "replacement",
+            "agent_name_not_found",
+            "submitted_wait_name_lost",
+        ),
+        ("missing", "agent_not_found", "submitted_wait_terminal_lost"),
+        ("unknown", "agent_not_running", "submitted_wait_not_running"),
+        (
+            "invalid",
+            "invalid_response",
+            "submitted_wait_invalid_response",
+        ),
+        ("refused", "permission_denied", "submitted_wait_refused"),
+    ] {
+        let mut prompts = 0;
+        let mut gets = 0;
+        let mut before_wait = None;
+        let timeout = if case == "timeout" { "0" } else { "1000" };
+        let (fixture, requests, output) = m839_cli_exchange(
+            &[
+                "agent",
+                "prompt",
+                "worker",
+                "--wait",
+                "--timeout",
+                timeout,
+                "body",
+            ],
+            |request, base| {
+                if request["method"] == "ping" {
+                    if prompts == 1 {
+                        before_wait = Some(m839_delivery_rows(&base.join("cli-sqlite/zynk.db")));
+                        if case == "protocol" {
+                            return serde_json::json!({"result":{"type":"pong", "version":"replacement", "protocol":20}});
+                        }
+                    }
+                    return m839_pong();
+                }
+                if request["method"] == "agent.prompt" {
+                    prompts += 1;
+                    assert_eq!(prompts, 1);
+                    assert!(m839_delivery_rows(&base.join("cli-sqlite/zynk.db")).is_empty());
+                    let mut agent = m839_agent_json("idle", "worker", "term_original", 7);
+                    agent["agent_session"] = m839_session("submission-session-B");
+                    return serde_json::json!({"result":{"type":"agent_prompted", "agent":agent, "baseline_state_change_seq":7}});
+                }
+                assert_eq!(request["method"], "agent.get");
+                gets += 1;
+                if gets == 1 {
+                    fs::write(base.join("runtime.id"), "rt_m839\n").unwrap();
+                    assert_eq!(request["params"]["target"], "worker");
+                    let mut agent = m839_agent_json("idle", "worker", "term_original", 5);
+                    agent["agent_session"] = m839_session("resolution-session-A");
+                    return m839_agent_reply(agent);
+                }
+                assert_eq!(gets, 2);
+                assert_eq!(request["params"]["target"], "term_original");
+                match case {
+                    "transport" => serde_json::Value::Null,
+                    "name" => {
+                        m839_agent_reply(m839_agent_json("done", "reused", "term_original", 8))
+                    }
+                    "replacement" => {
+                        m839_agent_reply(m839_agent_json("done", "worker", "term_new", 8))
+                    }
+                    "missing" => {
+                        serde_json::json!({"error":{"code":"agent_not_found", "message":"old terminal lost"}})
+                    }
+                    "unknown" => {
+                        m839_agent_reply(m839_agent_json("unknown", "worker", "term_original", 8))
+                    }
+                    "invalid" => serde_json::json!({"result":{"type":"ok"}}),
+                    "refused" => {
+                        serde_json::json!({"error":{"code":"permission_denied", "message":"wait refused"}})
+                    }
+                    _ => panic!("unexpected polling request for {case}"),
+                }
+            },
+        );
+        assert_eq!(prompts, 1, "case={case}");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r["method"] == "agent.prompt")
+                .count(),
+            1
+        );
+        assert_eq!(output.status.code(), Some(3), "case={case}: {output:?}");
+        assert!(output.stderr.is_empty(), "case={case}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["result"], "ok");
+        assert_eq!(value["delivery_status"], "submitted");
+        assert_eq!(value["proof"]["proof_source"], "agent.prompt");
+        assert_eq!(
+            value["to"],
+            m839_original_party(Some("resolution-session-A"))
+        );
+        assert!(value.get("error").is_none());
+        assert_eq!(value["wait"]["result"], "failed");
+        assert_eq!(value["wait"]["error"]["code"], code);
+        assert_eq!(
+            value["wait"]["error"]["context"]["transport_effect"],
+            effect
+        );
+        assert!(value["next"].as_str().unwrap().contains("do not resubmit"));
+        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        let messages = m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["agent"], "codex");
+        assert_eq!(messages[0]["terminal_id"], "term_original");
+        assert_eq!(messages[0]["session_source"], "fixture-hook");
+        assert_eq!(messages[0]["session_kind"], "id");
+        assert_eq!(messages[0]["session_value"], "resolution-session-A");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_type"], "submitted");
+        assert_eq!(events[0]["payload"]["terminal_id"], "term_original");
+        assert_eq!(events[0]["message_id"], value["message_id"]);
+        assert_eq!(events[0]["timestamp"], value["submitted_at"]);
+        if case == "timeout" {
+            assert!(before_wait.is_none());
+        } else {
+            assert_eq!(
+                before_wait.unwrap(),
+                events,
+                "durable before first wait guard: {case}"
+            );
+        }
+    }
+
+    for case in ["sequence_missing", "malformed", "both"] {
+        let mut prompts = 0;
+        let mut polls = 0;
+        let (fixture, requests, output) = m839_cli_exchange(
+            &[
+                "agent",
+                "prompt",
+                "worker",
+                "--wait",
+                "--timeout",
+                "150",
+                "body",
+            ],
+            |request, base| {
+                if request["method"] == "ping" {
+                    return m839_pong();
+                }
+                if request["method"] == "agent.prompt" {
+                    prompts += 1;
+                    return serde_json::json!({"result":{"type":"agent_prompted", "agent":m839_agent_json("idle", "worker", "term_original", 7), "baseline_state_change_seq":7}});
+                }
+                assert_eq!(request["method"], "agent.get");
+                if prompts == 0 {
+                    fs::write(base.join("runtime.id"), "rt_m839\n").unwrap();
+                    return m839_agent_reply(m839_agent_json("idle", "worker", "term_original", 7));
+                }
+                polls += 1;
+                if case == "malformed" {
+                    return serde_json::Value::String("{malformed".into());
+                }
+                let mut agent = m839_agent_json("done", "worker", "term_original", 8);
+                if case == "sequence_missing" {
+                    agent.as_object_mut().unwrap().remove("state_change_seq");
+                }
+                let mut response = m839_agent_reply(agent);
+                if case == "both" {
+                    response["error"] = serde_json::json!({"code":"permission_denied", "message":"contradictory poll"});
+                }
+                response
+            },
+        );
+        assert_eq!(output.status.code(), Some(3), "{case}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["wait"]["error"]["code"], "invalid_response", "{case}");
+        assert_eq!(
+            value["wait"]["error"]["context"]["transport_effect"],
+            "submitted_wait_invalid_response"
+        );
+        assert_eq!(value["delivery_status"], "submitted");
+        assert_eq!(value["result"], "ok");
+        assert_eq!(value["to"], m839_original_party(None));
+        assert!(value["next"].as_str().unwrap().contains("do not resubmit"));
+        assert_eq!((prompts, polls), (1, 1));
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r["method"] == "agent.prompt")
+                .count(),
+            1
+        );
+        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_type"], "submitted");
+        assert_eq!(events[0]["message_id"], value["message_id"]);
+    }
+}
+
+#[test]
+fn m839c_prompt_wait_requires_new_sequence_and_keeps_original_party() {
+    let mut prompts = 0;
+    let mut polls = 0;
+    let mut before_wait = None;
+    let (fixture, requests, output) = m839_cli_exchange(
+        &[
+            "agent",
+            "prompt",
+            "worker",
+            "--wait",
+            "--timeout",
+            "1500",
+            "body",
+        ],
+        |request, base| {
+            if request["method"] == "ping" {
+                if prompts == 1 {
+                    before_wait = Some(m839_delivery_rows(&base.join("cli-sqlite/zynk.db")));
+                }
+                return m839_pong();
+            }
+            if request["method"] == "agent.prompt" {
+                prompts += 1;
+                let mut agent = m839_agent_json("idle", "worker", "term_original", 7);
+                agent["agent_session"] = m839_session("submission-session-B");
+                return serde_json::json!({"result":{"type":"agent_prompted", "agent":agent, "baseline_state_change_seq":7}});
+            }
+            assert_eq!(request["method"], "agent.get");
+            if prompts == 0 {
+                fs::write(base.join("runtime.id"), "rt_m839\n").unwrap();
+                let mut agent = m839_agent_json("idle", "worker", "term_original", 5);
+                agent["agent_session"] = m839_session("resolution-session-A");
+                return m839_agent_reply(agent);
+            }
+            polls += 1;
+            assert!(polls <= 2);
+            assert_eq!(request["params"]["target"], "term_original");
+            let mut agent = m839_agent_json(
+                "blocked",
+                "worker",
+                "term_original",
+                if polls == 1 { 7 } else { 8 },
+            );
+            agent["agent_session"] = serde_json::json!({"agent":"codex", "source":"later-hook", "kind":"id", "value":"later-session"});
+            m839_agent_reply(agent)
+        },
+    );
+    assert_eq!((prompts, polls), (1, 2));
+    assert_eq!(requests.iter().filter(|r| r["method"] == "ping").count(), 3);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["result"], "ok");
+    assert_eq!(value["delivery_status"], "submitted");
+    assert_eq!(value["proof"]["proof_source"], "agent.prompt");
+    assert_eq!(value["wait"]["result"], "ok");
+    assert_eq!(value["wait"]["agent"]["state_change_seq"], 8);
+    assert_eq!(value["wait"]["agent"]["agent_status"], "blocked");
+    assert_eq!(
+        value["to"],
+        m839_original_party(Some("resolution-session-A"))
+    );
+    let messages = m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["agent"], "codex");
+    assert_eq!(messages[0]["terminal_id"], "term_original");
+    assert_eq!(messages[0]["session_source"], "fixture-hook");
+    assert_eq!(messages[0]["session_kind"], "id");
+    assert_eq!(messages[0]["session_value"], "resolution-session-A");
+    let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "submitted");
+    assert_eq!(events[0]["proof_source"], "agent.prompt");
+    assert_eq!(events[0]["payload"]["terminal_id"], "term_original");
+    assert_eq!(events[0]["message_id"], value["message_id"]);
+    assert_eq!(events[0]["timestamp"], value["submitted_at"]);
+    assert_eq!(before_wait.unwrap(), events);
+}
+
+#[test]
+fn m839c_prompt_known_submit_append_failure_never_waits_or_records_failed() {
+    use sqlx::{Connection, Executor};
+    let mut prompts = 0;
+    let mut gets = 0;
+    let (fixture, requests, output) = m839_cli_exchange(
+        &["agent", "prompt", "worker", "--wait", "body"],
+        |request, base| {
+            if request["method"] == "ping" {
+                return m839_pong();
+            }
+            if request["method"] == "agent.get" {
+                gets += 1;
+                assert_eq!(gets, 1, "must not wait after append failure");
+                fs::write(base.join("runtime.id"), "rt_m839\n").unwrap();
+                return m839_agent_reply(m839_agent_json("idle", "worker", "term_original", 7));
+            }
+            assert_eq!(request["method"], "agent.prompt");
+            prompts += 1;
+            assert_eq!(prompts, 1);
+            sqlite_block_on(async {
+                let options = sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(base.join("cli-sqlite/zynk.db"))
+                    .busy_timeout(Duration::from_millis(200));
+                let mut conn = sqlx::SqliteConnection::connect_with(&options)
+                    .await
+                    .unwrap();
+                conn.execute("CREATE TRIGGER m839_reject_submit BEFORE INSERT ON delivery_events WHEN NEW.event_type='submitted' BEGIN SELECT RAISE(ABORT, 'm839 intentional append refusal'); END;").await.unwrap();
+                conn.close().await.unwrap();
+            });
+            serde_json::json!({"result":{"type":"agent_prompted", "agent":m839_agent_json("idle", "worker", "term_original", 7), "baseline_state_change_seq":7}})
+        },
+    );
+    assert_eq!((prompts, gets), (1, 1));
+    assert_eq!(requests.len(), 4);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["result"], "failed");
+    assert_eq!(value["error"]["code"], "delivery_event_persist_failed");
+    assert_eq!(
+        value["error"]["context"]["transport_effect"],
+        "submitted_unrecorded"
+    );
+    assert!(value["next"].as_str().unwrap().contains("do not resubmit"));
+    assert!(value.get("wait").is_none());
+    assert!(value.get("delivery_status").is_none());
+    assert_eq!(
+        m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db")).len(),
+        1
+    );
+    assert!(m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db")).is_empty());
+}
+
+#[test]
+fn m839c_prompt_unverified_response_never_claims_submitted_or_waits() {
+    for case in [
+        "id",
+        "type",
+        "name",
+        "terminal",
+        "baseline_missing",
+        "baseline_type",
+        "lost",
+    ] {
+        let mut gets = 0;
+        let mut prompts = 0;
+        let (fixture, requests, output) = m839_cli_exchange(
+            &["agent", "prompt", "worker", "--wait", "body"],
+            |request, base| {
+                if request["method"] == "ping" {
+                    return m839_pong();
+                }
+                if request["method"] == "agent.get" {
+                    gets += 1;
+                    assert_eq!(gets, 1, "no wait or re-resolution: {case}");
+                    fs::write(base.join("runtime.id"), "rt_m839\n").unwrap();
+                    return m839_agent_reply(m839_agent_json("idle", "worker", "term_original", 5));
+                }
+                assert_eq!(request["method"], "agent.prompt");
+                prompts += 1;
+                assert_eq!(prompts, 1);
+                assert_eq!(request["params"]["expected_terminal_id"], "term_original");
+                let mut response = serde_json::json!({"result":{"type":"agent_prompted", "agent":m839_agent_json("idle", "worker", "term_original", 7), "baseline_state_change_seq":7}});
+                match case {
+                    "id" => {
+                        response["id"] = serde_json::json!("wrong");
+                        return response.to_string().into();
+                    }
+                    "type" => response["result"]["type"] = serde_json::json!("agent_info"),
+                    "name" => {
+                        response["result"]["agent"]["name"] = serde_json::json!("replacement")
+                    }
+                    "terminal" => {
+                        response["result"]["agent"]["terminal_id"] = serde_json::json!("term_new")
+                    }
+                    "baseline_missing" => {
+                        response["result"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("baseline_state_change_seq");
+                    }
+                    "baseline_type" => {
+                        response["result"]["baseline_state_change_seq"] = serde_json::json!("7")
+                    }
+                    "lost" => return serde_json::Value::Null,
+                    _ => unreachable!(),
+                }
+                response
+            },
+        );
+        assert_eq!((gets, prompts), (1, 1));
+        assert_eq!(requests.len(), 4);
+        assert_eq!(output.status.code(), Some(1), "{case}: {output:?}");
+        assert!(output.stderr.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["result"], "failed");
+        assert_eq!(
+            value["error"]["code"],
+            if case == "lost" {
+                "transport_failed"
+            } else {
+                "invalid_response"
+            }
+        );
+        assert_eq!(
+            value["error"]["context"]["transport_effect"],
+            "submission_unverified"
+        );
+        assert_eq!(value["to"], m839_original_party(None));
+        assert!(value.get("delivery_status").is_none());
+        assert!(value.get("submitted_at").is_none());
+        assert!(value.get("wait").is_none());
+        assert!(value["next"].as_str().unwrap().contains("do not resubmit"));
+        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_type"], "failed");
+        assert_eq!(events[0]["proof_source"], "agent.prompt");
+        assert_eq!(events[0]["message_id"], value["message_id"]);
+        assert_eq!(
+            m839_message_rows(&fixture.base.join("cli-sqlite/zynk.db")).len(),
+            1
+        );
+    }
+
+    for case in ["both", "malformed"] {
+        let mut gets = 0;
+        let (fixture, requests, output) = m839_cli_exchange(
+            &["agent", "prompt", "worker", "--wait", "body"],
+            |request, base| {
+                if request["method"] == "ping" {
+                    return m839_pong();
+                }
+                if request["method"] == "agent.get" {
+                    gets += 1;
+                    assert_eq!(gets, 1, "no wait after unverified response: {case}");
+                    fs::write(base.join("runtime.id"), "rt_m839\n").unwrap();
+                    return m839_agent_reply(m839_agent_json("idle", "worker", "term_original", 7));
+                }
+                assert_eq!(request["method"], "agent.prompt");
+                if case == "malformed" {
+                    return serde_json::Value::String("{malformed".into());
+                }
+                serde_json::json!({
+                    "result":{"type":"agent_prompted", "agent":m839_agent_json("idle", "worker", "term_original", 7), "baseline_state_change_seq":7},
+                    "error":{"code":"permission_denied", "message":"contradictory refusal"}
+                })
+            },
+        );
+        assert_eq!(output.status.code(), Some(1), "{case}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "invalid_response", "{case}");
+        assert_eq!(
+            value["error"]["context"]["transport_effect"],
+            "submission_unverified"
+        );
+        assert!(value["next"].as_str().unwrap().contains("do not resubmit"));
+        assert!(value.get("delivery_status").is_none());
+        assert!(value.get("wait").is_none());
+        assert_eq!(value["to"], m839_original_party(None));
+        assert_eq!(requests.len(), 4);
+        let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_type"], "failed");
+        assert_eq!(events[0]["proof_source"], "agent.prompt");
+    }
+}
+
+#[test]
+fn m839c_prompt_precondition_refusal_and_unresolved_transport_stay_distinct() {
+    let mut gets = 0;
+    let (fixture, requests, output) = m839_cli_exchange(
+        &["agent", "prompt", "worker", "--wait", "body"],
+        |request, base| {
+            if request["method"] == "ping" {
+                return m839_pong();
+            }
+            if request["method"] == "agent.get" {
+                gets += 1;
+                assert_eq!(gets, 1);
+                fs::write(base.join("runtime.id"), "rt_m839\n").unwrap();
+                return m839_agent_reply(m839_agent_json("idle", "worker", "term_original", 5));
+            }
+            assert_eq!(request["method"], "agent.prompt");
+            assert_eq!(request["params"]["expected_terminal_id"], "term_original");
+            serde_json::json!({"error":{"code":"agent_target_changed", "message":"terminal precondition refused"}})
+        },
+    );
+    assert_eq!(requests.len(), 4);
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "agent_target_changed");
+    assert_eq!(value["to"], m839_original_party(None));
+    assert!(value.get("delivery_status").is_none());
+    assert!(value.get("wait").is_none());
+    let events = m839_delivery_rows(&fixture.base.join("cli-sqlite/zynk.db"));
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "failed");
+    assert_eq!(events[0]["proof_source"], "agent.prompt");
+
+    for mismatch in [false, true] {
+        let (fixture, requests, output) =
+            m839_cli_exchange(&["agent", "prompt", "worker", "body"], |request, _| {
+                assert_eq!(request["method"], "ping");
+                if !mismatch {
+                    return serde_json::Value::Null;
+                }
+                let mut pong = m839_pong();
+                pong["result"]["protocol"] = serde_json::json!(20);
+                pong
+            });
+        assert_eq!(requests.len(), 1);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stderr.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["result"], "failed");
+        assert_eq!(value["error"]["code"], "transport_failed");
+        assert!(value["error"].get("context").is_none());
+        assert_eq!(value["target_resolution"], "unknown");
+        assert_eq!(value["to"], serde_json::json!({}));
+        fixture.assert_no_runtime_created();
+    }
+}
+
+fn m839_named_table_counts(db: &Path) -> Vec<(String, i64)> {
+    use sqlx::Connection;
+    sqlite_block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(db)
+                .read_only(true)
+                .busy_timeout(Duration::from_millis(200));
+            let mut connection = sqlx::SqliteConnection::connect_with(&options)
+                .await
+                .unwrap();
+            let mut counts = Vec::new();
+            for table in [
+                "conversations",
+                "conversation_participants",
+                "messages",
+                "delivery_events",
+                "embedding_models",
+                "embedding_jobs",
+                "message_embeddings",
+                "_sqlx_migrations",
+            ] {
+                let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                    .fetch_one(&mut connection)
+                    .await
+                    .unwrap();
+                counts.push((table.into(), count));
+            }
+            connection.close().await.unwrap();
+            counts
+        })
+        .await
+        .expect("bounded m839 named-table snapshot")
+    })
+}
+
+fn m839_seed_aged_read_orphan(db: &Path) {
+    use sqlx::{Connection, Executor};
+    sqlite_block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(db).create_if_missing(false).busy_timeout(Duration::from_millis(200));
+            let mut connection = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
+            connection.execute("INSERT INTO conversations (id,runtime_session_id,socket_namespace,workspace_id,tab_id,created_at,last_message_at) VALUES ('m839-read-c','rt','ns','w','t','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z')").await.unwrap();
+            for id in ["m839-read-from", "m839-read-to"] {
+                sqlx::query("INSERT INTO conversation_participants (id,conversation_id,agent_label,participant_key,joined_at) VALUES (?,'m839-read-c',?,?,'2000-01-01T00:00:00Z')")
+                    .bind(id).bind(id).bind(id).execute(&mut connection).await.unwrap();
+            }
+            connection.execute("INSERT INTO messages (id,conversation_id,conversation_seq,runtime_session_id,socket_namespace,created_at,target_arg,from_participant_id,to_participant_id,body,body_hash,workspace_id,tab_id) VALUES ('m839-read-orphan','m839-read-c',1,'rt','ns','2000-01-01T00:00:00Z','worker','m839-read-from','m839-read-to','body','hash','w','t')").await.unwrap();
+            connection.close().await.unwrap();
+        }).await.expect("bounded m839 orphan seed");
+    });
+}
+
+#[test]
+fn m839c_real_agent_reads_with_managed_state_add_no_persistence_rows() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = unique_test_dir();
+    fs::create_dir_all(base.join("bin")).unwrap();
+    let shell = base.join("shell");
+    fs::write(&shell, b"#!/bin/sh\nroot=${0%/*}\nexport HOME=\"$root\" PATH=\"$root/bin\" ZYNK_AGENT= ENV=/dev/null BASH_ENV=/dev/null INPUTRC=/dev/null PROMPT_COMMAND= PS1= PS2=\nexec /bin/bash --noprofile --norc --noediting -i\n").unwrap();
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    let agent = base.join("bin/codex");
+    fs::copy("/bin/cat", &agent).unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket = runtime_dir.join("zynk.sock");
+    let config = toml::to_string(&serde_json::json!({"onboarding":false, "terminal":{"default_shell":shell, "shell_mode":"non_login"}})).unwrap();
+    let zynk = spawn_zynk_with_config(
+        &config_home,
+        &runtime_dir,
+        &socket,
+        Some(&base.join("bin")),
+        &config,
+    );
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let created = m837_exchange(
+        &socket,
+        serde_json::json!({"id":"m839:create", "method":"workspace.create", "params":{"cwd":base, "focus":true}}),
+    );
+    let pane = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let ready = m837_exchange(
+        &socket,
+        serde_json::json!({"id":"m839:ready", "method":"pane.send_input", "params":{"pane_id":pane, "text":"printf '%s' ready > \"$HOME/m839-ready\"", "keys":["Enter"]}}),
+    );
+    assert_eq!(ready["result"]["type"], "ok");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while fs::read(base.join("m839-ready")).ok().as_deref() != Some(b"ready".as_slice()) {
+        assert!(
+            Instant::now() < deadline,
+            "isolated shell did not initialize"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let started = m837_exchange(
+        &socket,
+        serde_json::json!({"id":"m839:start", "method":"agent.start", "params":{"name":"worker", "kind":"codex", "pane_id":pane, "timeout_ms":30000}}),
+    );
+    assert_eq!(started["result"]["type"], "agent_started", "{started}");
+    let terminal = started["result"]["agent"]["terminal_id"].as_str().unwrap();
+    let db = config_home.join("sqlite/zynk.db");
+    m839_seed_aged_read_orphan(&db);
+    let before = m839_named_table_counts(&db);
+    let deliveries = m839_delivery_rows(&db);
+    assert!(
+        deliveries.is_empty(),
+        "fixture orphan must have no delivery event: {deliveries:?}"
+    );
+    for method in ["agent.get", "agent.list", "agent.get", "agent.list"] {
+        let params = if method == "agent.get" {
+            serde_json::json!({"target":terminal})
+        } else {
+            serde_json::json!({})
+        };
+        let response = m837_exchange(
+            &socket,
+            serde_json::json!({"id":"m839:read", "method":method, "params":params}),
+        );
+        assert!(response.get("error").is_none(), "{response}");
+        if method == "agent.get" {
+            assert_eq!(response["result"]["agent"]["terminal_id"], terminal);
+            assert_eq!(response["result"]["agent"]["name"], "worker");
+        } else {
+            assert!(response["result"]["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|agent| agent["terminal_id"] == terminal && agent["name"] == "worker"));
+        }
+        assert_eq!(m839_named_table_counts(&db), before, "{method}");
+        assert_eq!(m839_delivery_rows(&db), deliveries, "{method}");
+    }
+    cleanup_spawned_zynk(zynk, base);
+}
+
+fn m839_managed_cli_bounded(base: &Path, socket: &Path, args: &[&str]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zynk"))
+        .args(args)
+        .env_clear()
+        .env("HOME", base.join("cli-home"))
+        .env("XDG_CONFIG_HOME", base.join("cli-config"))
+        .env("XDG_DATA_HOME", base.join("cli-data"))
+        .env("XDG_CACHE_HOME", base.join("cli-cache"))
+        .env("XDG_RUNTIME_DIR", base.join("cli-runtime"))
+        .env("ZYNK_SQLITE_HOME", base.join("config/sqlite"))
+        .env("ZYNK_SOCKET_PATH", socket)
+        .current_dir(base)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    thread::scope(|scope| {
+        let read = |mut pipe: Box<dyn Read + Send>| {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        };
+        let stdout = scope.spawn(move || read(Box::new(stdout)));
+        let stderr = scope.spawn(move || read(Box::new(stderr)));
+        let finished = wait_until(Duration::from_secs(12), Duration::from_millis(5), || {
+            child.try_wait().unwrap().is_some()
+        });
+        if !finished {
+            let _ = child.kill();
+        }
+        let status = child.wait().unwrap();
+        let output = std::process::Output {
+            status,
+            stdout: stdout.join().unwrap(),
+            stderr: stderr.join().unwrap(),
+        };
+        assert!(
+            finished,
+            "m839 managed CLI exceeded 12s; direct child reaped"
+        );
+        output
+    })
 }

@@ -2762,7 +2762,25 @@ impl PaneRuntime {
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-        self.io.try_send_bytes(bytes)
+        #[cfg(test)]
+        let observed =
+            TEST_INPUT_ATTEMPTS.with(|slot| slot.borrow().as_ref().map(|_| bytes.clone()));
+        let result = self.io.try_send_bytes(bytes);
+        #[cfg(test)]
+        if let Some(bytes) = observed {
+            let outcome = match &result {
+                Ok(()) => TestInputOutcome::Accepted,
+                Err(mpsc::error::TrySendError::Full(_)) => TestInputOutcome::Full,
+                Err(mpsc::error::TrySendError::Closed(_)) => TestInputOutcome::Closed,
+            };
+            TEST_INPUT_ATTEMPTS.with(|slot| {
+                slot.borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .push(TestInputAttempt { bytes, outcome });
+            });
+        }
+        result
     }
 
     pub async fn send_paste(&self, text: String) -> Result<(), mpsc::error::SendError<Bytes>> {
@@ -3042,6 +3060,101 @@ impl PaneRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn m839a_input_observer_records_actual_queue_results_and_paste_delegation() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel_capacity(80, 24, 1);
+        let (_, observed) = test_observe_try_sends(|| {
+            assert!(runtime
+                .try_send_bytes(Bytes::from_static(b"accepted"))
+                .is_ok());
+            assert!(matches!(
+                runtime.try_send_bytes(Bytes::from_static(b"full")),
+                Err(mpsc::error::TrySendError::Full(_))
+            ));
+            rx.close();
+            assert!(matches!(
+                runtime.try_send_bytes(Bytes::from_static(b"closed")),
+                Err(mpsc::error::TrySendError::Closed(_))
+            ));
+        });
+        assert_eq!(
+            observed,
+            vec![
+                TestInputAttempt {
+                    bytes: Bytes::from_static(b"accepted"),
+                    outcome: TestInputOutcome::Accepted
+                },
+                TestInputAttempt {
+                    bytes: Bytes::from_static(b"full"),
+                    outcome: TestInputOutcome::Full
+                },
+                TestInputAttempt {
+                    bytes: Bytes::from_static(b"closed"),
+                    outcome: TestInputOutcome::Closed
+                },
+            ]
+        );
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"accepted"));
+        assert!(rx.try_recv().is_err());
+
+        let (runtime, mut rx) = PaneRuntime::test_with_channel_capacity(80, 24, 1);
+        runtime.test_process_pty_bytes(b"\x1b[?2004h");
+        let (_, observed) =
+            test_observe_try_sends(|| runtime.try_send_paste("text".into()).unwrap());
+        assert_eq!(
+            observed,
+            vec![TestInputAttempt {
+                bytes: Bytes::from_static(b"\x1b[200~text\x1b[201~"),
+                outcome: TestInputOutcome::Accepted,
+            }]
+        );
+        assert_eq!(rx.try_recv().unwrap(), observed[0].bytes);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn m839a_input_observer_unwinds_and_refuses_nested_scope_without_losing_outer() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel_capacity(80, 24, 2);
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            test_observe_try_sends(|| {
+                runtime
+                    .try_send_bytes(Bytes::from_static(b"before-panic"))
+                    .unwrap();
+                panic!("m839 observation witness");
+            });
+        }));
+        assert!(failure.is_err());
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"before-panic"));
+        let (_, observed) = test_observe_try_sends(|| {
+            runtime
+                .try_send_bytes(Bytes::from_static(b"before-nested"))
+                .unwrap();
+            let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                test_observe_try_sends(|| ())
+            }));
+            assert!(nested.is_err());
+            runtime
+                .try_send_bytes(Bytes::from_static(b"after-panic"))
+                .unwrap();
+        });
+        assert_eq!(
+            observed,
+            vec![
+                TestInputAttempt {
+                    bytes: Bytes::from_static(b"before-nested"),
+                    outcome: TestInputOutcome::Accepted
+                },
+                TestInputAttempt {
+                    bytes: Bytes::from_static(b"after-panic"),
+                    outcome: TestInputOutcome::Accepted
+                },
+            ]
+        );
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"before-nested"));
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"after-panic"));
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn m833_popup_launch_env_removes_pane_identity_after_extra_application() {
         let mut command = portable_pty::CommandBuilder::new("/bin/sh");
@@ -5113,4 +5226,49 @@ mod tests {
         runtime.acknowledge_process_exit(Some(Agent::Hermes), later);
         assert!(runtime.pending_process_exits().is_empty());
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TestInputOutcome {
+    Accepted,
+    Full,
+    Closed,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TestInputAttempt {
+    pub(crate) bytes: Bytes,
+    pub(crate) outcome: TestInputOutcome,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_INPUT_ATTEMPTS: std::cell::RefCell<Option<Vec<TestInputAttempt>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn test_observe_try_sends<R>(
+    operation: impl FnOnce() -> R,
+) -> (R, Vec<TestInputAttempt>) {
+    struct ClearObservation;
+    impl Drop for ClearObservation {
+        fn drop(&mut self) {
+            TEST_INPUT_ATTEMPTS.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    TEST_INPUT_ATTEMPTS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(slot.is_none(), "nested input observation");
+        *slot = Some(Vec::new());
+    });
+    let _clear = ClearObservation;
+    let result = operation();
+    let attempts = TEST_INPUT_ATTEMPTS.with(|slot| slot.borrow_mut().take().unwrap());
+    (result, attempts)
 }

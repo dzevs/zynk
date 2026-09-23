@@ -2718,17 +2718,22 @@ impl AppState {
                 process_exited,
                 observed_at,
             } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    Some(terminal.set_detected_state_with_screen_signals_at(
-                        agent,
-                        state,
-                        visible_blocker,
-                        false,
-                        visible_working,
-                        process_exited,
-                        observed_at,
-                    ))
-                })
+                .update_terminal_state_at(
+                    pane_id,
+                    dispatch_at,
+                    process_exited.then_some(observed_at),
+                    |terminal| {
+                        Some(terminal.set_detected_state_with_screen_signals_at(
+                            agent,
+                            state,
+                            visible_blocker,
+                            false,
+                            visible_working,
+                            process_exited,
+                            observed_at,
+                        ))
+                    },
+                )
                 .into_iter()
                 .collect(),
             AppEvent::HookStateReported {
@@ -2905,6 +2910,19 @@ impl AppState {
     where
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
     {
+        self.update_terminal_state_at(pane_id, std::time::Instant::now(), None, update)
+    }
+
+    fn update_terminal_state_at<F>(
+        &mut self,
+        pane_id: PaneId,
+        now: std::time::Instant,
+        exit_observed_at: Option<std::time::Instant>,
+        update: F,
+    ) -> Option<PaneStateUpdate>
+    where
+        F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
+    {
         let ws_idx = self
             .workspaces
             .iter()
@@ -2914,11 +2932,13 @@ impl AppState {
             .attached_terminal_id
             .clone();
         let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
-        let mutation = {
+        let (mutation, managed_changed) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
-            update(terminal)?
+            let mutation = update(terminal)?;
+            let managed_changed = terminal.reconcile_managed_agent_at(now, exit_observed_at);
+            (mutation, managed_changed)
         };
-        if mutation.session_ref_changed {
+        if mutation.session_ref_changed || managed_changed {
             self.mark_session_dirty();
         }
         let change = mutation.effective_state_change?;
@@ -2946,12 +2966,49 @@ impl AppState {
         Some(update)
     }
 
+    pub(crate) fn next_managed_agent_deadline(&self) -> Option<std::time::Instant> {
+        self.terminals
+            .values()
+            .filter_map(crate::terminal::TerminalState::next_managed_agent_deadline)
+            .min()
+    }
+
+    pub(crate) fn reconcile_managed_agents_at(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Vec<(usize, PaneId)> {
+        let mut changed = std::collections::HashSet::new();
+        for (id, terminal) in &mut self.terminals {
+            if terminal.reconcile_managed_agent_at(now, None) {
+                changed.insert(id.clone());
+            }
+        }
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        self.mark_session_dirty();
+        self.workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, workspace)| {
+                let changed = &changed;
+                workspace.tabs.iter().flat_map(move |tab| {
+                    tab.panes.iter().filter_map(move |(&pane_id, pane)| {
+                        changed
+                            .contains(&pane.attached_terminal_id)
+                            .then_some((ws_idx, pane_id))
+                    })
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn publish_pane_process_exit_if_agent(
         &mut self,
         pane_id: PaneId,
     ) -> Option<PaneStateUpdate> {
         let observed_at = std::time::Instant::now();
-        self.update_terminal_state(pane_id, |terminal| {
+        self.update_terminal_state_at(pane_id, observed_at, Some(observed_at), |terminal| {
             let agent = terminal.effective_known_agent().or(terminal.detected_agent);
             if agent.is_none() && !terminal.full_lifecycle_hook_authority_active() {
                 return None;
@@ -3276,6 +3333,280 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    impl AppState {
+        fn m839_parent_update_terminal_state<F>(
+            &mut self,
+            pane_id: PaneId,
+            update: F,
+        ) -> Option<PaneStateUpdate>
+        where
+            F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
+        {
+            let ws_idx = self
+                .workspaces
+                .iter()
+                .position(|ws| ws.pane_state(pane_id).is_some())?;
+            let terminal_id = self.workspaces[ws_idx]
+                .pane_state(pane_id)?
+                .attached_terminal_id
+                .clone();
+            let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
+            let mutation = {
+                let terminal = self.terminals.get_mut(&terminal_id)?;
+                update(terminal)?
+            };
+            if mutation.session_ref_changed {
+                self.mark_session_dirty();
+            }
+            let change = mutation.effective_state_change?;
+            if change.previous_state != change.state {
+                self.next_agent_state_change_seq += 1;
+                if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+                    terminal.last_agent_state_change_seq = Some(self.next_agent_state_change_seq);
+                }
+            }
+            let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
+            let update = PaneStateUpdate {
+                pane_id,
+                ws_idx,
+                previous_agent_label: change.previous_agent_label.clone(),
+                previous_known_agent: change.previous_known_agent,
+                previous_state: change.previous_state,
+                previous_seen,
+                previous_presentation: change.previous_presentation.clone(),
+                agent_label: change.agent_label.clone(),
+                known_agent: change.known_agent,
+                state: change.state,
+                seen,
+                presentation: change.presentation.clone(),
+            };
+            Some(update)
+        }
+    }
+
+    fn m839_unmanaged_mutation(
+        terminal: &mut crate::terminal::TerminalState,
+        case: usize,
+        at: std::time::Instant,
+    ) -> Option<TerminalStateMutation> {
+        match case {
+            0 => None,
+            1 | 2 => Some(TerminalStateMutation {
+                effective_state_change: None,
+                session_ref_changed: case == 2,
+            }),
+            3 | 4 => {
+                let mut mutation = terminal.set_detected_state_with_screen_signals_at(
+                    Some(Agent::Codex),
+                    AgentState::Working,
+                    false,
+                    false,
+                    false,
+                    false,
+                    at,
+                );
+                assert!(mutation.effective_state_change.is_some());
+                mutation.session_ref_changed = case == 4;
+                Some(mutation)
+            }
+            _ => panic!("unknown fixture case"),
+        }
+    }
+
+    #[test]
+    fn m839a_unmanaged_mutation_boundary_matches_parent_and_preserves_early_return() {
+        let at = std::time::Instant::now();
+        for initially_dirty in [false, true] {
+            for initially_seen in [false, true] {
+                for case in 0..5 {
+                    let mut parent = app_with_workspaces(&["unmanaged"]);
+                    let mut current = app_with_workspaces(&["unmanaged"]);
+                    let parent_pane = parent.workspaces[0].tabs[0].root_pane;
+                    let current_pane = current.workspaces[0].tabs[0].root_pane;
+                    let parent_terminal = parent.workspaces[0]
+                        .pane_state(parent_pane)
+                        .unwrap()
+                        .attached_terminal_id
+                        .clone();
+                    let current_terminal = current.workspaces[0]
+                        .pane_state(current_pane)
+                        .unwrap()
+                        .attached_terminal_id
+                        .clone();
+                    for (state, pane, terminal_id) in [
+                        (&mut parent, parent_pane, &parent_terminal),
+                        (&mut current, current_pane, &current_terminal),
+                    ] {
+                        state.session_dirty = initially_dirty;
+                        state.next_agent_state_change_seq = 41;
+                        state.workspaces[0].tabs[0]
+                            .panes
+                            .get_mut(&pane)
+                            .unwrap()
+                            .seen = initially_seen;
+                        assert_eq!(state.terminals[terminal_id].managed_agent_kind(), None);
+                        assert_eq!(
+                            state.terminals[terminal_id].last_agent_state_change_seq,
+                            None
+                        );
+                    }
+                    let mut parent_calls = 0;
+                    let expected =
+                        parent.m839_parent_update_terminal_state(parent_pane, |terminal| {
+                            parent_calls += 1;
+                            m839_unmanaged_mutation(terminal, case, at)
+                        });
+                    let mut current_calls = 0;
+                    let actual =
+                        current.update_terminal_state_at(current_pane, at, None, |terminal| {
+                            current_calls += 1;
+                            m839_unmanaged_mutation(terminal, case, at)
+                        });
+                    assert_eq!((parent_calls, current_calls), (1, 1), "case={case}");
+                    let expected = expected.map(|mut update| {
+                        update.pane_id = current_pane;
+                        update
+                    });
+                    assert_eq!(
+                        actual, expected,
+                        "case={case} dirty={initially_dirty} seen={initially_seen}"
+                    );
+                    assert_eq!(actual.is_some(), case >= 3, "case={case}");
+                    assert_eq!(current.session_dirty, parent.session_dirty, "case={case}");
+                    assert_eq!(
+                        current.session_dirty,
+                        initially_dirty || case == 2 || case == 4
+                    );
+                    assert_eq!(
+                        current.next_agent_state_change_seq,
+                        parent.next_agent_state_change_seq
+                    );
+                    assert_eq!(
+                        current.next_agent_state_change_seq,
+                        if case >= 3 { 42 } else { 41 }
+                    );
+                    assert_eq!(
+                        current.workspaces[0].pane_state(current_pane).unwrap().seen,
+                        parent.workspaces[0].pane_state(parent_pane).unwrap().seen
+                    );
+                    assert_eq!(
+                        current.workspaces[0].pane_state(current_pane).unwrap().seen,
+                        if case >= 3 { true } else { initially_seen }
+                    );
+                    let current_terminal = &current.terminals[&current_terminal];
+                    let parent_terminal = &parent.terminals[&parent_terminal];
+                    assert_eq!(
+                        current_terminal.last_agent_state_change_seq,
+                        parent_terminal.last_agent_state_change_seq
+                    );
+                    assert_eq!(current_terminal.state, parent_terminal.state);
+                    assert_eq!(
+                        current_terminal.effective_known_agent(),
+                        parent_terminal.effective_known_agent()
+                    );
+                    assert_eq!(current_terminal.managed_agent_kind(), None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m839a_managed_reconciliation_dirties_even_without_effective_state_change() {
+        let mut state = app_with_workspaces(&["managed"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let started = std::time::Instant::now();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .begin_managed_agent(
+                "pending".into(),
+                Agent::Codex,
+                started,
+                std::time::Duration::from_secs(3),
+                std::time::Duration::from_secs(30),
+            );
+        state.session_dirty = false;
+        state.next_agent_state_change_seq = 41;
+        let mut calls = 0;
+        let update = state.update_terminal_state_at(
+            pane,
+            started + std::time::Duration::from_secs(30),
+            None,
+            |_| {
+                calls += 1;
+                Some(TerminalStateMutation {
+                    effective_state_change: None,
+                    session_ref_changed: false,
+                })
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(update, None);
+        assert!(state.session_dirty);
+        assert_eq!(state.next_agent_state_change_seq, 41);
+        assert_eq!(state.terminals[&terminal_id].managed_agent_kind(), None);
+        assert_eq!(state.terminals[&terminal_id].agent_name, None);
+    }
+
+    #[test]
+    fn m839a_managed_reconciliation_consumes_the_same_call_mutation() {
+        let mut state = app_with_workspaces(&["managed"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let started = std::time::Instant::now();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .begin_managed_agent(
+                "pending".into(),
+                Agent::Codex,
+                started,
+                std::time::Duration::from_secs(3),
+                std::time::Duration::from_secs(30),
+            );
+        assert!(state.terminals[&terminal_id].managed_agent_launch_pending());
+        state.session_dirty = false;
+        state.next_agent_state_change_seq = 41;
+        let now = started + std::time::Duration::from_secs(1);
+        let mut calls = 0;
+        let update = state.update_terminal_state_at(pane, now, None, |terminal| {
+            calls += 1;
+            let mutation = terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Claude),
+                AgentState::Working,
+                false,
+                false,
+                false,
+                false,
+                now,
+            );
+            assert!(!mutation.session_ref_changed);
+            assert!(mutation.effective_state_change.is_some());
+            Some(mutation)
+        });
+        assert_eq!(calls, 1);
+        assert!(update.is_some());
+        assert_eq!(state.terminals[&terminal_id].managed_agent_kind(), None);
+        assert_eq!(state.terminals[&terminal_id].agent_name, None);
+        assert!(state.session_dirty);
+        assert_eq!(state.next_agent_state_change_seq, 42);
+        assert_eq!(
+            state.terminals[&terminal_id].effective_known_agent(),
+            Some(Agent::Claude)
+        );
+    }
+
     #[test]
     fn m832b_pane_tab_workspace_close_remove_only_their_stream_owners() {
         for kind in [0, 1, 2] {

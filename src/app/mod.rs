@@ -5923,39 +5923,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn focused_agent_start_records_previous_pane() {
+    async fn m839a_focused_pane_split_preserves_old_creation_focus_history() {
         let mut app = test_app();
+        app.state.default_shell = exiting_test_command().into();
         let workspace = Workspace::test_new("agent-start-focus");
         let root = workspace.tabs[0].root_pane;
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-
+        let root_id = app.pane_info(0, root).unwrap().pane_id;
         let response = app.handle_api_request(crate::api::schema::Request {
-            id: "req_agent_start_focus".into(),
-            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
-                name: "worker".into(),
-                cwd: None,
+            id: "req_pane_split_focus".into(),
+            method: crate::api::schema::Method::PaneSplit(crate::api::schema::PaneSplitParams {
                 workspace_id: None,
-                tab_id: None,
-                split: Some(crate::api::schema::SplitDirection::Right),
+                target_pane_id: Some(root_id),
+                direction: crate::api::schema::SplitDirection::Right,
+                ratio: None,
+                cwd: None,
                 focus: true,
-                argv: vec![exiting_test_command().into()],
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
-
-        assert_eq!(response["result"]["type"], "agent_started");
+        assert_eq!(response["result"]["type"], "pane_info");
         assert_ne!(app.state.workspaces[0].focused_pane_id(), Some(root));
-
         app.state.last_pane();
-
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
-
-        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
-        for (_terminal_id, runtime) in runtimes {
+        for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
     }

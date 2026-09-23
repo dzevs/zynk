@@ -7190,3 +7190,55 @@ check and gate; a normal-hook commit and exact-tip chain follow only after those
 checks. This append does not claim an unexecuted check or verdict. Whole-M8
 Gate-2, independent Gate-3 and all operator integration/release/runtime gates
 remain due. No merge, push, install, tag, publish or cleanup is authorized.
+
+### M8-39 - managed-agent launch, prompt and wait (`e0758c32`, SPLIT)
+
+`agent.start` now launches an exhaustive supported-agent kind through an existing Linux shell, reserves
+the name while Pending, reconciles capture-time observations into Active or expiry, and preserves manual
+labels when a reservation expires. Detected agent, status, readiness and sequence values remain
+observations; confirmed hook ownership remains the only receiver and receipt authority. Restore retains
+Active presentation without persisting Pending or manufacturing an observation timestamp. `agent.get` may
+reconcile due state and mark the session dirty; `agent.list` projects scheduler-reconciled state. Neither
+read creates database rows or delivery events.
+
+Both interactive and headless schedulers service managed deadlines. The headless call is a fork-owned
+correction absent from upstream `e0758c32` and `v0.8.2`; future ports of upstream headless commits
+`a5c69bea`, `2d24950a`, `76211757`, `15539d3d`, `d76657f2`, `36074530`, `7ae4b056`, `350f0013`,
+`7e4ab7b0`, and `e48d8306` must preserve it. The no-managed-state path retains the parent's update and
+early-return effects.
+
+`agent.prompt` persists the resolved Party, checks the same terminal and foreground process before one
+submission, records Submitted before optional waiting, and preserves the message id and submitted status
+when waiting fails. Malformed, contradictory, or lost responses remain submission-unverified and advise
+against automatic resubmission. `agent wait` resolves once, pins the terminal, completes on Idle, Done, or
+Blocked, and refuses retargeting. `pane.send_input` now validates first and enqueues one vector containing
+text plus encoded keys; an empty request is one empty item. SPEC, README, CLI help, and CHANGELOG state the
+readiness and queue-granularity changes.
+
+ADR 0015 and additive migration 0005 add `agent.prompt` to the proof-source CHECK while copying every
+existing row column verbatim. A pre-0005 binary reports the database as Newer rather than ready, Foreign,
+or crashed. Protocol stays 19 for this intermediate range despite incompatible `agent.start` shapes;
+old-shape requests are typed-refused and protocol 20 must later absorb the change.
+
+The child catalog contains 4517 members with five ignored. The complete cumulative C selection passed
+2273 scheduled identities after one retained same-byte diagnostic; the final full suite passed 4512 with
+five skipped, and fmt plus clippy `-D warnings` passed. Twenty-six serial fault variants produced 2262
+observations (2198 PASS, 64 FAIL), all intended first sites and kinds matched, and the watched paint identity
+printed PASS in every variant. One bounded same-byte F21 diagnostic makes 27 invocations over 26 variants.
+The restored fault cohort passed 87/87.
+
+`M839-F21-UNATTRIBUTED-LOCK-DEADLINE-PAIR` remains OPEN. Its retained pair and the F23 companion contain
+eight unassigned failed observations over seven unique identities. The first restored-C run added two OPEN
+observations on green bytes: the already-seen prompt SQLite-busy site and a fixed-500-ms pane-run listener
+refusal. One approved same-byte diagnostic passed all 2273 scheduled identities; it does not relabel either
+failure or establish a cause. A three-run isolated first-open probe measured parent medians of 22.951 ms and
+child medians of 22.701 ms for the chosen query path, so it did not show the child slower; it neither isolates
+migration cost nor rules out fixture scheduling. Fixture-bound observation and timeout design is required
+early in the next implementation batch, under separate review.
+
+`M839-G1-N1` remains OPEN: the frozen controls do not independently discriminate every foreign-source,
+shadowed-identity, and ownerless-lingering-exit arbitration combination. The four prior implementation-side
+prerequisite-interpretation occurrences, the preparation occurrence, reviewer gaps, M7-20, twenty origins,
+three standing limits, capped instrument histories, resource/schema/handoff limits,
+`M83335-EXACT-PAINT-ABSENCE`, and `MPD-FORMAT-APPROVAL-ORDER` retain their recorded terms. This range
+authorizes no merge, push, install, tag, publish, release, cleanup, or live-runtime action.

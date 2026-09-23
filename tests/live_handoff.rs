@@ -1220,69 +1220,116 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
 }
 
 #[test]
-fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
+fn m839a_live_handoff_keeps_imported_launch_pane_after_command_exits() {
     let _lock = test_lock();
-    let base = unique_test_dir();
-    let config_home = base.join("config");
-    let runtime_dir = base.join("runtime");
-    let api_socket = runtime_dir.join("zynk.sock");
-    let started_marker = base.join("agent-started");
-    let exited_marker = base.join("agent-exited");
-    let shell_marker = base.join("shell-after-agent");
-
-    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    register_runtime_dir(&runtime_dir);
-
-    let command = format!(
-        "echo started > {}; sleep 1; echo exited > {}",
-        started_marker.display(),
-        exited_marker.display()
+    let mut fixture = M828bHandoffFixture {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let runtime = fixture.base.join("runtime");
+    let socket = runtime.join("zynk.sock");
+    fixture.server = Some(spawn_server_with_env(
+        &fixture.base.join("config"),
+        &runtime,
+        &socket,
+        &[
+            ("ZYNK_AGENT", ""),
+            ("ENV", "/dev/null"),
+            ("BASH_ENV", "/dev/null"),
+        ],
+    ));
+    register_runtime_dir(&runtime);
+    wait_for_socket(&socket, Duration::from_secs(10));
+    let old_pid = fixture.server.as_ref().unwrap().child.process_id().unwrap();
+    let started_marker = fixture.base.join("agent-started");
+    let exited_marker = fixture.base.join("agent-exited");
+    let release_marker = fixture.base.join("release-command");
+    let shell_marker = fixture.base.join("shell-after-agent");
+    let script = fixture.base.join("launch-command.sh");
+    fs::write(&script, "printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.02; done; printf exited > \"$3\"\n").unwrap();
+    let plugin = fixture.base.join("plugin");
+    fs::create_dir_all(&plugin).unwrap();
+    let manifest = serde_json::json!({
+        "id":"m839-launch", "name":"M839 launch preservation", "version":"0.1.0",
+        "min_zynk_version":"3.1.0", "platforms":["linux"],
+        "panes":[{"id":"command", "title":"launch witness", "placement":"split",
+            "command":["/bin/sh",script,started_marker,release_marker,exited_marker]}],
+    });
+    fs::write(
+        plugin.join("zynk-plugin.toml"),
+        toml::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    link_plugin(&socket, &plugin);
+    let created = fixture.request(
+        "workspace.create",
+        serde_json::json!({"cwd":fixture.base, "focus":true}),
     );
-    let started = request(
-        &api_socket,
-        serde_json::json!({
-            "id": "test:agent-start",
-            "method": "agent.start",
-            "params": {
-                "name": "handoff-agent",
-                "cwd": "/tmp",
-                "focus": true,
-                "argv": ["/bin/sh", "-c", command]
-            }
-        }),
-    );
-    assert_ok(started.clone());
-    let pane_id = started["result"]["agent"]["pane_id"]
+    assert_eq!(created["result"]["type"], "workspace_created", "{created}");
+    let seed = created["result"]["root_pane"]["pane_id"]
         .as_str()
         .unwrap()
         .to_string();
+    let launched = fixture.request("plugin.pane.open", serde_json::json!({
+        "plugin_id":"m839-launch", "entrypoint":"command", "placement":"split", "target_pane_id":seed,
+        "cwd":fixture.base, "focus":true,
+    }));
+    assert_eq!(
+        launched["result"]["type"], "plugin_pane_opened",
+        "{launched}"
+    );
+    let pane_id = launched["result"]["plugin_pane"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let named = fixture.request(
+        "agent.rename",
+        serde_json::json!({"target":pane_id, "name":"handoff-agent"}),
+    );
+    assert_eq!(named["result"]["type"], "agent_info", "{named}");
+    assert!(named["result"]["agent"].get("agent_session").is_none());
+    assert_ok(fixture.request("pane.close", serde_json::json!({"pane_id":seed})));
     support::wait_for_file(&started_marker, Duration::from_secs(5));
-
-    assert_ok(request(
-        &api_socket,
-        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
-    ));
-    drop(spawned);
-    wait_for_api(&api_socket, Duration::from_secs(10));
+    let process = fixture.request("pane.process_info", serde_json::json!({"pane_id":pane_id}));
+    assert_eq!(process["result"]["type"], "pane_process_info", "{process}");
+    let original_pid = process["result"]["process_info"]["shell_pid"]
+        .as_u64()
+        .unwrap();
+    assert!(!exited_marker.exists());
+    assert_ok(fixture.request("server.live_handoff", serde_json::json!({})));
+    register_replacement(&runtime, Some(old_pid));
+    drop(fixture.server.take());
+    wait_for_api(&socket, Duration::from_secs(10));
+    assert!(!exited_marker.exists());
+    fs::write(&release_marker, b"release").unwrap();
     support::wait_for_file(&exited_marker, Duration::from_secs(5));
-    thread::sleep(Duration::from_millis(300));
-
-    assert_ok(request(
-        &api_socket,
-        serde_json::json!({
-            "id": "test:pane:shell-after-agent",
-            "method": "pane.send_input",
-            "params": {"pane_id": pane_id, "text": format!("echo alive > {}", shell_marker.display()), "keys": ["Enter"]}
-        }),
+    let quote = |value: &Path| format!("'{}'", value.to_str().unwrap().replace('\'', "'\\''"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let pane = fixture.request("pane.process_info", serde_json::json!({"pane_id":pane_id}));
+        assert_eq!(pane["result"]["type"], "pane_process_info", "{pane}");
+        let info = &pane["result"]["process_info"];
+        if info["shell_pid"]
+            .as_u64()
+            .is_some_and(|pid| pid != original_pid)
+            && info["foreground_processes"].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["pid"] == info["shell_pid"]
+                        && matches!(row["name"].as_str(), Some("sh" | "bash"))
+                })
+            })
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "post-exit shell: {pane}");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_ok(fixture.request(
+        "pane.send_input",
+        serde_json::json!({"pane_id":pane_id,
+        "text":format!("printf alive > {}", quote(&shell_marker)), "keys":["Enter"]}),
     ));
     support::wait_for_file(&shell_marker, Duration::from_secs(5));
-
-    let _ = request(
-        &api_socket,
-        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
-    );
-    cleanup_test_base(&base);
 }
 
 #[test]
@@ -2758,10 +2805,16 @@ fn m828c_live_handoff_preserves_observation_without_persisting_metadata() {
     };
     let runtime = fixture.base.join("runtime");
     let socket = runtime.join("zynk.sock");
-    fixture.server = Some(spawn_server_without_peer_trust(
+    let shell = m839_handoff_shell(&fixture.base);
+    fixture.server = Some(spawn_server_with_env(
         &fixture.base.join("config"),
         &runtime,
         &socket,
+        &[
+            ("ZYNK_TEST_TRUST_PEER_PID", "disabled"),
+            ("SHELL", shell.to_str().unwrap()),
+            ("ZYNK_AGENT", ""),
+        ],
     ));
     register_runtime_dir(&runtime);
     wait_for_socket(&socket, Duration::from_secs(10));
@@ -2772,19 +2825,22 @@ fn m828c_live_handoff_preserves_observation_without_persisting_metadata() {
         ("\u{280b}   ", None),
     ];
     let script = r#"printf '\033]2;%s\007\n%s\n' "$1" "$2"; while IFS= read -r command; do case "$command" in next) printf '\033]2;handoff-next\007\nC_HANDOFF_NEXT\n';; esac; done"#;
-    let mut old_panes = Vec::new();
+    let script_path = fixture.base.join("m839-handoff-title-script");
+    fs::write(&script_path, script).unwrap();
+    let mut old_panes: Vec<String> = Vec::new();
     for (index, (raw, _)) in titles.iter().enumerate() {
         let marker = format!("C_HANDOFF_READY_{index}");
-        let started = fixture.request(
-            "agent.start",
-            serde_json::json!({"name": format!("title-{index}"), "cwd": fixture.base,
-                "argv": ["/bin/sh", "-c", script, "handoff-title", raw, marker]}),
+        let pane_id = m839_handoff_ordinary_pane(
+            &fixture,
+            old_panes.last().map(String::as_str),
+            &format!("title-{index}"),
+            &[
+                "/bin/sh".into(),
+                script_path.to_str().unwrap().into(),
+                (*raw).into(),
+                marker.clone(),
+            ],
         );
-        assert_eq!(started["result"]["type"], "agent_started", "{started}");
-        let pane_id = started["result"]["agent"]["pane_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let read = fixture.request(
@@ -3555,4 +3611,67 @@ fn live_handoff_keeps_the_pane_tree_binding() {
         after.contains("rc=0"),
         "an in-pane report must still be accepted after the handoff: {after:?}"
     );
+}
+
+fn m839_handoff_shell(base: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(base).unwrap();
+    let shell = base.join("m839-shell");
+    fs::write(&shell, b"#!/bin/sh\nexport ZYNK_AGENT= ENV=/dev/null BASH_ENV=/dev/null INPUTRC=/dev/null PROMPT_COMMAND= PS1= PS2=\nexec /bin/bash --noprofile --norc --noediting -i\n").unwrap();
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    shell
+}
+
+fn m839_handoff_ordinary_pane(
+    fixture: &M828bHandoffFixture,
+    previous: Option<&str>,
+    name: &str,
+    argv: &[String],
+) -> String {
+    let pane =
+        if let Some(previous) = previous {
+            let response = fixture.request("pane.split", serde_json::json!({
+            "target_pane_id": previous, "direction":"right", "cwd":fixture.base, "focus":false,
+        }));
+            assert_eq!(response["result"]["type"], "pane_info", "{response}");
+            response["result"]["pane"].clone()
+        } else {
+            let response = fixture.request(
+                "workspace.create",
+                serde_json::json!({"cwd":fixture.base, "focus":true}),
+            );
+            assert_eq!(
+                response["result"]["type"], "workspace_created",
+                "{response}"
+            );
+            response["result"]["root_pane"].clone()
+        };
+    let pane_id = pane["pane_id"].as_str().unwrap().to_string();
+    let renamed = fixture.request(
+        "agent.rename",
+        serde_json::json!({"target":pane_id, "name":name}),
+    );
+    assert_eq!(renamed["result"]["type"], "agent_info", "{renamed}");
+    assert!(renamed["result"]["agent"].get("agent_session").is_none());
+    assert!(renamed["result"]["agent"].get("launch_pending").is_none());
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let launch = fixture.base.join(format!("m839-title-launch-{name}"));
+    fs::write(
+        &launch,
+        format!(
+            "exec {}\n",
+            argv.iter()
+                .map(|value| quote(value))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    )
+    .unwrap();
+    let command = format!("exec /bin/sh {}", quote(launch.to_str().unwrap()));
+    let sent = fixture.request(
+        "pane.send_input",
+        serde_json::json!({"pane_id":pane_id, "text":command, "keys":["Enter"]}),
+    );
+    assert_eq!(sent["result"]["type"], "ok", "{sent}");
+    pane_id
 }

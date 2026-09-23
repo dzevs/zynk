@@ -6,6 +6,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendCommand {
     AgentSend,
+    AgentPrompt,
     PaneRun,
     PaneSendText,
     // Native top-level verbs (ADR 0007 §2). Transport/delivery semantics are IDENTICAL
@@ -19,6 +20,7 @@ impl SendCommand {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AgentSend => "agent send",
+            Self::AgentPrompt => "agent prompt",
             Self::PaneRun => "pane run",
             Self::PaneSendText => "pane send-text",
             Self::ZynkSend => "zynk send",
@@ -39,6 +41,7 @@ pub fn delivery_status_for(cmd: SendCommand) -> DeliveryStatus {
     match cmd {
         // The native verbs share `agent send`'s atomic-submit transport.
         SendCommand::AgentSend
+        | SendCommand::AgentPrompt
         | SendCommand::PaneRun
         | SendCommand::ZynkSend
         | SendCommand::ZynkReply => DeliveryStatus::Submitted,

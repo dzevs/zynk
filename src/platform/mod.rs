@@ -18,6 +18,54 @@ pub struct ForegroundJob {
     pub processes: Vec<ForegroundProcess>,
 }
 
+fn normalized_shell_name(name: &str) -> String {
+    name.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim_start_matches('-')
+        .to_ascii_lowercase()
+        .trim_end_matches(".exe")
+        .to_owned()
+}
+
+pub(crate) fn is_pane_shell_process_name(name: &str) -> bool {
+    matches!(
+        normalized_shell_name(name).as_str(),
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "mksh" | "fish"
+    )
+}
+
+pub(crate) fn interactive_shell_command(argv: &[String], shell_name: &str) -> Option<String> {
+    if argv.first()?.is_empty()
+        || argv.iter().any(|arg| arg.chars().any(char::is_control))
+        || !is_pane_shell_process_name(shell_name)
+    {
+        return None;
+    }
+    let fish = normalized_shell_name(shell_name) == "fish";
+    Some(
+        argv.iter()
+            .map(|arg| {
+                if !arg.is_empty()
+                    && arg.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric()
+                            || matches!(byte, b'_' | b'-' | b'.' | b'/' | b':' | b'+' | b'=')
+                    })
+                {
+                    return arg.clone();
+                }
+                let quoted = if fish {
+                    arg.replace('\\', "\\\\").replace('\'', "\\'")
+                } else {
+                    arg.replace('\'', "'\\''")
+                };
+                format!("'{quoted}'")
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 /// Credentials of the process on the other end of a Unix-socket connection
 /// (ADR 0014). The kernel fills the pid and uid in at connect time, so a client
 /// cannot forge them; they are never taken from a request field.

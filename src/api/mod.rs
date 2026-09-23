@@ -62,6 +62,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::AgentRename(_)
             | Method::AgentFocus(_)
             | Method::AgentStart(_)
+            | Method::AgentPrompt(_)
             | Method::PaneSplit(_)
             | Method::PaneSwap(_)
             | Method::PaneMove(_)

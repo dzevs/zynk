@@ -168,7 +168,9 @@ output, wait for state changes, and message each other. Start with [`SKILL.md`](
 single-response `events.wait` operation and keeps the existing subscription-event JSON on stdout.
 An already matching status wins even at timeout zero. Timeouts include setup and are checked
 between bounded requests/polls, not as a hard wall-clock deadline. Status fields are observations,
-not authenticated identity or receipt evidence; `agent wait` retains its Idle-or-Done behavior.
+not authenticated identity or receipt evidence. `agent wait` completes on Idle, Done, or Blocked,
+including an already-idle Pending managed agent; use `agent start` when interactive launch readiness
+is required.
 
 Explicit `pane.focus` and `agent.focus` API requests mark every unseen pane in the
 destination tab seen, including when the target is already focused. An idle sibling

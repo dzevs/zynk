@@ -467,6 +467,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentRename(_) => "agent.rename",
         Method::AgentFocus(_) => "agent.focus",
         Method::AgentStart(_) => "agent.start",
+        Method::AgentPrompt(_) => "agent.prompt",
         Method::PaneSplit(_) => "pane.split",
         Method::PaneSwap(_) => "pane.swap",
         Method::PaneMove(_) => "pane.move",
@@ -772,6 +773,32 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m839a_legacy_start_is_invalid_before_app_dispatch() {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel();
+        api_rx.close();
+        let (mut client, server) = m827_socket_pair();
+        let request = serde_json::json!({
+            "id":"legacy-start", "method":"agent.start", "params":{
+                "name":"worker", "cwd":"/tmp", "argv":["sh", "-c", "false"], "focus":true
+            }
+        });
+        writeln!(client, "{request}").unwrap();
+        handle_connection(
+            server,
+            &api_tx,
+            &EventHub::default(),
+            &Arc::new(AtomicBool::new(true)),
+            None,
+        )
+        .unwrap();
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(response.error.code, "invalid_request");
+        assert_eq!(response.id, "");
+        assert!(api_rx.try_recv().is_err());
+    }
+
     #[test]
     fn m837_socket_wait_close_preserves_error_and_outer_id() {
         let hub = EventHub::default();

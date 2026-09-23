@@ -2,9 +2,7 @@
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-#[cfg(test)]
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // Effective state arbitration is intentionally centralized here. Full lifecycle
 // Zynk hook integrations are hook-authoritative while live; screen recovery
@@ -448,6 +446,23 @@ pub(crate) struct TerminalTitleChange {
     pub(crate) stripped_changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedAgentPhase {
+    Pending {
+        ready_after: Option<Instant>,
+        deadline: Instant,
+    },
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManagedAgent {
+    kind: Agent,
+    observed_expected: bool,
+    observation_floor: Instant,
+    phase: ManagedAgentPhase,
+}
+
 /// Pure state for a server-owned terminal.
 ///
 /// During the migration this is still one-to-one with a pane-backed PTY, but
@@ -472,6 +487,7 @@ pub struct TerminalState {
     session_owner_epoch: Option<Instant>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
+    managed_agent: Option<ManagedAgent>,
     hook_report_sequences: HashMap<String, u64>,
     /// An observed process EXIT that no running observation has answered yet, held at
     /// the TERMINAL so it outlives the owner that recorded it: `(full owner, capture
@@ -521,6 +537,7 @@ impl TerminalState {
             session_owner_epoch: None,
             manual_label: None,
             agent_name: None,
+            managed_agent: None,
             hook_report_sequences: HashMap::new(),
             unanswered_hook_exit: None,
             handoff_confirmation: None,
@@ -2910,6 +2927,160 @@ impl TerminalState {
 
     pub fn clear_agent_name(&mut self) {
         self.agent_name = None;
+        self.managed_agent = None;
+    }
+
+    pub(crate) fn begin_managed_agent(
+        &mut self,
+        name: String,
+        kind: Agent,
+        now: Instant,
+        settle_delay: Duration,
+        timeout: Duration,
+    ) {
+        self.set_agent_name(name);
+        self.managed_agent = Some(ManagedAgent {
+            kind,
+            observed_expected: false,
+            observation_floor: now,
+            phase: ManagedAgentPhase::Pending {
+                ready_after: Some(now.checked_add(settle_delay).unwrap_or(now)),
+                deadline: now.checked_add(timeout).unwrap_or(now),
+            },
+        });
+    }
+
+    pub(crate) fn restore_managed_agent(&mut self, name: String, kind: Agent) {
+        self.set_agent_name(name);
+        self.managed_agent = Some(ManagedAgent {
+            kind,
+            observed_expected: true,
+            observation_floor: Instant::now(),
+            phase: ManagedAgentPhase::Active,
+        });
+    }
+
+    pub(crate) fn seed_restored_agent_presentation(&mut self, agent: Agent) {
+        self.detected_agent = Some(agent);
+        self.fallback_state = AgentState::Idle;
+        self.fallback_visible_blocker = false;
+        self.fallback_observed_at = None;
+        self.state = AgentState::Idle;
+    }
+
+    pub(crate) fn managed_agent_kind(&self) -> Option<Agent> {
+        self.managed_agent.map(|managed| managed.kind)
+    }
+
+    pub(crate) fn managed_agent_launch_pending(&self) -> bool {
+        self.managed_agent
+            .is_some_and(|managed| matches!(managed.phase, ManagedAgentPhase::Pending { .. }))
+    }
+
+    fn managed_known_observation_at(&self) -> Option<Instant> {
+        match &self.hook_authority {
+            Some(authority) => Some(authority.reported_at),
+            None => self.fallback_observed_at,
+        }
+    }
+
+    fn managed_ready_observation(&self, managed: ManagedAgent) -> bool {
+        let state_at = if self.visible_blocker_overrides_hook() || self.hook_authority.is_none() {
+            self.fallback_observed_at
+        } else {
+            self.hook_authority
+                .as_ref()
+                .map(|authority| authority.reported_at)
+        };
+        let owner = self
+            .hook_authority
+            .as_ref()
+            .map(|a| (a.source.as_str(), a.agent_label.as_str()))
+            .or_else(|| {
+                self.hook_identity
+                    .as_ref()
+                    .map(|i| (i.source.as_str(), i.agent_label.as_str()))
+            });
+        let provisional = owner.is_some_and(|(source, label)| {
+            self.unanswered_exit_to_inherit(source, label).is_some()
+                || self
+                    .handoff_confirmation
+                    .as_ref()
+                    .is_some_and(|(owner, _)| owner.matches(source, label))
+        });
+        !provisional
+            && self
+                .managed_known_observation_at()
+                .is_some_and(|at| at >= managed.observation_floor)
+            && state_at.is_some_and(|at| at >= managed.observation_floor)
+            && self.effective_known_agent() == Some(managed.kind)
+            && matches!(self.state, AgentState::Idle | AgentState::Blocked)
+    }
+
+    pub(crate) fn managed_agent_interactive_ready(&self) -> bool {
+        self.managed_agent.is_some_and(|managed| {
+            matches!(managed.phase, ManagedAgentPhase::Active)
+                && self.managed_ready_observation(managed)
+        })
+    }
+
+    pub(crate) fn next_managed_agent_deadline(&self) -> Option<Instant> {
+        let ManagedAgentPhase::Pending {
+            ready_after,
+            deadline,
+        } = self.managed_agent?.phase
+        else {
+            return None;
+        };
+        Some(ready_after.unwrap_or(deadline).min(deadline))
+    }
+
+    pub(crate) fn reconcile_managed_agent_at(
+        &mut self,
+        now: Instant,
+        exit_observed_at: Option<Instant>,
+    ) -> bool {
+        let Some(mut managed) = self.managed_agent else {
+            return false;
+        };
+        let before = managed;
+        let known = self.effective_known_agent();
+        let fresh = self
+            .managed_known_observation_at()
+            .is_some_and(|at| at >= managed.observation_floor);
+        if exit_observed_at.is_some_and(|at| at >= managed.observation_floor)
+            || (fresh
+                && (known.is_some_and(|agent| agent != managed.kind)
+                    || (matches!(managed.phase, ManagedAgentPhase::Pending { .. })
+                        && managed.observed_expected
+                        && known.is_none())))
+        {
+            self.clear_agent_name();
+            return true;
+        }
+        if let ManagedAgentPhase::Pending {
+            ready_after,
+            deadline,
+        } = managed.phase
+        {
+            if now >= deadline {
+                self.clear_agent_name();
+                return true;
+            }
+            managed.observed_expected |= fresh && known == Some(managed.kind);
+            if ready_after.is_none_or(|at| now >= at) {
+                managed.phase = if self.managed_ready_observation(managed) {
+                    ManagedAgentPhase::Active
+                } else {
+                    ManagedAgentPhase::Pending {
+                        ready_after: None,
+                        deadline,
+                    }
+                };
+            }
+        }
+        self.managed_agent = Some(managed);
+        managed != before
     }
 
     pub fn clear_agent_runtime_identity_after_respawn(&mut self) {
@@ -3000,6 +3171,334 @@ pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m839a_restore_presentation_seed_does_not_supply_a_visible_blocker() {
+        let restored_at = Instant::now();
+        let hook_at = restored_at + Duration::from_secs(1);
+        let detector_at = restored_at + Duration::from_secs(2);
+        for use_parent_seed in [true, false] {
+            let mut terminal = test_terminal();
+            if use_parent_seed {
+                terminal.set_detected_state_with_screen_signals_at(
+                    Some(Agent::Codex),
+                    AgentState::Idle,
+                    false,
+                    false,
+                    false,
+                    false,
+                    restored_at,
+                );
+            } else {
+                terminal.seed_restored_agent_presentation(Agent::Codex);
+            }
+            assert_eq!(terminal.managed_agent_kind(), None);
+            assert_eq!(terminal.effective_known_agent(), Some(Agent::Codex));
+            assert_eq!(terminal.effective_agent_label(), Some("codex"));
+            assert_eq!(terminal.fallback_state, AgentState::Idle);
+            assert!(!terminal.fallback_visible_blocker);
+            assert_eq!(terminal.state, AgentState::Idle);
+            assert_eq!(
+                terminal.fallback_observed_at,
+                use_parent_seed.then_some(restored_at)
+            );
+            assert!(terminal
+                .set_hook_authority_at(
+                    "zynk:codex".into(),
+                    "codex".into(),
+                    AgentState::Working,
+                    None,
+                    None,
+                    Some(1),
+                    hook_at,
+                )
+                .is_some());
+            assert!(
+                !terminal.visible_blocker_overrides_hook(),
+                "parent_seed={use_parent_seed}"
+            );
+            assert_eq!(terminal.state, AgentState::Working);
+            let mutation = terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Codex),
+                AgentState::Blocked,
+                true,
+                false,
+                false,
+                false,
+                detector_at,
+            );
+            assert_eq!(terminal.fallback_observed_at, Some(detector_at));
+            assert!(
+                terminal.visible_blocker_overrides_hook(),
+                "parent_seed={use_parent_seed}"
+            );
+            assert_eq!(terminal.state, AgentState::Blocked);
+            assert_eq!(
+                mutation.effective_state_change.unwrap().previous_state,
+                AgentState::Working
+            );
+            assert_eq!(
+                terminal.hook_authority.as_ref().unwrap().state,
+                AgentState::Working
+            );
+            assert_eq!(terminal.managed_agent_kind(), None);
+        }
+    }
+
+    fn m839_observe(
+        terminal: &mut TerminalState,
+        agent: Option<Agent>,
+        state: AgentState,
+        exited: bool,
+        at: Instant,
+    ) {
+        terminal.set_detected_state_with_screen_signals_at(
+            agent, state, false, false, false, exited, at,
+        );
+    }
+
+    fn m839_begin(terminal: &mut TerminalState, floor: Instant, kind: Agent) {
+        terminal.begin_managed_agent(
+            "m839-managed".into(),
+            kind,
+            floor,
+            Duration::from_secs(3),
+            Duration::from_secs(30),
+        );
+    }
+
+    #[test]
+    fn m839_managed_source_freshness_survives_generic_reconciliation() {
+        let old = Instant::now();
+        let floor = old + Duration::from_secs(1);
+        for observed in [None, Some(Agent::Claude), Some(Agent::Codex)] {
+            let mut terminal = test_terminal();
+            m839_begin(&mut terminal, floor, Agent::Claude);
+            m839_observe(&mut terminal, observed, AgentState::Idle, false, old);
+            terminal.reconcile_managed_agent_at(floor + Duration::from_secs(4), None);
+            assert_eq!(terminal.agent_name.as_deref(), Some("m839-managed"));
+            assert_eq!(terminal.managed_agent_kind(), Some(Agent::Claude));
+            assert!(terminal.managed_agent_launch_pending());
+            assert!(!terminal.managed_agent_interactive_ready());
+            assert!(!terminal.managed_agent.unwrap().observed_expected);
+            assert_eq!(
+                terminal.next_managed_agent_deadline(),
+                Some(floor + Duration::from_secs(30))
+            );
+        }
+
+        let mut terminal = test_terminal();
+        m839_begin(&mut terminal, floor, Agent::Claude);
+        m839_observe(
+            &mut terminal,
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            floor + Duration::from_secs(1),
+        );
+        terminal.reconcile_managed_agent_at(floor + Duration::from_secs(1), None);
+        assert!(terminal.managed_agent.unwrap().observed_expected);
+        m839_observe(&mut terminal, None, AgentState::Unknown, false, old);
+        terminal.reconcile_managed_agent_at(floor + Duration::from_secs(4), None);
+        assert!(terminal.managed_agent_launch_pending());
+        m839_observe(
+            &mut terminal,
+            None,
+            AgentState::Unknown,
+            false,
+            floor + Duration::from_secs(5),
+        );
+        terminal.reconcile_managed_agent_at(floor + Duration::from_secs(5), None);
+        assert_eq!(terminal.agent_name, None);
+        assert_eq!(terminal.managed_agent_kind(), None);
+    }
+
+    #[test]
+    fn m839_managed_exit_uses_capture_not_dispatch_clock() {
+        let old = Instant::now();
+        let floor = old + Duration::from_secs(1);
+        let mut terminal = test_terminal();
+        m839_begin(&mut terminal, floor, Agent::Claude);
+        m839_observe(
+            &mut terminal,
+            Some(Agent::Claude),
+            AgentState::Unknown,
+            true,
+            old,
+        );
+        terminal.reconcile_managed_agent_at(floor + Duration::from_secs(4), Some(old));
+        assert_eq!(terminal.agent_name.as_deref(), Some("m839-managed"));
+        terminal.reconcile_managed_agent_at(floor + Duration::from_secs(5), None);
+        assert_eq!(terminal.agent_name.as_deref(), Some("m839-managed"));
+        assert!(!terminal.managed_agent_interactive_ready());
+
+        for captured in [floor, floor + Duration::from_secs(2)] {
+            let mut terminal = test_terminal();
+            m839_begin(&mut terminal, floor, Agent::Claude);
+            m839_observe(
+                &mut terminal,
+                Some(Agent::Claude),
+                AgentState::Unknown,
+                true,
+                captured,
+            );
+            assert!(
+                terminal.reconcile_managed_agent_at(floor + Duration::from_secs(4), Some(captured))
+            );
+            assert_eq!(terminal.agent_name, None);
+            assert_eq!(terminal.managed_agent_kind(), None);
+            assert!(!terminal.reconcile_managed_agent_at(floor + Duration::from_secs(5), None));
+        }
+    }
+
+    #[test]
+    fn m839_managed_settle_and_timeout_are_independent_of_stale_evidence() {
+        let old = Instant::now();
+        let floor = old + Duration::from_secs(1);
+        let mut terminal = test_terminal();
+        m839_begin(&mut terminal, floor, Agent::Claude);
+        assert_eq!(
+            terminal.next_managed_agent_deadline(),
+            Some(floor + Duration::from_secs(3))
+        );
+        m839_observe(
+            &mut terminal,
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            old,
+        );
+        assert!(terminal.reconcile_managed_agent_at(floor + Duration::from_secs(3), None));
+        assert!(terminal.managed_agent_launch_pending());
+        assert_eq!(
+            terminal.next_managed_agent_deadline(),
+            Some(floor + Duration::from_secs(30))
+        );
+        assert!(!terminal.reconcile_managed_agent_at(floor + Duration::from_secs(4), None));
+        m839_observe(
+            &mut terminal,
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            floor + Duration::from_secs(30),
+        );
+        assert!(terminal.reconcile_managed_agent_at(floor + Duration::from_secs(30), None));
+        assert_eq!(terminal.managed_agent_kind(), None);
+        assert_eq!(terminal.agent_name, None);
+        assert_eq!(terminal.next_managed_agent_deadline(), None);
+    }
+
+    #[test]
+    fn m839_managed_readiness_requires_fresh_settled_idle_or_blocked() {
+        let floor = Instant::now();
+        for state in [AgentState::Idle, AgentState::Blocked] {
+            let mut terminal = test_terminal();
+            m839_begin(&mut terminal, floor, Agent::Claude);
+            m839_observe(&mut terminal, Some(Agent::Claude), state, false, floor);
+            terminal.reconcile_managed_agent_at(floor + Duration::from_secs(2), None);
+            assert!(terminal.managed_agent_launch_pending());
+            assert!(!terminal.managed_agent_interactive_ready());
+            terminal.reconcile_managed_agent_at(floor + Duration::from_secs(3), None);
+            assert!(!terminal.managed_agent_launch_pending());
+            assert!(terminal.managed_agent_interactive_ready());
+            assert_eq!(terminal.agent_name.as_deref(), Some("m839-managed"));
+            assert_eq!(terminal.next_managed_agent_deadline(), None);
+        }
+        for state in [AgentState::Working, AgentState::Unknown] {
+            let mut terminal = test_terminal();
+            m839_begin(&mut terminal, floor, Agent::Claude);
+            m839_observe(&mut terminal, Some(Agent::Claude), state, false, floor);
+            terminal.reconcile_managed_agent_at(floor + Duration::from_secs(4), None);
+            assert!(terminal.managed_agent_launch_pending());
+            assert!(!terminal.managed_agent_interactive_ready());
+        }
+        let mut mismatch = test_terminal();
+        m839_begin(&mut mismatch, floor, Agent::Claude);
+        m839_observe(
+            &mut mismatch,
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            floor,
+        );
+        mismatch.reconcile_managed_agent_at(floor, None);
+        assert_eq!(mismatch.agent_name, None);
+    }
+
+    #[test]
+    fn m839_managed_restore_seed_is_presentation_not_observation() {
+        let mut terminal = test_terminal();
+        terminal.restore_managed_agent("m839-restored".into(), Agent::Claude);
+        terminal.seed_restored_agent_presentation(Agent::Claude);
+        assert_eq!(terminal.effective_known_agent(), Some(Agent::Claude));
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.fallback_observed_at, None);
+        assert_eq!(terminal.agent_name.as_deref(), Some("m839-restored"));
+        assert_eq!(terminal.managed_agent_kind(), Some(Agent::Claude));
+        assert!(!terminal.managed_agent_launch_pending());
+        assert_eq!(terminal.next_managed_agent_deadline(), None);
+        assert!(!terminal.managed_agent_interactive_ready());
+        let later = Instant::now() + Duration::from_secs(1);
+        m839_observe(
+            &mut terminal,
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            later,
+        );
+        terminal.reconcile_managed_agent_at(later, None);
+        assert!(terminal.managed_agent_interactive_ready());
+        assert_eq!(terminal.confirmed_hook_owner(), None);
+        assert_eq!(terminal.persisted_agent_session, None);
+    }
+
+    #[test]
+    fn m839_managed_hook_arrival_and_exit_confirmation_keep_distinct_clocks() {
+        let exit_at = Instant::now();
+        let old_running_at = exit_at + Duration::from_secs(1);
+        let floor = exit_at + Duration::from_secs(2);
+        let hook_at = exit_at + Duration::from_secs(3);
+        let mut terminal = test_terminal();
+        m839_begin(&mut terminal, floor, Agent::Pi);
+        assert!(terminal
+            .set_hook_authority_at(
+                "zynk:pi".into(),
+                "pi".into(),
+                AgentState::Idle,
+                None,
+                None,
+                Some(1),
+                hook_at,
+            )
+            .is_some());
+        m839_observe(
+            &mut terminal,
+            Some(Agent::Pi),
+            AgentState::Unknown,
+            true,
+            exit_at,
+        );
+        terminal.reconcile_managed_agent_at(floor + Duration::from_secs(4), Some(exit_at));
+        assert_eq!(terminal.agent_name.as_deref(), Some("m839-managed"));
+        assert_eq!(terminal.confirmed_hook_owner(), None);
+        assert!(terminal.managed_agent_launch_pending());
+        assert!(!terminal.managed_agent_interactive_ready());
+        m839_observe(
+            &mut terminal,
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            old_running_at,
+        );
+        assert_eq!(terminal.confirmed_hook_owner(), Some(("zynk:pi", "pi")));
+        terminal.reconcile_managed_agent_at(floor + Duration::from_secs(5), None);
+        assert!(!terminal.managed_agent_launch_pending());
+        assert!(terminal.managed_agent_interactive_ready());
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().reported_at,
+            hook_at
+        );
+    }
+
     use super::*;
     use crate::detect::AgentDetection;
 

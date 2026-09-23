@@ -10,6 +10,12 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Added**
 
+- Managed-agent launch and prompt automation. `agent start` reserves a name while Pending, launches
+  into an existing supported shell, and waits for interactive readiness; `agent prompt` persists the
+  resolved Party, enforces terminal and foreground readiness, submits once, and can optionally wait
+  without resubmitting after a wait failure. Wait failures preserve the submitted `message_id` and
+  exit 3. Protocol 19 temporarily spans the incompatible old and new `agent.start` request shapes;
+  old-shape requests are refused rather than launched.
 - Modal terminal popups for plugin panes and custom commands, with cell/percent
   dimensions and `zynk popup close`. Popups leave tiled pane identities and layout
   unchanged, receive terminal input including Escape, and close on process exit
@@ -86,7 +92,7 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
   `session.snapshot` rather than rely on retained event history.
 - `events.wait` now handles pane agent-status matches at the socket layer with
   server-owned timeouts. `wait agent-status` uses it without changing its event
-  JSON output; the fork's `agent wait` still accepts Idle or Done. These status
+  JSON output; the fork's `agent wait` now accepts Idle, Done, or Blocked. These status
   projections remain observations, not identity or delivery-receipt authority.
 - `pane split --current` now selects the calling pane through `ZYNK_PANE_ID`,
   independently of UI focus. Omitted targets and unusable caller values keep
@@ -124,6 +130,11 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Changed**
 
+- `pane.send_input`, `agent send`, `agent prompt`, and `pane run` now enqueue one encoded byte vector
+  after validating all keys. Empty text with no keys is one empty queue item rather than no item.
+- Migration 0005 adds `agent.prompt` to delivery-event proof provenance by rebuilding the constrained
+  table and copying all existing row columns verbatim. Older binaries typed-refuse the newer database
+  lineage; rollback requires a compatible binary or operator-owned recovery.
 - Nonempty pane token reports use strict source/TTL rules and 16-request-key,
   32-stored-key and 32-sequenced-token-source limits. Absent or empty tokens
   retain legacy presentation admission. Previously ignored token fields are

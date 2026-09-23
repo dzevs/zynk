@@ -1340,6 +1340,174 @@ pub async fn recover_orphan_messages_older_than(
 
 #[cfg(test)]
 mod tests {
+    type M839DeliveryRow = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        i64,
+        String,
+        String,
+    );
+    type M839DeliveryColumn = (i64, String, String, i64, Option<String>, i64);
+
+    struct M839FixtureDb(std::path::PathBuf);
+
+    impl M839FixtureDb {
+        fn cleanup(&self) -> std::io::Result<()> {
+            for suffix in ["", "-wal", "-shm", "-journal", ".init-lock"] {
+                let mut name = self.0.as_os_str().to_owned();
+                name.push(suffix);
+                match std::fs::remove_file(std::path::PathBuf::from(name)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for M839FixtureDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm", "-journal", ".init-lock"] {
+                let mut name = self.0.as_os_str().to_owned();
+                name.push(suffix);
+                if let Err(error) = std::fs::remove_file(std::path::PathBuf::from(name)) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!("m839 fixture cleanup {}{suffix}: {error}", self.0.display());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m839b_migration_preserves_all_old_delivery_columns_and_adds_prompt() {
+        use sqlx::Row as _;
+
+        let path = plant_native_db_through("m839-proof-upgrade", 4);
+        let fixture = M839FixtureDb(path.clone());
+        assert_eq!(recorded_versions(&path), [1, 2, 3, 4]);
+        let (before, schema_before) = block_on(async {
+            let mut conn = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new().filename(&path).create_if_missing(false),
+            )
+            .await?;
+            conn.execute("INSERT INTO conversations (id, runtime_session_id, socket_namespace, workspace_id, tab_id, created_at, last_message_at) VALUES ('m839-c', 'rt', 'ns', 'w1', 't1', 'old-created', 'old-last')").await?;
+            for id in ["m839-from", "m839-to"] {
+                sqlx::query("INSERT INTO conversation_participants (id, conversation_id, agent_label, participant_key, joined_at) VALUES (?, 'm839-c', ?, ?, 'old-joined')")
+                    .bind(id).bind(id).bind(id).execute(&mut conn).await?;
+            }
+            conn.execute("INSERT INTO messages (id, conversation_id, conversation_seq, runtime_session_id, socket_namespace, created_at, target_arg, from_participant_id, to_participant_id, type, body, body_hash, workspace_id, tab_id) VALUES ('m839-m', 'm839-c', 1, 'rt', 'ns', 'old-created', 'target', 'm839-from', 'm839-to', 'note', 'body', 'hash', 'w1', 't1')").await?;
+            for (index, (proof, kind)) in [
+                ("pane.send_text", "drafted"),
+                ("pane.send_input", "submitted"),
+                ("pane.submit", "submitted"),
+                ("integration", "received"),
+                ("pane_tree", "received"),
+                ("operator", "processed"),
+                ("system.recovery", "failed"),
+            ].into_iter().enumerate() {
+                sqlx::query("INSERT INTO delivery_events (id, message_id, event_type, proof_source, zynk_event_id, seq, timestamp, payload_json) VALUES (?, 'm839-m', ?, ?, ?, ?, ?, ?)")
+                    .bind(format!("m839-e{index}"))
+                    .bind(kind)
+                    .bind(proof)
+                    .bind((index % 2 == 0).then(|| format!("old-wire-{index}")))
+                    .bind(index as i64 + 1)
+                    .bind(format!("old-stamp-{index}"))
+                    .bind(format!("{{ \"old\" : {index} }}"))
+                    .execute(&mut conn).await?;
+            }
+            let rows: Vec<M839DeliveryRow> =
+                sqlx::query_as("SELECT id, message_id, event_type, proof_source, zynk_event_id, seq, timestamp, payload_json FROM delivery_events ORDER BY seq")
+                    .fetch_all(&mut conn).await?;
+            let columns: Vec<M839DeliveryColumn> = sqlx::query_as("PRAGMA table_info(delivery_events)")
+                .fetch_all(&mut conn).await?;
+            conn.close().await?;
+            Ok::<_, DbError>((rows, columns))
+        }).unwrap();
+        assert_eq!(before.len(), 7);
+        assert_eq!(schema_before.len(), 8);
+        block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            let after: Vec<M839DeliveryRow> =
+                sqlx::query_as("SELECT id, message_id, event_type, proof_source, zynk_event_id, seq, timestamp, payload_json FROM delivery_events ORDER BY seq")
+                    .fetch_all(&mut conn).await?;
+            assert_eq!(after, before);
+            let schema_after: Vec<M839DeliveryColumn> = sqlx::query_as("PRAGMA table_info(delivery_events)")
+                .fetch_all(&mut conn).await?;
+            assert_eq!(schema_after, schema_before);
+            sqlx::query("INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) VALUES ('m839-prompt', 'm839-m', 'submitted', 'agent.prompt', 8, 'new-stamp')")
+                .execute(&mut conn).await?;
+            let added = sqlx::query("SELECT proof_source, payload_json, zynk_event_id FROM delivery_events WHERE id = 'm839-prompt'")
+                .fetch_one(&mut conn).await?;
+            assert_eq!(added.try_get::<String, _>("proof_source")?, "agent.prompt");
+            assert_eq!(added.try_get::<String, _>("payload_json")?, "{}");
+            assert_eq!(added.try_get::<Option<String>, _>("zynk_event_id")?, None);
+            let refused = sqlx::query("INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) VALUES ('m839-bad', 'm839-m', 'submitted', 'hearsay', 9, 'new-stamp')")
+                .execute(&mut conn).await;
+            assert!(refused.is_err(), "unknown proof admitted");
+            conn.close().await?;
+            Ok::<_, DbError>(())
+        }).unwrap();
+        assert_eq!(recorded_versions(&path), [1, 2, 3, 4, 5]);
+        fixture.cleanup().unwrap();
+    }
+
+    #[test]
+    fn m839b_prompt_proof_migration_preserves_delivery_constraints() {
+        use sqlx::Row as _;
+
+        let path = tmp_db("m839-proof-constraints");
+        let fixture = M839FixtureDb(path.clone());
+        block_on(async {
+            let mut conn = open_migrated_at_without_recovery(&path).await?;
+            conn.execute("INSERT INTO conversations (id, runtime_session_id, socket_namespace, workspace_id, tab_id, created_at, last_message_at) VALUES ('c', 'rt', 'ns', 'w', 't', 'stamp', 'stamp')").await?;
+            for id in ["from", "to"] {
+                sqlx::query("INSERT INTO conversation_participants (id, conversation_id, agent_label, participant_key, joined_at) VALUES (?, 'c', ?, ?, 'stamp')")
+                    .bind(id).bind(id).bind(id).execute(&mut conn).await?;
+            }
+            for (id, seq) in [("m", 1_i64), ("m2", 2)] {
+                sqlx::query("INSERT INTO messages (id, conversation_id, conversation_seq, runtime_session_id, socket_namespace, created_at, target_arg, from_participant_id, to_participant_id, body, body_hash, workspace_id, tab_id) VALUES (?, 'c', ?, 'rt', 'ns', 'stamp', 'to', 'from', 'to', 'body', 'hash', 'w', 't')")
+                    .bind(id).bind(seq).execute(&mut conn).await?;
+            }
+            let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys").fetch_one(&mut conn).await?;
+            assert_eq!(foreign_keys, 1);
+            conn.execute("INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) VALUES ('e', 'm', 'submitted', 'agent.prompt', 1, 'stamp')").await?;
+            let other_message = conn.execute("INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) VALUES ('e2', 'm2', 'submitted', 'agent.prompt', 1, 'stamp')").await;
+            assert!(other_message.is_ok(), "sequence is per-message: {other_message:?}");
+            for (id, message, kind, seq) in [
+                ("duplicate-seq", "m", "submitted", 1_i64),
+                ("foreign-message", "absent", "submitted", 2),
+                ("bad-event", "m", "unknown-event", 2),
+                ("e", "m", "submitted", 2),
+                ("e", "m2", "submitted", 2),
+            ] {
+                let result = sqlx::query("INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) VALUES (?, ?, ?, 'agent.prompt', ?, 'stamp')")
+                    .bind(id).bind(message).bind(kind).bind(seq).execute(&mut conn).await;
+                assert!(result.is_err(), "constraint case {id}");
+            }
+            let columns = sqlx::query("PRAGMA index_info(idx_delivery_events_message_seq)").fetch_all(&mut conn).await?;
+            let columns: Vec<String> = columns.iter().map(|row| row.try_get("name").unwrap()).collect();
+            assert_eq!(columns, ["message_id", "seq"]);
+            let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM delivery_events").fetch_one(&mut conn).await?;
+            assert_eq!(before, 2);
+            conn.execute("DELETE FROM messages WHERE id = 'm'").await?;
+            let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM delivery_events").fetch_one(&mut conn).await?;
+            assert_eq!(after, 1);
+            let remaining: String = sqlx::query_scalar("SELECT message_id FROM delivery_events").fetch_one(&mut conn).await?;
+            assert_eq!(remaining, "m2");
+            conn.execute("DELETE FROM messages WHERE id = 'm2'").await?;
+            let final_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM delivery_events").fetch_one(&mut conn).await?;
+            assert_eq!(final_count, 0);
+            conn.close().await?;
+            Ok::<_, DbError>(())
+        }).unwrap();
+        fixture.cleanup().unwrap();
+    }
+
     use super::*;
     use sqlx::sqlite::SqliteJournalMode;
 

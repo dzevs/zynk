@@ -171,6 +171,32 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
     parse_canonical_agent_label(&name).or_else(|| lookup_agent(&name))
 }
 
+pub(crate) fn interactive_agent_executable(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Pi => "pi",
+        Agent::Claude => "claude",
+        Agent::Codex => "codex",
+        Agent::Gemini => "gemini",
+        Agent::Cursor => "cursor-agent",
+        Agent::Devin => "devin",
+        Agent::Antigravity => "agy",
+        Agent::Cline => "cline",
+        Agent::Mastracode => "mastracode",
+        Agent::OpenCode => "opencode",
+        Agent::GithubCopilot => "copilot",
+        Agent::Kimi => "kimi",
+        Agent::Kiro => "kiro-cli",
+        Agent::Droid => "droid",
+        Agent::Amp => "amp",
+        Agent::Grok => "grok",
+        Agent::Hermes => "hermes",
+        Agent::Kilo => "kilo",
+        Agent::Qodercli => "qodercli",
+        Agent::Qwen => "qwen",
+        Agent::Maki => "maki",
+    }
+}
+
 /// Resolve a label that is exactly the agent's canonical [`agent_label`] --
 /// no aliases, no case folding, no trimming, no executable suffixes.
 pub(crate) fn parse_canonical_agent_label(label: &str) -> Option<Agent> {
@@ -686,6 +712,38 @@ fn is_python_runtime(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m839a_interactive_executables_cover_the_fork_roster() {
+        for agent in Agent::ALL {
+            let expected = match agent {
+                Agent::Pi => "pi",
+                Agent::Claude => "claude",
+                Agent::Codex => "codex",
+                Agent::Gemini => "gemini",
+                Agent::Cursor => "cursor-agent",
+                Agent::Devin => "devin",
+                Agent::Antigravity => "agy",
+                Agent::Cline => "cline",
+                Agent::Mastracode => "mastracode",
+                Agent::OpenCode => "opencode",
+                Agent::GithubCopilot => "copilot",
+                Agent::Kimi => "kimi",
+                Agent::Kiro => "kiro-cli",
+                Agent::Droid => "droid",
+                Agent::Amp => "amp",
+                Agent::Grok => "grok",
+                Agent::Hermes => "hermes",
+                Agent::Kilo => "kilo",
+                Agent::Qodercli => "qodercli",
+                Agent::Qwen => "qwen",
+                Agent::Maki => "maki",
+            };
+            assert_eq!(interactive_agent_executable(agent), expected, "{agent:?}");
+        }
+        assert_eq!(parse_agent_label("qwen"), Some(Agent::Qwen));
+        assert_eq!(parse_agent_label("omp"), None);
+    }
+
     use super::*;
 
     fn foreground_process(

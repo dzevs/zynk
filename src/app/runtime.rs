@@ -367,6 +367,8 @@ impl App {
 
         changed |= self.expire_due_metadata(now);
 
+        changed |= self.reconcile_due_managed_agents(now);
+
         if geometry_dirty || resized {
             self.pending_agent_resume_deadline = None;
         } else {
@@ -374,6 +376,25 @@ impl App {
             changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
         }
         changed
+    }
+
+    pub(crate) fn reconcile_due_managed_agents(&mut self, now: Instant) -> bool {
+        if !self
+            .state
+            .next_managed_agent_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            return false;
+        }
+        let panes = self.state.reconcile_managed_agents_at(now);
+        if panes.is_empty() {
+            return false;
+        }
+        for (ws_idx, pane_id) in panes {
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
+        self.schedule_session_save();
+        true
     }
 
     /// Clears temporary copied-token highlights, such as after double-click copy.
@@ -595,6 +616,7 @@ impl App {
             self.config_diagnostic_deadline,
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
+            self.state.next_managed_agent_deadline(),
             self.copy_feedback_deadline,
             include_git_refresh
                 .then(|| self.git_refresh_deadline())

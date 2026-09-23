@@ -1714,16 +1714,16 @@ impl App {
             Ok(encoded_keys) => encoded_keys,
             Err(key) => return encode_error(id, "invalid_key", format!("unsupported key {key}")),
         };
-        if !params.text.is_empty() {
-            let text_bytes = encode_api_text(runtime, &params.text);
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(text_bytes)) {
-                return encode_error(id, "pane_send_failed", err.to_string());
-            }
+        let mut bytes = if params.text.is_empty() {
+            Vec::new()
+        } else {
+            encode_api_text(runtime, &params.text)
+        };
+        for key in encoded_keys {
+            bytes.extend(key);
         }
-        for bytes in encoded_keys {
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
-                return encode_error(id, "pane_send_failed", err.to_string());
-            }
+        if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+            return encode_error(id, "pane_send_failed", err.to_string());
         }
 
         encode_success(id, ResponseResult::Ok {})
@@ -2078,6 +2078,202 @@ fn invalid_agent(id: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn m839a_submission_encoder_and_send_input_share_protocol_bytes() {
+        use crate::input::KeyboardProtocol;
+
+        let header_text = crate::zynk::header::prepend_header("M839-HEADER", "body\nnext");
+        for (flags, enter) in [
+            (None, b"\r".as_slice()),
+            (Some(1), b"\r".as_slice()),
+            (Some(9), b"\x1b[13u".as_slice()),
+            (Some(11), b"\x1b[13u".as_slice()),
+        ] {
+            for bracketed in [false, true] {
+                for text in ["plain\ntext", header_text.as_str()] {
+                    let (mut app, pane_id, _) = app_with_send_key_runtime(1);
+                    let internal = app.state.workspaces[0].tabs[0].root_pane;
+                    let mut modes = Vec::new();
+                    if let Some(flags) = flags {
+                        modes.extend_from_slice(format!("\x1b[>{flags}u").as_bytes());
+                    }
+                    if bracketed {
+                        modes.extend_from_slice(b"\x1b[?2004h");
+                    }
+                    let (runtime, mut rx) =
+                        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                            80, 24, 0, &modes, 1,
+                        );
+                    assert_eq!(runtime.bracketed_paste_enabled(), bracketed);
+                    assert_eq!(
+                        runtime.keyboard_protocol(),
+                        flags.map_or(KeyboardProtocol::Legacy, |flags| KeyboardProtocol::Kitty {
+                            flags
+                        })
+                    );
+                    let encoded_enter = runtime.encode_terminal_key(
+                        crossterm::event::KeyEvent::new(
+                            crossterm::event::KeyCode::Enter,
+                            crossterm::event::KeyModifiers::NONE,
+                        )
+                        .into(),
+                    );
+                    assert_eq!(encoded_enter, enter, "flags={flags:?}");
+                    let mut expected = if bracketed {
+                        format!("\x1b[200~{text}\x1b[201~").into_bytes()
+                    } else {
+                        text.as_bytes().to_vec()
+                    };
+                    expected.extend_from_slice(enter);
+                    let submission = crate::app::api_helpers::encode_api_submission(&runtime, text);
+                    assert_eq!(
+                        submission, expected,
+                        "helper flags={flags:?} paste={bracketed}"
+                    );
+                    app.state.workspaces[0].insert_test_runtime(internal, runtime);
+                    let response = app.handle_api_request(crate::api::schema::Request {
+                        id: "m839-parity".into(),
+                        method: crate::api::schema::Method::PaneSendInput(PaneSendInputParams {
+                            pane_id,
+                            text: text.into(),
+                            keys: vec!["Enter".into()],
+                        }),
+                    });
+                    let result: SuccessResponse = serde_json::from_str(&response).unwrap();
+                    assert_eq!(result.id, "m839-parity");
+                    assert_eq!(result.result, ResponseResult::Ok {});
+                    assert_eq!(
+                        rx.try_recv().unwrap().as_ref(),
+                        expected,
+                        "queued flags={flags:?} paste={bracketed}"
+                    );
+                    assert!(rx.try_recv().is_err(), "second queue item");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn m839a_send_input_full_or_closed_queue_has_no_partial_item() {
+        for closed in [false, true] {
+            for empty in [false, true] {
+                let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+                let internal = app.state.workspaces[0].tabs[0].root_pane;
+                if closed {
+                    rx.close();
+                } else {
+                    app.lookup_runtime_sender(0, internal)
+                        .unwrap()
+                        .try_send_bytes(bytes::Bytes::from_static(b"existing"))
+                        .unwrap();
+                }
+                let response = app.handle_api_request(crate::api::schema::Request {
+                    id: "m839-pressure".into(),
+                    method: crate::api::schema::Method::PaneSendInput(PaneSendInputParams {
+                        pane_id,
+                        text: if empty {
+                            String::new()
+                        } else {
+                            "payload".into()
+                        },
+                        keys: if empty {
+                            vec![]
+                        } else {
+                            vec!["Enter".into(), "ctrl+h".into()]
+                        },
+                    }),
+                });
+                let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+                assert_eq!(error.id, "m839-pressure");
+                assert_eq!(
+                    error.error.code, "pane_send_failed",
+                    "closed={closed} empty={empty}"
+                );
+                if !closed {
+                    assert_eq!(rx.try_recv().unwrap().as_ref(), b"existing");
+                }
+                assert!(rx.try_recv().is_err(), "partial or empty item accepted");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn m839a_send_input_validates_all_keys_before_any_enqueue() {
+        for occupied in [false, true] {
+            let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+            let internal = app.state.workspaces[0].tabs[0].root_pane;
+            if occupied {
+                app.lookup_runtime_sender(0, internal)
+                    .unwrap()
+                    .try_send_bytes(bytes::Bytes::from_static(b"existing"))
+                    .unwrap();
+            }
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "m839-invalid-key".into(),
+                method: crate::api::schema::Method::PaneSendInput(PaneSendInputParams {
+                    pane_id,
+                    text: "must-not-leak".into(),
+                    keys: vec!["Enter".into(), "not-a-key".into()],
+                }),
+            });
+            let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(error.id, "m839-invalid-key");
+            assert_eq!(error.error.code, "invalid_key", "occupied={occupied}");
+            assert_eq!(error.error.message, "unsupported key not-a-key");
+            if occupied {
+                assert_eq!(rx.try_recv().unwrap().as_ref(), b"existing");
+            }
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn m839a_send_input_empty_and_keys_only_keep_one_item_contract() {
+        for bracketed in [false, true] {
+            for (text, keys, key_bytes) in [
+                ("", vec![], b"".as_slice()),
+                ("", vec!["Enter".into()], b"\r".as_slice()),
+                (
+                    "",
+                    vec!["ctrl+h".into(), "ctrl+j".into()],
+                    b"\x08\x0a".as_slice(),
+                ),
+                ("line\nnext", vec![], b"".as_slice()),
+                (
+                    "line\nnext",
+                    vec!["Enter".into(), "ctrl+h".into(), "ctrl+j".into()],
+                    b"\r\x08\x0a".as_slice(),
+                ),
+            ] {
+                let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+                let internal = app.state.workspaces[0].tabs[0].root_pane;
+                if bracketed {
+                    app.lookup_runtime_sender(0, internal)
+                        .unwrap()
+                        .test_process_pty_bytes(b"\x1b[?2004h");
+                }
+                let mut expected = if bracketed && !text.is_empty() {
+                    format!("\x1b[200~{text}\x1b[201~").into_bytes()
+                } else {
+                    text.as_bytes().to_vec()
+                };
+                expected.extend_from_slice(key_bytes);
+                let response = app.handle_api_request(crate::api::schema::Request {
+                    id: "m839-empty".into(),
+                    method: crate::api::schema::Method::PaneSendInput(PaneSendInputParams {
+                        pane_id,
+                        text: text.into(),
+                        keys,
+                    }),
+                });
+                let result: SuccessResponse = serde_json::from_str(&response).unwrap();
+                assert_eq!(result.result, ResponseResult::Ok {});
+                assert_eq!(rx.try_recv().unwrap().as_ref(), expected);
+                assert!(rx.try_recv().is_err());
+            }
+        }
+    }
+
     use super::*;
     use crate::{
         api::schema::{ErrorResponse, SplitDirection, SuccessResponse},

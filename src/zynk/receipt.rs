@@ -469,6 +469,104 @@ async fn append_received_event_in_tx(
 
 #[cfg(test)]
 mod tests {
+    struct M839ReceiptFixtureDb(std::path::PathBuf);
+
+    impl M839ReceiptFixtureDb {
+        fn cleanup(&self) -> std::io::Result<()> {
+            for suffix in ["", "-wal", "-shm", "-journal", ".init-lock"] {
+                let mut name = self.0.as_os_str().to_owned();
+                name.push(suffix);
+                match std::fs::remove_file(std::path::PathBuf::from(name)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for M839ReceiptFixtureDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm", "-journal", ".init-lock"] {
+                let mut name = self.0.as_os_str().to_owned();
+                name.push(suffix);
+                if let Err(error) = std::fs::remove_file(std::path::PathBuf::from(name)) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!("m839 fixture cleanup {}{suffix}: {error}", self.0.display());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m839b_discovered_proof_initializers_fit_the_migrated_check() {
+        use sqlx::Connection as _;
+
+        let initializers = proof_source_initializers();
+        assert!(
+            initializers.len() > 10,
+            "empty initializer scan: {initializers:?}"
+        );
+        let mut values = Vec::new();
+        for (path, expression) in initializers {
+            let value = match expression.as_str() {
+                "RECEIPT_PROOF_SOURCE" | "crate::zynk::receipt::RECEIPT_PROOF_SOURCE" => {
+                    RECEIPT_PROOF_SOURCE.to_string()
+                }
+                "crate::zynk::receipt::LEGACY_RECEIPT_PROOF_SOURCE" => {
+                    LEGACY_RECEIPT_PROOF_SOURCE.to_string()
+                }
+                literal => serde_json::from_str::<String>(literal)
+                    .unwrap_or_else(|_| panic!("unclassified initializer {path}: {literal}")),
+            };
+            values.push(value);
+        }
+        values.sort();
+        values.dedup();
+        assert!(values.iter().any(|value| value == "agent.prompt"));
+        assert!(values.iter().any(|value| value == RECEIPT_PROOF_SOURCE));
+        assert!(values
+            .iter()
+            .any(|value| value == LEGACY_RECEIPT_PROOF_SOURCE));
+        run(async {
+            let path = temp_db_path();
+            let fixture = M839ReceiptFixtureDb(path.clone());
+            let mut conn = crate::zynk::db::open_migrated_at_without_recovery(&path).await?;
+            setup_submitted(
+                &mut conn,
+                "claude",
+                "w1:p1",
+                "codex",
+                "w1:p2",
+                "m839-parity",
+            )
+            .await;
+            for (index, value) in values.iter().enumerate() {
+                // Direct insert observes historical CHECK legality, not permission for a new writer.
+                let result = sqlx::query("INSERT INTO delivery_events (id, message_id, event_type, proof_source, seq, timestamp) VALUES (?, 'm839-parity', 'submitted', ?, ?, 'stamp')")
+                    .bind(format!("m839-proof-{index}"))
+                    .bind(value)
+                    .bind(index as i64 + 2)
+                    .execute(&mut conn).await;
+                assert!(
+                    result.is_ok(),
+                    "CHECK refused initializer {value}: {result:?}"
+                );
+            }
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM delivery_events WHERE message_id = 'm839-parity'",
+            )
+            .fetch_one(&mut conn)
+            .await?;
+            assert_eq!(count, values.len() as i64 + 1);
+            conn.close().await?;
+            fixture.cleanup().unwrap();
+            Ok(())
+        });
+    }
+
     use super::*;
     use crate::zynk::message::{new_prefixed_id, Party, SendCommand};
     use crate::zynk::persistence::{
@@ -762,6 +860,7 @@ mod tests {
         assert_eq!(
             values,
             vec![
+                "\"agent.prompt\"",
                 "\"pane.send_input\"",
                 "\"pane.send_text\"",
                 "\"system.recovery\"",

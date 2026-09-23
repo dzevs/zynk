@@ -102,6 +102,8 @@ pub struct PaneSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_agent_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
@@ -373,7 +375,15 @@ fn capture_tab(
             .panes
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .filter(|terminal| !terminal.managed_agent_launch_pending())
             .and_then(|terminal| terminal.agent_name.clone());
+        let managed_agent_kind = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .filter(|terminal| !terminal.managed_agent_launch_pending())
+            .and_then(|terminal| terminal.managed_agent_kind())
+            .map(|agent| crate::detect::agent_label(agent).to_string());
         let attached_terminal_id = tab
             .panes
             .get(id)
@@ -449,6 +459,7 @@ fn capture_tab(
                 cwd,
                 label,
                 agent_name,
+                managed_agent_kind,
                 agent_session,
                 launch_argv,
                 hook_retirement,
@@ -562,6 +573,98 @@ pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m839a_snapshot_omits_pending_reservation_but_preserves_manual_label() {
+        use crate::detect::{Agent, AgentState};
+        use std::time::{Duration, Instant};
+        let mut state = state_with_workspaces(&["managed-snapshot"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let now = Instant::now();
+        let terminal = state.terminals.get_mut(&id).unwrap();
+        terminal.set_manual_label("manual label".into());
+        terminal.set_agent_name("ordinary".into());
+        let ordinary = capture_from_state(&state);
+        let ordinary = &ordinary.workspaces[0].tabs[0].panes[&pane.raw()];
+        assert_eq!(ordinary.agent_name.as_deref(), Some("ordinary"));
+        assert_eq!(ordinary.managed_agent_kind, None);
+        assert_eq!(ordinary.label.as_deref(), Some("manual label"));
+        let terminal = state.terminals.get_mut(&id).unwrap();
+        terminal.begin_managed_agent(
+            "worker".into(),
+            Agent::Codex,
+            now,
+            Duration::from_secs(3),
+            Duration::from_secs(30),
+        );
+        assert!(terminal.hook_authority.is_none());
+        assert!(terminal.hook_identity.is_none());
+        let pending = capture_from_state(&state);
+        let pending = &pending.workspaces[0].tabs[0].panes[&pane.raw()];
+        assert_eq!(pending.label.as_deref(), Some("manual label"));
+        assert_eq!(pending.agent_name, None);
+        assert_eq!(pending.managed_agent_kind, None);
+        assert!(pending.agent_session.is_none());
+        assert!(pending.hook_retirement.is_none());
+        let encoded = serde_json::to_value(pending).unwrap();
+        assert!(encoded.get("managed_agent_kind").is_none());
+        assert!(encoded.get("agent_name").is_none());
+
+        let terminal = state.terminals.get_mut(&id).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(3),
+        );
+        terminal.reconcile_managed_agent_at(now + Duration::from_secs(3), None);
+        assert!(terminal.hook_authority.is_none());
+        assert!(terminal.hook_identity.is_none());
+        let active = capture_from_state(&state);
+        let active = &active.workspaces[0].tabs[0].panes[&pane.raw()];
+        assert_eq!(active.label.as_deref(), Some("manual label"));
+        assert_eq!(active.agent_name.as_deref(), Some("worker"));
+        assert_eq!(active.managed_agent_kind.as_deref(), Some("codex"));
+        assert!(active.agent_session.is_none());
+        assert!(active.hook_retirement.is_none());
+
+        let terminal = state.terminals.get_mut(&id).unwrap();
+        let exit = now + Duration::from_secs(4);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            true,
+            exit,
+        );
+        terminal.reconcile_managed_agent_at(exit, Some(exit));
+        let ended = capture_from_state(&state);
+        let ended = &ended.workspaces[0].tabs[0].panes[&pane.raw()];
+        assert_eq!(ended.agent_name, None);
+        assert_eq!(ended.managed_agent_kind, None);
+        assert_eq!(ended.label.as_deref(), Some("manual label"));
+    }
+
+    #[test]
+    fn m839a_snapshot_legacy_shape_and_managed_marker_never_mint_session() {
+        let legacy = serde_json::json!({"cwd":"/", "label":"manual", "agent_name":"ordinary"});
+        let parsed: PaneSnapshot = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(parsed.managed_agent_kind, None);
+        assert!(parsed.agent_session.is_none());
+        assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+        let mut active = legacy;
+        active["managed_agent_kind"] = serde_json::json!("codex");
+        let parsed: PaneSnapshot = serde_json::from_value(active.clone()).unwrap();
+        assert_eq!(parsed.managed_agent_kind.as_deref(), Some("codex"));
+        assert!(parsed.agent_session.is_none());
+        assert_eq!(serde_json::to_value(parsed).unwrap(), active);
+    }
+
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -886,6 +989,7 @@ mod tests {
                 cwd: PathBuf::from("/home/user/Projects/zynk"),
                 label: None,
                 agent_name: None,
+                managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
                 hook_retirement: None,
@@ -897,6 +1001,7 @@ mod tests {
                 cwd: PathBuf::from("/home/user/Projects/website"),
                 label: Some("website".into()),
                 agent_name: None,
+                managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
                 hook_retirement: None,
@@ -1709,6 +1814,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-zynk-test"),
                 label: None,
                 agent_name: None,
+                managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
                 hook_retirement: None,
@@ -1722,6 +1828,7 @@ mod tests {
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 label: None,
                 agent_name: None,
+                managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
                 hook_retirement: None,

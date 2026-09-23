@@ -1,6 +1,6 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -975,42 +975,6 @@ fn wait_agent_status(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
-pub(super) fn wait_for_agent_change(
-    request: Request,
-    timeout_ms: Option<u64>,
-    timeout_message: &str,
-) -> std::io::Result<i32> {
-    let read_timeout = timeout_ms.map(Duration::from_millis);
-    let client = ApiClient::local();
-    ensure_server_protocol_compatible(&client, &request.id)?;
-    let (ack, mut stream) = client
-        .subscribe_value(&request, read_timeout)
-        .map_err(api_client_error_to_io)?;
-    if let Err(err) = crate::api::client::parse_response_value(ack) {
-        if let ApiClientError::ErrorResponse(response) = err {
-            eprintln!("{}", serde_json::to_string(&response).unwrap());
-            return Ok(1);
-        }
-        return Err(api_client_error_to_io(err));
-    }
-
-    match stream.next_event() {
-        Ok(None) => {
-            eprintln!("subscription closed before event arrived");
-            Ok(1)
-        }
-        Ok(Some(event_value)) => {
-            println!("{}", serde_json::to_string(&event_value).unwrap());
-            Ok(0)
-        }
-        Err(ApiClientError::Io(err)) if api_timeout_error(&err) => {
-            eprintln!("{timeout_message}");
-            Ok(1)
-        }
-        Err(err) => Err(api_client_error_to_io(err)),
-    }
-}
-
 pub(super) fn print_response(response: &serde_json::Value) -> std::io::Result<i32> {
     if response.get("error").is_some() {
         eprintln!("{}", serde_json::to_string(response).unwrap());
@@ -1066,13 +1030,6 @@ fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> st
 
 pub(crate) fn protocol_mismatch_response(err: &std::io::Error) -> Option<&ErrorResponse> {
     protocol_guard::error_response(err)
-}
-
-fn api_timeout_error(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-    )
 }
 
 fn api_client_error_to_io(err: ApiClientError) -> std::io::Error {

@@ -4321,6 +4321,8 @@ impl HeadlessServer {
             changed = true;
         }
 
+        changed |= self.app.reconcile_due_managed_agents(now);
+
         if geometry_dirty {
             self.app.pending_agent_resume_deadline = None;
         } else {
@@ -4914,6 +4916,186 @@ fn init_logging() {
 
 #[cfg(test)]
 mod tests {
+    fn m839a_managed_headless_fixture(
+        now: Instant,
+        observed: bool,
+    ) -> (M828aHeadlessFixture, crate::terminal::TerminalId) {
+        let mut fixture = m828a_headless_fixture();
+        let server = fixture.server.as_mut().unwrap();
+        let workspace = crate::workspace::Workspace::test_new("managed timer");
+        let terminal_id = workspace
+            .terminal_id(workspace.tabs[0].root_pane)
+            .unwrap()
+            .clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.manual_label = Some("launch label".into());
+        terminal.begin_managed_agent(
+            "timer-agent".into(),
+            crate::detect::Agent::Codex,
+            now,
+            Duration::from_secs(3),
+            Duration::from_secs(30),
+        );
+        if observed {
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Idle,
+                false,
+                false,
+                false,
+                false,
+                now + Duration::from_secs(1),
+            );
+        }
+        server.app.state.session_dirty = false;
+        server.app.no_session = false;
+        server.app.session_save_deadline = None;
+        server.app.next_auto_update_check = None;
+        server.app.next_agent_manifest_update_check = None;
+        (fixture, terminal_id)
+    }
+
+    #[test]
+    fn m839a_headless_timer_settles_without_agent_reads() {
+        for geometry_dirty in [false, true] {
+            let now = Instant::now();
+            let settle = now + Duration::from_secs(3);
+            let (mut fixture, terminal_id) = m839a_managed_headless_fixture(now, true);
+            let server = fixture.server.as_mut().unwrap();
+            assert!(server.clients.is_empty());
+            assert_eq!(server.app.terminal_runtimes.len(), 0);
+            let sequence = server.app.event_hub.current_sequence();
+            assert_eq!(
+                server
+                    .app
+                    .next_headless_loop_deadline_with_git_refresh(now, false, false),
+                Some(settle)
+            );
+            assert!(!server.handle_scheduled_tasks_headless(
+                settle - Duration::from_millis(1),
+                geometry_dirty
+            ));
+            assert!(server.app.state.terminals[&terminal_id].managed_agent_launch_pending());
+            assert!(!server.app.state.session_dirty);
+            assert!(server.app.session_save_deadline.is_none());
+            assert!(server.app.event_hub.events_after(sequence).is_empty());
+            assert!(server.handle_scheduled_tasks_headless(settle, geometry_dirty));
+            let terminal = &server.app.state.terminals[&terminal_id];
+            assert!(!terminal.managed_agent_launch_pending());
+            assert!(terminal.managed_agent_interactive_ready());
+            assert_eq!(terminal.agent_name.as_deref(), Some("timer-agent"));
+            assert_eq!(terminal.next_managed_agent_deadline(), None);
+            assert!(terminal.confirmed_hook_owner().is_none());
+            assert!(terminal.persisted_agent_session.is_none());
+            assert!(server.app.state.session_dirty);
+            assert!(server.app.session_save_deadline.is_some());
+            let events = server.app.event_hub.events_after(sequence);
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0].1.event,
+                crate::api::schema::EventKind::PaneUpdated
+            );
+            assert!(
+                matches!(&events[0].1.data, crate::api::schema::EventData::PaneUpdated { pane }
+            if pane.terminal_id == terminal_id.to_string())
+            );
+            // Inspect scheduling without starting background persistence at synthetic time.
+            server.app.session_save_deadline = None;
+            server.app.no_session = true;
+            server.app.state.session_dirty = false;
+            let after = server.app.event_hub.current_sequence();
+            assert!(!server.handle_scheduled_tasks_headless(settle, geometry_dirty));
+            assert_eq!(
+                server
+                    .app
+                    .next_headless_loop_deadline_with_git_refresh(settle, false, false),
+                None
+            );
+            assert!(!server.app.state.session_dirty);
+            assert!(server.app.event_hub.events_after(after).is_empty());
+        }
+    }
+
+    #[test]
+    fn m839a_headless_timer_consumes_settle_then_expires_without_agent_reads() {
+        for geometry_dirty in [false, true] {
+            let now = Instant::now();
+            let settle = now + Duration::from_secs(3);
+            let expiry = now + Duration::from_secs(30);
+            let (mut fixture, terminal_id) = m839a_managed_headless_fixture(now, false);
+            let server = fixture.server.as_mut().unwrap();
+            let sequence = server.app.event_hub.current_sequence();
+            assert!(server.handle_scheduled_tasks_headless(settle, geometry_dirty));
+            let terminal = &server.app.state.terminals[&terminal_id];
+            assert!(terminal.managed_agent_launch_pending());
+            assert!(!terminal.managed_agent_interactive_ready());
+            assert_eq!(terminal.agent_name.as_deref(), Some("timer-agent"));
+            assert_eq!(terminal.next_managed_agent_deadline(), Some(expiry));
+            assert!(server.app.state.session_dirty);
+            assert!(server.app.session_save_deadline.is_some());
+            let events = server.app.event_hub.events_after(sequence);
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0].1.event,
+                crate::api::schema::EventKind::PaneUpdated
+            );
+            assert!(
+                matches!(&events[0].1.data, crate::api::schema::EventData::PaneUpdated { pane }
+            if pane.terminal_id == terminal_id.to_string())
+            );
+            server.app.session_save_deadline = None;
+            server.app.state.session_dirty = false;
+            assert_eq!(
+                server
+                    .app
+                    .next_headless_loop_deadline_with_git_refresh(settle, false, false),
+                Some(expiry)
+            );
+            let after_settle = server.app.event_hub.current_sequence();
+            assert!(!server.handle_scheduled_tasks_headless(
+                expiry - Duration::from_millis(1),
+                geometry_dirty
+            ));
+            assert!(server.app.event_hub.events_after(after_settle).is_empty());
+            assert!(server.handle_scheduled_tasks_headless(expiry, geometry_dirty));
+            let terminal = &server.app.state.terminals[&terminal_id];
+            assert_eq!(terminal.agent_name, None);
+            assert_eq!(terminal.managed_agent_kind(), None);
+            assert_eq!(terminal.next_managed_agent_deadline(), None);
+            assert_eq!(terminal.manual_label.as_deref(), Some("launch label"));
+            assert!(terminal.confirmed_hook_owner().is_none());
+            assert!(terminal.persisted_agent_session.is_none());
+            assert!(server.app.state.session_dirty);
+            assert!(server.app.session_save_deadline.is_some());
+            let events = server.app.event_hub.events_after(after_settle);
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0].1.event,
+                crate::api::schema::EventKind::PaneUpdated
+            );
+            assert!(
+                matches!(&events[0].1.data, crate::api::schema::EventData::PaneUpdated { pane }
+            if pane.terminal_id == terminal_id.to_string())
+            );
+            server.app.session_save_deadline = None;
+            server.app.no_session = true;
+            server.app.state.session_dirty = false;
+            let after_expiry = server.app.event_hub.current_sequence();
+            assert!(!server.handle_scheduled_tasks_headless(expiry, geometry_dirty));
+            assert_eq!(
+                server
+                    .app
+                    .next_headless_loop_deadline_with_git_refresh(expiry, false, false),
+                None
+            );
+            assert!(!server.app.state.session_dirty);
+            assert!(server.app.event_hub.events_after(after_expiry).is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn m833_popup_visibility_and_direct_sources_survive_no_workspace() {
         let (mut server, _rx, _) = retained_test_server(b"tile");

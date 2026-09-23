@@ -322,12 +322,21 @@ fn agent_command() -> Command {
                 .arg(Arg::new("name").value_name("NAME"))
                 .arg(flag("clear")),
         )
+        .subcommand(
+            Command::new("prompt")
+                .about("Submit to a ready named agent; optional wait observes later idle/done/blocked, with exit 3 on wait failure after submission")
+                .arg(required("name", "NAME"))
+                .arg(option("type", "TYPE"))
+                .arg(option("trace", "ID|inherit"))
+                .arg(flag("wait"))
+                .arg(option("timeout", "MS").requires("wait"))
+                .arg(required("text", "TEXT").num_args(1..).last(true)),
+        )
         .subcommand(id_command("focus", "target", "Focus an agent"))
         .subcommand(
             Command::new("wait")
-                .about("Wait for an agent status")
-                .arg(required("target", "TARGET"))
-                .arg(agent_wait_status_option())
+                .about("Wait for a named agent to be idle, done or blocked; use agent start for launch readiness")
+                .arg(required("name", "NAME"))
                 .arg(option("timeout", "MS")),
         )
         .subcommand(
@@ -338,14 +347,11 @@ fn agent_command() -> Command {
         )
         .subcommand(
             Command::new("start")
-                .about("Start an agent command")
+                .about("Launch in an existing pane and wait for interactive readiness; timeout keeps the label and does not prove the command did not run")
                 .arg(required("name", "NAME"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(option("workspace", "ID"))
-                .arg(option("tab", "ID"))
-                .arg(split_option())
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
+                .arg(option("kind", "KIND").required(true).value_parser(crate::detect::Agent::ALL.map(crate::detect::agent_label)))
+                .arg(option("pane", "ID").required(true))
+                .arg(option("timeout", "MS")),
         )
         .subcommand(
             Command::new("explain")
@@ -876,10 +882,6 @@ fn direction_option() -> Arg {
     option("direction", "DIRECTION").value_parser(["left", "right", "up", "down"])
 }
 
-fn split_option() -> Arg {
-    option("split", "DIRECTION").value_parser(["right", "down"])
-}
-
 fn split_direction_option() -> Arg {
     option("direction", "DIRECTION").value_parser(["right", "down"])
 }
@@ -888,12 +890,6 @@ fn status_option(name: &'static str, required: bool) -> Arg {
     option(name, "STATUS")
         .required(required)
         .value_parser(["idle", "working", "blocked", "done", "unknown"])
-}
-
-fn agent_wait_status_option() -> Arg {
-    option("status", "STATUS")
-        .required(true)
-        .value_parser(["idle", "working", "blocked", "unknown"])
 }
 
 fn pane_agent_state_option(name: &'static str) -> Arg {
@@ -1062,7 +1058,7 @@ mod tests {
             ("worktree", "list create open remove"),
             ("tab", "list create get focus rename close"),
             ("notification", "show"),
-            ("agent", "list get read send rename focus wait attach start explain"),
+            ("agent", "list get read send prompt rename focus wait attach start explain"),
             ("pane", "list get layout neighbor edges focus resize zoom read rename split swap move close send-text send-keys report-agent report-agent-session release-agent report-metadata run"),
             ("wait", "output agent-status"),
             ("terminal", "attach session"),
@@ -1120,6 +1116,7 @@ mod tests {
             ("send", "type trace"), ("reply", "type trace"),
             ("pane send-text", "type trace"), ("pane run", "type trace"),
             ("agent send", "type"),
+            ("agent wait", "timeout"),
             ("thread", "json"), ("trace", "json"), ("whoami", "json"), ("who", "json"),
             ("inbox", "agent limit json"),
             ("query", "workspace conversation agent since type branch cwd trace limit exact json"),
@@ -1141,7 +1138,6 @@ mod tests {
             );
         }
         for (path, option, values) in [
-            ("agent wait", "status", "idle working blocked unknown"),
             ("pane report-agent", "state", "idle working blocked unknown"),
             (
                 "wait agent-status",
@@ -1269,14 +1265,21 @@ mod tests {
     }
 
     #[test]
-    fn spec_includes_agent_status_values() {
+    fn m839c_spec_wait_has_no_status_and_names_completion_states() {
         let cmd = super::command();
         let wait = command_path(&cmd, &["agent", "wait"]);
-        let values = option_values(wait, "status");
-        assert!(values.contains(&"idle".to_string()));
-        assert!(values.contains(&"working".to_string()));
-        assert!(values.contains(&"blocked".to_string()));
-        assert!(!values.contains(&"done".to_string()));
+        assert!(!has_option(wait, "status"));
+        assert!(has_option(wait, "timeout"));
+        let help = wait
+            .get_about()
+            .expect("agent wait completion description")
+            .to_string();
+        for state in ["idle", "done", "blocked"] {
+            assert!(
+                help.contains(state),
+                "completion state {state} absent: {help}"
+            );
+        }
     }
 
     #[test]

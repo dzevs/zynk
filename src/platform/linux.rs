@@ -127,6 +127,48 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     )
 }
 
+pub(crate) fn available_pane_shell(child_pid: u32) -> Result<String, String> {
+    let job = foreground_job(child_pid)
+        .ok_or_else(|| format!("foreground job unavailable for child pid {child_pid}"))?;
+    available_pane_shell_from_job(child_pid, job)
+}
+
+fn available_pane_shell_from_job(child_pid: u32, job: ForegroundJob) -> Result<String, String> {
+    if job.process_group_id != child_pid
+        || job.processes.is_empty()
+        || job.processes.iter().any(|process| process.pid != child_pid)
+    {
+        let names: Vec<_> = job
+            .processes
+            .iter()
+            .map(|process| process.name.as_str())
+            .collect();
+        return Err(format!(
+            "foreground job is not the pane shell: names={names:?}"
+        ));
+    }
+    let Some(process) = job.processes.into_iter().next() else {
+        return Err("foreground job is not the pane shell: names=[]".into());
+    };
+    if super::is_pane_shell_process_name(&process.name) {
+        return Ok(process.name);
+    }
+    if matches!(
+        super::normalized_shell_name(&process.name).as_str(),
+        "pwsh" | "powershell" | "csh" | "tcsh" | "elvish" | "xonsh" | "nu" | "cmd"
+    ) {
+        Err(format!(
+            "foreground {:?} uses an unsupported shell dialect",
+            process.name
+        ))
+    } else {
+        Err(format!(
+            "foreground {:?} is not a supported pane shell",
+            process.name
+        ))
+    }
+}
+
 fn foreground_job_with(
     observed_group: Option<u32>,
     mode: impl FnOnce() -> ProcessDetectionMode,
@@ -752,6 +794,321 @@ fn process_session_id(pid: u32) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+    use crate::platform::{interactive_shell_command, is_pane_shell_process_name};
+    #[test]
+    fn m839_shell_encoding_is_explicit_for_each_accepted_dialect() {
+        let argv: Vec<String> = [
+            "codex",
+            "",
+            "two words",
+            "a'b",
+            "$HOME",
+            r"one\two",
+            r"two\\slashes",
+            "trailing\\",
+            "semi;colon",
+            "`command`",
+            "double\"quote",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let posix = r#"codex '' 'two words' 'a'\''b' '$HOME' 'one\two' 'two\\slashes' 'trailing\' 'semi;colon' '`command`' 'double"quote'"#;
+        let fish = r#"codex '' 'two words' 'a\'b' '$HOME' 'one\\two' 'two\\\\slashes' 'trailing\\' 'semi;colon' '`command`' 'double"quote'"#;
+        for (shell, expected) in [
+            ("sh", posix),
+            ("bash", posix),
+            ("dash", posix),
+            ("zsh", posix),
+            ("ksh", posix),
+            ("mksh", posix),
+            ("fish", fish),
+            ("FISH", fish),
+            ("-fish", fish),
+            ("/bin/fish", fish),
+            ("fish.exe", fish),
+        ] {
+            assert!(is_pane_shell_process_name(shell), "shell={shell}");
+            assert_eq!(
+                interactive_shell_command(&argv, shell).as_deref(),
+                Some(expected),
+                "shell={shell}"
+            );
+        }
+    }
+
+    #[test]
+    fn m839_shell_normalization_never_admits_excluded_dialects() {
+        let argv = vec!["codex".to_owned(), "two words".to_owned()];
+        for shell in ["-bash", "/bin/zsh", "FISH", "bash.exe"] {
+            assert!(is_pane_shell_process_name(shell), "shell={shell}");
+            assert!(interactive_shell_command(&argv, shell).is_some());
+        }
+        for shell in [
+            "csh",
+            "tcsh",
+            "elvish",
+            "xonsh",
+            "nu",
+            "pwsh",
+            "/usr/bin/pwsh",
+            "-powershell",
+            "PowerShell.exe",
+            "cmd",
+            "vim",
+            "cargo",
+            "",
+        ] {
+            assert!(!is_pane_shell_process_name(shell), "shell={shell}");
+            assert_eq!(interactive_shell_command(&argv, shell), None, "{shell}");
+        }
+    }
+
+    #[test]
+    fn m839_shell_command_rejects_empty_program_and_controls() {
+        for shell in ["sh", "bash", "dash", "zsh", "ksh", "mksh", "fish"] {
+            assert_eq!(interactive_shell_command(&[], shell), None);
+            assert_eq!(interactive_shell_command(&[String::new()], shell), None);
+            for arg in [
+                "line\nnext",
+                "return\rnext",
+                "tab\there",
+                "nul\0",
+                "\u{7f}",
+                "\u{85}",
+                "\u{9b}",
+            ] {
+                assert_eq!(
+                    interactive_shell_command(&["codex".into(), arg.into()], shell),
+                    None,
+                    "shell={shell} arg={arg:?}"
+                );
+                assert_eq!(
+                    interactive_shell_command(&[arg.into()], shell),
+                    None,
+                    "shell={shell} program={arg:?}"
+                );
+                assert_eq!(
+                    interactive_shell_command(&[arg.into(), "valid".into()], shell),
+                    None,
+                    "shell={shell} program={arg:?} with_arg"
+                );
+            }
+            assert_eq!(
+                interactive_shell_command(&["codex".into(), String::new()], shell).as_deref(),
+                Some("codex ''")
+            );
+            assert_eq!(
+                interactive_shell_command(&["codex".into(), "caf\u{e9}".into()], shell).as_deref(),
+                Some("codex 'caf\u{e9}'"),
+                "shell={shell} valid_unicode_arg"
+            );
+            assert_eq!(
+                interactive_shell_command(&["caf\u{e9}".into()], shell).as_deref(),
+                Some("'caf\u{e9}'"),
+                "shell={shell} valid_unicode_program"
+            );
+        }
+    }
+
+    #[test]
+    fn m839_shell_posix_arguments_round_trip_through_real_sh() {
+        let args = [
+            "",
+            "two words",
+            "a'b",
+            "$HOME",
+            r"one\two",
+            r"two\\slashes",
+            "trailing\\",
+            "semi;colon",
+            "`command`",
+            "double\"quote",
+        ];
+        let mut argv = vec!["printf".to_owned(), r"%s\0".to_owned()];
+        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+        let command = interactive_shell_command(&argv, "sh").unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "stderr={:?}", output.stderr);
+        assert!(output.stderr.is_empty());
+        let expected: Vec<u8> = args
+            .iter()
+            .flat_map(|arg| arg.as_bytes().iter().copied().chain(std::iter::once(0)))
+            .collect();
+        assert_eq!(output.stdout, expected);
+    }
+
+    #[test]
+    fn m839_shell_foreground_admission_requires_only_the_child_shell() {
+        let process = |pid, name: &str| ForegroundProcess {
+            pid,
+            name: name.into(),
+            argv0: None,
+            cmdline: None,
+            argv: None,
+        };
+        for shell in ["sh", "bash", "dash", "zsh", "ksh", "mksh", "fish"] {
+            assert_eq!(
+                available_pane_shell_from_job(
+                    23,
+                    ForegroundJob {
+                        process_group_id: 23,
+                        processes: vec![process(23, shell)],
+                    }
+                ),
+                Ok(shell.to_owned())
+            );
+        }
+        for (job, expected) in [
+            (
+                ForegroundJob {
+                    process_group_id: 23,
+                    processes: vec![],
+                },
+                "foreground job is not the pane shell: names=[]",
+            ),
+            (
+                ForegroundJob {
+                    process_group_id: 24,
+                    processes: vec![process(23, "sh")],
+                },
+                "foreground job is not the pane shell: names=[\"sh\"]",
+            ),
+            (
+                ForegroundJob {
+                    process_group_id: 23,
+                    processes: vec![process(23, "sh"), process(24, "cat")],
+                },
+                "foreground job is not the pane shell: names=[\"sh\", \"cat\"]",
+            ),
+            (
+                ForegroundJob {
+                    process_group_id: 23,
+                    processes: vec![process(24, "sh")],
+                },
+                "foreground job is not the pane shell: names=[\"sh\"]",
+            ),
+            (
+                ForegroundJob {
+                    process_group_id: 23,
+                    processes: vec![process(23, "cat")],
+                },
+                "foreground \"cat\" is not a supported pane shell",
+            ),
+            (
+                ForegroundJob {
+                    process_group_id: 23,
+                    processes: vec![process(23, "pwsh")],
+                },
+                "foreground \"pwsh\" uses an unsupported shell dialect",
+            ),
+        ] {
+            assert_eq!(available_pane_shell_from_job(23, job), Err(expected.into()));
+        }
+    }
+
+    #[test]
+    fn m839_shell_refusals_name_the_observation_and_reason() {
+        for (name, expected) in [
+            (
+                "pwsh",
+                "foreground \"pwsh\" uses an unsupported shell dialect",
+            ),
+            (
+                "powershell",
+                "foreground \"powershell\" uses an unsupported shell dialect",
+            ),
+            (
+                "csh",
+                "foreground \"csh\" uses an unsupported shell dialect",
+            ),
+            (
+                "tcsh",
+                "foreground \"tcsh\" uses an unsupported shell dialect",
+            ),
+            (
+                "elvish",
+                "foreground \"elvish\" uses an unsupported shell dialect",
+            ),
+            (
+                "xonsh",
+                "foreground \"xonsh\" uses an unsupported shell dialect",
+            ),
+            ("nu", "foreground \"nu\" uses an unsupported shell dialect"),
+            (
+                "cmd",
+                "foreground \"cmd\" uses an unsupported shell dialect",
+            ),
+            (
+                "/usr/bin/pwsh",
+                "foreground \"/usr/bin/pwsh\" uses an unsupported shell dialect",
+            ),
+            (
+                "-powershell",
+                "foreground \"-powershell\" uses an unsupported shell dialect",
+            ),
+            (
+                "PowerShell.exe",
+                "foreground \"PowerShell.exe\" uses an unsupported shell dialect",
+            ),
+            ("vim", "foreground \"vim\" is not a supported pane shell"),
+            ("", "foreground \"\" is not a supported pane shell"),
+            (
+                "bad\n\"name",
+                "foreground \"bad\\n\\\"name\" is not a supported pane shell",
+            ),
+            (
+                "bad\u{1b}name",
+                "foreground \"bad\\u{1b}name\" is not a supported pane shell",
+            ),
+        ] {
+            let job = ForegroundJob {
+                process_group_id: 23,
+                processes: vec![ForegroundProcess {
+                    pid: 23,
+                    name: name.into(),
+                    argv0: None,
+                    cmdline: None,
+                    argv: None,
+                }],
+            };
+            assert_eq!(
+                available_pane_shell_from_job(23, job),
+                Err(expected.into()),
+                "name={name:?}"
+            );
+        }
+        let job = ForegroundJob {
+            process_group_id: 24,
+            processes: vec![ForegroundProcess {
+                pid: 24,
+                name: "bad\n\"name".into(),
+                argv0: None,
+                cmdline: None,
+                argv: None,
+            }],
+        };
+        assert_eq!(
+            available_pane_shell_from_job(23, job),
+            Err("foreground job is not the pane shell: names=[\"bad\\n\\\"name\"]".into())
+        );
+    }
+
+    #[test]
+    fn m839_shell_absent_foreground_job_has_its_own_diagnostic() {
+        assert_eq!(
+            available_pane_shell(0),
+            Err("foreground job unavailable for child pid 0".into())
+        );
+    }
+
     use super::*;
     use std::sync::{Mutex, OnceLock};
 

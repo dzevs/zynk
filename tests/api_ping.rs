@@ -1071,58 +1071,98 @@ fn assert_new_terminal_cwd_follow(leader_matches_shell: bool) {
 }
 
 #[test]
-fn agent_start_creates_named_terminal_over_socket() {
+fn m839a_agent_start_names_existing_terminal_over_socket() {
+    use std::os::unix::fs::PermissionsExt;
     let _lock = test_lock();
-    let base = unique_test_dir();
-    let config_home = base.join("config");
-    let runtime_dir = base.join("runtime");
-    let socket_path = runtime_dir.join("zynk.sock");
-
-    let child = spawn_zynk(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
-
-    let started = send_request(
-        &socket_path,
-        &format!(
-            r#"{{"id":"agent_start","method":"agent.start","params":{{"name":"main","cwd":"{}","argv":["/bin/sh","-c","printf agent-start-ok; sleep 2"]}}}}"#,
-            base.display()
-        ),
+    let mut fixture = FollowCwdServer {
+        base: unique_test_dir(),
+        server: None,
+    };
+    let socket = fixture.base.join("runtime/zynk.sock");
+    let shell = m839_ordinary_fixture_shell(&fixture.base);
+    let bin = fixture.base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy("/bin/cat", bin.join("codex")).unwrap();
+    fs::set_permissions(bin.join("codex"), fs::Permissions::from_mode(0o700)).unwrap();
+    fixture.server = Some(spawn_zynk_with_shell(
+        &fixture.base.join("config"),
+        &fixture.base.join("runtime"),
+        &socket,
+        &shell,
+    ));
+    wait_for_socket(&socket, Duration::from_secs(5));
+    let call = |method: &str, params: serde_json::Value| {
+        send_request(
+            &socket,
+            &serde_json::json!({"id":"m839-existing", "method":method, "params":params})
+                .to_string(),
+        )
+    };
+    let created = call(
+        "workspace.create",
+        serde_json::json!({"cwd":fixture.base, "focus":true}),
     );
-    assert_eq!(started["result"]["type"], "agent_started");
+    assert_eq!(created["result"]["type"], "workspace_created", "{created}");
+    let pane = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let original_terminal = created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .unwrap();
+    let ready = fixture.base.join("m839-shell-ready");
+    let quote = |value: &Path| format!("'{}'", value.to_str().unwrap().replace('\'', "'\\''"));
+    let setup = call(
+        "pane.send_input",
+        serde_json::json!({"pane_id":pane,
+        "text":format!("export PATH={}; printf ready > {}", quote(&bin), quote(&ready)), "keys":["Enter"]}),
+    );
+    assert_eq!(setup["result"]["type"], "ok");
+    support::wait_for_file(&ready, Duration::from_secs(5));
+    let before = call("pane.list", serde_json::json!({}));
+    let started = call(
+        "agent.start",
+        serde_json::json!({"name":"main", "kind":"codex", "pane_id":pane, "timeout_ms":30000}),
+    );
+    assert_eq!(started["result"]["type"], "agent_started", "{started}");
     assert_eq!(started["result"]["agent"]["name"], "main");
     assert_eq!(
         started["result"]["agent"]["cwd"],
-        base.display().to_string()
+        fixture.base.display().to_string()
     );
-    assert_eq!(started["result"]["argv"][0], "/bin/sh");
-    let terminal_id = started["result"]["agent"]["terminal_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let listed = send_request(
-        &socket_path,
-        r#"{"id":"agent_start_list","method":"agent.list","params":{}}"#,
-    );
+    assert_eq!(started["result"]["argv"], serde_json::json!(["codex"]));
+    assert_eq!(started["result"]["agent"]["terminal_id"], original_terminal);
+    assert_eq!(started["result"]["agent"]["pane_id"], pane);
+    assert!(started["result"]["agent"].get("agent_session").is_none());
+    let after = call("pane.list", serde_json::json!({}));
+    let topology = |value: &serde_json::Value| {
+        value["result"]["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pane| {
+                (
+                    pane["workspace_id"].clone(),
+                    pane["tab_id"].clone(),
+                    pane["pane_id"].clone(),
+                    pane["terminal_id"].clone(),
+                    pane["focused"].clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(topology(&after), topology(&before));
+    let listed = call("agent.list", serde_json::json!({}));
     let agents = listed["result"]["agents"].as_array().unwrap();
     assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0]["terminal_id"], terminal_id);
+    assert_eq!(agents[0]["terminal_id"], original_terminal);
     assert_eq!(agents[0]["name"], "main");
-
-    let duplicate = send_request(
-        &socket_path,
-        &format!(
-            r#"{{"id":"agent_start_duplicate","method":"agent.start","params":{{"name":"main","cwd":"{}","argv":["/bin/sh","-c","true"]}}}}"#,
-            base.display()
-        ),
+    let duplicate = call(
+        "agent.start",
+        serde_json::json!({"name":"main", "kind":"codex", "pane_id":pane}),
     );
     assert_eq!(duplicate["error"]["code"], "agent_name_taken");
     assert!(duplicate["error"]["message"]
         .as_str()
         .unwrap()
-        .contains(&terminal_id));
-
-    cleanup_spawned_zynk(child, base);
+        .contains(original_terminal));
 }
 
 #[test]
@@ -2536,10 +2576,12 @@ fn m828c_socket_observes_title_updates_without_intervening_reads() {
         server: None,
     };
     let socket = fixture.base.join("runtime/zynk.sock");
-    fixture.server = Some(spawn_zynk(
+    let shell = m839_ordinary_fixture_shell(&fixture.base);
+    fixture.server = Some(spawn_zynk_with_shell(
         &fixture.base.join("config"),
         &fixture.base.join("runtime"),
         &socket,
+        &shell,
     ));
     wait_for_socket(&socket, Duration::from_secs(5));
     let call = |method: &str, params: serde_json::Value| {
@@ -2553,12 +2595,20 @@ fn m828c_socket_observes_title_updates_without_intervening_reads() {
     };
     let raw = "\u{25d0} socket-first";
     let script = r#"printf '\033]2;%s\007\nC_TITLE_READY\n' "$1"; while IFS= read -r command; do case "$command" in next) printf '\033]2;socket-next\007\nC_TITLE_NEXT\n';; esac; done"#;
-    let started = call(
-        "agent.start",
-        serde_json::json!({"name": "title-observer", "cwd": fixture.base,
-            "argv": ["/bin/sh", "-c", script, "title-fixture", raw]}),
-    );
-    assert_eq!(started["type"], "agent_started");
+    let script_path = fixture.base.join("m839-title-script");
+    fs::write(&script_path, script).unwrap();
+    let started = m839_ordinary_named_pane(
+        &socket,
+        &fixture.base,
+        "title-observer",
+        &[
+            "/bin/sh".into(),
+            script_path.to_str().unwrap().into(),
+            raw.into(),
+        ],
+    )["result"]
+        .clone();
+    assert_eq!(started["type"], "agent_info");
     let pane_id = started["agent"]["pane_id"].as_str().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -2629,19 +2679,17 @@ fn m828b_pane_subscription_observes_timer_expiry_without_read_requests() {
         server: None,
     };
     let socket = fixture.base.join("runtime/zynk.sock");
-    fixture.server = Some(spawn_zynk(
+    let shell = m839_ordinary_fixture_shell(&fixture.base);
+    fixture.server = Some(spawn_zynk_with_shell(
         &fixture.base.join("config"),
         &fixture.base.join("runtime"),
         &socket,
+        &shell,
     ));
     wait_for_socket(&socket, Duration::from_secs(5));
-    let started = send_request(
-        &socket,
-        &serde_json::json!({"id": "m828b-start", "method": "agent.start",
-        "params": {"name": "token-timer", "cwd": fixture.base, "argv": ["/bin/cat"]}})
-        .to_string(),
-    );
-    assert_eq!(started["result"]["type"], "agent_started", "{started}");
+    let started =
+        m839_ordinary_named_pane(&socket, &fixture.base, "token-timer", &["/bin/cat".into()]);
+    assert_eq!(started["result"]["type"], "agent_info", "{started}");
     let pane_id = started["result"]["agent"]["pane_id"].as_str().unwrap();
     let mut reader = open_subscription(
         &socket,
@@ -2688,19 +2736,17 @@ fn m828b_pane_and_agent_tokens_are_visible_without_authority() {
         server: None,
     };
     let socket = fixture.base.join("runtime/zynk.sock");
-    fixture.server = Some(spawn_zynk(
+    let shell = m839_ordinary_fixture_shell(&fixture.base);
+    fixture.server = Some(spawn_zynk_with_shell(
         &fixture.base.join("config"),
         &fixture.base.join("runtime"),
         &socket,
+        &shell,
     ));
     wait_for_socket(&socket, Duration::from_secs(5));
-    let started = send_request(
-        &socket,
-        &serde_json::json!({"id": "m828b-start", "method": "agent.start",
-        "params": {"name": "token-worker", "cwd": fixture.base, "argv": ["/bin/cat"]}})
-        .to_string(),
-    );
-    assert_eq!(started["result"]["type"], "agent_started", "{started}");
+    let started =
+        m839_ordinary_named_pane(&socket, &fixture.base, "token-worker", &["/bin/cat".into()]);
+    assert_eq!(started["result"]["type"], "agent_info", "{started}");
     let initial = &started["result"]["agent"];
     let pane_id = initial["pane_id"].as_str().unwrap();
     let terminal_id = initial["terminal_id"].as_str().unwrap();
@@ -2830,4 +2876,38 @@ fn m828a_workspace_token_subscription_observes_timer_expiry_without_read_request
     assert!(reader
         .try_read_json_line(Duration::from_millis(150))
         .is_none());
+}
+
+fn m839_ordinary_fixture_shell(base: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(base).unwrap();
+    let path = base.join("m839-ordinary-shell");
+    fs::write(&path, b"#!/bin/sh\nroot=${0%/*}\nexport HOME=\"$root\" ZYNK_AGENT= ENV=/dev/null BASH_ENV=/dev/null INPUTRC=/dev/null PROMPT_COMMAND= PS1= PS2=\nexec /bin/bash --noprofile --norc --noediting -i\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path.to_str().unwrap().to_string()
+}
+
+fn m839_ordinary_named_pane(
+    socket: &Path,
+    base: &Path,
+    name: &str,
+    argv: &[String],
+) -> serde_json::Value {
+    let created = send_request(socket, &serde_json::json!({"id":"m839-ordinary-create", "method":"workspace.create", "params":{"cwd":base, "focus":true}}).to_string());
+    assert_eq!(created["result"]["type"], "workspace_created", "{created}");
+    let pane = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let named = send_request(socket, &serde_json::json!({"id":"m839-ordinary-name", "method":"agent.rename", "params":{"target":pane, "name":name}}).to_string());
+    assert_eq!(named["result"]["type"], "agent_info", "{named}");
+    assert!(named["result"]["agent"].get("agent_session").is_none());
+    assert!(named["result"]["agent"].get("launch_pending").is_none());
+    let command = format!(
+        "exec {}",
+        argv.iter()
+            .map(|arg| format!("'{}'", arg.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let sent = send_request(socket, &serde_json::json!({"id":"m839-ordinary-input", "method":"pane.send_input", "params":{"pane_id":pane, "text":command, "keys":["Enter"]}}).to_string());
+    assert_eq!(sent["result"]["type"], "ok", "{sent}");
+    named
 }

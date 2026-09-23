@@ -305,6 +305,7 @@ impl Workspace {
         )
     }
 
+    #[cfg(test)]
     pub fn new_argv_command(
         initial_cwd: PathBuf,
         rows: u16,

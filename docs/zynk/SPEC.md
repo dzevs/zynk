@@ -150,6 +150,7 @@ special to one:
 zynk pane run       <pane>   <text> [--type <t>]
 zynk pane send-text <pane>   <text> [--type <t>]
 zynk agent send     <target> <text> [--type <t>]
+zynk agent prompt   <name>   <text> [--type <t>] [--trace <id|inherit>] [--wait] [--timeout <ms>]
 ```
 
 - Agent supplies the positional `text` (+ optional `--type`). NO `--reply-to` (parent derived from
@@ -161,6 +162,14 @@ zynk agent send     <target> <text> [--type <t>]
     `pane.send_input` (atomic). It does NOT inherit zynk's raw `agent send` literal-no-Enter behavior
     (that was the stuck-draft bug). → `delivery_status = submitted`.
   - `zynk pane run` → atomic submit (`pane.send_input`). → `delivery_status = submitted`.
+  - `zynk agent prompt` → persist the pure body and resolved Party, require the same terminal at
+    dispatch, then submit only when the named agent is ready and is still the pane's foreground
+    process. A verified response records `delivery_status = submitted` with
+    `proof_source = agent.prompt` before an optional wait. A wait failure exits 3 with the original
+    `message_id` and submitted state, and MUST NOT resubmit or append a compensating Failed event.
+    A missing or contradictory response is explicitly unverified and advises against automatic
+    resubmission; it is not proof that no terminal effect occurred. Prompt readiness, status and
+    sequence observations never create receiver or receipt authority.
   - `zynk pane send-text` → explicit NO Enter (deliberately staging text). → `delivery_status = drafted`
     (message persisted + protocol metadata/type, but NOT submitted; a future submit transitions it to `submitted`).
   So `submitted` (§6) is consistent: only `agent send`/`pane run`/a future submit produce it; `send-text`
@@ -174,6 +183,50 @@ zynk agent send     <target> <text> [--type <t>]
   bind "next Enter from the pane" to the latest draft — that races user input.)
 - `pane send-keys` (raw key codes, not text) is **excluded** from the message-layer — not a message.
 - New retrieval command: `zynk query …` (F3).
+
+### Managed agents and submission boundaries
+
+`zynk agent start <name> --kind <kind> --pane <id> [--timeout <ms>] [-- <args...>]`
+launches in an existing pane and waits for `interactive_ready`. A name is reserved in both Pending
+and Active phases; duplicate attempts report `agent_name_taken` with the holder terminal, while a
+rename during Pending reports `agent_launch_pending`. A timeout releases the managed reservation
+but keeps the launch name as the pane's manual label and does not prove that the command did not run.
+The server accepts `sh`, `bash`, `dash`, `zsh`, `ksh`, `mksh`, and `fish` foreground shells on Linux.
+It refuses `pwsh`, `powershell`, `csh`, `tcsh`, `elvish`, `xonsh`, `nu`, and `cmd` as unsupported
+dialects; absent child PID, unavailable foreground job, and a non-shell foreground process are
+separate reason-bearing refusals in the same busy admission class. PATH is the server's environment.
+PID reuse, concurrent typing, and a nonempty shell edit buffer are not observable admission facts.
+
+`AgentInfo.launch_pending`, `interactive_ready`, `agent_status`, and `state_change_seq` are
+observations, not identity or receipt authority. Managed metadata never manufactures
+`agent_session`; receipt admission remains the confirmed owner-coherent hook path, including its
+pending-exit fence. Restored Active metadata remains Active, Pending metadata is never persisted,
+and invalid managed kinds are ignored and logged. A restored presentation seed deliberately has no
+detector-observation timestamp: a visible blocker cannot override restored hook state until a real
+detector observation supplies both state and time. `agent.get` can reconcile a due managed transition
+and mark session state dirty; `agent.list` only projects the state already reconciled by the scheduler.
+Neither read method creates conversation DB rows or delivery events. Both interactive and headless
+schedulers reconcile due managed transitions; the headless call is a fork-owned correction absent
+from upstream `e0758c32` and upstream `v0.8.2`.
+
+`zynk agent wait <name> [--timeout <ms>]` resolves once, pins the terminal, and completes on observed
+Idle, Done, or Blocked. It does not require launch readiness or a sequence advance, so a Pending
+managed agent whose detector already reports Idle can satisfy it; use `agent start` when interactive
+launch readiness is required. Prompt `--wait` is stricter: completion must be later than the prompt
+baseline sequence. Timeouts are checked between requests and do not bound a blocked in-flight IPC
+read. A changed terminal or name fails instead of retargeting.
+
+`pane.send_input`, and therefore `agent send`, `agent prompt`, and `pane run`, validates all keys
+before mutation and enqueues one byte vector containing optional bracketed text plus encoded keys.
+The empty-text/empty-keys request now enqueues one empty item; this is a behavior change from the
+previous zero-item path. One queue item is not a promise of one kernel write or external consumption.
+Legacy and Kitty disambiguation-only Enter encode CR; Kitty report-all Enter encodes `ESC[13u`.
+
+Protocol remains 19 in this intermediate range. It therefore spans two incompatible `agent.start`
+request shapes: the equality-only guard cannot detect that difference, and an old-shape request is
+typed-refused rather than launched. The later protocol-20 port must absorb this contract change.
+`AgentPromptParams.expected_terminal_id` is an optional fork wire precondition; the fork CLI always
+supplies it from the same resolution that produced the persisted Party.
 
 **Send response (F4):** every send returns the persisted record + delivery state:
 ```json
@@ -253,8 +306,12 @@ not denormalized onto every message.
   — `from_participant_id`/`to_participant_id` reference `conversation_participants` (the agent/session
   snapshot, with decomposed `source`/`kind`/`value`), instead of denormalizing `agent_session` per row.
 - `delivery_events(id, message_id, event_type drafted|submitted|received|processed|failed,
-  proof_source pane.send_text|pane.send_input|pane.submit|integration|pane_tree|operator|system.recovery,
+  proof_source pane.send_text|pane.send_input|pane.submit|agent.prompt|integration|pane_tree|operator|system.recovery,
   zynk_event_id NULL, seq, timestamp, payload_json)`
+  — migration 0005 adds `agent.prompt` by rebuilding the table and copying all eight columns
+  verbatim. Migrations 0001-0004 remain immutable. A pre-0005 binary sees the resulting DB as
+  `Newer`, never ready or Foreign; rollback requires a compatible binary or an operator-owned
+  database backup/recovery decision, not migration-row/checksum edits or a reverse migration.
 - `messages_fts` — FTS5 external-content over `body` + selected searchable metadata (written synchronously
   on insert — keyword search is always fresh)
 - `embedding_models(id, local_model, dims, tokenizer_hash, created_at)`

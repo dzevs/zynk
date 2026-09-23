@@ -1,9 +1,14 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
-use std::path::PathBuf;
+use bytes::Bytes;
+use std::time::{Duration, Instant};
 
-use super::{terminal_targets::TerminalTargetError, App, Mode};
-use crate::api::schema::{AgentStartParams, SplitDirection};
+use super::{terminal_targets::TerminalTargetError, App};
+use crate::api::schema::AgentStartParams;
+
+const AGENT_START_SETTLE_DELAY: Duration = Duration::from_secs(3);
+const DEFAULT_AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_AGENT_START_TIMEOUT: Duration = Duration::from_secs(300);
 
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
@@ -23,10 +28,23 @@ impl App {
     }
 
     pub(super) fn agent_info_for_target(
-        &self,
+        &mut self,
         target: &str,
     ) -> Result<crate::api::schema::AgentInfo, TerminalTargetError> {
         let resolved = self.resolve_terminal_target(target)?;
+        let managed_changed = self
+            .state
+            .workspaces
+            .get(resolved.ws_idx)
+            .and_then(|ws| ws.terminal_id(resolved.pane_id))
+            .cloned()
+            .and_then(|id| self.state.terminals.get_mut(&id))
+            .is_some_and(|terminal| terminal.reconcile_managed_agent_at(Instant::now(), None));
+        if managed_changed {
+            self.state.mark_session_dirty();
+            self.emit_pane_updated(resolved.ws_idx, resolved.pane_id);
+            self.schedule_session_save();
+        }
         self.agent_info(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| TerminalTargetError::NotFound {
                 target: target.to_string(),
@@ -56,6 +74,16 @@ impl App {
         let resolved = self
             .resolve_terminal_target(target)
             .map_err(AgentRenameError::Target)?;
+        if self
+            .state
+            .workspaces
+            .get(resolved.ws_idx)
+            .and_then(|ws| ws.terminal_id(resolved.pane_id))
+            .and_then(|id| self.state.terminals.get(id))
+            .is_some_and(|terminal| terminal.managed_agent_launch_pending())
+        {
+            return Err(AgentRenameError::PendingLaunch);
+        }
         let normalized_name = name.and_then(|name| {
             let trimmed = name.trim().to_string();
             (!trimmed.is_empty()).then_some(trimmed)
@@ -105,8 +133,21 @@ impl App {
         if name.is_empty() {
             return Err(AgentStartError::InvalidName);
         }
-        if params.argv.is_empty() {
-            return Err(AgentStartError::EmptyArgv);
+        let kind = crate::detect::parse_agent_label(&params.kind)
+            .ok_or_else(|| AgentStartError::UnsupportedKind(params.kind.clone()))?;
+        let timeout = params
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_AGENT_START_TIMEOUT);
+        if timeout <= AGENT_START_SETTLE_DELAY || timeout > MAX_AGENT_START_TIMEOUT {
+            return Err(AgentStartError::InvalidTimeout);
+        }
+        if params
+            .args
+            .iter()
+            .any(|arg| arg.chars().any(char::is_control))
+        {
+            return Err(AgentStartError::InvalidArgument);
         }
         let conflicts = self.agent_name_conflicts(&name, "");
         if !conflicts.is_empty() {
@@ -116,70 +157,8 @@ impl App {
             });
         }
 
-        let cwd = params
-            .cwd
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let argv = params.argv;
-        let focus = params.focus;
-        let (rows, cols) = self.state.estimate_pane_size();
-
-        let (ws_idx, tab_idx, pane_id) = if let Some(tab_id) = params.tab_id {
-            let (ws_idx, tab_idx) =
-                self.parse_tab_id(&tab_id)
-                    .ok_or_else(|| AgentStartError::TargetNotFound {
-                        target: tab_id.clone(),
-                    })?;
-            if let Some(workspace_id) = params.workspace_id.as_deref() {
-                let requested_ws_idx = self.parse_workspace_id(workspace_id).ok_or_else(|| {
-                    AgentStartError::TargetNotFound {
-                        target: workspace_id.to_string(),
-                    }
-                })?;
-                if requested_ws_idx != ws_idx {
-                    return Err(AgentStartError::PlacementConflict);
-                }
-            }
-            let target_pane = self.state.workspaces[ws_idx].tabs[tab_idx].layout.focused();
-            self.spawn_agent_split(
-                ws_idx,
-                target_pane,
-                params.split.unwrap_or(SplitDirection::Right),
-                cwd,
-                &argv,
-                focus,
-            )?
-        } else if let Some(workspace_id) = params.workspace_id {
-            let ws_idx = self.parse_workspace_id(&workspace_id).ok_or_else(|| {
-                AgentStartError::TargetNotFound {
-                    target: workspace_id.clone(),
-                }
-            })?;
-            let tab_idx = self.state.workspaces[ws_idx].active_tab;
-            let target_pane = self.state.workspaces[ws_idx].tabs[tab_idx].layout.focused();
-            self.spawn_agent_split(
-                ws_idx,
-                target_pane,
-                params.split.unwrap_or(SplitDirection::Right),
-                cwd,
-                &argv,
-                focus,
-            )?
-        } else if self.state.workspaces.is_empty() {
-            self.spawn_agent_workspace(cwd, rows, cols, &argv, focus)?
-        } else {
-            let ws_idx = self.state.active.unwrap_or(0);
-            let tab_idx = self.state.workspaces[ws_idx].active_tab;
-            let target_pane = self.state.workspaces[ws_idx].tabs[tab_idx].layout.focused();
-            self.spawn_agent_split(
-                ws_idx,
-                target_pane,
-                params.split.unwrap_or(SplitDirection::Right),
-                cwd,
-                &argv,
-                focus,
-            )?
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return Err(AgentStartError::TargetNotFound(params.pane_id));
         };
 
         let terminal_id = self
@@ -188,18 +167,59 @@ impl App {
             .get(ws_idx)
             .and_then(|ws| ws.terminal_id(pane_id))
             .cloned()
-            .ok_or_else(|| AgentStartError::SpawnFailed("terminal disappeared".into()))?;
-        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
-            return Err(AgentStartError::SpawnFailed("terminal disappeared".into()));
-        };
-        terminal.set_agent_name(name.clone());
+            .ok_or_else(|| AgentStartError::TargetNotFound(params.pane_id.clone()))?;
+        let terminal = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .ok_or_else(|| AgentStartError::TargetNotFound(params.pane_id.clone()))?;
+        if terminal.is_agent_terminal() || terminal.managed_agent_kind().is_some() {
+            return Err(AgentStartError::TargetBusy(format!(
+                "pane {} already has an agent",
+                params.pane_id
+            )));
+        }
+        let runtime = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .ok_or_else(|| AgentStartError::TargetUnavailable(params.pane_id.clone()))?;
+        let child_pid = runtime.child_pid().ok_or_else(|| {
+            AgentStartError::TargetBusy(
+                "pane has no child pid; foreground shell unavailable".into(),
+            )
+        })?;
+        let shell = crate::platform::available_pane_shell(child_pid)
+            .map_err(AgentStartError::TargetBusy)?;
+        let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
+        argv.extend(params.args);
+        let command = crate::platform::interactive_shell_command(&argv, &shell)
+            .ok_or(AgentStartError::InvalidArgument)?;
+        let bytes = super::api_helpers::encode_api_submission(runtime, &command);
+        let previous_label = terminal.manual_label.clone();
+        let terminal = self
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .ok_or_else(|| AgentStartError::TargetUnavailable(params.pane_id.clone()))?;
+        terminal.begin_managed_agent(
+            name.clone(),
+            kind,
+            Instant::now(),
+            AGENT_START_SETTLE_DELAY,
+            timeout,
+        );
         terminal.set_manual_label(name);
+        if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+            terminal.clear_agent_name();
+            terminal.manual_label = previous_label;
+            return Err(AgentStartError::InputFailed(err.to_string()));
+        }
         self.state.mark_session_dirty();
+        self.schedule_session_save();
 
         let agent = self
             .agent_info(ws_idx, pane_id)
-            .ok_or_else(|| AgentStartError::SpawnFailed("agent disappeared".into()))?;
-        debug_assert_eq!(agent.tab_id, self.public_tab_id(ws_idx, tab_idx).unwrap());
+            .ok_or(AgentStartError::TargetUnavailable(params.pane_id))?;
         Ok((agent, argv))
     }
 
@@ -212,20 +232,32 @@ impl App {
                 code: "invalid_agent_name".into(),
                 message: "agent name must not be empty".into(),
             },
-            AgentStartError::EmptyArgv => crate::api::schema::ErrorBody {
-                code: "invalid_agent_argv".into(),
-                message: "agent start argv must not be empty".into(),
+            AgentStartError::UnsupportedKind(kind) => crate::api::schema::ErrorBody {
+                code: "unsupported_agent_kind".into(),
+                message: format!("unsupported interactive agent kind {kind}"),
             },
-            AgentStartError::TargetNotFound { target } => crate::api::schema::ErrorBody {
-                code: "agent_placement_not_found".into(),
-                message: format!("agent placement target {target} not found"),
+            AgentStartError::InvalidArgument => crate::api::schema::ErrorBody {
+                code: "invalid_agent_argument".into(),
+                message: "agent arguments cannot be encoded safely for the target shell".into(),
             },
-            AgentStartError::PlacementConflict => crate::api::schema::ErrorBody {
-                code: "agent_placement_conflict".into(),
-                message: "--tab must belong to --workspace".into(),
+            AgentStartError::InvalidTimeout => crate::api::schema::ErrorBody {
+                code: "invalid_agent_timeout".into(),
+                message: "agent start timeout must be greater than 3000ms and at most 300000ms".into(),
             },
-            AgentStartError::SpawnFailed(message) => crate::api::schema::ErrorBody {
-                code: "agent_start_failed".into(),
+            AgentStartError::TargetNotFound(target) => crate::api::schema::ErrorBody {
+                code: "agent_pane_not_found".into(),
+                message: format!("agent target pane {target} not found"),
+            },
+            AgentStartError::TargetBusy(message) => crate::api::schema::ErrorBody {
+                code: "agent_target_busy".into(),
+                message,
+            },
+            AgentStartError::TargetUnavailable(target) => crate::api::schema::ErrorBody {
+                code: "agent_pane_unavailable".into(),
+                message: format!("agent target pane {target} is unavailable"),
+            },
+            AgentStartError::InputFailed(message) => crate::api::schema::ErrorBody {
+                code: "agent_start_input_failed".into(),
                 message,
             },
             AgentStartError::DuplicateName { name, candidates } => crate::api::schema::ErrorBody {
@@ -289,6 +321,10 @@ impl App {
     ) -> crate::api::schema::ErrorBody {
         match err {
             AgentRenameError::Target(err) => self.agent_target_error_body(err),
+            AgentRenameError::PendingLaunch => crate::api::schema::ErrorBody {
+                code: "agent_launch_pending".into(),
+                message: "agent launch is still pending".into(),
+            },
             AgentRenameError::DuplicateName { name, candidates } => crate::api::schema::ErrorBody {
                 code: "agent_name_taken".into(),
                 message: format!(
@@ -311,98 +347,7 @@ impl App {
         }
     }
 
-    fn spawn_agent_workspace(
-        &mut self,
-        cwd: PathBuf,
-        rows: u16,
-        cols: u16,
-        argv: &[String],
-        focus: bool,
-    ) -> Result<(usize, usize, crate::layout::PaneId), AgentStartError> {
-        let (ws, terminal, runtime) = crate::workspace::Workspace::new_argv_command(
-            cwd,
-            rows,
-            cols,
-            argv,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
-            self.event_tx.clone(),
-            self.render_notify.clone(),
-            self.render_dirty.clone(),
-        )
-        .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
-        self.terminal_runtimes.insert(terminal.id.clone(), runtime);
-        self.state.terminals.insert(terminal.id.clone(), terminal);
-        self.state.workspaces.push(ws);
-        let ws_idx = self.state.workspaces.len() - 1;
-        self.state
-            .remove_alias_shadowed_by_new_pane(self.state.workspaces[ws_idx].tabs[0].root_pane);
-        if focus || self.state.active.is_none() {
-            self.state.switch_workspace(ws_idx);
-            self.state.mode = Mode::Terminal;
-        }
-        self.schedule_session_save();
-        let pane_id = self.state.workspaces[ws_idx].tabs[0].root_pane;
-        Ok((ws_idx, 0, pane_id))
-    }
-
-    fn spawn_agent_split(
-        &mut self,
-        ws_idx: usize,
-        target_pane: crate::layout::PaneId,
-        split: SplitDirection,
-        cwd: PathBuf,
-        argv: &[String],
-        focus: bool,
-    ) -> Result<(usize, usize, crate::layout::PaneId), AgentStartError> {
-        let (rows, cols) = self.state.estimate_pane_size();
-        let previous_focus = self.state.current_pane_focus_target();
-        let direction = match split {
-            SplitDirection::Right => ratatui::layout::Direction::Horizontal,
-            SplitDirection::Down => ratatui::layout::Direction::Vertical,
-        };
-        let result = self
-            .state
-            .workspaces
-            .get_mut(ws_idx)
-            .and_then(|ws| {
-                ws.split_pane_argv_command(
-                    target_pane,
-                    direction,
-                    rows,
-                    cols,
-                    Some(cwd),
-                    argv,
-                    Vec::new(),
-                    self.state.pane_scrollback_limit_bytes,
-                    self.state.host_terminal_theme,
-                    self.state.host_terminal_appearance,
-                    focus,
-                )
-            })
-            .ok_or_else(|| AgentStartError::TargetNotFound {
-                target: target_pane.raw().to_string(),
-            })?
-            .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
-        self.terminal_runtimes
-            .insert(result.1.terminal.id.clone(), result.1.runtime);
-        self.state
-            .remove_alias_shadowed_by_new_pane(result.1.pane_id);
-        self.state
-            .terminals
-            .insert(result.1.terminal.id.clone(), result.1.terminal);
-        if focus {
-            self.state.switch_workspace_tab(ws_idx, result.0);
-            self.state
-                .record_pane_focus_change(previous_focus, ws_idx, result.1.pane_id);
-            self.state.mode = Mode::Terminal;
-        }
-        self.schedule_session_save();
-        Ok((ws_idx, result.0, result.1.pane_id))
-    }
-
-    fn agent_info(
+    pub(super) fn agent_info(
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -424,6 +369,9 @@ impl App {
             display_agent: pane.display_agent,
             agent_status: pane.agent_status,
             screen_detection_skipped: terminal.full_lifecycle_hook_authority_active(),
+            launch_pending: terminal.managed_agent_launch_pending(),
+            interactive_ready: terminal.managed_agent_interactive_ready(),
+            state_change_seq: terminal.last_agent_state_change_seq.unwrap_or(0),
 
             state_labels: pane.state_labels,
             tokens: pane.tokens,
@@ -454,12 +402,13 @@ impl App {
 
 pub(super) enum AgentStartError {
     InvalidName,
-    EmptyArgv,
-    TargetNotFound {
-        target: String,
-    },
-    PlacementConflict,
-    SpawnFailed(String),
+    UnsupportedKind(String),
+    InvalidArgument,
+    InvalidTimeout,
+    TargetNotFound(String),
+    TargetBusy(String),
+    TargetUnavailable(String),
+    InputFailed(String),
     DuplicateName {
         name: String,
         candidates: Vec<crate::api::schema::AgentInfo>,
@@ -468,6 +417,7 @@ pub(super) enum AgentStartError {
 
 pub(super) enum AgentRenameError {
     Target(TerminalTargetError),
+    PendingLaunch,
     DuplicateName {
         name: String,
         candidates: Vec<crate::api::schema::AgentInfo>,

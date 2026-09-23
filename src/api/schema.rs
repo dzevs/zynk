@@ -122,6 +122,8 @@ pub enum Method {
     AgentFocus(AgentTarget),
     #[serde(rename = "agent.start")]
     AgentStart(AgentStartParams),
+    #[serde(rename = "agent.prompt")]
+    AgentPrompt(AgentPromptParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
@@ -237,6 +239,318 @@ pub enum Method {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m839b_prompt_wire_optional_target_binding_and_ui_classification() {
+        let minimum = serde_json::json!({
+            "id":"prompt", "method":"agent.prompt", "params":{"target":"worker", "text":"line\nnext"}
+        });
+        let request: Request = serde_json::from_value(minimum.clone()).unwrap();
+        let Method::AgentPrompt(params) = &request.method else {
+            panic!("prompt shape");
+        };
+        assert_eq!(params.target, "worker");
+        assert_eq!(params.text, "line\nnext");
+        assert_eq!(params.expected_terminal_id, None);
+        assert!(crate::api::request_changes_ui(&request));
+        assert_eq!(serde_json::to_value(&request).unwrap(), minimum);
+        let mut pinned = minimum.clone();
+        pinned["params"]["expected_terminal_id"] = serde_json::json!("term_resolved");
+        let request: Request = serde_json::from_value(pinned.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), pinned);
+        let mut nullable = minimum.clone();
+        nullable["params"]["expected_terminal_id"] = serde_json::Value::Null;
+        let request: Request = serde_json::from_value(nullable).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), minimum);
+        for field in ["target", "text"] {
+            let mut missing = minimum.clone();
+            missing["params"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Request>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for value in [
+            serde_json::json!(7),
+            serde_json::json!(true),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let mut invalid = minimum.clone();
+            invalid["params"]["expected_terminal_id"] = value;
+            assert!(serde_json::from_value::<Request>(invalid).is_err());
+        }
+        let wire_ids = serde_declared_method_wire_ids();
+        let start = wire_ids
+            .iter()
+            .position(|name| name == "agent.start")
+            .unwrap();
+        assert_eq!(wire_ids[start + 1], "agent.prompt");
+        assert_eq!(
+            wire_ids
+                .iter()
+                .filter(|name| *name == "agent.prompt")
+                .count(),
+            1
+        );
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 19);
+    }
+
+    #[test]
+    fn m839b_prompted_response_requires_agent_and_baseline() {
+        let mut agent = m828b_pane_json();
+        agent["state_change_seq"] = serde_json::json!(7);
+        let response = serde_json::json!({"id":"prompt", "result":{
+            "type":"agent_prompted", "agent":agent, "baseline_state_change_seq":7
+        }});
+        let decoded: SuccessResponse = serde_json::from_value(response.clone()).unwrap();
+        let ResponseResult::AgentPrompted {
+            agent,
+            baseline_state_change_seq,
+        } = &decoded.result
+        else {
+            panic!("prompted response");
+        };
+        assert_eq!(agent.terminal_id, "term_metadata");
+        assert_eq!(agent.state_change_seq, 7);
+        assert_eq!(*baseline_state_change_seq, 7);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), response);
+        let mut maximum = response.clone();
+        maximum["result"]["baseline_state_change_seq"] = serde_json::json!(u64::MAX);
+        let decoded: SuccessResponse = serde_json::from_value(maximum.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), maximum);
+        for field in ["agent", "baseline_state_change_seq"] {
+            let mut missing = response.clone();
+            missing["result"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<SuccessResponse>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for baseline in [
+            serde_json::json!(-1),
+            serde_json::json!("7"),
+            serde_json::json!(null),
+        ] {
+            let mut invalid = response.clone();
+            invalid["result"]["baseline_state_change_seq"] = baseline;
+            assert!(serde_json::from_value::<SuccessResponse>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn m839b_runtime_schema_exports_prompt_target_binding() {
+        let document = export::protocol_schema_document();
+        let params = &document["schemas"]["request"]["$defs"]["AgentPromptParams"];
+        let mut required: Vec<_> = params["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        required.sort_unstable();
+        assert_eq!(required, ["target", "text"]);
+        assert_eq!(params["properties"]["target"]["type"], "string");
+        assert_eq!(params["properties"]["text"]["type"], "string");
+        assert_eq!(
+            params["properties"]["expected_terminal_id"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert!(!required.contains(&"expected_terminal_id"));
+        let responses = document["schemas"]["success_response"]["$defs"]["ResponseResult"]["oneOf"]
+            .as_array()
+            .unwrap();
+        let prompted: Vec<_> = responses
+            .iter()
+            .filter(|value| value["properties"]["type"]["const"] == "agent_prompted")
+            .collect();
+        assert_eq!(prompted.len(), 1);
+        let required = prompted[0]["required"].as_array().unwrap();
+        for field in ["type", "agent", "baseline_state_change_seq"] {
+            assert!(required.contains(&serde_json::json!(field)), "{field}");
+        }
+        assert_eq!(
+            prompted[0]["properties"]["agent"]["$ref"],
+            "#/schemas/success_response/$defs/AgentInfo"
+        );
+        let u64_schema = schemars::schema_for!(u64).to_value();
+        for key in ["type", "format", "minimum", "maximum"] {
+            assert_eq!(
+                prompted[0]["properties"]["baseline_state_change_seq"][key], u64_schema[key],
+                "baseline/{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn m839a_start_shape_requires_existing_pane_and_kind() {
+        let minimum = serde_json::json!({
+            "id":"start", "method":"agent.start",
+            "params":{"name":"worker", "kind":"qwen", "pane_id":"w1:p1"}
+        });
+        let request: Request = serde_json::from_value(minimum.clone()).unwrap();
+        let Method::AgentStart(params) = &request.method else {
+            panic!("start shape");
+        };
+        assert_eq!(params.name, "worker");
+        assert_eq!(params.kind, "qwen");
+        assert_eq!(params.pane_id, "w1:p1");
+        assert!(params.args.is_empty());
+        assert_eq!(params.timeout_ms, None);
+        assert_eq!(serde_json::to_value(&request).unwrap(), minimum);
+        assert!(crate::api::request_changes_ui(&request));
+
+        let full = serde_json::json!({
+            "id":"start", "method":"agent.start", "params":{
+                "name":"worker", "kind":"qwen", "pane_id":"w1:p1",
+                "args":["", "space arg", "$HOME", "quote'", "slash\\"],
+                "timeout_ms":3001
+            }
+        });
+        let request: Request = serde_json::from_value(full.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), full);
+        for field in ["name", "kind", "pane_id"] {
+            let mut missing = minimum.clone();
+            missing["params"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Request>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            ("kind", serde_json::json!(7)),
+            ("pane_id", serde_json::json!(null)),
+            ("args", serde_json::json!("not an array")),
+            ("args", serde_json::json!([3])),
+            ("timeout_ms", serde_json::json!(-1)),
+            ("timeout_ms", serde_json::json!("3001")),
+        ] {
+            let mut invalid = minimum.clone();
+            invalid["params"][field] = value;
+            assert!(
+                serde_json::from_value::<Request>(invalid).is_err(),
+                "{field}"
+            );
+        }
+        let legacy = serde_json::json!({
+            "id":"old", "method":"agent.start", "params":{
+                "name":"worker", "cwd":"/tmp", "argv":["sh"], "focus":true
+            }
+        });
+        assert!(serde_json::from_value::<Request>(legacy).is_err());
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 19);
+    }
+
+    #[test]
+    fn m839a_agent_info_defaults_do_not_invent_readiness_or_identity() {
+        let legacy = m828b_pane_json();
+        let agent: AgentInfo = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(!agent.launch_pending);
+        assert!(!agent.interactive_ready);
+        assert_eq!(agent.state_change_seq, 0);
+        assert_eq!(agent.agent_session, None);
+        let mut expected = legacy.clone();
+        expected["state_change_seq"] = serde_json::json!(0);
+        assert_eq!(serde_json::to_value(agent).unwrap(), expected);
+
+        let mut observations = legacy;
+        observations["launch_pending"] = serde_json::json!(true);
+        observations["interactive_ready"] = serde_json::json!(true);
+        observations["state_change_seq"] = serde_json::json!(u64::MAX);
+        let agent: AgentInfo = serde_json::from_value(observations.clone()).unwrap();
+        assert!(agent.launch_pending);
+        assert!(agent.interactive_ready);
+        assert_eq!(agent.state_change_seq, u64::MAX);
+        assert_eq!(agent.agent_session, None);
+        assert_eq!(serde_json::to_value(agent).unwrap(), observations);
+        for (pending, ready) in [(true, false), (false, true)] {
+            let mut input = m828b_pane_json();
+            input["launch_pending"] = serde_json::json!(pending);
+            input["interactive_ready"] = serde_json::json!(ready);
+            let agent: AgentInfo = serde_json::from_value(input).unwrap();
+            assert_eq!(
+                (agent.launch_pending, agent.interactive_ready),
+                (pending, ready)
+            );
+            let output = serde_json::to_value(agent).unwrap();
+            for (field, present) in [("launch_pending", pending), ("interactive_ready", ready)] {
+                assert_eq!(
+                    output.get(field),
+                    present.then_some(&serde_json::Value::Bool(true)),
+                    "{field}"
+                );
+            }
+            assert_eq!(output["state_change_seq"], 0);
+            assert!(output.get("agent_session").is_none());
+        }
+        for (field, value) in [
+            ("launch_pending", serde_json::json!("true")),
+            ("interactive_ready", serde_json::json!(1)),
+            ("state_change_seq", serde_json::json!(-1)),
+            ("state_change_seq", serde_json::json!(null)),
+        ] {
+            let mut invalid = m828b_pane_json();
+            invalid[field] = value;
+            assert!(
+                serde_json::from_value::<AgentInfo>(invalid).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn m839a_runtime_schema_names_start_and_readiness_contracts() {
+        let document = export::protocol_schema_document();
+        assert_eq!(document["protocol"], 19);
+        let start = &document["schemas"]["request"]["$defs"]["AgentStartParams"];
+        let mut required: Vec<_> = start["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        required.sort_unstable();
+        assert_eq!(required, ["kind", "name", "pane_id"]);
+        let properties = start["properties"].as_object().unwrap();
+        for field in [
+            "cwd",
+            "workspace_id",
+            "tab_id",
+            "split",
+            "focus",
+            "argv",
+            "env",
+        ] {
+            assert!(
+                !properties.contains_key(field),
+                "retired start field {field}"
+            );
+        }
+        assert_eq!(properties["args"]["type"], "array");
+        assert_eq!(properties["args"]["items"]["type"], "string");
+        let optional_u64 = schemars::schema_for!(Option<u64>).to_value();
+        for key in ["type", "format", "minimum", "maximum"] {
+            assert_eq!(
+                properties["timeout_ms"][key], optional_u64[key],
+                "timeout/{key}"
+            );
+        }
+        let info = &document["schemas"]["success_response"]["$defs"]["AgentInfo"];
+        let required = info["required"].as_array().unwrap();
+        for field in ["launch_pending", "interactive_ready"] {
+            assert_eq!(info["properties"][field]["type"], "boolean");
+            assert!(!required.contains(&serde_json::json!(field)), "{field}");
+        }
+        let u64_schema = schemars::schema_for!(u64).to_value();
+        for key in ["type", "format", "minimum", "maximum"] {
+            assert_eq!(
+                info["properties"]["state_change_seq"][key], u64_schema[key],
+                "sequence/{key}"
+            );
+        }
+        assert_eq!(info["properties"]["state_change_seq"]["default"], 0);
+        assert!(!required.contains(&serde_json::json!("state_change_seq")));
+    }
+
     #[test]
     fn m833_popup_sizes_have_canonical_external_percent_syntax() {
         use crate::popup_size::PopupSize;
@@ -680,6 +994,7 @@ mod tests {
                 expected,
                 "pane {input}"
             );
+            expected["state_change_seq"] = serde_json::json!(0);
             let agent: AgentInfo = serde_json::from_value(input.clone()).unwrap();
             assert_eq!(
                 serde_json::to_value(agent).unwrap(),
@@ -769,7 +1084,17 @@ mod tests {
         ] {
             let response = serde_json::json!({"id": "titles", "result": result});
             let decoded: SuccessResponse = serde_json::from_value(response.clone()).unwrap();
-            assert_eq!(serde_json::to_value(decoded).unwrap(), response);
+            let mut expected = response.clone();
+            match expected["result"]["type"].as_str().unwrap() {
+                "agent_info" => {
+                    expected["result"]["agent"]["state_change_seq"] = serde_json::json!(0);
+                }
+                "agent_list" => {
+                    expected["result"]["agents"][0]["state_change_seq"] = serde_json::json!(0);
+                }
+                _ => {}
+            }
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
         }
         let kinds = serde_declared_event_kind_wire_ids();
         assert_eq!(kinds.len(), 22);
@@ -847,6 +1172,7 @@ mod tests {
             }
             let decoded: PaneInfo = serde_json::from_value(pane.clone()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+            expected["state_change_seq"] = serde_json::json!(0);
             let decoded: AgentInfo = serde_json::from_value(pane).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
         }
@@ -1817,6 +2143,7 @@ mod tests {
         "agent.rename",
         "agent.focus",
         "agent.start",
+        "agent.prompt",
         "pane.split",
         "pane.swap",
         "pane.move",

@@ -8,6 +8,7 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 use tracing::{error, warn};
 
+#[cfg(test)]
 use crate::detect::AgentState;
 use crate::events::AppEvent;
 use crate::layout::{Node, PaneId, TileLayout};
@@ -536,6 +537,15 @@ fn restore_tab(
 
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
+        let saved_managed_agent = saved_pane
+            .and_then(|pane| pane.managed_agent_kind.as_deref())
+            .and_then(|kind| {
+                let agent = crate::detect::parse_canonical_agent_label(kind);
+                if agent.is_none() {
+                    warn!(%kind, "ignoring invalid saved managed agent kind");
+                }
+                agent
+            });
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_hook_retirement = saved_pane.and_then(|p| p.hook_retirement.clone());
@@ -593,19 +603,13 @@ fn restore_tab(
             if let Some(label) = saved_label {
                 terminal.set_manual_label(label);
             }
-            if let Some(agent_name) = saved_agent_name {
-                terminal.set_agent_name(agent_name);
+            match (saved_agent_name, saved_managed_agent) {
+                (Some(name), Some(kind)) => terminal.restore_managed_agent(name, kind),
+                (Some(name), None) => terminal.set_agent_name(name),
+                (None, _) => {}
             }
             if let Some(agent) = initial_restore_agent {
-                let _ = terminal.set_detected_state_with_screen_signals_at(
-                    Some(agent),
-                    AgentState::Idle,
-                    false,
-                    false,
-                    false,
-                    false,
-                    std::time::Instant::now(),
-                );
+                terminal.seed_restored_agent_presentation(agent);
             }
             if let Some(session) = restored_terminal_agent_session(
                 saved_agent_session,
@@ -666,19 +670,16 @@ fn restore_tab(
                 if let Some(label) = saved_label {
                     terminal.set_manual_label(label);
                 }
-                if let Some(agent_name) = saved_agent_name {
-                    terminal.set_agent_name(agent_name);
+                match (saved_agent_name, saved_managed_agent) {
+                    (Some(name), Some(kind)) if was_imported => {
+                        terminal.restore_managed_agent(name, kind)
+                    }
+                    (Some(_), Some(_)) => {}
+                    (Some(name), None) => terminal.set_agent_name(name),
+                    (None, _) => {}
                 }
                 if let Some(agent) = initial_restore_agent {
-                    let _ = terminal.set_detected_state_with_screen_signals_at(
-                        Some(agent),
-                        AgentState::Idle,
-                        false,
-                        false,
-                        false,
-                        false,
-                        std::time::Instant::now(),
-                    );
+                    terminal.seed_restored_agent_presentation(agent);
                 }
                 if let Some(session) = restored_terminal_agent_session(
                     saved_agent_session,
@@ -954,6 +955,337 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
 
 #[cfg(test)]
 mod tests {
+    struct M839RestoredRuntimes(HashMap<TerminalId, TerminalRuntime>);
+
+    impl Drop for M839RestoredRuntimes {
+        fn drop(&mut self) {
+            for (_, runtime) in self.0.drain() {
+                runtime.shutdown();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn m839a_cold_restore_classifies_legacy_invalid_and_managed_markers() {
+        for (kind, expected_name) in [
+            (None, Some("worker")),
+            (Some("codex"), None),
+            (Some("omp"), Some("worker")),
+        ] {
+            let mut snapshot = snapshot_with_hook_retirement(None);
+            let saved = snapshot.workspaces[0].tabs[0].panes.get_mut(&0).unwrap();
+            saved.label = Some("manual label".into());
+            saved.agent_name = Some("worker".into());
+            saved.managed_agent_kind = kind.map(str::to_string);
+            saved.agent_session = None;
+            let (events, _rx) = mpsc::channel(32);
+            let (workspaces, terminals, runtimes) = restore(
+                &snapshot,
+                None,
+                24,
+                80,
+                0,
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            );
+            let runtimes = M839RestoredRuntimes(runtimes);
+            assert_eq!(workspaces.len(), 1);
+            assert_eq!(terminals.len(), 1);
+            assert_eq!(runtimes.0.len(), 1);
+            let terminal = terminals.values().next().unwrap();
+            assert_eq!(terminal.manual_label.as_deref(), Some("manual label"));
+            assert_eq!(
+                terminal.agent_name.as_deref(),
+                expected_name,
+                "kind={kind:?}"
+            );
+            assert_eq!(terminal.managed_agent_kind(), None);
+            assert!(!terminal.managed_agent_launch_pending());
+            assert!(!terminal.managed_agent_interactive_ready());
+            assert_eq!(terminal.confirmed_hook_owner(), None);
+            assert_eq!(terminal.persisted_agent_session, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn m839a_native_resume_restores_active_marker_without_fresh_readiness() {
+        let mut snapshot = snapshot_with_hook_retirement(None);
+        let saved = snapshot.workspaces[0].tabs[0].panes.get_mut(&0).unwrap();
+        saved.label = Some("manual label".into());
+        saved.agent_name = Some("worker".into());
+        saved.managed_agent_kind = Some("codex".into());
+        saved.agent_session = Some(super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "zynk:codex".into(),
+            agent: "codex".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "saved-session".into(),
+        });
+        let (events, _rx) = mpsc::channel(32);
+        let (workspaces, terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let runtimes = M839RestoredRuntimes(runtimes);
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(terminals.len(), 1);
+        assert!(runtimes.0.is_empty());
+        let mut terminal = terminals.into_values().next().unwrap();
+        assert!(terminal.pending_agent_resume_plan.is_some());
+        assert_eq!(terminal.agent_name.as_deref(), Some("worker"));
+        assert_eq!(terminal.manual_label.as_deref(), Some("manual label"));
+        assert_eq!(
+            terminal.managed_agent_kind(),
+            Some(crate::detect::Agent::Codex)
+        );
+        assert!(!terminal.managed_agent_launch_pending());
+        assert!(!terminal.managed_agent_interactive_ready());
+        assert_eq!(terminal.next_managed_agent_deadline(), None);
+        assert_eq!(
+            terminal.effective_known_agent(),
+            Some(crate::detect::Agent::Codex)
+        );
+        assert_eq!(terminal.state, crate::detect::AgentState::Idle);
+        assert_eq!(terminal.confirmed_hook_owner(), None);
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .unwrap()
+                .session_ref
+                .value,
+            "saved-session"
+        );
+        assert!(terminal.hook_authority.is_none());
+        assert!(terminal.hook_identity.is_none());
+        let fresh = std::time::Instant::now();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            fresh,
+        );
+        terminal.reconcile_managed_agent_at(fresh, None);
+        assert!(terminal.managed_agent_interactive_ready());
+        assert!(!terminal.managed_agent_launch_pending());
+        assert_eq!(terminal.next_managed_agent_deadline(), None);
+        assert_eq!(terminal.agent_name.as_deref(), Some("worker"));
+        assert_eq!(
+            terminal.managed_agent_kind(),
+            Some(crate::detect::Agent::Codex)
+        );
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .unwrap()
+                .session_ref
+                .value,
+            "saved-session"
+        );
+        assert!(terminal.hook_authority.is_none());
+        assert!(terminal.hook_identity.is_none());
+    }
+
+    #[tokio::test]
+    async fn m839a_restore_seed_does_not_supply_visible_blocker_observation() {
+        use crate::detect::{Agent, AgentState};
+        let mut snapshot = snapshot_with_hook_retirement(None);
+        let saved = snapshot.workspaces[0].tabs[0].panes.get_mut(&0).unwrap();
+        saved.agent_session = Some(super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "zynk:claude".into(),
+            agent: "claude".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "ordinary-saved-session".into(),
+        });
+        saved.managed_agent_kind = None;
+        let (events, _rx) = mpsc::channel(32);
+        let (_, terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let _runtimes = M839RestoredRuntimes(runtimes);
+        let mut terminal = terminals.into_values().next().unwrap();
+        assert_eq!(terminal.managed_agent_kind(), None);
+        assert_eq!(terminal.effective_known_agent(), Some(Agent::Claude));
+        assert_eq!(terminal.state, AgentState::Idle);
+        let hook_at = std::time::Instant::now();
+        terminal
+            .set_hook_authority_at(
+                "zynk:claude".into(),
+                "claude".into(),
+                AgentState::Working,
+                None,
+                None,
+                Some(10),
+                hook_at,
+            )
+            .unwrap();
+        assert_eq!(terminal.state, AgentState::Working);
+        terminal.reconcile_managed_agent_at(hook_at, None);
+        assert_eq!(terminal.state, AgentState::Working);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+            false,
+            hook_at + std::time::Duration::from_millis(1),
+        );
+        assert_eq!(terminal.state, AgentState::Blocked);
+    }
+
+    #[tokio::test]
+    async fn m839a_imported_runtime_restores_active_marker_without_pending_or_session() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use std::time::{Duration, Instant};
+        struct PendingImports(HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>);
+        impl Drop for PendingImports {
+            fn drop(&mut self) {
+                for (_, imported) in self.0.drain() {
+                    drop(unsafe { OwnedFd::from_raw_fd(imported.master_fd) });
+                }
+            }
+        }
+        for saved_session in [None, Some("imported-saved-session")] {
+            let mut snapshot = snapshot_with_hook_retirement(None);
+            let saved = snapshot.workspaces[0].tabs[0].panes.get_mut(&0).unwrap();
+            saved.label = Some("manual label".into());
+            saved.agent_name = Some("worker".into());
+            saved.managed_agent_kind = Some("codex".into());
+            saved.agent_session =
+                saved_session.map(|value| super::super::snapshot::PaneAgentSessionSnapshot {
+                    source: "zynk:codex".into(),
+                    agent: "codex".into(),
+                    kind: crate::agent_resume::AgentSessionRefKind::Id,
+                    value: value.into(),
+                });
+            let (events, _rx) = mpsc::channel(32);
+            let launch = PaneLaunchEnv::from_extra(vec![("ZYNK_AGENT".into(), String::new())])
+                .without_pane_identity();
+            let source = TerminalRuntime::spawn_argv_command(
+                PaneId::from_raw(0),
+                24,
+                80,
+                std::env::current_dir().unwrap(),
+                &["/bin/cat".into()],
+                &launch,
+                crate::pane::AgentDetection::Disabled,
+                0,
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                events.clone(),
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            )
+            .unwrap();
+            source.pause_handoff_reader(Duration::from_secs(1)).unwrap();
+            let fd = unsafe { OwnedFd::from_raw_fd(source.duplicate_handoff_fd().unwrap()) };
+            let state = source.handoff_runtime_state(0);
+            let mut imports = PendingImports(HashMap::from([(
+                0,
+                crate::handoff_runtime::ImportedHandoffRuntime {
+                    master_fd: fd.into_raw_fd(),
+                    state,
+                },
+            )]));
+            let (workspaces, terminals, runtimes) = restore_handoff(
+                &snapshot,
+                0,
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+                &mut imports.0,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            )
+            .unwrap();
+            let mut runtimes = M839RestoredRuntimes(runtimes);
+            for runtime in runtimes.0.values_mut() {
+                runtime.assume_handoff_ownership();
+            }
+            source.preserve_for_handoff();
+            assert!(imports.0.is_empty());
+            assert_eq!(workspaces.len(), 1);
+            assert_eq!(terminals.len(), 1);
+            assert_eq!(runtimes.0.len(), 1);
+            let mut terminal = terminals.into_values().next().unwrap();
+            assert_eq!(terminal.agent_name.as_deref(), Some("worker"));
+            assert_eq!(terminal.manual_label.as_deref(), Some("manual label"));
+            assert_eq!(
+                terminal.managed_agent_kind(),
+                Some(crate::detect::Agent::Codex)
+            );
+            assert!(!terminal.managed_agent_launch_pending());
+            assert!(!terminal.managed_agent_interactive_ready());
+            assert_eq!(terminal.next_managed_agent_deadline(), None);
+            assert_eq!(terminal.confirmed_hook_owner(), None);
+            assert_eq!(
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|session| session.session_ref.value.as_str()),
+                saved_session
+            );
+            if saved_session.is_some() {
+                assert_eq!(
+                    terminal.effective_known_agent(),
+                    Some(crate::detect::Agent::Codex)
+                );
+                assert_eq!(terminal.state, crate::detect::AgentState::Idle);
+            }
+            assert!(terminal.hook_authority.is_none());
+            assert!(terminal.hook_identity.is_none());
+            let observed_at = Instant::now();
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Idle,
+                false,
+                false,
+                false,
+                false,
+                observed_at,
+            );
+            terminal.reconcile_managed_agent_at(observed_at, None);
+            assert!(terminal.managed_agent_interactive_ready());
+            assert_eq!(terminal.confirmed_hook_owner(), None);
+            assert_eq!(
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|session| session.session_ref.value.as_str()),
+                saved_session
+            );
+            assert!(terminal.hook_authority.is_none());
+            assert!(terminal.hook_identity.is_none());
+        }
+    }
+
     use super::*;
 
     fn test_session_path(name: &str) -> String {
@@ -1529,6 +1861,7 @@ mod tests {
                             cwd,
                             label: None,
                             agent_name: None,
+                            managed_agent_kind: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "zynk:opencode".into(),
                                 agent: "opencode".into(),
@@ -1613,6 +1946,7 @@ mod tests {
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
+                                managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
                                 hook_retirement: None,
@@ -1624,6 +1958,7 @@ mod tests {
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
+                                managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
                                 hook_retirement: None,
@@ -1677,6 +2012,7 @@ mod tests {
                     cwd: cwd.clone(),
                     label: None,
                     agent_name: None,
+                    managed_agent_kind: None,
                     agent_session: None,
                     launch_argv: None,
                     hook_retirement: None,
@@ -1687,6 +2023,7 @@ mod tests {
             cwd: cwd.clone(),
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
+            managed_agent_kind: None,
             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                 source: "zynk:codex".into(),
                 agent: "codex".into(),
@@ -1841,6 +2178,7 @@ mod tests {
                             cwd,
                             label: None,
                             agent_name: None,
+                            managed_agent_kind: None,
                             agent_session: None,
                             launch_argv: None,
                             hook_retirement: retirement,
@@ -2076,6 +2414,7 @@ mod tests {
                             cwd,
                             label: None,
                             agent_name: None,
+                            managed_agent_kind: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "zynk:codex".into(),
                                 agent: "codex".into(),
@@ -2242,6 +2581,7 @@ mod tests {
                 cwd: cwd.clone(),
                 label: None,
                 agent_name: None,
+                managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
                 hook_retirement: None,
