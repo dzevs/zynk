@@ -119,12 +119,12 @@ impl App {
         self.state.plugin_commands_in_flight += 1;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let child = crate::plugin_command::command_for_argv(&program, &args)
-                .current_dir(plugin_root)
-                .envs(env)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
+            let child =
+                crate::plugin_command::command_for_argv_in_dir(&program, &args, &plugin_root)
+                    .envs(env)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn();
             let finished = match child {
                 Ok(mut child) => {
                     let stdout = child.stdout.take();
@@ -183,6 +183,10 @@ impl App {
     pub(crate) fn run_plugin_event_hooks(&mut self, event: &crate::api::schema::EventEnvelope) {
         let event_name = event.event.dot_name();
         if !crate::api::schema::PLUGIN_HOOK_EVENT_KINDS.contains(&event.event) {
+            return;
+        }
+        if let Err(err) = self.refresh_installed_plugins() {
+            tracing::warn!(err = %err, "failed to refresh plugin registry before event hooks");
             return;
         }
         let plugins = self

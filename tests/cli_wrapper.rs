@@ -818,6 +818,241 @@ fn parse_cli_json_output(args: &[&str], output: std::process::Output) -> serde_j
     })
 }
 
+fn run_isolated_plugin_cli(root: &Path, args: &[&str]) -> std::process::Output {
+    let home = root.join("home");
+    let config = root.join("config");
+    let data = root.join("data");
+    let cache = root.join("cache");
+    let state = root.join("state");
+    let runtime = root.join("runtime");
+    let sqlite = root.join("sqlite");
+    for path in [&home, &config, &data, &cache, &state, &runtime, &sqlite] {
+        fs::create_dir_all(path).unwrap();
+    }
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    command
+        .env_clear()
+        .args(args)
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("SHELL", "/bin/sh")
+        .env("XDG_CONFIG_HOME", config)
+        .env("XDG_DATA_HOME", data)
+        .env("XDG_CACHE_HOME", cache)
+        .env("XDG_STATE_HOME", state)
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("ZYNK_SQLITE_HOME", sqlite);
+    command.output().unwrap()
+}
+
+#[test]
+fn m848_plugin_link_works_offline_in_private_sentinel_roots() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let base = unique_test_dir();
+    let roots = base.join("roots");
+    let escape = base.join("must-stay-absent");
+    let plugin_dir = base.join("source").join("offline");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::write(
+        plugin_dir.join("zynk-plugin.toml"),
+        r#"
+id = "example.offline"
+name = "Offline Plugin"
+version = "0.1.0"
+min_zynk_version = "0.6.10"
+platforms = ["linux"]
+"#,
+    )
+    .unwrap();
+
+    let link_args = [
+        "--session",
+        "offline",
+        "plugin",
+        "link",
+        plugin_dir.to_str().unwrap(),
+        "--disabled",
+    ];
+    let linked = parse_cli_json_output(&link_args, run_isolated_plugin_cli(&roots, &link_args));
+    assert_eq!(linked["result"]["type"], "plugin_linked");
+    assert_eq!(linked["result"]["plugin"]["plugin_id"], "example.offline");
+    assert_eq!(linked["result"]["plugin"]["enabled"], false);
+    assert_eq!(linked["result"]["plugin"]["source"]["kind"], "local");
+
+    let list_args = ["--session", "other", "plugin", "list", "--json"];
+    let listed = parse_cli_json_output(&list_args, run_isolated_plugin_cli(&roots, &list_args));
+    assert_eq!(listed["result"]["plugins"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed["result"]["plugins"][0]["plugin_id"],
+        "example.offline"
+    );
+
+    let app_config = roots.join("config").join(app_dir_name());
+    let registry = app_config.join("plugins.json");
+    let lock = app_config.join(".plugins.lock");
+    let plugin_config = app_config.join("plugins/config/example.offline");
+    let plugin_state = roots
+        .join("state")
+        .join(app_dir_name())
+        .join("plugins/example.offline");
+    assert_eq!(
+        registry.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        plugin_config.metadata().unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        plugin_state.metadata().unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(!named_session_socket(&roots.join("config"), "offline").exists());
+    assert!(
+        !escape.exists(),
+        "inherited ZYNK_* paths must not escape sentinel roots"
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn m847_named_sessions_share_and_refresh_the_global_plugin_registry() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let state_home = base.join("state");
+    let data_home = base.join("data");
+    let cache_home = base.join("cache");
+    let home = base.join("home");
+    let first_dir = base.join("plugins/first");
+    let second_dir = base.join("plugins/second");
+    for (dir, id) in [
+        (&first_dir, "example.first"),
+        (&second_dir, "example.second"),
+    ] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("zynk-plugin.toml"),
+            format!(
+                "id = \"{id}\"\nname = \"{id}\"\nversion = \"0.1.0\"\nmin_zynk_version = \"0.6.10\"\nplatforms = [\"linux\"]\n\n[[actions]]\nid = \"run\"\ntitle = \"Run\"\ncommand = [\"sh\", \"-c\", \"echo run\"]\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let extra_env = [
+        ("HOME", home.to_str().unwrap()),
+        ("XDG_STATE_HOME", state_home.to_str().unwrap()),
+        ("XDG_DATA_HOME", data_home.to_str().unwrap()),
+        ("XDG_CACHE_HOME", cache_home.to_str().unwrap()),
+    ];
+    let alpha = spawn_named_server_with_env(
+        &config_home,
+        &runtime_dir,
+        "alpha",
+        &base.join("sqlite"),
+        false,
+        &extra_env,
+    );
+    let beta = spawn_named_server_with_env(
+        &config_home,
+        &runtime_dir,
+        "beta",
+        &base.join("sqlite"),
+        false,
+        &extra_env,
+    );
+    wait_for_socket(
+        &named_session_socket(&config_home, "alpha"),
+        Duration::from_secs(5),
+    );
+    wait_for_socket(
+        &named_session_socket(&config_home, "beta"),
+        Duration::from_secs(5),
+    );
+
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            run_named_cli_json(
+                &config_home,
+                &runtime_dir,
+                &[
+                    "--session",
+                    "alpha",
+                    "plugin",
+                    "link",
+                    first_dir.to_str().unwrap(),
+                ],
+            )
+        });
+        let second = scope.spawn(|| {
+            run_named_cli_json(
+                &config_home,
+                &runtime_dir,
+                &[
+                    "--session",
+                    "beta",
+                    "plugin",
+                    "link",
+                    second_dir.to_str().unwrap(),
+                ],
+            )
+        });
+        assert_eq!(
+            first.join().unwrap()["result"]["plugin"]["plugin_id"],
+            "example.first"
+        );
+        assert_eq!(
+            second.join().unwrap()["result"]["plugin"]["plugin_id"],
+            "example.second"
+        );
+    });
+
+    let list = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "beta", "plugin", "list", "--json"],
+    );
+    assert_eq!(list["result"]["plugins"].as_array().unwrap().len(), 2);
+
+    run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "beta", "plugin", "disable", "example.first"],
+    );
+    let disabled = run_named_cli(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "alpha",
+            "plugin",
+            "action",
+            "invoke",
+            "run",
+            "--plugin",
+            "example.first",
+        ],
+    );
+    assert_eq!(disabled.status.code(), Some(1));
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&disabled.stdout),
+        String::from_utf8_lossy(&disabled.stderr)
+    );
+    assert!(output.contains("disabled"), "{output}");
+
+    let _ = run_named_cli(&config_home, &runtime_dir, &["session", "stop", "alpha"]);
+    let _ = run_named_cli(&config_home, &runtime_dir, &["session", "stop", "beta"]);
+    drop(alpha);
+    drop(beta);
+    cleanup_test_base(&base);
+}
+
 fn wait_until(timeout: Duration, interval: Duration, mut condition: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {

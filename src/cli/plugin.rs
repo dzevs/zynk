@@ -77,11 +77,20 @@ fn plugin_link(args: &[String]) -> std::io::Result<i32> {
             }
         }
     }
-    print_plugin_response(Method::PluginLink(PluginLinkParams {
+    let params = PluginLinkParams {
         path,
         enabled,
         source: None,
-    }))
+    };
+    let response = match super::send_request(&Request {
+        id: "cli:plugin".into(),
+        method: Method::PluginLink(params.clone()),
+    }) {
+        Ok(response) => response,
+        Err(err) if is_connection_error(&err) => offline_plugin_link_response(&params)?,
+        Err(err) => return Err(err),
+    };
+    super::print_response(&response)
 }
 
 fn plugin_config_dir_command(args: &[String]) -> std::io::Result<i32> {
@@ -213,7 +222,7 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
         let post_build_plugin = load_cli_plugin_manifest(&manifest_root, true)?;
         ensure_manifest_unchanged_after_build(&preview_plugin, &post_build_plugin)?;
 
-        let final_checkout = managed_checkout_path(&preview_plugin.plugin_id);
+        let final_checkout = crate::plugin_paths::managed_checkout_path(&preview_plugin.plugin_id);
         let backup_checkout = temp_root.join("previous-checkout");
         let mut backup_moved = false;
         if final_checkout.exists() {
@@ -222,7 +231,12 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
         }
         let install_attempt = (|| {
             if let Some(parent) = final_checkout.parent() {
-                std::fs::create_dir_all(parent).map_err(InstallFailure::Rollback)?;
+                crate::plugin_paths::ensure_private_dir(
+                    &crate::plugin_paths::managed_plugins_dir(),
+                )
+                .map_err(InstallFailure::Rollback)?;
+                crate::plugin_paths::ensure_private_dir(parent)
+                    .map_err(InstallFailure::Rollback)?;
             }
             std::fs::rename(&checkout, &final_checkout).map_err(InstallFailure::Rollback)?;
 
@@ -301,14 +315,15 @@ fn plugin_uninstall(args: &[String]) -> std::io::Result<i32> {
             }
         }
         Err(err) if is_connection_error(&err) => {
-            let mut plugins = crate::persist::plugin_registry::load();
-            let before = plugins.len();
-            plugins.retain(|plugin| plugin.plugin_id != plugin_id);
-            if before == plugins.len() {
+            let (removed, _) = crate::persist::plugin_registry::update(|plugins| {
+                let before = plugins.len();
+                plugins.retain(|plugin| plugin.plugin_id != plugin_id);
+                before != plugins.len()
+            })?;
+            if !removed {
                 eprintln!("plugin not installed: {target}");
                 return Ok(1);
             }
-            crate::persist::plugin_registry::save(&plugins)?;
         }
         Err(err) => return Err(err),
     }
@@ -907,6 +922,15 @@ fn load_cli_plugin_manifest(path: &Path, enabled: bool) -> std::io::Result<Insta
         .map_err(|(_, message)| std::io::Error::other(message))
 }
 
+fn persist_plugin_offline(plugin: &InstalledPluginInfo) -> std::io::Result<()> {
+    crate::plugin_paths::ensure_plugin_user_dirs(&plugin.plugin_id)?;
+    crate::persist::plugin_registry::update(|plugins| {
+        plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
+        plugins.push(plugin.clone());
+    })?;
+    Ok(())
+}
+
 fn register_installed_plugin(
     plugin: InstalledPluginInfo,
     source: PluginSourceInfo,
@@ -962,12 +986,7 @@ fn register_installed_plugin(
             Ok(())
         }
         Err(err) if is_connection_error(&err) => {
-            let mut plugins = crate::persist::plugin_registry::load();
-            plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
-            crate::plugin_paths::ensure_plugin_user_dirs(&plugin.plugin_id)
-                .map_err(InstallFailure::Rollback)?;
-            plugins.push(plugin);
-            crate::persist::plugin_registry::save(&plugins).map_err(InstallFailure::Rollback)
+            persist_plugin_offline(&plugin).map_err(InstallFailure::Rollback)
         }
         Err(err) => Err(InstallFailure::Rollback(err)),
     }
@@ -1095,6 +1114,16 @@ fn plugin_matches_github_source(plugin: &InstalledPluginInfo, source: &GithubPlu
         && plugin.source.owner.as_deref() == Some(source.owner.as_str())
         && plugin.source.repo.as_deref() == Some(source.repo.as_str())
         && plugin.source.subdir.as_deref() == source.subdir.as_deref()
+}
+
+fn offline_plugin_link_response(params: &PluginLinkParams) -> std::io::Result<serde_json::Value> {
+    let plugin = load_cli_plugin_manifest(Path::new(&params.path), params.enabled)?;
+    persist_plugin_offline(&plugin)?;
+    serde_json::to_value(SuccessResponse {
+        id: "cli:plugin".into(),
+        result: ResponseResult::PluginLinked { plugin },
+    })
+    .map_err(std::io::Error::other)
 }
 
 fn offline_plugin_list_response(params: &PluginListParams) -> std::io::Result<serde_json::Value> {
@@ -1302,9 +1331,8 @@ fn run_plugin_build_command(
         }));
     };
     let args = command.iter().skip(1).cloned().collect::<Vec<_>>();
-    let mut child = crate::plugin_command::command_for_argv(program, &args);
+    let mut child = crate::plugin_command::command_for_argv_in_dir(program, &args, cwd);
     child
-        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1538,23 +1566,15 @@ fn confirm(prompt: &str) -> std::io::Result<bool> {
 }
 
 fn create_plugin_temp_dir(label: &str) -> std::io::Result<PathBuf> {
-    let path = managed_plugins_dir().join(format!(
+    let managed_dir = crate::plugin_paths::managed_plugins_dir();
+    crate::plugin_paths::ensure_private_dir(&managed_dir)?;
+    let path = managed_dir.join(format!(
         ".tmp-{label}-{}-{}",
         std::process::id(),
         current_unix_ms()
     ));
-    std::fs::create_dir_all(&path)?;
+    crate::plugin_paths::ensure_private_dir(&path)?;
     Ok(path)
-}
-
-fn managed_plugins_dir() -> PathBuf {
-    crate::session::data_dir().join("plugins")
-}
-
-fn managed_checkout_path(plugin_id: &str) -> PathBuf {
-    managed_plugins_dir()
-        .join("github")
-        .join(crate::api::schema::plugin_managed_path_component(plugin_id))
 }
 
 fn remove_managed_plugin_files(plugin: &InstalledPluginInfo) -> std::io::Result<()> {
@@ -1581,7 +1601,7 @@ fn is_expected_managed_path(plugin: &InstalledPluginInfo, path: &Path) -> bool {
     let Ok(path) = path.canonicalize() else {
         return false;
     };
-    let expected = managed_checkout_path(&plugin.plugin_id);
+    let expected = crate::plugin_paths::managed_checkout_path(&plugin.plugin_id);
     let Ok(expected) = expected.canonicalize() else {
         return false;
     };
