@@ -1214,6 +1214,111 @@ fn m835_reply_compatible_ping(stream: &mut UnixStream, request: &serde_json::Val
     stream.flush().unwrap();
 }
 
+#[derive(Debug)]
+struct MockCliChildOutcome {
+    status: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_pane_run_mock_server(
+    listener: UnixListener,
+    expected_requests: usize,
+    ready: std::sync::mpsc::SyncSender<()>,
+    child_outcome: std::sync::mpsc::Receiver<MockCliChildOutcome>,
+    watchdog: Duration,
+) -> Result<Vec<String>, String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("set nonblocking: {err}"))?;
+    ready
+        .send(())
+        .map_err(|_| "readiness receiver closed".to_string())?;
+
+    let deadline = Instant::now() + watchdog;
+    let mut requests = Vec::new();
+    let mut pings = 0usize;
+    let mut accepted_connections = 0usize;
+    loop {
+        if requests.len() == expected_requests {
+            if pings != expected_requests || accepted_connections != expected_requests * 2 {
+                return Err(format!(
+                    "expected exchange was incomplete: expected_requests={expected_requests} pings={pings} accepted_connections={accepted_connections} transcript={requests:?}"
+                ));
+            }
+            return Ok(requests);
+        }
+
+        match child_outcome.try_recv() {
+            Ok(outcome) => {
+                return Err(format!(
+                    "child exited before expected exchange: expected_requests={expected_requests} status={:?} stdout={:?} stderr={:?} transcript={requests:?}",
+                    outcome.status, outcome.stdout, outcome.stderr
+                ));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "watchdog expired before expected exchange: expected_requests={expected_requests} pings={pings} accepted_connections={accepted_connections} transcript={requests:?}"
+            ));
+        }
+
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                accepted_connections += 1;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .map_err(|err| format!("set read timeout: {err}"))?;
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .map_err(|err| format!("set write timeout: {err}"))?;
+                let mut line = String::new();
+                BufReader::new(
+                    stream
+                        .try_clone()
+                        .map_err(|err| format!("clone stream: {err}"))?,
+                )
+                .read_line(&mut line)
+                .map_err(|err| format!("read request: {err}"))?;
+                let request: serde_json::Value = serde_json::from_str(&line)
+                    .map_err(|err| format!("decode request {line:?}: {err}"))?;
+                if request["method"] == "ping" {
+                    if pings != requests.len() {
+                        return Err(format!(
+                            "duplicate compatibility ping: pings={pings} transcript={requests:?}"
+                        ));
+                    }
+                    pings += 1;
+                    m835_reply_compatible_ping(&mut stream, &request);
+                    continue;
+                }
+                if pings != requests.len() + 1 {
+                    return Err(format!(
+                        "request arrived without compatibility ping: pings={pings} transcript={requests:?} request={request}"
+                    ));
+                }
+                stream
+                    .write_all(br#"{"id":"cli:request","result":{"type":"ok"}}"#)
+                    .map_err(|err| format!("write response: {err}"))?;
+                stream
+                    .write_all(b"\n")
+                    .map_err(|err| format!("terminate response: {err}"))?;
+                stream
+                    .flush()
+                    .map_err(|err| format!("flush response: {err}"))?;
+                requests.push(line);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(err) => return Err(format!("accept failed: {err}")),
+        }
+    }
+}
+
 #[test]
 fn pane_run_sends_one_send_input_request_with_enter_key() {
     let base = unique_test_dir();
@@ -1228,54 +1333,29 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
     // invariant under test is "exactly ONE `pane.send_input` with Enter" (no
     // duplicate/second submit); any companion request is only the read-only
     // resolution `pane.get`, never another input.
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (child_tx, child_rx) = std::sync::mpsc::sync_channel(1);
     let server = thread::spawn(move || {
-        listener.set_nonblocking(true).unwrap();
-        let mut requests = Vec::new();
-        let mut accepted_connections = 0;
-        let mut pings = 0;
-        let deadline = Instant::now() + Duration::from_millis(500);
-        // Stop early once the submit has been observed AND the resolution settled.
-        while Instant::now() < deadline {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    accepted_connections += 1;
-                    let mut line = String::new();
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
-                    reader.read_line(&mut line).unwrap();
-                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-                    if request["method"] == "ping" {
-                        assert_eq!(pings, requests.len(), "duplicate compatibility ping");
-                        pings += 1;
-                        m835_reply_compatible_ping(&mut stream, &request);
-                        continue;
-                    }
-                    assert_eq!(pings, requests.len() + 1);
-                    stream
-                        .write_all(br#"{"id":"cli:request","result":{"type":"ok"}}"#)
-                        .unwrap();
-                    stream.write_all(b"\n").unwrap();
-                    stream.flush().unwrap();
-                    requests.push(line);
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(err) => panic!("accept failed: {err}"),
-            }
-        }
-        assert_eq!(pings, requests.len());
-        assert_eq!(accepted_connections, requests.len() * 2);
-        requests
+        run_pane_run_mock_server(listener, 2, ready_tx, child_rx, Duration::from_secs(5))
     });
+    ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
     let run = run_cli(&socket_path, &["pane", "run", "1-1", "echo hello"]);
+    let _ = child_tx.send(MockCliChildOutcome {
+        status: run.status.code(),
+        stdout: String::from_utf8_lossy(&run.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
+    });
     assert!(
         run.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&run.stderr)
     );
 
-    let requests = server.join().unwrap();
+    let requests = server
+        .join()
+        .unwrap()
+        .unwrap_or_else(|error| panic!("pane run mock failed: {error}"));
     let parsed: Vec<serde_json::Value> = requests
         .iter()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -1304,6 +1384,125 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
         );
     }
 
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn m840_pane_run_mock_waits_for_expected_exchange_after_readiness() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket = base.join("mock-lifecycle.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (_child_tx, child_rx) = std::sync::mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        run_pane_run_mock_server(listener, 1, ready_tx, child_rx, Duration::from_secs(2))
+    });
+
+    ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    // This exceeds the retired 500 ms listener window. Readiness and the expected
+    // exchange, rather than elapsed startup time, now own successful completion.
+    thread::sleep(Duration::from_millis(550));
+    let ping = send_request(&socket, r#"{"id":"m840:ping","method":"ping","params":{}}"#);
+    assert_eq!(ping["result"]["type"], "pong");
+    let response = send_request(
+        &socket,
+        r#"{"id":"m840:request","method":"pane.send_input","params":{}}"#,
+    );
+    assert_eq!(response["result"]["type"], "ok");
+
+    let requests = server.join().unwrap().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("pane.send_input"));
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn m840_pane_run_mock_reports_early_child_output_and_transcript() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket = base.join("mock-early-child.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (child_tx, child_rx) = std::sync::mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        run_pane_run_mock_server(listener, 1, ready_tx, child_rx, Duration::from_secs(2))
+    });
+
+    ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    child_tx
+        .send(MockCliChildOutcome {
+            status: Some(3),
+            stdout: "partial stdout".into(),
+            stderr: "early stderr".into(),
+        })
+        .unwrap();
+    let error = server.join().unwrap().unwrap_err();
+    assert!(error.contains("status=Some(3)"), "{error}");
+    assert!(error.contains("partial stdout"), "{error}");
+    assert!(error.contains("early stderr"), "{error}");
+    assert!(error.contains("transcript=[]"), "{error}");
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn m840_pane_run_mock_watchdog_retains_empty_transcript() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket = base.join("mock-watchdog.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (_child_tx, child_rx) = std::sync::mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        run_pane_run_mock_server(listener, 1, ready_tx, child_rx, Duration::ZERO)
+    });
+
+    ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let error = server.join().unwrap().unwrap_err();
+    assert!(error.contains("watchdog expired"), "{error}");
+    assert!(error.contains("expected_requests=1"), "{error}");
+    assert!(error.contains("transcript=[]"), "{error}");
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn m840_bounded_cli_timeout_keeps_output_paths_transcript_and_reap_result() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket = base.join("diagnostic.sock");
+    let database = base.join("sqlite/zynk.db");
+    let panic = std::panic::catch_unwind(|| {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "printf retained-stdout; printf retained-stderr >&2; exec sleep 10",
+            ])
+            .env_clear();
+        run_cli_child_bounded(
+            command,
+            Duration::from_millis(50),
+            CliChildDiagnostics {
+                args: &["api", "snapshot"],
+                socket: &socket,
+                database: &database,
+                request_transcript: &["ping", "session.snapshot"],
+            },
+        );
+    })
+    .unwrap_err();
+    let error = panic_payload_text(panic);
+    assert!(error.contains("retained-stdout"), "{error}");
+    assert!(error.contains("retained-stderr"), "{error}");
+    assert!(error.contains("api snapshot"), "{error}");
+    assert!(error.contains(&socket.display().to_string()), "{error}");
+    assert!(error.contains(&database.display().to_string()), "{error}");
+    assert!(
+        error.contains("ping") && error.contains("session.snapshot"),
+        "{error}"
+    );
+    assert!(error.contains("kill_result=Ok"), "{error}");
+    assert!(error.contains("reap_result=Ok"), "{error}");
     cleanup_test_base(&base);
 }
 
@@ -4669,8 +4868,87 @@ fn pane_shell_gets_zynk_socket_and_pane_env() {
     cleanup_spawned_zynk(zynk, base);
 }
 
+struct CliChildDiagnostics<'a> {
+    args: &'a [&'a str],
+    socket: &'a Path,
+    database: &'a Path,
+    request_transcript: &'a [&'a str],
+}
+
+fn panic_payload_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "non-string panic payload".to_string(),
+        },
+    }
+}
+
+fn run_cli_child_bounded(
+    mut command: Command,
+    timeout: Duration,
+    diagnostics: CliChildDiagnostics<'_>,
+) -> std::process::Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    thread::scope(|scope| {
+        let read = |mut pipe: Box<dyn Read + Send>| {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        };
+        let stdout = scope.spawn(move || read(Box::new(stdout)));
+        let stderr = scope.spawn(move || read(Box::new(stderr)));
+        let finished = wait_until(timeout, Duration::from_millis(5), || {
+            child.try_wait().unwrap().is_some()
+        });
+        let kill_result = if finished {
+            "NotNeeded".to_string()
+        } else {
+            match child.kill() {
+                Ok(()) => "Ok".to_string(),
+                Err(err) => format!("Err({err})"),
+            }
+        };
+        let reap = child.wait();
+        let reap_result = match &reap {
+            Ok(status) => format!("Ok({status:?})"),
+            Err(err) => format!("Err({err})"),
+        };
+        let status = reap.unwrap();
+        let output = std::process::Output {
+            status,
+            stdout: stdout.join().unwrap(),
+            stderr: stderr.join().unwrap(),
+        };
+        assert!(
+            finished,
+            "CLI child exceeded {:?}; args={}; socket={}; database={}; request_transcript={:?}; status={:?}; stdout={:?}; stderr={:?}; kill_result={}; reap_result={}",
+            timeout,
+            diagnostics.args.join(" "),
+            diagnostics.socket.display(),
+            diagnostics.database.display(),
+            diagnostics.request_transcript,
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            kill_result,
+            reap_result,
+        );
+        output
+    })
+}
+
 fn run_snapshot_cli_bounded(base: &Path, socket: &Path, args: &[&str]) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zynk"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    command
         .args(args)
         .env_clear()
         .env("HOME", base.join("cli-home"))
@@ -4685,38 +4963,18 @@ fn run_snapshot_cli_bounded(base: &Path, socket: &Path, args: &[&str]) -> std::p
             "ZYNK_CLIENT_SOCKET_PATH",
             base.join("cli-runtime/client.sock"),
         )
-        .current_dir(base)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    // Drain both pipes while waiting so a complete snapshot can exceed pipe capacity.
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    thread::scope(|scope| {
-        let read = |mut pipe: Box<dyn Read + Send>| {
-            let mut bytes = Vec::new();
-            pipe.read_to_end(&mut bytes).unwrap();
-            bytes
-        };
-        let stdout = scope.spawn(move || read(Box::new(stdout)));
-        let stderr = scope.spawn(move || read(Box::new(stderr)));
-        let finished = wait_until(Duration::from_secs(3), Duration::from_millis(5), || {
-            child.try_wait().unwrap().is_some()
-        });
-        if !finished {
-            let _ = child.kill();
-        }
-        let status = child.wait().unwrap();
-        let output = std::process::Output {
-            status,
-            stdout: stdout.join().unwrap(),
-            stderr: stderr.join().unwrap(),
-        };
-        assert!(finished, "snapshot CLI exceeded 3s; child reaped");
-        output
-    })
+        .current_dir(base);
+    let database = base.join("cli-sqlite/zynk.db");
+    run_cli_child_bounded(
+        command,
+        Duration::from_secs(3),
+        CliChildDiagnostics {
+            args,
+            socket,
+            database: &database,
+            request_transcript: &[],
+        },
+    )
 }
 
 #[test]
@@ -6106,11 +6364,10 @@ fn m835_f4_refusal(verb: &[&str], late: bool, wrong_protocol: u32) {
         vec!["ping"]
     };
     let done = AtomicBool::new(false);
-    let (output, requests, recorded) = thread::scope(|scope| {
+    let (output, requests) = thread::scope(|scope| {
         let worker = scope.spawn(|| {
             let deadline = Instant::now() + Duration::from_secs(4);
             let mut requests = Vec::new();
-            let mut recorded = None;
             while Instant::now() < deadline {
                 let (mut stream, _) = match listener.accept() {
                     Ok(pair) => pair,
@@ -6127,21 +6384,6 @@ fn m835_f4_refusal(verb: &[&str], late: bool, wrong_protocol: u32) {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 requests.push(request.clone());
                 let n = requests.len();
-                if late && n == expected.len() && request["method"] == "ping" {
-                    recorded = Some(sqlite_block_on(async {
-                        tokio::time::timeout(Duration::from_secs(1), async {
-                            let options = sqlx::sqlite::SqliteConnectOptions::new()
-                                .filename(&db).read_only(true).busy_timeout(Duration::from_millis(200));
-                            let mut conn = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
-                            let ids = sqlx::query_scalar::<_, String>("SELECT id FROM messages").fetch_all(&mut conn).await.unwrap();
-                            let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM delivery_events")
-                                .fetch_one(&mut conn).await.unwrap();
-                            assert_eq!(count, 0);
-                            conn.close().await.unwrap();
-                            ids
-                        }).await.expect("bounded pre-refusal DB observation")
-                    }));
-                }
                 let result = if request["method"] == "ping" {
                     json!({"type":"pong", "version":"fixture", "protocol":if n == expected.len() { wrong_protocol } else { 19 }})
                 } else {
@@ -6149,14 +6391,32 @@ fn m835_f4_refusal(verb: &[&str], late: bool, wrong_protocol: u32) {
                 };
                 writeln!(stream, "{}", json!({"id":request["id"], "result":result})).unwrap();
             }
-            (requests, recorded)
+            requests
         });
         let mut args = verb.to_vec();
         args.extend(["w1:p1", "--", "body"]);
         let output = run_snapshot_cli_bounded(&fixture.base, &socket, &args);
         done.store(true, Ordering::Release);
-        let (requests, recorded) = worker.join().unwrap();
-        (output, requests, recorded)
+        (output, worker.join().unwrap())
+    });
+    // The CLI has exited before this connection opens, so the fixture never races
+    // the child's transaction. This observation is final-state evidence only.
+    let recorded = late.then(|| {
+        sqlite_block_on(async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&db)
+                .read_only(true)
+                .busy_timeout(Duration::from_secs(1));
+            let mut conn = sqlx::SqliteConnection::connect_with(&options)
+                .await
+                .unwrap();
+            let ids = sqlx::query_scalar::<_, String>("SELECT id FROM messages")
+                .fetch_all(&mut conn)
+                .await
+                .unwrap();
+            conn.close().await.unwrap();
+            ids
+        })
     });
     assert_eq!(
         requests
