@@ -306,11 +306,15 @@ with a pending traversal completes through the traversal poll; a terminal held o
 ordered through that handoff rather than being discovered by a layout-wide liveness scan.
 This event-loop bound is guarded in two independent ways. Deterministic one- and fifteen-pane controls drive
 the production poll-and-release boundary while counting the real `Layout::pane_ids` traversal primitive. A
-source change-detection guard pins the loop's reviewed direct self-call set, rejects layout-collection
-identifiers in the loop and maintenance boundary, and fingerprints the complete named poll/release boundary
-plus its idle-reachable handoff lookup. Any change to those reviewed shapes fails until its baseline is updated
-explicitly. The static guard does not claim to recognize every possible traversal; the execution control
-separately bounds actual `Layout::pane_ids` work on the production path.
+source change-detection guard fingerprints the masked whole `run` body and the five named maintenance bodies:
+`process_pending_alt_screen_reads`, `poll_pending_alt_screen_reads`,
+`release_deferred_alt_screen_terminals`, `release_deferred_alt_screen_terminals_with`, and
+`take_ready_handoff`. It also pins the loop's reviewed direct self-call set and rejects layout-collection
+identifiers in the loop and maintenance boundary. The guard detects any change to the `run` body and to the
+five named maintenance bodies. It does not detect a traversal added inside the body of a function that `run`
+already calls outside those five. That residual, `ARCH-C1-EXISTING-CALLEE-RESIDUAL`, is operator-accepted as
+of 2026-09-25 and is covered only by ordinary code review, plus the dynamic `Layout::pane_ids` counter for
+`pane_ids`-based work on the production maintenance path.
 Deferred live handoffs use monotonic per-terminal barriers: a handoff remains ordered after each captured
 traversal and before later input for those terminals, while input for other terminals remains immediate.
 Pre-barrier requests fail closed before the barrier is reached. Failed handoffs release suffixes through the

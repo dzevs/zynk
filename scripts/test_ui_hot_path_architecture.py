@@ -89,6 +89,9 @@ HEADLESS_RUN_SELF_METHODS = frozenset(
         "sync_window_title",
     }
 )
+HEADLESS_RUN_BODY_FINGERPRINT = (
+    "d416d7b021315ca14942a0a27926e158defa859b54b89e6c9e61bd4589d405cb"
+)
 SELF_METHOD_CALL = re.compile(r"\bself\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 ALT_SCREEN_MAINTENANCE_BODY = (
     "let completed_alt_screen_reads = self.poll_pending_alt_screen_reads(now); "
@@ -269,6 +272,12 @@ def headless_alt_screen_maintenance_violations(source: str) -> list[str]:
         f"run contains forbidden collection identifier {identifier}"
         for identifier in identifier_hits(run_body, HEADLESS_RUN_FORBIDDEN_IDENTIFIERS)
     ]
+    run_fingerprint = normalized_body_fingerprint(run_body)
+    if run_fingerprint != HEADLESS_RUN_BODY_FINGERPRINT:
+        violations.append(
+            "run body fingerprint changed: "
+            f"expected {HEADLESS_RUN_BODY_FINGERPRINT}, got {run_fingerprint}"
+        )
     run_self_methods = frozenset(SELF_METHOD_CALL.findall(run_body))
     for method in sorted(run_self_methods - HEADLESS_RUN_SELF_METHODS):
         violations.append(f"run contains unreviewed self method call {method}")
@@ -344,7 +353,14 @@ class UiHotPathArchitectureTests(unittest.TestCase):
         self.assertEqual(source.count(needle), 1)
         source = source.replace(needle, replacement, 1)
 
-        self.assertTrue(headless_alt_screen_maintenance_violations(source))
+        violations = headless_alt_screen_maintenance_violations(source)
+        self.assertTrue(
+            any(
+                violation.startswith("run body fingerprint changed:")
+                for violation in violations
+            ),
+            violations,
+        )
 
     def test_headless_guard_rejects_line_broken_direct_pane_iteration(self) -> None:
         source = HEADLESS_SOURCE.read_text(encoding="utf-8")
@@ -362,7 +378,14 @@ class UiHotPathArchitectureTests(unittest.TestCase):
         self.assertEqual(source.count(needle), 1)
         source = source.replace(needle, replacement, 1)
 
-        self.assertTrue(headless_alt_screen_maintenance_violations(source))
+        violations = headless_alt_screen_maintenance_violations(source)
+        self.assertTrue(
+            any(
+                violation.startswith("run body fingerprint changed:")
+                for violation in violations
+            ),
+            violations,
+        )
 
     def test_headless_guard_rejects_direct_pane_scan_inside_poll(self) -> None:
         source = HEADLESS_SOURCE.read_text(encoding="utf-8")
@@ -412,6 +435,80 @@ class UiHotPathArchitectureTests(unittest.TestCase):
         source = source.replace(needle, replacement, 1)
 
         self.assertTrue(headless_alt_screen_maintenance_violations(source))
+
+    def test_headless_guard_rejects_associated_run_helper_call(self) -> None:
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        run_needle = """            if self.process_pending_alt_screen_reads(now) {
+"""
+        run_replacement = """            Self::gate3_uninstrumented_run_helper(self);
+            if self.process_pending_alt_screen_reads(now) {
+"""
+        helper_needle = """    fn process_pending_alt_screen_reads(&mut self, now: Instant) -> bool {
+"""
+        helper_replacement = """    fn gate3_uninstrumented_run_helper(&mut self) {
+        let count = self
+            .app
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .count();
+        std::hint::black_box(count);
+    }
+
+    fn process_pending_alt_screen_reads(&mut self, now: Instant) -> bool {
+"""
+        self.assertEqual(source.count(run_needle), 1)
+        self.assertEqual(source.count(helper_needle), 1)
+        source = source.replace(run_needle, run_replacement, 1)
+        source = source.replace(helper_needle, helper_replacement, 1)
+
+        violations = headless_alt_screen_maintenance_violations(source)
+        self.assertTrue(
+            any(
+                violation.startswith("run body fingerprint changed:")
+                for violation in violations
+            ),
+            violations,
+        )
+
+    def test_headless_guard_rejects_qualified_run_helper_call(self) -> None:
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        run_needle = """            if self.process_pending_alt_screen_reads(now) {
+"""
+        run_replacement = """            HeadlessServer::gate3_uninstrumented_run_helper(self);
+            if self.process_pending_alt_screen_reads(now) {
+"""
+        helper_needle = """    fn process_pending_alt_screen_reads(&mut self, now: Instant) -> bool {
+"""
+        helper_replacement = """    fn gate3_uninstrumented_run_helper(&mut self) {
+        let count = self
+            .app
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .count();
+        std::hint::black_box(count);
+    }
+
+    fn process_pending_alt_screen_reads(&mut self, now: Instant) -> bool {
+"""
+        self.assertEqual(source.count(run_needle), 1)
+        self.assertEqual(source.count(helper_needle), 1)
+        source = source.replace(run_needle, run_replacement, 1)
+        source = source.replace(helper_needle, helper_replacement, 1)
+
+        violations = headless_alt_screen_maintenance_violations(source)
+        self.assertTrue(
+            any(
+                violation.startswith("run body fingerprint changed:")
+                for violation in violations
+            ),
+            violations,
+        )
 
     def test_headless_guard_rejects_new_poll_helper_call(self) -> None:
         source = HEADLESS_SOURCE.read_text(encoding="utf-8")

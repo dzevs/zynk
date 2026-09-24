@@ -7872,3 +7872,38 @@ M8-39 persistence-lock carry.
 This correction is **IMPLEMENTED / PENDING VERIFICATION** until the five C1 guard mutations, the other four
 final-byte probes, restored focused controls, the isolated exact chain, fresh packet, successor Gate-2, and
 successor Gate-3 complete.
+
+#### M-FINAL Gate-3 successor-6 correction
+
+The independent Gate-3 review rejected `4bfa79ef3436115394c15e40ca1a9165a07a4462` because the successor-5
+`run` call allowlist recognized only `self.method(...)`. A valid
+`Self::gate3_uninstrumented_run_helper(self)` call in `run`, with an associated helper outside the five
+fingerprinted maintenance bodies, could traverse workspaces, tabs, and `tab.panes.values()` while the
+architecture suite, Cargo check, and the dynamic C1 control all stayed green. Two independent peer probes
+confirmed the same associated or qualified call escape.
+
+Production Rust remains byte-identical. The architecture guard now fingerprints the complete masked,
+whitespace-normalized `HeadlessServer::run` body. Any executable token change in that body therefore fails
+closed regardless of whether a call is written through `self`, `Self::`, a concrete type, a trait-qualified
+path, a free function, or a macro. The reviewed 31-name direct-self set and collection-identifier checks remain
+as diagnostics, and the five maintenance-body fingerprints remain unchanged. Real-source in-memory controls
+reproduce both the exact `Self::` associated-helper scan and a concrete `HeadlessServer::` qualified form.
+
+This is a change-detection guarantee with one explicit residual. The guard detects any change to the `run`
+body and to the five named maintenance bodies: `process_pending_alt_screen_reads`,
+`poll_pending_alt_screen_reads`, `release_deferred_alt_screen_terminals`,
+`release_deferred_alt_screen_terminals_with`, and `take_ready_handoff`. It does not detect a traversal added
+inside the body of a function that `run` already calls outside those five. That residual is named
+`ARCH-C1-EXISTING-CALLEE-RESIDUAL`; the operator accepted it on 2026-09-25. It is covered only by ordinary
+code review, plus the dynamic `Layout::pane_ids` counter for `pane_ids`-based work on the production
+maintenance path.
+
+Reviewer gap `RG-MF-9` records that the successor-5 implementation and Gate-2 treated an instance-call
+allowlist as if it covered associated and qualified calls. The rejected packet and all prior evidence remain
+retained without transferring approval. Inherited carry status is unchanged: F4 and `N22B` are
+operator-accepted fixture risks, `ARCH-C1-EXISTING-CALLEE-RESIDUAL` is the operator-accepted architecture
+residual above, and the M8-39 persistence-lock carry is closed.
+
+This correction is **IMPLEMENTED / PENDING VERIFICATION** until the exact associated and qualified helper
+faults, the restored C1 mutation set, unchanged C2/C3 controls, fresh custody probe, isolated exact chain,
+fresh packet, successor Gate-2, and successor Gate-3 complete.
