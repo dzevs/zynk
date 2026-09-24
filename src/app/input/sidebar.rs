@@ -1199,6 +1199,9 @@ mod tests {
                 Workspace::test_new("b"),
                 Workspace::test_new("c"),
             ];
+            for workspace in &mut app.state.workspaces {
+                workspace.cached_git_branch = Some("main".into());
+            }
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
             let cards = &app.state.view.workspace_card_areas;
             assert_eq!(
@@ -1263,6 +1266,9 @@ mod tests {
                 Workspace::test_new("b"),
                 Workspace::test_new("c"),
             ];
+            for workspace in &mut app.state.workspaces {
+                workspace.cached_git_branch = Some("main".into());
+            }
             let active_id = app.state.workspaces[1].id.clone();
             let selected_id = app.state.workspaces[2].id.clone();
             app.state.active = Some(1);

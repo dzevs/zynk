@@ -599,21 +599,28 @@ fn set_handshake_recv_timeout(
 
 fn client_launch_mode(
     direct_attach_requested: bool,
-    exact_cell_size: bool,
-    cell_width_px: u32,
-    cell_height_px: u32,
+    _exact_cell_size: bool,
+    _cell_width_px: u32,
+    _cell_height_px: u32,
 ) -> ClientLaunchMode {
     if direct_attach_requested {
         ClientLaunchMode::TerminalAttach
-    } else if exact_cell_size
-        && cell_width_px > 0
-        && cell_height_px > 0
-        && direct_graphics_profile_allowed(false)
-    {
-        ClientLaunchMode::AppDirectGraphics
     } else {
         ClientLaunchMode::App
     }
+}
+
+fn direct_graphics_capability_requested(
+    direct_attach_requested: bool,
+    exact_cell_size: bool,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> bool {
+    !direct_attach_requested
+        && exact_cell_size
+        && cell_width_px > 0
+        && cell_height_px > 0
+        && direct_graphics_profile_allowed(false)
 }
 
 /// Performs the client→server handshake.
@@ -630,11 +637,12 @@ fn do_handshake(
     requested_encoding: RenderEncoding,
     direct_attach_requested: bool,
 ) -> Result<RenderEncoding, ClientError> {
-    stream
-        .set_nonblocking(false)
-        .map_err(ClientError::ConnectionFailed)?;
-
-    // Send Hello.
+    let enable_direct_graphics = direct_graphics_capability_requested(
+        direct_attach_requested,
+        exact_cell_size,
+        cell_width_px,
+        cell_height_px,
+    );
     let hello = ClientMessage::Hello {
         version: PROTOCOL_VERSION,
         cols,
@@ -650,6 +658,20 @@ fn do_handshake(
             cell_height_px,
         ),
     };
+    exchange_handshake(stream, hello, enable_direct_graphics)
+}
+
+fn exchange_handshake(
+    stream: &mut LocalStream,
+    hello: ClientMessage,
+    enable_direct_graphics: bool,
+) -> Result<RenderEncoding, ClientError> {
+    stream
+        .set_nonblocking(false)
+        .map_err(ClientError::ConnectionFailed)?;
+
+    // Send the protocol-19-compatible Hello envelope first. Optional protocol-20
+    // capabilities are enabled only after a compatible Welcome.
     protocol::write_message(stream, &hello)
         .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
 
@@ -674,6 +696,10 @@ fn do_handshake(
         } => {
             if let Some(error) = error {
                 return Err(ClientError::HandshakeRejected { version, error });
+            }
+            if enable_direct_graphics {
+                protocol::write_message(stream, &ClientMessage::EnableDirectGraphics)
+                    .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
             }
             info!(version, ?encoding, "handshake succeeded");
             Ok(encoding)
@@ -2203,6 +2229,133 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use interprocess::local_socket::traits::Listener as _;
+
+    struct TestSocketPath(std::path::PathBuf);
+
+    impl Drop for TestSocketPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, TestSocketPath) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::path::PathBuf::from("/tmp").join(format!(
+            "hc{}-{}-{nanos}.sock",
+            std::process::id(),
+            name.len()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = crate::ipc::bind_local_listener(&path).unwrap();
+        let client = crate::ipc::connect_local_stream(&path).unwrap();
+        let server = listener.accept().unwrap();
+        (client, server, TestSocketPath(path))
+    }
+
+    #[test]
+    fn protocol_19_server_rejects_current_app_and_terminal_clients_with_typed_welcome() {
+        use crate::protocol::protocol_19_legacy_decoder as legacy;
+
+        for (direct_attach, expected_mode) in [
+            (false, legacy::ClientLaunchMode::App),
+            (true, legacy::ClientLaunchMode::TerminalAttach),
+        ] {
+            let (mut client, mut server, _path) = local_stream_pair("legacy-rejection");
+            let peer = std::thread::spawn(move || {
+                let hello: legacy::ClientMessage =
+                    protocol::read_message(&mut server, MAX_FRAME_SIZE).expect("legacy Hello");
+                match hello {
+                    legacy::ClientMessage::Hello {
+                        version,
+                        launch_mode,
+                        ..
+                    } => {
+                        assert_eq!(version, PROTOCOL_VERSION);
+                        assert_eq!(launch_mode, expected_mode);
+                    }
+                    other => panic!("expected legacy Hello, got {other:?}"),
+                }
+                protocol::write_message(
+                    &mut server,
+                    &legacy::ServerMessage::Welcome {
+                        version: 19,
+                        encoding: legacy::RenderEncoding::SemanticFrame,
+                        error: Some("client version 20 is newer than server version 19".into()),
+                    },
+                )
+                .expect("legacy rejection Welcome");
+            });
+
+            let result = do_handshake(
+                &mut client,
+                100,
+                30,
+                0,
+                0,
+                false,
+                RenderEncoding::SemanticFrame,
+                direct_attach,
+            );
+            assert!(matches!(
+                result,
+                Err(ClientError::HandshakeRejected { version: 19, error })
+                    if error.contains("newer than server version 19")
+            ));
+            peer.join().expect("legacy peer");
+        }
+    }
+
+    #[test]
+    fn direct_graphics_capability_is_sent_only_after_compatible_welcome() {
+        let (mut client, mut server, _path) = local_stream_pair("direct-capability");
+        let peer = std::thread::spawn(move || {
+            let hello: ClientMessage =
+                protocol::read_message(&mut server, MAX_FRAME_SIZE).expect("Hello");
+            assert!(matches!(
+                hello,
+                ClientMessage::Hello {
+                    launch_mode: ClientLaunchMode::App,
+                    ..
+                }
+            ));
+            protocol::write_message(
+                &mut server,
+                &ServerMessage::Welcome {
+                    version: PROTOCOL_VERSION,
+                    encoding: RenderEncoding::SemanticFrame,
+                    error: None,
+                },
+            )
+            .expect("Welcome");
+            let capability: ClientMessage =
+                protocol::read_message(&mut server, MAX_FRAME_SIZE).expect("capability");
+            assert_eq!(capability, ClientMessage::EnableDirectGraphics);
+        });
+
+        assert_eq!(
+            exchange_handshake(
+                &mut client,
+                ClientMessage::Hello {
+                    version: PROTOCOL_VERSION,
+                    cols: 100,
+                    rows: 30,
+                    cell_width_px: 8,
+                    cell_height_px: 16,
+                    requested_encoding: RenderEncoding::SemanticFrame,
+                    keybindings: ClientKeybindings::Server,
+                    launch_mode: ClientLaunchMode::App,
+                },
+                true,
+            )
+            .expect("compatible handshake"),
+            RenderEncoding::SemanticFrame
+        );
+        peer.join().expect("current peer");
+    }
 
     #[test]
     fn resize_signal_reports_even_when_polled_size_is_unchanged() {

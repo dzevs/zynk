@@ -7663,3 +7663,43 @@ does not dispatch; orphan recovery later marks the durable attempt failed. If `a
 with an error after its successful commit, the delivery event remains durable even though the CLI reports
 the close failure. This favors avoiding an unverified dispatch over claiming success and does not change the
 delivery-transition or receipt invariants.
+
+#### M-FINAL Gate-3 P1 corrections
+
+The first independent Gate-3 review rejected `8123aef76f1d44ddf3a1391381b5a908c745bb84` for two P1 defects.
+First, protocol 20 inserted `AppDirectGraphics` between the protocol-19 `ClientLaunchMode` variants, shifting
+`TerminalAttach` from bincode tag 1 to tag 2. Because a server decodes the complete pre-version `Hello` before
+checking the advertised version, a protocol-19 server could not decode a protocol-20 terminal client's
+handshake and therefore could not return the required typed `Welcome` rejection. The correction restores the
+protocol-19 `App = 0` and `TerminalAttach = 1` envelope, appends `EnableDirectGraphics` after the published
+protocol-20 `ClientMessage` variants, and sends that capability only after a successful compatible `Welcome`.
+The server starts every connection non-direct and enables the capability idempotently only for a registered
+full-app client. Frozen protocol-19 App and TerminalAttach definitions exercise both byte directions; the
+legacy rejection `Welcome`, complete current client/server tag lists, pre-Welcome refusal, terminal-attach
+refusal, absent-capability behavior, and `ClientConnected`-before-enable ordering are pinned by controls.
+
+Second, alternate-screen conflict classification was terminal-specific but deferred processing stopped at
+the first still-conflicting request and retained every later request. That global FIFO created unrelated
+head-of-line blocking contrary to the same-terminal-only contract. Deferred processing now scans one taken
+snapshot in arrival order, requeues each still-conflicting request without changing its relative order, and
+dispatches each ready request through the unchanged handler. Controls pin terminal-B and `pane.input.set`
+immediacy, same-terminal FIFO, shutdown behavior, and live-handoff ordering: a handoff waits for terminal A's
+restoration, terminal-B input remains immediate, and input for A arriving behind a successful handoff receives
+the existing stopping response.
+
+Gate-3 also exposed one test-only hermeticity defect shared with the M8-39 base. The
+`m828d2_gap_one_drop_premises_and_variable_rows_are_distinct` fixture created synthetic workspaces whose
+cached branch came from the test process working directory. It therefore had two-row sidebar cards inside a
+Git checkout and one-row cards in an archive-style gitless source root. The geometry blocks now seed their
+own cached `main` branch, while the separate Git integration block continues to use owned temporary
+repositories. The gitless-working-directory red and green are retained. The exact-chain runner removes all
+inherited `ZYNK_*` variables, including `ZYNK_PANE_ID`, before binding sentinel HOME/XDG/TMP paths.
+
+Reviewer gaps are recorded for both P1s. B2 Gate-2 checked JSON method wire IDs and one-directional
+protocol-19 refusal but did not inspect positional bincode tags in the pre-version `Hello`. M-FINAL N2
+Gate-2 accepted the first-conflict break as bounded without reconciling it against the ledger promise that
+other terminals and `pane.input.set` remain immediate. The rejected Gate-3 packet and all inherited carry
+statuses remain retained; no evidence or approval transfers from `8123aef`.
+
+This correction is **IMPLEMENTED / PENDING VERIFICATION** until the two final-byte mutation probes, isolated
+lint/FULL/check/gate chain, fresh exact-SHA packet, successor Gate-2, and successor Gate-3 complete.

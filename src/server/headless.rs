@@ -1568,6 +1568,19 @@ impl HeadlessServer {
             })
     }
 
+    fn enable_direct_graphics_for_client(&mut self, client_id: u64) -> bool {
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        if !client.is_full_app_client() || client.writer.is_none() || client.direct_graphics {
+            return false;
+        }
+        client.direct_graphics = true;
+        client.pixel_mouse = true;
+        self.sync_foreground_client_state();
+        true
+    }
+
     fn has_app_client(&self) -> bool {
         self.app_client_count() > 0
     }
@@ -2958,6 +2971,7 @@ impl HeadlessServer {
             | ServerEvent::ClientClipboardImage { client_id, .. }
             | ServerEvent::ClientResize { client_id, .. } => *client_id,
             ServerEvent::ClientConnected { .. }
+            | ServerEvent::ClientDirectGraphicsEnabled { .. }
             | ServerEvent::ClientAttachTerminal { .. }
             | ServerEvent::ClientObserveTerminal { .. }
             | ServerEvent::ClientControlTerminal { .. }
@@ -3065,6 +3079,9 @@ impl HeadlessServer {
                 self.resize_shared_runtime_to_effective_size();
                 self.nudge_handoff_panes_on_first_client_attach();
                 true
+            }
+            ServerEvent::ClientDirectGraphicsEnabled { client_id } => {
+                self.enable_direct_graphics_for_client(client_id)
             }
             ServerEvent::GraphicsTransmissionResult {
                 client_id,
@@ -3569,18 +3586,24 @@ impl HeadlessServer {
     }
 
     fn process_deferred_alt_screen_reads(&mut self) -> bool {
+        self.process_deferred_alt_screen_reads_with(|server, msg| {
+            server.handle_api_request_with_shutdown_check(msg)
+        })
+    }
+
+    fn process_deferred_alt_screen_reads_with(
+        &mut self,
+        mut dispatch: impl FnMut(&mut Self, api::ApiRequestMessage) -> bool,
+    ) -> bool {
         let deferred = std::mem::take(&mut self.deferred_alt_screen_reads);
         let mut changed = false;
-        let mut deferred = deferred.into_iter();
-        while let Some(msg) = deferred.next() {
+        for msg in deferred {
             match self.alt_screen_read_conflict(&msg.request) {
                 AltScreenReadConflict::None => {
-                    changed |= self.handle_api_request_with_shutdown_check(msg);
+                    changed |= dispatch(self, msg);
                 }
                 AltScreenReadConflict::Frozen(_) | AltScreenReadConflict::Defer => {
                     self.deferred_alt_screen_reads.push(msg);
-                    self.deferred_alt_screen_reads.extend(deferred);
-                    break;
                 }
             }
         }
@@ -9675,7 +9698,7 @@ next_tab = ""
     }
 
     #[test]
-    fn mfinal_alt_screen_read_keeps_global_fifo_while_first_target_is_still_reading() {
+    fn mfinal_alt_screen_read_releases_ready_terminal_without_cross_terminal_blocking() {
         with_terminal_session_test_server(|server, first_terminal_id, _, first_pane_id| {
             let second_pane =
                 server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
@@ -9739,12 +9762,25 @@ next_tab = ""
                 .pending_alt_screen_reads
                 .retain(|pending| pending.terminal_id == first_terminal_id);
             server.process_deferred_alt_screen_reads();
+            assert_eq!(
+                second_input_rx
+                    .try_recv()
+                    .expect("ready second target input")
+                    .as_ref(),
+                b"second"
+            );
+            let second_response = second_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("ready second target response");
+            let parsed: api::schema::SuccessResponse =
+                serde_json::from_str(&second_response).expect("success response");
+            assert_eq!(parsed.result, api::schema::ResponseResult::Ok {});
             assert!(matches!(
-                second_input_rx.try_recv(),
+                first_input_rx.try_recv(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
             assert!(matches!(
-                second_response_rx.try_recv(),
+                first_response_rx.try_recv(),
                 Err(std::sync::mpsc::TryRecvError::Empty)
             ));
 
@@ -9757,21 +9793,169 @@ next_tab = ""
                     .as_ref(),
                 b"first"
             );
+            let response = first_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("deferred first target response");
+            let parsed: api::schema::SuccessResponse =
+                serde_json::from_str(&response).expect("success response");
+            assert_eq!(parsed.result, api::schema::ResponseResult::Ok {});
+        });
+    }
+
+    #[test]
+    fn mfinal_alt_screen_read_keeps_pane_input_set_immediate() {
+        with_terminal_session_test_server(|server, terminal_id, _, pane_id| {
+            let pending = test_pending_alt_screen_read(server, terminal_id);
+            server.pending_alt_screen_reads.push(pending);
+
+            let (input, input_response_rx) = test_api_message(
+                "blocked-input",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id: pane_id.clone(),
+                    text: "blocked".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            server.handle_api_request_with_shutdown_check(input);
+
+            let (settings, settings_response_rx) = test_api_message(
+                "settings",
+                api::schema::Method::PaneInputSet(api::schema::PaneInputSetParams {
+                    pane_id,
+                    right_click: Default::default(),
+                }),
+            );
+            server.handle_api_request_with_shutdown_check(settings);
+
+            let response = settings_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("pane.input.set response while input is deferred");
+            let parsed: api::schema::SuccessResponse =
+                serde_json::from_str(&response).expect("success response");
+            assert_eq!(parsed.result, api::schema::ResponseResult::Ok {});
+            assert!(matches!(
+                input_response_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            assert_eq!(server.deferred_alt_screen_reads.len(), 1);
+        });
+    }
+
+    #[test]
+    fn mfinal_alt_screen_read_keeps_handoff_order_without_blocking_other_terminals() {
+        with_terminal_session_test_server(|server, first_terminal_id, _, first_pane_id| {
+            let second_pane =
+                server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+            server.app.state.ensure_test_terminals();
+            let second_terminal_id = server.app.state.workspaces[0]
+                .terminal_id(second_pane)
+                .expect("second terminal")
+                .clone();
+            let second_pane_number = server.app.state.workspaces[0]
+                .public_pane_number(second_pane)
+                .expect("second public pane number");
+            let second_pane_id = crate::workspace::public_pane_id_for_number(
+                &server.app.state.workspaces[0].id,
+                second_pane_number,
+            );
+            let (first_runtime, mut first_input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+            let (second_runtime, mut second_input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+            server
+                .app
+                .terminal_runtimes
+                .insert(first_terminal_id.clone(), first_runtime);
+            server
+                .app
+                .terminal_runtimes
+                .insert(second_terminal_id, second_runtime);
+            server
+                .pending_alt_screen_reads
+                .push(test_pending_alt_screen_read(
+                    server,
+                    first_terminal_id.clone(),
+                ));
+
+            let (handoff, handoff_response_rx) = test_api_message(
+                "handoff",
+                api::schema::Method::ServerLiveHandoff(Default::default()),
+            );
+            let (second, second_response_rx) = test_api_message(
+                "second",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id: second_pane_id,
+                    text: "second".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            let (first, first_response_rx) = test_api_message(
+                "first",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id: first_pane_id,
+                    text: "first".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            server.handle_api_request_with_shutdown_check(handoff);
+            server.handle_api_request_with_shutdown_check(second);
+            server.handle_api_request_with_shutdown_check(first);
+
             assert_eq!(
                 second_input_rx
                     .try_recv()
-                    .expect("second target input")
+                    .expect("other terminal input")
                     .as_ref(),
                 b"second"
             );
-            for response_rx in [first_response_rx, second_response_rx] {
-                let response = response_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("deferred response");
-                let parsed: api::schema::SuccessResponse =
-                    serde_json::from_str(&response).expect("success response");
-                assert_eq!(parsed.result, api::schema::ResponseResult::Ok {});
-            }
+            let response = second_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("other terminal response");
+            assert!(serde_json::from_str::<api::schema::SuccessResponse>(&response).is_ok());
+            assert!(matches!(
+                first_input_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            assert_eq!(server.deferred_alt_screen_reads.len(), 2);
+
+            server.pending_alt_screen_reads.clear();
+            let mut dispatch_order = Vec::new();
+            server.process_deferred_alt_screen_reads_with(|server, msg| {
+                dispatch_order.push(msg.request.id.clone());
+                if matches!(
+                    msg.request.method,
+                    api::schema::Method::ServerLiveHandoff(_)
+                ) {
+                    let response = serde_json::to_string(&api::schema::SuccessResponse {
+                        id: msg.request.id,
+                        result: api::schema::ResponseResult::Ok {},
+                    })
+                    .expect("handoff response");
+                    let _ = msg.respond_to.send(response);
+                    server.finish_live_handoff_shutdown();
+                    true
+                } else {
+                    server.handle_api_request_with_shutdown_check(msg)
+                }
+            });
+
+            assert_eq!(dispatch_order, ["handoff", "first"]);
+            let handoff_response = handoff_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("handoff response");
+            assert!(
+                serde_json::from_str::<api::schema::SuccessResponse>(&handoff_response).is_ok()
+            );
+            let first_response = first_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("post-handoff response");
+            let error: api::schema::ErrorResponse =
+                serde_json::from_str(&first_response).expect("server stopping response");
+            assert_eq!(error.error.code, "server_unavailable");
+            assert!(matches!(
+                first_input_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
         });
     }
 

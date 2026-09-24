@@ -886,6 +886,8 @@ pub(crate) enum ServerEvent {
         direct_graphics: bool,
         writer: ClientWriter,
     },
+    /// A compatible full-app client enabled audited local direct graphics.
+    ClientDirectGraphicsEnabled { client_id: u64 },
     /// A client sent an input message.
     ClientInput { client_id: u64, data: Vec<u8> },
     /// A client reported the one armed Kitty regular-file response.
@@ -1133,7 +1135,6 @@ fn handle_client_handshake_inner(
         render_encoding,
         keybindings,
         direct_attach_requested,
-        direct_graphics,
     ) = match hello {
         ClientMessage::Hello {
             version,
@@ -1183,7 +1184,6 @@ fn handle_client_handshake_inner(
                 requested_encoding,
                 keybindings,
                 launch_mode == ClientLaunchMode::TerminalAttach,
-                launch_mode == ClientLaunchMode::AppDirectGraphics,
             )
         }
         _ => {
@@ -1249,7 +1249,7 @@ fn handle_client_handshake_inner(
         render_encoding,
         keybindings,
         direct_attach_requested,
-        direct_graphics,
+        direct_graphics: false,
         writer,
     };
     if let Err(err) = server_event_tx.blocking_send(connected) {
@@ -1408,6 +1408,9 @@ fn client_read_loop(
 
         let event = match msg {
             ClientMessage::Input { .. } => unreachable!("raw input handled before dispatch"),
+            ClientMessage::EnableDirectGraphics => {
+                ServerEvent::ClientDirectGraphicsEnabled { client_id }
+            }
             ClientMessage::InputPixels {
                 data,
                 cols,
@@ -2243,8 +2246,64 @@ new_tab = "ctrl+notakey"
 
     #[test]
     fn m865_protocol_19_peer_refuses_protocol_20_without_effect() {
+        use crate::protocol::protocol_19_legacy_decoder as legacy;
+
+        for launch_mode in [
+            legacy::ClientLaunchMode::App,
+            legacy::ClientLaunchMode::TerminalAttach,
+        ] {
+            let (mut client_stream, server_stream, _path) =
+                local_stream_pair("client-handshake-protocol-19");
+            let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+            let should_quit = Arc::new(AtomicBool::new(false));
+            let handshake_quit = should_quit.clone();
+            let handle = std::thread::spawn(move || {
+                handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit)
+            });
+
+            protocol::write_message(
+                &mut client_stream,
+                &legacy::ClientMessage::Hello {
+                    version: 19,
+                    cols: 100,
+                    rows: 30,
+                    cell_width_px: 8,
+                    cell_height_px: 16,
+                    requested_encoding: legacy::RenderEncoding::TerminalAnsi,
+                    keybindings: legacy::ClientKeybindings::Server,
+                    launch_mode,
+                },
+            )
+            .expect("write protocol 19 hello");
+
+            let welcome: legacy::ServerMessage =
+                protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read rejection");
+            match welcome {
+                legacy::ServerMessage::Welcome {
+                    version,
+                    error: Some(error),
+                    ..
+                } => {
+                    assert_eq!(version, 20);
+                    assert!(error.contains("client version 19 is older than server version 20"));
+                }
+                other => panic!("expected protocol rejection, got {other:?}"),
+            }
+            assert!(
+                server_event_rx.try_recv().is_err(),
+                "an incompatible peer must not produce ClientConnected"
+            );
+            handle
+                .join()
+                .expect("handshake thread join")
+                .expect("handshake thread result");
+        }
+    }
+
+    #[test]
+    fn direct_graphics_capability_is_refused_before_welcome() {
         let (mut client_stream, server_stream, _path) =
-            local_stream_pair("client-handshake-protocol-19");
+            local_stream_pair("client-handshake-early-capability");
         let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
         let should_quit = Arc::new(AtomicBool::new(false));
         let handshake_quit = should_quit.clone();
@@ -2252,42 +2311,46 @@ new_tab = "ctrl+notakey"
             handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit)
         });
 
-        protocol::write_message(
-            &mut client_stream,
-            &ClientMessage::Hello {
-                version: 19,
-                cols: 100,
-                rows: 30,
-                cell_width_px: 8,
-                cell_height_px: 16,
-                requested_encoding: RenderEncoding::TerminalAnsi,
-                keybindings: ClientKeybindings::Server,
-                launch_mode: ClientLaunchMode::App,
-            },
-        )
-        .expect("write protocol 19 hello");
-
+        protocol::write_message(&mut client_stream, &ClientMessage::EnableDirectGraphics)
+            .expect("write premature capability");
         let welcome: ServerMessage =
-            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read rejection");
-        match welcome {
-            ServerMessage::Welcome {
-                version,
-                error: Some(error),
-                ..
-            } => {
-                assert_eq!(version, 20);
-                assert!(error.contains("client version 19 is older than server version 20"));
-            }
-            other => panic!("expected protocol rejection, got {other:?}"),
-        }
-        assert!(
-            server_event_rx.try_recv().is_err(),
-            "an incompatible peer must not produce ClientConnected"
-        );
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read refusal");
+        assert!(matches!(
+            welcome,
+            ServerMessage::Welcome { error: Some(error), .. }
+                if error == "expected Hello as first message"
+        ));
+        assert!(server_event_rx.try_recv().is_err());
         handle
             .join()
             .expect("handshake thread join")
             .expect("handshake thread result");
+    }
+
+    #[test]
+    fn client_read_loop_forwards_direct_graphics_capability() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-read-direct-capability");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+
+        protocol::write_message(&mut client_stream, &ClientMessage::EnableDirectGraphics)
+            .expect("write capability");
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "direct graphics capability"),
+            ServerEvent::ClientDirectGraphicsEnabled { client_id: 7 }
+        ));
+
+        should_quit.store(true, Ordering::Release);
+        drop(client_stream);
+        handle
+            .join()
+            .expect("client read thread join")
+            .expect("client read result");
     }
 
     #[test]

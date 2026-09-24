@@ -304,7 +304,7 @@ async fn pixel_input_metadata_cannot_resize_authoritative_client_state() {
 }
 
 #[test]
-fn direct_eligibility_is_installed_with_the_client_connection() {
+fn direct_eligibility_requires_post_welcome_capability() {
     let mut server = test_headless_server();
     let (writer, _control_rx, _render_rx) = test_client_writer();
 
@@ -317,14 +317,44 @@ fn direct_eligibility_is_installed_with_the_client_connection() {
         render_encoding: RenderEncoding::SemanticFrame,
         keybindings: None,
         direct_attach_requested: false,
-        direct_graphics: true,
+        direct_graphics: false,
         writer,
     }));
 
+    assert!(!server.clients[&7].direct_graphics);
+    assert_eq!(server.foreground_client_id, Some(7));
+    assert!(!server.app.direct_graphics_available);
+
+    assert!(server.handle_server_event(ServerEvent::ClientDirectGraphicsEnabled { client_id: 7 }));
     let client = server.clients.get(&7).expect("connected client");
     assert!(client.direct_graphics);
-    assert_eq!(server.foreground_client_id, Some(7));
     assert!(server.app.direct_graphics_available);
+
+    assert!(!server.handle_server_event(ServerEvent::ClientDirectGraphicsEnabled { client_id: 7 }));
+}
+
+#[test]
+fn direct_graphics_capability_is_ignored_during_handoff() {
+    let mut server = test_headless_server();
+    let (writer, _control_rx, _render_rx) = test_client_writer();
+
+    assert!(server.handle_server_event(ServerEvent::ClientConnected {
+        client_id: 7,
+        cols: 80,
+        rows: 24,
+        cell_width_px: 10,
+        cell_height_px: 20,
+        render_encoding: RenderEncoding::SemanticFrame,
+        keybindings: None,
+        direct_attach_requested: false,
+        direct_graphics: false,
+        writer,
+    }));
+    server.handoff_in_progress = true;
+
+    assert!(!server.handle_server_event(ServerEvent::ClientDirectGraphicsEnabled { client_id: 7 }));
+    assert!(!server.clients[&7].direct_graphics);
+    assert!(!server.app.direct_graphics_available);
 }
 
 #[test]
@@ -340,9 +370,10 @@ fn direct_graphics_requires_one_negotiated_app_client() {
         render_encoding: RenderEncoding::SemanticFrame,
         keybindings: None,
         direct_attach_requested: false,
-        direct_graphics: true,
+        direct_graphics: false,
         writer: writer_a,
     }));
+    assert!(server.handle_server_event(ServerEvent::ClientDirectGraphicsEnabled { client_id: 1 }));
     assert!(server.clients[&1].direct_graphics);
     assert!(server.clients[&1].pixel_mouse);
     assert!(server.direct_graphics_available());
@@ -361,6 +392,29 @@ fn direct_graphics_requires_one_negotiated_app_client() {
         writer: writer_b,
     }));
     assert!(!server.direct_graphics_available());
+}
+
+#[test]
+fn direct_graphics_capability_ignores_unregistered_and_terminal_attach_clients() {
+    let mut server = test_headless_server();
+    assert!(!server.handle_server_event(ServerEvent::ClientDirectGraphicsEnabled { client_id: 7 }));
+
+    let (writer, _control, _render) = test_client_writer();
+    assert!(server.handle_server_event(ServerEvent::ClientConnected {
+        client_id: 7,
+        cols: 80,
+        rows: 24,
+        cell_width_px: 10,
+        cell_height_px: 20,
+        render_encoding: RenderEncoding::TerminalAnsi,
+        keybindings: None,
+        direct_attach_requested: true,
+        direct_graphics: false,
+        writer,
+    }));
+    assert!(!server.handle_server_event(ServerEvent::ClientDirectGraphicsEnabled { client_id: 7 }));
+    assert!(!server.clients[&7].direct_graphics);
+    assert!(!server.app.direct_graphics_available);
 }
 
 #[test]

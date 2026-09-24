@@ -260,6 +260,12 @@ and exhaustive. Compatibility remains equality-only: protocol-19 and protocol-20
 upgrade diagnostic before mutation and cannot partially execute the other's methods. Protocol 17, 18, and
 the incompatible intermediate protocol-19 agent shapes are not installable B2 states.
 
+The pre-version `Hello` envelope preserves protocol-19 launch-mode tags (`App = 0`,
+`TerminalAttach = 1`) so either peer can decode far enough to exchange that typed rejection. A compatible
+full-app client enables direct graphics only after `Welcome` with the append-only
+`EnableDirectGraphics` client capability; a terminal-attach or unregistered client cannot enable it, a
+duplicate enable is idempotent, and a client that sends no capability remains non-direct.
+
 Linux host framing separates a coalesced lone Escape from the following escape sequence, while ordinary
 client framing retains its established Alt-key interpretation. Default and SGR mouse frames are complete
 before dispatch; incomplete frames receive the bounded mouse reassembly policy and never leak a consumed
@@ -288,7 +294,9 @@ No deferred send records Submitted before that dispatch; shutdown or live handof
 `server_unavailable` response instead of dropping queued requests. Deferral changes no timeout start point:
 the prompt and start timers retain their existing semantics, although traversal can add up to the existing
 15-second traversal plus 5-second restoration bound before those timers begin. Protocol 20 and its wire IDs
-are unchanged.
+are unchanged. Processing a deferred snapshot requeues only requests that still conflict with their target;
+ready requests for another terminal do not wait behind them. A deferred live handoff remains ordered after
+the traversal and before later input for that terminal, while input for other terminals remains immediate.
 
 Workspace hierarchy and reorder events preserve fork metadata tokens, agent-view projection, glyph grammar,
 selection, and authority boundaries. Closing a workspace's final tab closes the workspace through the normal

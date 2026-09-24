@@ -59,8 +59,6 @@ pub enum ClientKeybindings {
 pub enum ClientLaunchMode {
     /// Full app client.
     App,
-    /// Full app client eligible for audited local direct graphics.
-    AppDirectGraphics,
     /// Direct terminal attach client.
     TerminalAttach,
 }
@@ -368,6 +366,9 @@ pub enum ClientMessage {
 
     /// The direct command was written and flushed; response timing starts now.
     GraphicsTransmissionStarted { transfer_id: u64, image_id: u32 },
+
+    /// Enable audited local direct graphics after a compatible Welcome.
+    EnableDirectGraphics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -882,6 +883,116 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), Fram
     })
 }
 
+/// Exact protocol-19 handshake-facing wire definitions from
+/// `bb6fc7abdb4a062d8c3e2e759416a87c68afa596:src/protocol/wire.rs`.
+///
+/// Keep these independent from the live definitions so compatibility tests
+/// fail when a positional bincode tag or pre-version field changes.
+#[cfg(test)]
+pub(crate) mod protocol_19_legacy_decoder {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) enum RenderEncoding {
+        SemanticFrame,
+        TerminalAnsi,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) enum ClientKeybindings {
+        Server,
+        Local { keys_toml: String },
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) enum ClientLaunchMode {
+        App,
+        TerminalAttach,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) enum ClientMessage {
+        Hello {
+            version: u32,
+            cols: u16,
+            rows: u16,
+            cell_width_px: u32,
+            cell_height_px: u32,
+            requested_encoding: RenderEncoding,
+            keybindings: ClientKeybindings,
+            launch_mode: ClientLaunchMode,
+        },
+        Input {
+            data: Vec<u8>,
+        },
+        ClipboardImage {
+            extension: String,
+            data: Vec<u8>,
+        },
+        Resize {
+            cols: u16,
+            rows: u16,
+            cell_width_px: u32,
+            cell_height_px: u32,
+        },
+        Detach,
+        AttachTerminal {
+            terminal_id: String,
+            takeover: bool,
+        },
+        AttachScroll {
+            source: super::AttachScrollSource,
+            direction: super::AttachScrollDirection,
+            lines: u16,
+            column: Option<u16>,
+            row: Option<u16>,
+            modifiers: u8,
+        },
+        InputEvents {
+            events: Vec<super::ClientInputEvent>,
+        },
+        ObserveTerminal {
+            target: String,
+        },
+        ControlTerminal {
+            target: String,
+            takeover: bool,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) enum ServerMessage {
+        Welcome {
+            version: u32,
+            encoding: RenderEncoding,
+            error: Option<String>,
+        },
+        Frame(super::FrameData),
+        Terminal(super::TerminalFrame),
+        Graphics {
+            bytes: Vec<u8>,
+        },
+        ServerShutdown {
+            reason: Option<String>,
+        },
+        Notify {
+            kind: super::NotifyKind,
+            message: String,
+            body: Option<String>,
+        },
+        Clipboard {
+            data: String,
+        },
+        WindowTitle {
+            title: Option<String>,
+        },
+        ReloadSoundConfig,
+        MouseCapture {
+            enabled: bool,
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Version negotiation
 // ---------------------------------------------------------------------------
@@ -969,6 +1080,124 @@ mod tests {
     }
 
     #[test]
+    fn client_launch_mode_wire_tags_preserve_protocol_19_values() {
+        fn tag(mode: ClientLaunchMode) -> u8 {
+            *bincode::serde::encode_to_vec(mode, bincode::config::standard())
+                .expect("encode launch mode")
+                .first()
+                .expect("launch mode tag")
+        }
+
+        assert_eq!(tag(ClientLaunchMode::App), 0);
+        assert_eq!(tag(ClientLaunchMode::TerminalAttach), 1);
+    }
+
+    #[test]
+    fn protocol_20_app_and_terminal_hellos_decode_as_protocol_19() {
+        use protocol_19_legacy_decoder as legacy;
+
+        for (launch_mode, expected) in [
+            (ClientLaunchMode::App, legacy::ClientLaunchMode::App),
+            (
+                ClientLaunchMode::TerminalAttach,
+                legacy::ClientLaunchMode::TerminalAttach,
+            ),
+        ] {
+            let message = ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                requested_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: ClientKeybindings::Server,
+                launch_mode,
+            };
+            let encoded =
+                bincode::serde::encode_to_vec(&message, bincode::config::standard()).unwrap();
+            let (decoded, consumed): (legacy::ClientMessage, usize) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
+                    .expect("protocol-20 Hello should retain the protocol-19 envelope");
+            assert_eq!(consumed, encoded.len());
+            match decoded {
+                legacy::ClientMessage::Hello {
+                    version,
+                    launch_mode,
+                    ..
+                } => {
+                    assert_eq!(version, PROTOCOL_VERSION);
+                    assert_eq!(launch_mode, expected);
+                }
+                other => panic!("expected legacy Hello, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_19_app_and_terminal_hellos_decode_as_protocol_20() {
+        use protocol_19_legacy_decoder as legacy;
+
+        for (launch_mode, expected) in [
+            (legacy::ClientLaunchMode::App, ClientLaunchMode::App),
+            (
+                legacy::ClientLaunchMode::TerminalAttach,
+                ClientLaunchMode::TerminalAttach,
+            ),
+        ] {
+            let message = legacy::ClientMessage::Hello {
+                version: 19,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                requested_encoding: legacy::RenderEncoding::TerminalAnsi,
+                keybindings: legacy::ClientKeybindings::Server,
+                launch_mode,
+            };
+            let encoded =
+                bincode::serde::encode_to_vec(&message, bincode::config::standard()).unwrap();
+            let (decoded, consumed): (ClientMessage, usize) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
+                    .expect("protocol-19 Hello should decode under protocol 20");
+            assert_eq!(consumed, encoded.len());
+            match decoded {
+                ClientMessage::Hello {
+                    version,
+                    launch_mode,
+                    ..
+                } => {
+                    assert_eq!(version, 19);
+                    assert_eq!(launch_mode, expected);
+                }
+                other => panic!("expected current Hello, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_20_rejection_welcome_decodes_as_protocol_19() {
+        use protocol_19_legacy_decoder as legacy;
+
+        let message = ServerMessage::Welcome {
+            version: PROTOCOL_VERSION,
+            encoding: RenderEncoding::SemanticFrame,
+            error: Some("client version 19 is older".to_owned()),
+        };
+        let encoded = bincode::serde::encode_to_vec(&message, bincode::config::standard()).unwrap();
+        let (decoded, consumed): (legacy::ServerMessage, usize) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
+                .expect("protocol-20 rejection Welcome should decode under protocol 19");
+        assert_eq!(consumed, encoded.len());
+        match decoded {
+            legacy::ServerMessage::Welcome { version, error, .. } => {
+                assert_eq!(version, PROTOCOL_VERSION);
+                assert_eq!(error.as_deref(), Some("client version 19 is older"));
+            }
+            other => panic!("expected legacy Welcome, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn client_message_wire_tags_preserve_protocol_20_order() {
         fn tag(msg: &ClientMessage) -> u8 {
             *bincode::serde::encode_to_vec(msg, bincode::config::standard())
@@ -1040,6 +1269,32 @@ mod tests {
             }),
             9
         );
+        assert_eq!(
+            tag(&ClientMessage::GraphicsTransmissionResult {
+                transfer_id: 1,
+                image_id: 1,
+                success: true,
+            }),
+            10
+        );
+        assert_eq!(
+            tag(&ClientMessage::InputPixels {
+                data: Vec::new(),
+                cols: 80,
+                rows: 24,
+                width_px: 800,
+                height_px: 480,
+            }),
+            11
+        );
+        assert_eq!(
+            tag(&ClientMessage::GraphicsTransmissionStarted {
+                transfer_id: 1,
+                image_id: 1,
+            }),
+            12
+        );
+        assert_eq!(tag(&ClientMessage::EnableDirectGraphics), 13);
     }
 
     #[test]
@@ -1284,35 +1539,32 @@ mod tests {
     }
 
     #[test]
-    fn protocol_19_legacy_decoder_rejects_new_terminal_stream_tags() {
-        #[allow(dead_code)]
-        #[derive(serde::Deserialize)]
-        enum LegacyProtocol19ClientMessage {
-            Hello,
-            Input,
-            ClipboardImage,
-            Resize,
-            Detach,
-            AttachTerminal,
-            AttachScroll,
-            InputEvents,
-        }
-
+    fn protocol_19_legacy_decoder_rejects_protocol_20_client_tags() {
         for message in [
-            ClientMessage::ObserveTerminal {
-                target: "w1:p1".to_owned(),
+            ClientMessage::GraphicsTransmissionResult {
+                transfer_id: 1,
+                image_id: 2,
+                success: true,
             },
-            ClientMessage::ControlTerminal {
-                target: "w1:p1".to_owned(),
-                takeover: false,
+            ClientMessage::InputPixels {
+                data: Vec::new(),
+                cols: 80,
+                rows: 24,
+                width_px: 800,
+                height_px: 480,
             },
+            ClientMessage::GraphicsTransmissionStarted {
+                transfer_id: 1,
+                image_id: 2,
+            },
+            ClientMessage::EnableDirectGraphics,
         ] {
             let encoded =
                 bincode::serde::encode_to_vec(&message, bincode::config::standard()).unwrap();
-            let legacy = bincode::serde::decode_from_slice::<LegacyProtocol19ClientMessage, _>(
-                &encoded,
-                bincode::config::standard(),
-            );
+            let legacy = bincode::serde::decode_from_slice::<
+                protocol_19_legacy_decoder::ClientMessage,
+                _,
+            >(&encoded, bincode::config::standard());
             assert!(
                 legacy.is_err(),
                 "legacy protocol-19 decoder accepted {message:?}"
@@ -1653,6 +1905,24 @@ mod tests {
             ),
             (ServerMessage::KittyKeyboardReportAll { enabled: false }, 10),
             (ServerMessage::TerminalBell { count: 1 }, 11),
+            (
+                ServerMessage::GraphicsFile {
+                    path: String::new(),
+                    expected_len: 0,
+                    image_id: 1,
+                    transfer_id: 1,
+                    leading: Vec::new(),
+                    control: String::new(),
+                },
+                12,
+            ),
+            (
+                ServerMessage::GraphicsTransmissionRetired {
+                    transfer_id: 1,
+                    image_id: 1,
+                },
+                13,
+            ),
         ];
 
         for (message, expected) in cases {
