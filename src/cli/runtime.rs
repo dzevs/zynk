@@ -1,9 +1,11 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use crate::api::schema::{
-    EmptyParams, Method, PaneFocusDirectionParams, PaneMoveParams, PaneRenameParams,
-    PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomParams, Request,
-    TabCreateParams, TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams,
-    WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget, WorktreeCreateParams,
-    WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
+    EmptyParams, Method, PaneFocusDirectionParams, PaneInputSetParams, PaneMoveParams,
+    PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
+    PaneZoomParams, Request, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
+    WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
+    WorktreeCreateParams, WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 fn print_method_response(id: &'static str, method: Method) -> std::io::Result<i32> {
@@ -112,6 +114,10 @@ pub(super) fn pane_zoom(params: PaneZoomParams) -> std::io::Result<i32> {
 
 pub(super) fn pane_rename(params: PaneRenameParams) -> std::io::Result<i32> {
     print_method_response("cli:pane:rename", Method::PaneRename(params))
+}
+
+pub(super) fn pane_input_set(params: PaneInputSetParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:input:set", Method::PaneInputSet(params))
 }
 
 pub(super) fn pane_split(params: PaneSplitParams) -> std::io::Result<i32> {

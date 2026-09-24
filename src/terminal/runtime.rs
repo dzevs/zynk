@@ -332,8 +332,16 @@ impl TerminalRuntime {
         self.0.bracketed_paste_enabled()
     }
 
+    pub fn modify_other_keys_enabled(&self) -> bool {
+        self.0.modify_other_keys_enabled()
+    }
+
     pub fn mouse_reporting_enabled(&self) -> bool {
         self.0.mouse_reporting_enabled()
+    }
+
+    pub fn sgr_pixel_mouse_enabled(&self) -> bool {
+        self.0.sgr_pixel_mouse_enabled()
     }
 
     pub fn plain_page_keys_use_host_scrollback(&self) -> Option<bool> {
@@ -385,20 +393,35 @@ impl TerminalRuntime {
         self.0.agent_osc_progress()
     }
 
+    #[cfg(test)]
     pub fn recent_text(&self, lines: usize) -> String {
         self.0.recent_text(lines)
     }
 
-    pub fn recent_ansi(&self, lines: usize) -> String {
-        self.0.recent_ansi(lines)
+    pub(crate) fn recent_text_snapshot(&self, lines: usize) -> crate::pane::TerminalReadSnapshot {
+        self.0.recent_text_snapshot(lines)
+    }
+
+    pub(crate) fn recent_ansi_snapshot(&self, lines: usize) -> crate::pane::TerminalReadSnapshot {
+        self.0.recent_ansi_snapshot(lines)
     }
 
     pub fn recent_unwrapped_text(&self, lines: usize) -> String {
         self.0.recent_unwrapped_text(lines)
     }
 
-    pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
-        self.0.recent_unwrapped_ansi(lines)
+    pub(crate) fn recent_unwrapped_text_snapshot(
+        &self,
+        lines: usize,
+    ) -> crate::pane::TerminalReadSnapshot {
+        self.0.recent_unwrapped_text_snapshot(lines)
+    }
+
+    pub(crate) fn recent_unwrapped_ansi_snapshot(
+        &self,
+        lines: usize,
+    ) -> crate::pane::TerminalReadSnapshot {
+        self.0.recent_unwrapped_ansi_snapshot(lines)
     }
 
     pub fn snapshot_history(&self) -> Option<String> {
@@ -477,34 +500,66 @@ impl TerminalRuntime {
         self.0.wheel_routing()
     }
 
+    pub(crate) fn screen_text_snapshot(
+        &self,
+    ) -> Option<(
+        crate::ghostty::ActiveScreen,
+        crate::terminal::ScreenSnapshot,
+    )> {
+        let (screen, cols, rows) = self.0.screen_text_snapshot()?;
+        Some((screen, crate::terminal::ScreenSnapshot { cols, rows }))
+    }
+
+    pub(crate) fn screen_text_snapshot_with_seq(
+        &self,
+    ) -> Option<(
+        crate::ghostty::ActiveScreen,
+        crate::terminal::ScreenSnapshot,
+        u64,
+    )> {
+        for _ in 0..3 {
+            let before = self.content_seq();
+            if !before.is_multiple_of(2) {
+                continue;
+            }
+            let (screen, snapshot) = self.screen_text_snapshot()?;
+            let after = self.content_seq();
+            if before == after {
+                return Some((screen, snapshot, after));
+            }
+        }
+        None
+    }
+
     pub fn encode_mouse_button(
         &self,
         kind: crossterm::event::MouseEventKind,
-        column: u16,
-        row: u16,
+        position: crate::input::mouse::Position,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
-        self.0.encode_mouse_button(kind, column, row, modifiers)
+        self.0.encode_mouse_button(kind, position, modifiers)
     }
 
     pub fn encode_mouse_motion(
         &self,
         kind: crossterm::event::MouseEventKind,
-        column: u16,
-        row: u16,
+        position: crate::input::mouse::Position,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
-        self.0.encode_mouse_motion(kind, column, row, modifiers)
+        self.0.encode_mouse_motion(kind, position, modifiers)
     }
 
     pub fn encode_mouse_wheel(
         &self,
         kind: crossterm::event::MouseEventKind,
-        column: u16,
-        row: u16,
+        position: crate::input::mouse::Position,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
-        self.0.encode_mouse_wheel(kind, column, row, modifiers)
+        self.0.encode_mouse_wheel(kind, position, modifiers)
+    }
+
+    pub(crate) fn pixel_size(&self) -> Option<(u32, u32)> {
+        self.0.pixel_size()
     }
 
     pub fn encode_alternate_scroll(
@@ -536,6 +591,10 @@ impl TerminalRuntime {
 
     pub(crate) fn current_size(&self) -> (u16, u16) {
         self.0.current_size()
+    }
+
+    pub(crate) fn content_seq(&self) -> u64 {
+        self.0.content_seq()
     }
 }
 

@@ -264,6 +264,31 @@ impl App {
         None
     }
 
+    pub(crate) fn host_keyboard_report_all_requested(&self) -> bool {
+        if self.state.popup_pane.is_none()
+            && matches!(self.state.mode, Mode::Prefix | Mode::Navigate)
+        {
+            return true;
+        }
+
+        let runtime = if self.state.popup_pane.is_some() {
+            self.popup_runtime()
+        } else if self.state.mode == Mode::Terminal {
+            self.state.active.and_then(|ws_idx| {
+                self.state
+                    .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            })
+        } else {
+            None
+        };
+
+        runtime.is_some_and(|runtime| {
+            let protocol = runtime.keyboard_protocol();
+            protocol.reports_all_keys()
+                || (protocol.reports_event_types() && runtime.modify_other_keys_enabled())
+        })
+    }
+
     pub(crate) fn forward_terminal_key_to_target_headless(
         &self,
         target: &TerminalInputTarget,

@@ -43,8 +43,8 @@ use self::agent_detection::{
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{
-    TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalTextMatch, TerminalTextPoint,
-    TerminalWordMotion,
+    TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalReadSnapshot, TerminalTextMatch,
+    TerminalTextPoint, TerminalWordMotion,
 };
 pub use self::{
     state::PaneState,
@@ -1090,6 +1090,7 @@ pub struct PaneRuntime {
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
+    content_seq: Arc<AtomicU64>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     // A single detector awaits each send, bounding this to queue capacity + one.
@@ -1484,6 +1485,20 @@ fn usable_reported_cwd(cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
     (cwd.is_absolute() && cwd.is_dir()).then_some(cwd)
 }
 
+fn publish_terminal_bells(pane_id: PaneId, count: u16, events: &mpsc::Sender<AppEvent>) {
+    if count == 0 {
+        return;
+    }
+    if let Err(err) = events.try_send(AppEvent::TerminalBell { pane_id, count }) {
+        warn!(
+            pane = pane_id.raw(),
+            count,
+            err = %err,
+            "failed to queue terminal bell"
+        );
+    }
+}
+
 fn publish_reported_cwd(
     pane_id: PaneId,
     cwd: std::path::PathBuf,
@@ -1860,6 +1875,7 @@ impl PaneRuntime {
         let child_pid = Arc::new(AtomicU32::new(child_pid));
         let reported_cwd = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
+        let content_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
 
         let io = {
@@ -1867,6 +1883,7 @@ impl PaneRuntime {
             let response_writer = response_tx.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
+            let content_seq = content_seq.clone();
             let detection_content_seq = detection_content_seq.clone();
             let child_pid = child_pid.clone();
             let read_events = events.clone();
@@ -1874,11 +1891,17 @@ impl PaneRuntime {
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
+                content_seq.fetch_add(1, Ordering::AcqRel);
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
+                content_seq.fetch_add(1, Ordering::Release);
+                publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
                 observe_detection_content_change(bytes, &detection_content_seq);
-                if result.request_render && render_dirty.request_pty(pane_id) {
+                let title_requested =
+                    result.terminal_title_changed && render_dirty.request_terminal_title(pane_id);
+                let render_requested = result.request_render && render_dirty.request_pty(pane_id);
+                if title_requested || render_requested {
                     render_notify.notify_one();
                 }
                 if let Some(delay) = result.render_delay {
@@ -1947,6 +1970,7 @@ impl PaneRuntime {
             reported_cwd,
             child_wait_completed: None,
             kitty_keyboard_flags,
+            content_seq,
             detection_content_seq,
             full_lifecycle_authority_active,
             pending_process_exits,
@@ -2004,6 +2028,7 @@ impl PaneRuntime {
         let child_start_time = Arc::new(AtomicU64::new(0));
         let reported_cwd = Arc::new(Mutex::new(None));
         let child_wait_completed = Arc::new(AtomicBool::new(false));
+        let content_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let pending_process_exits = Arc::new(Mutex::new(Vec::new()));
@@ -2047,19 +2072,26 @@ impl PaneRuntime {
             let response_writer = response_tx.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
+            let content_seq = content_seq.clone();
             let detection_content_seq = detection_content_seq.clone();
             let child_pid = child_pid.clone();
             let events = events.clone();
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
+                content_seq.fetch_add(1, Ordering::AcqRel);
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
+                content_seq.fetch_add(1, Ordering::Release);
+                publish_terminal_bells(pane_id, result.terminal_bells, &events);
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
                 }
-                if result.request_render && render_dirty.request_pty(pane_id) {
+                let title_requested =
+                    result.terminal_title_changed && render_dirty.request_terminal_title(pane_id);
+                let render_requested = result.request_render && render_dirty.request_pty(pane_id);
+                if title_requested || render_requested {
                     render_notify.notify_one();
                 }
                 if let Some(delay) = result.render_delay {
@@ -2502,6 +2534,7 @@ impl PaneRuntime {
             reported_cwd,
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
+            content_seq,
             detection_content_seq,
             full_lifecycle_authority_active,
             pending_process_exits,
@@ -2557,6 +2590,10 @@ impl PaneRuntime {
     pub(crate) fn current_size(&self) -> (u16, u16) {
         let (rows, cols, _, _) = self.current_size.get();
         (rows, cols)
+    }
+
+    pub(crate) fn content_seq(&self) -> u64 {
+        self.content_seq.load(Ordering::Acquire)
     }
 
     /// Resize if the dimensions actually changed.
@@ -2649,6 +2686,10 @@ impl PaneRuntime {
         self.terminal.bracketed_paste_enabled()
     }
 
+    pub fn modify_other_keys_enabled(&self) -> bool {
+        self.terminal.modify_other_keys_enabled()
+    }
+
     pub fn focus_reporting_enabled(&self) -> bool {
         self.terminal.focus_reporting_enabled()
     }
@@ -2663,6 +2704,10 @@ impl PaneRuntime {
 
     pub fn alternate_screen_active(&self) -> bool {
         self.terminal.alternate_screen_active()
+    }
+
+    pub fn sgr_pixel_mouse_enabled(&self) -> bool {
+        self.terminal.sgr_pixel_mouse_enabled()
     }
 
     pub fn cursor_state(&self, area: Rect, show_cursor: bool) -> Option<TerminalCursorState> {
@@ -2713,24 +2758,33 @@ impl PaneRuntime {
         self.terminal.agent_osc_progress()
     }
 
+    #[cfg(test)]
     pub fn recent_text(&self, lines: usize) -> String {
         self.terminal.recent_text(lines)
     }
 
-    pub fn recent_ansi(&self, lines: usize) -> String {
-        self.terminal.recent_ansi(lines)
+    pub(crate) fn recent_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
+        self.terminal.recent_text_snapshot(lines)
+    }
+
+    pub(crate) fn recent_ansi_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
+        self.terminal.recent_ansi_snapshot(lines)
     }
 
     pub fn recent_unwrapped_text(&self, lines: usize) -> String {
         self.terminal.recent_unwrapped_text(lines)
     }
 
-    pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
-        self.terminal.recent_unwrapped_ansi(lines)
+    pub(crate) fn recent_unwrapped_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
+        self.terminal.recent_unwrapped_text_snapshot(lines)
+    }
+
+    pub(crate) fn recent_unwrapped_ansi_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
+        self.terminal.recent_unwrapped_ansi_snapshot(lines)
     }
 
     pub fn snapshot_history(&self) -> Option<String> {
-        let ansi = self.recent_unwrapped_ansi(usize::MAX);
+        let ansi = self.recent_unwrapped_ansi_snapshot(usize::MAX).text;
         (!ansi.trim().is_empty()).then_some(ansi)
     }
 
@@ -2874,43 +2928,54 @@ impl PaneRuntime {
         self.terminal.wheel_routing()
     }
 
+    pub(crate) fn screen_text_snapshot(
+        &self,
+    ) -> Option<(
+        crate::ghostty::ActiveScreen,
+        u16,
+        Vec<crate::ghostty::ScreenTextRow>,
+    )> {
+        self.terminal.screen_text_snapshot()
+    }
+
     pub fn encode_mouse_button(
         &self,
         kind: crossterm::event::MouseEventKind,
-        column: u16,
-        row: u16,
+        position: crate::input::mouse::Position,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
         if !self.mouse_reporting_enabled() {
             return None;
         }
-        self.terminal
-            .encode_mouse_button(kind, column, row, modifiers)
+        self.terminal.encode_mouse_button(kind, position, modifiers)
     }
 
     pub fn encode_mouse_motion(
         &self,
         kind: crossterm::event::MouseEventKind,
-        column: u16,
-        row: u16,
+        position: crate::input::mouse::Position,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
-        self.terminal
-            .encode_mouse_motion(kind, column, row, modifiers)
+        self.terminal.encode_mouse_motion(kind, position, modifiers)
     }
 
     pub fn encode_mouse_wheel(
         &self,
         kind: crossterm::event::MouseEventKind,
-        column: u16,
-        row: u16,
+        position: crate::input::mouse::Position,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
         if self.wheel_routing()? != WheelRouting::MouseReport {
             return None;
         }
-        self.terminal
-            .encode_mouse_wheel(kind, column, row, modifiers)
+        self.terminal.encode_mouse_wheel(kind, position, modifiers)
+    }
+
+    pub(crate) fn pixel_size(&self) -> Option<(u32, u32)> {
+        let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
+        let width = u32::from(cols).checked_mul(cell_width_px)?;
+        let height = u32::from(rows).checked_mul(cell_height_px)?;
+        (width > 0 && height > 0).then_some((width, height))
     }
 
     pub fn encode_alternate_scroll(
@@ -3057,8 +3122,10 @@ impl PaneRuntime {
     }
 
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
+        self.content_seq.fetch_add(1, Ordering::AcqRel);
         let (tx, _rx) = mpsc::channel(1);
         let _ = self.terminal.process_pty_bytes(self.pane_id, 0, bytes, &tx);
+        self.content_seq.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn test_with_scrollback_bytes(
@@ -3099,6 +3166,7 @@ impl PaneRuntime {
                 reported_cwd: Arc::new(Mutex::new(None)),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+                content_seq: Arc::new(AtomicU64::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
                 pending_process_exits: Arc::new(Mutex::new(Vec::new())),
@@ -3115,6 +3183,24 @@ impl PaneRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn history_content_sequence_stays_separate_from_detection_sequence() {
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        let content_before = runtime.content_seq();
+        let detection_before = runtime.detection_content_seq.load(Ordering::Acquire);
+
+        runtime.test_process_pty_bytes(b"history");
+        assert_eq!(runtime.content_seq(), content_before + 2);
+        assert_eq!(
+            runtime.detection_content_seq.load(Ordering::Acquire),
+            detection_before
+        );
+
+        mark_detection_content_changed(&runtime.detection_content_seq);
+        assert_eq!(runtime.content_seq(), content_before + 2);
+        assert!(runtime.detection_content_seq.load(Ordering::Acquire) > detection_before);
+    }
+
     #[tokio::test]
     async fn m839a_input_observer_records_actual_queue_results_and_paste_delegation() {
         let (runtime, mut rx) = PaneRuntime::test_with_channel_capacity(80, 24, 1);
@@ -4207,6 +4293,46 @@ mod tests {
         assert!(history.contains("handoff-primary-history"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_pty_reader_aggregates_terminal_bells() {
+        let (events, mut event_rx) = mpsc::channel(8);
+        let pane_id = PaneId::from_raw(42);
+        let runtime = PaneRuntime::spawn_shell_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            "printf '\\a\\a'; sleep 0.05",
+            &PaneLaunchEnv::default(),
+            AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+
+        let bell = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(AppEvent::TerminalBell {
+                    pane_id: delivered_pane,
+                    count,
+                }) = event_rx.recv().await
+                {
+                    break (delivered_pane, count);
+                }
+            }
+        })
+        .await
+        .expect("PTY reader should publish terminal bells");
+
+        assert_eq!(bell, (pane_id, 2));
+        runtime.shutdown();
+    }
+
     #[tokio::test]
     async fn handoff_history_ansi_skips_alternate_screen() {
         let runtime = PaneRuntime::test_with_scrollback_bytes(
@@ -4373,6 +4499,7 @@ mod tests {
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            content_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             pending_process_exits: Arc::new(Mutex::new(Vec::new())),
@@ -4407,6 +4534,7 @@ mod tests {
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            content_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             pending_process_exits: Arc::new(Mutex::new(Vec::new())),

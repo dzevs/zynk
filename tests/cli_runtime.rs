@@ -60,7 +60,10 @@ impl Fixture {
                                 if done.load(Ordering::Acquire)
                                     || started.elapsed() >= Duration::from_secs(3)
                                 {
-                                    assert_eq!(accepted_connections, 0);
+                                    assert_eq!(
+                                        accepted_connections, 0,
+                                        "invalid command connected: {args:?}"
+                                    );
                                     return None;
                                 }
                                 thread::sleep(Duration::from_millis(5));
@@ -350,7 +353,7 @@ fn runtime_worktree_cli_contract() {
     let fixture = Fixture::new();
     let cases = [
         (
-            vec!["worktree", "list", "--cwd", "relative/repo", "--json"],
+            vec!["worktree", "list", "--cwd", "relative/repo"],
             json!({"id":"cli:worktree:list", "method":"worktree.list", "params":{"cwd":fixture.base.join("relative/repo")}}),
         ),
         (
@@ -373,7 +376,6 @@ fn runtime_worktree_cli_contract() {
                 "two words",
                 "--no-focus",
                 "--focus",
-                "--json",
             ],
             json!({"id":"cli:worktree:create", "method":"worktree.create", "params":{"cwd":fixture.base.join("home/repo"), "branch":"feature/new", "base":"base/ref", "path":fixture.base.join("relative/tree"), "label":"two words", "focus":true}}),
         ),
@@ -400,7 +402,6 @@ fn runtime_worktree_cli_contract() {
                 "two words",
                 "--no-focus",
                 "--focus",
-                "--json",
             ],
             json!({"id":"cli:worktree:open", "method":"worktree.open", "params":{"workspace_id":"w8", "path":fixture.base.join("home/tree"), "label":"two words", "focus":true}}),
         ),
@@ -418,14 +419,7 @@ fn runtime_worktree_cli_contract() {
             json!({"id":"cli:worktree:open", "method":"worktree.open", "params":{"cwd":fixture.base.join("relative/repo"), "branch":"feature/old", "focus":false}}),
         ),
         (
-            vec![
-                "worktree",
-                "remove",
-                "--workspace",
-                "w4",
-                "--force",
-                "--json",
-            ],
+            vec!["worktree", "remove", "--workspace", "w4", "--force"],
             json!({"id":"cli:worktree:remove", "method":"worktree.remove", "params":{"workspace_id":"w4", "force":true}}),
         ),
         (
@@ -435,6 +429,46 @@ fn runtime_worktree_cli_contract() {
     ];
     for (args, expected) in cases {
         fixture.assert_case(&args, expected);
+    }
+    for (without_json, with_json, expected) in [
+        (
+            vec!["worktree", "list", "--workspace", "w4"],
+            vec!["worktree", "list", "--workspace", "w4", "--json"],
+            json!({"id":"cli:worktree:list", "method":"worktree.list", "params":{"workspace_id":"w4"}}),
+        ),
+        (
+            vec!["worktree", "create", "--workspace", "w7", "--no-focus"],
+            vec![
+                "worktree",
+                "create",
+                "--workspace",
+                "w7",
+                "--no-focus",
+                "--json",
+            ],
+            json!({"id":"cli:worktree:create", "method":"worktree.create", "params":{"workspace_id":"w7", "focus":false}}),
+        ),
+        (
+            vec!["worktree", "open", "--workspace", "w8", "--path", "~/tree"],
+            vec![
+                "worktree",
+                "open",
+                "--workspace",
+                "w8",
+                "--path",
+                "~/tree",
+                "--json",
+            ],
+            json!({"id":"cli:worktree:open", "method":"worktree.open", "params":{"workspace_id":"w8", "path":fixture.base.join("home/tree"), "focus":false}}),
+        ),
+        (
+            vec!["worktree", "remove", "--workspace", "w5"],
+            vec!["worktree", "remove", "--workspace", "w5", "--json"],
+            json!({"id":"cli:worktree:remove", "method":"worktree.remove", "params":{"workspace_id":"w5", "force":false}}),
+        ),
+    ] {
+        fixture.assert_case(&without_json, expected.clone());
+        fixture.assert_case(&with_json, expected);
     }
     for args in [
         vec!["worktree", "list", "--workspace", "w1", "--cwd", "path"],
@@ -492,10 +526,10 @@ fn runtime_pane_rename_contract() {
 #[test]
 fn runtime_pane_split_contract() {
     let fixture = Fixture::new();
-    fixture.assert_case(&["pane", "split", "discarded:p1", "--current", "--direction", "down", "--ratio", "0.25", "--cwd", "~/literal", "--no-focus", "--focus"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"target_pane_id":"caller:p9", "direction":"down", "ratio":0.25, "cwd":"~/literal", "focus":true}}));
-    fixture.assert_case(&["pane", "split", "--current", "--pane", "chosen:p8", "--direction", "right", "--focus", "--no-focus"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"target_pane_id":"chosen:p8", "direction":"right", "focus":false}}));
-    fixture.assert_case(&["pane", "split", "--direction", "right"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"direction":"right", "focus":false}}));
-    fixture.assert_case(&["pane", "split", "positional:p4", "--direction", "down"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"target_pane_id":"positional:p4", "direction":"down", "focus":false}}));
+    fixture.assert_case(&["pane", "split", "discarded:p1", "--current", "--direction", "down", "--ratio", "0.25", "--cwd", "~/literal", "--no-focus", "--focus"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"target_pane_id":"caller:p9", "direction":"down", "ratio":0.25, "cwd":"~/literal", "focus":true, "right_click":"zynk"}}));
+    fixture.assert_case(&["pane", "split", "--current", "--pane", "chosen:p8", "--direction", "right", "--focus", "--no-focus"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"target_pane_id":"chosen:p8", "direction":"right", "focus":false, "right_click":"zynk"}}));
+    fixture.assert_case(&["pane", "split", "--direction", "right"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"direction":"right", "focus":false, "right_click":"zynk"}}));
+    fixture.assert_case(&["pane", "split", "positional:p4", "--direction", "down"], json!({"id":"cli:pane:split", "method":"pane.split", "params":{"target_pane_id":"positional:p4", "direction":"down", "focus":false, "right_click":"zynk"}}));
     fixture.assert_invalid(&["pane", "split", "--direction", "right", "--ratio", "inf"]);
     fixture.assert_invalid(&["pane", "split", "--direction", "right", "--env", "X=y"]);
 }

@@ -456,6 +456,13 @@ impl App {
         );
     }
 
+    pub(crate) fn move_workspace_block_via_api(
+        &mut self,
+        params: crate::api::schema::WorkspaceMoveBlockParams,
+    ) {
+        self.runtime_workspace_move_block("tui.workspace.move_block", params);
+    }
+
     pub(crate) fn focus_tab_idx_via_api(&mut self, tab_idx: usize) {
         let Some(ws_idx) = self.state.active else {
             return;
@@ -583,6 +590,7 @@ impl App {
                 ratio: None,
                 cwd: None,
                 focus: true,
+                right_click: Default::default(),
             },
         );
     }

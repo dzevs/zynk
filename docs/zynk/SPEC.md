@@ -251,6 +251,57 @@ one typed `server_not_running` diagnostic with a concrete start command; protoco
 errors retain their own diagnostics. `zynk --skill` prints the bundled root `SKILL.md`; release preparation
 continues to use the repository's `zynk-pre-release-audit` skill.
 
+### B2 input, read, presentation, and protocol contract
+
+Binary client/server protocol 20 atomically absorbs the protocol-19 B1 method set and adds Kitty printable
+press/repeat/release identity, report-all state, SGR-pixel mouse input, pane-originated bells, direct graphics
+transfer state, and outer-window-title updates. Wire discriminants and runtime method populations are unique
+and exhaustive. Compatibility remains equality-only: protocol-19 and protocol-20 peers receive a typed
+upgrade diagnostic before mutation and cannot partially execute the other's methods. Protocol 17, 18, and
+the incompatible intermediate protocol-19 agent shapes are not installable B2 states.
+
+Linux host framing separates a coalesced lone Escape from the following escape sequence, while ordinary
+client framing retains its established Alt-key interpretation. Default and SGR mouse frames are complete
+before dispatch; incomplete frames receive the bounded mouse reassembly policy and never leak a consumed
+prefix. Kitty report-all state is read through narrow scalar terminal accessors. Printable press, repeat, and
+release kinds remain distinct through raw input, wire transport, routing, and pane encoding. No Windows VTI,
+macOS input compatibility arm, aggregate terminal snapshot, or non-Linux broken-pipe implementation is part
+of this Linux-only fork.
+
+Pane and agent read results carry an explicit `truncated` fact. A bounded result marks truncation when omitted
+history exists; it does not infer content that was not returned. Idle alternate-screen reads use the
+server-owned scroll observer and the optimized terminal-history snapshot path while preserving content/event
+sequence separation. Read, wait, and observation paths create zero conversation rows and zero delivery
+events. `pane read` and `wait output` accept reordered value options and `--flag=value` without changing
+defaults. Query `--current` resolves from the authenticated caller pane and refuses an absent binding.
+Worktree `--json` is absent from help and command specification but remains accepted by all four worktree
+parsers as a hidden compatibility no-op; worktree output is always JSON. Non-UTF-8 argv is a bounded usage
+error rather than a panic.
+
+Workspace hierarchy and reorder events preserve fork metadata tokens, agent-view projection, glyph grammar,
+selection, and authority boundaries. Closing a workspace's final tab closes the workspace through the normal
+mutation/event path. Right-click routing is typed per pane as `zynk` or `pane`; API/CLI mutation requires the
+same caller/pane admission as input, and context-menu handling cannot mutate an unowned target.
+
+Contiguous ANSI diff runs may share one write only when cursor, style, and flush semantics are unchanged.
+Transient resize requests repaint. Pane BEL counts route only to the active client. Local or remote terminal
+hangup, server EOF, and broken output pipes restore terminal state or exit quietly on Linux.
+
+`ui.window_title` defaults to `{hostname}: {workspace}` and supports `{tab}`, `{pane}`, and
+`{terminal_title}`. Empty disables ownership; malformed templates diagnose without taking the title. The
+server sanitizes rendered and API titles, deduplicates unchanged sends, targets only the foreground client,
+and retains an explicit API override across live handoff until clear. Its render wake joins
+`RenderSignalState` without removing generic or immediate PTY wake sources.
+
+Direct pane-frame delivery is an internal optimization behind the existing default-off
+`experimental.kitty_graphics` gate. It admits only an eligible local app owner, one current transfer, bounded
+queue/backpressure, private regular source/cache files, exact transfer/image acknowledgement, and explicit
+retirement. Input response matching cannot consume unrelated keys, paste, mouse, or graphics bytes. Canonical
+RGBA dimensions, public upload/body limits, conflict rules, cleanup, fallback acknowledgement, and the open
+aggregate resource bound remain those in the Experimental pane graphics section. High-DPI direct files scale
+from read-time cell geometry; absent geometry or direct-delivery refusal retains the bounded encoded fallback.
+Neither enqueue nor acknowledgement proves physical display.
+
 **Send response (F4):** every send returns the persisted record + delivery state:
 ```json
 { "result": "ok", "command": "agent send", "message_id": "...", "conversation_id": "...",

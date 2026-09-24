@@ -6,7 +6,7 @@ use bytes::Bytes;
 
 use crate::api::schema::{
     AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentSendParams, AgentStartParams,
-    AgentTarget, PaneReadResult, ReadFormat, ReadSource, ResponseResult,
+    AgentTarget, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -202,21 +202,12 @@ impl App {
         else {
             return agent_not_found(id, &params.target);
         };
-        let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
-        let text = match params.format {
-            ReadFormat::Text => match params.source {
-                ReadSource::Visible => pane.visible_text(),
-                ReadSource::Recent => pane.recent_text(requested_lines),
-                ReadSource::RecentUnwrapped => pane.recent_unwrapped_text(requested_lines),
-                ReadSource::Detection => pane.detection_text(),
-            },
-            ReadFormat::Ansi => match params.source {
-                ReadSource::Visible => pane.visible_ansi(),
-                ReadSource::Recent => pane.recent_ansi(requested_lines),
-                ReadSource::RecentUnwrapped => pane.recent_unwrapped_ansi(requested_lines),
-                ReadSource::Detection => pane.detection_text(),
-            },
-        };
+        let snapshot = crate::app::api_helpers::read_terminal_snapshot(
+            pane,
+            params.source,
+            params.format,
+            params.lines,
+        );
 
         encode_success(
             id,
@@ -231,9 +222,9 @@ impl App {
                         .unwrap(),
                     source: params.source,
                     format: params.format,
-                    text,
+                    text: snapshot.text,
                     revision: 0,
-                    truncated: false,
+                    truncated: snapshot.truncated,
                 },
             },
         )

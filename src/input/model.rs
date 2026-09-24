@@ -280,6 +280,10 @@ impl KeyboardProtocol {
     pub(crate) fn reports_event_types(self) -> bool {
         matches!(self, Self::Kitty { flags } if flags & 0b0000_0010 != 0)
     }
+
+    pub(crate) fn reports_all_keys(self) -> bool {
+        matches!(self, Self::Kitty { flags } if flags & 0b0000_1000 != 0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +309,7 @@ pub enum MouseProtocolEncoding {
     Default,
     Utf8,
     Sgr,
+    SgrPixels,
 }
 
 #[cfg(test)]

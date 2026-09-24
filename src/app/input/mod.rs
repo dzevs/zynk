@@ -443,6 +443,9 @@ impl App {
                         source_ws_idx,
                         insert_idx,
                     } => self.move_workspace_via_api(source_ws_idx, insert_idx),
+                    MouseAction::MoveWorkspaceBlock { params } => {
+                        self.move_workspace_block_via_api(params)
+                    }
                     MouseAction::MoveTab {
                         ws_idx,
                         source_tab_idx,
@@ -532,15 +535,17 @@ impl App {
         if !inner.contains((mouse.column, mouse.row).into()) {
             return;
         }
-        let column = mouse.column.saturating_sub(inner.x);
-        let row = mouse.row.saturating_sub(inner.y);
+        let position = crate::input::mouse::Position::Cell {
+            column: mouse.column.saturating_sub(inner.x),
+            row: mouse.row.saturating_sub(inner.y),
+        };
         let bytes = match mouse.kind {
             MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
             | MouseEventKind::ScrollRight => match rt.wheel_routing() {
                 Some(crate::pane::WheelRouting::MouseReport) => {
-                    rt.encode_mouse_wheel(mouse.kind, column, row, mouse.modifiers)
+                    rt.encode_mouse_wheel(mouse.kind, position, mouse.modifiers)
                 }
                 Some(crate::pane::WheelRouting::AlternateScroll) => {
                     rt.encode_alternate_scroll(mouse.kind)
@@ -557,12 +562,10 @@ impl App {
                 }
             },
             MouseEventKind::Down(_) => {
-                rt.encode_mouse_button(mouse.kind, column, row, mouse.modifiers)
+                rt.encode_mouse_button(mouse.kind, position, mouse.modifiers)
             }
             MouseEventKind::Up(_) | MouseEventKind::Drag(_) => return,
-            MouseEventKind::Moved => {
-                rt.encode_mouse_motion(mouse.kind, column, row, mouse.modifiers)
-            }
+            MouseEventKind::Moved => rt.encode_mouse_motion(mouse.kind, position, mouse.modifiers),
         };
         let Some(bytes) = bytes else { return };
         if !matches!(mouse.kind, MouseEventKind::Moved) {
@@ -788,7 +791,12 @@ impl AppState {
             .and_then(|i| self.workspaces.get(i))
             .and_then(|ws| {
                 let tab = ws.active_tab()?;
-                tab.follow_cwd_for_pane(tab.layout.focused(), &self.terminals, terminal_runtimes)
+                let terminal_id = tab.terminal_id(tab.layout.focused())?;
+                super::creation::launch_cwd_for_terminal(
+                    terminal_id,
+                    &self.terminals,
+                    terminal_runtimes,
+                )
             });
         let cwd = Some(super::creation::resolve_new_terminal_cwd(
             &self.new_terminal_cwd,

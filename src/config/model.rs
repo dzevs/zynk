@@ -918,6 +918,8 @@ pub struct UiConfig {
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
+    /// Outer terminal title template. Empty disables server-managed titles.
+    pub window_title: String,
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -1107,6 +1109,7 @@ impl Default for UiConfig {
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
+            window_title: super::window_title::default_window_title(),
         }
     }
 }
@@ -1463,6 +1466,15 @@ mobile_width_threshold = 96
         assert!(!default_config.ui.sidebar_start_collapsed);
         let config: Config = toml::from_str("[ui]\nsidebar_start_collapsed = true\n").unwrap();
         assert!(config.ui.sidebar_start_collapsed);
+    }
+
+    #[test]
+    fn window_title_defaults_to_host_and_workspace_and_can_be_disabled() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.window_title, "{hostname}: {workspace}");
+
+        let disabled: Config = toml::from_str("[ui]\nwindow_title = \"\"\n").unwrap();
+        assert!(disabled.ui.window_title.is_empty());
     }
 
     #[test]

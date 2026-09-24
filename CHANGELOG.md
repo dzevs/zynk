@@ -4,7 +4,7 @@
 
 The **herdr v0.7.1 port** (36 upstream changes re-applied on top of the Zynk identity — see
 `docs/zynk/fork-patch-ledger.md`, *v0.7.1 PORT LEDGER*), subsequent Linux-only port work, and a hardened
-single public repo. The binary client input protocol advances to 19; existing JSON socket method IDs,
+single public repo. The binary client input protocol advances to 20; existing JSON socket method IDs,
 protocol-ID fields, and the delivery/receipt matrix are unchanged. Two documented config keys are
 removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 only.
 
@@ -45,7 +45,11 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
   Public decoded payloads are capped at 512 KiB and raw stream bodies at 16 MiB;
   there is no aggregate memory quota or connection cap. Layers and streams do not
   survive restart or live handoff. See README for framing, conflicts, cell hints,
-  and the resource limitation. Binary protocol 19 and native receipts are unchanged.
+  and the resource limitation. Native message receipts are unchanged; the binary client protocol is 20.
+- Direct pane-frame delivery now sends validated regular-file RGBA frames to an eligible local app client,
+  with one active owner, bounded queueing, explicit retirement, response matching, and high-DPI cell scaling.
+  Static/API graphics keep their canonical RGBA bounds and fallback acknowledgement path. The feature remains
+  experimental, default-off, and subject to the existing aggregate resource limitation.
 - Expanded sidebar token rows and canonical per-agent overrides, using pane or
   workspace metadata and optional raw/stripped terminal titles. Plain layouts
   accept at most 16 rows of 16 tokens; explicit empty overrides do not fall back.
@@ -172,8 +176,16 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 - Remote restart checks now recognize detached-daemon support. Older servers
   without that capability trigger a restart recommendation even when version
   and protocol match; existing stop, handoff, and install confirmation gates remain.
-- Binary client protocol 19 carries key source metadata, grouped repeats, and explicit text commits.
-  Clients and servers must use the same protocol version.
+- Binary client protocol 20 carries the complete protocol-19 automation surface plus Kitty key event identity,
+  report-all state, pane-originated bells, pixel mouse input, direct graphics transfer state, and window-title
+  synchronization. Clients and servers must use the same protocol version; protocol-19 peers fail before
+  executing protocol-20 operations.
+- `pane read` and `wait output` accept reordered value options and `--flag=value`. Pane queries using
+  `--current` bind to the authenticated caller pane rather than UI focus. Worktree commands no longer
+  advertise the redundant `--json` flag but continue accepting it as a compatibility no-op.
+- `ui.window_title` defaults to `{hostname}: {workspace}` and accepts `{workspace}`, `{tab}`, `{pane}`, and
+  `{terminal_title}` tokens. An empty value disables server-managed outer titles. API overrides survive live
+  handoff and remain dominant until cleared; unsafe control terminators are removed before host output.
 - The Experiments tab is removed from Settings. Pane history remains available
   through `experimental.pane_history` in the config file; Header settings remain.
 - `ui.agent_panel_scope` is **no longer supported**; the agent panel shows all workspaces.
@@ -197,6 +209,18 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 **Fixed**
 
+- Pane and agent reads now report explicit truncation metadata. Idle alternate-screen reads use server-owned
+  history observation without changing conversation or delivery-event state, and retain separate content and
+  event sequence semantics.
+- Linux host input preserves lone Escape boundaries, parses default mouse reports without leaking partial
+  bytes, and keeps Kitty printable press/repeat/release identity through pane encoding. Report-all mode is
+  forwarded with scalar terminal-state reads rather than aggregate snapshots.
+- Workspace hierarchy/reordering, last-tab close, and per-pane right-click routing now use typed state and
+  caller/pane ownership. Closing a workspace's final tab closes that workspace; right-click routing can be set
+  to `zynk` or `pane` per pane without bypassing input admission.
+- Pane-originated bells reach only the active client. Transient terminal resizes repaint, contiguous ANSI diffs
+  batch safe writes, and local/remote hangup, server EOF, and broken CLI output pipes restore or exit cleanly.
+- Non-UTF-8 process arguments now produce a bounded usage diagnostic instead of panicking.
 - Pane graphics stream reads skip mode reset on terminal no-data completion.
   Successful reads still reset their mode; a read error remains the reported
   error if the reset attempt also fails. Linux setup errors remain visible.

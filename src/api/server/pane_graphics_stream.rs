@@ -30,6 +30,11 @@ const STREAM_FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const STREAM_FALLBACK_FAST_POLLS: u8 = 32;
 static NEXT_PANE_GRAPHICS_STREAM_OWNER: AtomicU64 = AtomicU64::new(1);
 
+#[derive(serde::Deserialize)]
+struct FrameFile {
+    path: String,
+}
+
 struct ConnectionLifetime(Arc<AtomicBool>);
 
 impl Drop for ConnectionLifetime {
@@ -43,7 +48,14 @@ struct FrameHeader {
     format: crate::api::schema::PaneGraphicsFormat,
     image_width: u32,
     image_height: u32,
-    data_length: usize,
+    #[serde(default)]
+    data_length: Option<usize>,
+    #[serde(default)]
+    file: Option<FrameFile>,
+    #[serde(default)]
+    sequence: u64,
+    #[serde(default)]
+    revision: u64,
     #[serde(default)]
     placement: crate::api::schema::PaneGraphicsPlacementParams,
 }
@@ -114,6 +126,8 @@ fn serve_with_timeouts(
     caller: ApiCaller,
 ) -> std::io::Result<()> {
     let pane_id = params.pane_id.clone();
+    let layer_id = params.layer_id.clone();
+    let z_index = params.z_index;
     let owner = next_owner();
     params.owner = owner.clone();
     let stream_active = Arc::new(AtomicBool::new(true));
@@ -133,7 +147,14 @@ fn serve_with_timeouts(
     if api_response_outcome(&open_response) != "ok" {
         drop(lifetime);
         let write_result = write_text_line_allow_disconnect(&mut stream, &open_response);
-        clear_layer(&pane_id, &owner, api_tx, caller);
+        clear_layer(
+            &pane_id,
+            layer_id.as_deref(),
+            z_index,
+            &owner,
+            api_tx,
+            caller,
+        );
         write_result?;
         return Ok(());
     }
@@ -146,7 +167,14 @@ fn serve_with_timeouts(
         },
     ) {
         drop(lifetime);
-        clear_layer(&pane_id, &owner, api_tx, caller);
+        clear_layer(
+            &pane_id,
+            layer_id.as_deref(),
+            z_index,
+            &owner,
+            api_tx,
+            caller,
+        );
         if is_connection_closed_error(&err) {
             return Ok(());
         }
@@ -158,6 +186,8 @@ fn serve_with_timeouts(
         &request_id,
         &owner,
         &pane_id,
+        layer_id.as_deref(),
+        z_index,
         api_tx,
         running,
         &stream_active,
@@ -165,7 +195,14 @@ fn serve_with_timeouts(
         caller,
     );
     drop(lifetime);
-    clear_layer(&pane_id, &owner, api_tx, caller);
+    clear_layer(
+        &pane_id,
+        layer_id.as_deref(),
+        z_index,
+        &owner,
+        api_tx,
+        caller,
+    );
     result
 }
 
@@ -174,6 +211,8 @@ fn serve_frames(
     request_id: &str,
     owner: &str,
     pane_id: &str,
+    layer_id: Option<&str>,
+    z_index: i32,
     api_tx: &ApiRequestSender,
     running: &Arc<AtomicBool>,
     stream_active: &Arc<AtomicBool>,
@@ -213,7 +252,68 @@ fn serve_frames(
                 return Ok(());
             }
         };
-        if header.data_length == 0 {
+        if let Some(file) = header.file {
+            if !matches!(
+                header.format,
+                crate::api::schema::PaneGraphicsFormat::Rgba
+                    | crate::api::schema::PaneGraphicsFormat::Bgra
+            ) {
+                write_json_line_allow_disconnect(
+                    stream,
+                    &ErrorResponse {
+                        id: request_id.to_string(),
+                        error: ErrorBody {
+                            code: "invalid_frame".into(),
+                            message: "file frames require rgba or bgra".into(),
+                        },
+                    },
+                )?;
+                return Ok(());
+            }
+            let response = dispatch_to_app_with_timeout(
+                Request {
+                    id: format!("{request_id}:file:{}", header.sequence),
+                    method: Method::PaneGraphicsStreamDirect(
+                        crate::api::schema::PaneGraphicsDirectParams {
+                            pane_id: pane_id.to_owned(),
+                            layer_id: layer_id.map(str::to_owned),
+                            z_index,
+                            owner: owner.to_owned(),
+                            image_width: header.image_width,
+                            image_height: header.image_height,
+                            format: header.format,
+                            path: file.path,
+                            sequence: header.sequence,
+                            revision: header.revision,
+                            placement: header.placement,
+                        },
+                    ),
+                },
+                api_tx,
+                Some(crate::app::pane_graphics::DIRECT_OUTER_TIMEOUT),
+                caller,
+            );
+            write_text_line_allow_disconnect(stream, &response)?;
+            if api_response_outcome(&response) != "ok" {
+                return Ok(());
+            }
+            continue;
+        }
+
+        let Some(data_length) = header.data_length else {
+            write_json_line_allow_disconnect(
+                stream,
+                &ErrorResponse {
+                    id: request_id.to_string(),
+                    error: ErrorBody {
+                        code: "invalid_frame".into(),
+                        message: "frame requires data_length or file".into(),
+                    },
+                },
+            )?;
+            return Ok(());
+        };
+        if data_length == 0 {
             write_json_line_allow_disconnect(
                 stream,
                 &ErrorResponse {
@@ -226,7 +326,7 @@ fn serve_frames(
             )?;
             return Ok(());
         }
-        if header.data_length > crate::api::schema::PANE_GRAPHICS_STREAM_MAX_BYTES {
+        if data_length > crate::api::schema::PANE_GRAPHICS_STREAM_MAX_BYTES {
             write_json_line_allow_disconnect(
                 stream,
                 &ErrorResponse {
@@ -242,7 +342,7 @@ fn serve_frames(
 
         let Some(data) = read_exact(
             stream,
-            header.data_length,
+            data_length,
             running,
             stream_active,
             timeouts.body_idle,
@@ -259,6 +359,8 @@ fn serve_frames(
                 id: frame_id,
                 method: Method::PaneGraphicsStreamSet(PaneGraphicsSetParams {
                     pane_id: pane_id.to_string(),
+                    layer_id: layer_id.map(str::to_owned),
+                    z_index,
                     owner: owner.to_string(),
                     format: header.format,
                     image_width: header.image_width,
@@ -290,12 +392,21 @@ fn next_owner() -> String {
     format!("pane.graphics.stream:{}:{id}", std::process::id())
 }
 
-fn clear_layer(pane_id: &str, owner: &str, api_tx: &ApiRequestSender, caller: ApiCaller) {
+fn clear_layer(
+    pane_id: &str,
+    layer_id: Option<&str>,
+    z_index: i32,
+    owner: &str,
+    api_tx: &ApiRequestSender,
+    caller: ApiCaller,
+) {
     let _response = dispatch_to_app_with_timeout(
         Request {
             id: format!("pane.graphics.stream.clear:{pane_id}"),
             method: Method::PaneGraphicsStreamClose(PaneGraphicsStreamParams {
                 pane_id: pane_id.to_string(),
+                layer_id: layer_id.map(str::to_owned),
+                z_index,
                 owner: owner.to_string(),
             }),
         },
@@ -553,6 +664,22 @@ fn read_should_retry(err: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browser_file_header_accepts_damage_but_keeps_full_canonical_frame() {
+        let header: FrameHeader = serde_json::from_str(
+            r#"{"format":"rgba","image_width":2,"image_height":3,"sequence":7,"revision":8,"file":{"path":"/private/frame"},"damage":{"x":1,"y":1,"width":1,"height":1},"transport":"direct-kitty","placement":{"grid_cols":2,"grid_rows":3}}"#,
+        )
+        .unwrap();
+        assert_eq!(header.data_length, None);
+        assert_eq!(header.file.unwrap().path, "/private/frame");
+        assert_eq!((header.sequence, header.revision), (7, 8));
+        assert_eq!((header.image_width, header.image_height), (2, 3));
+        assert_eq!(
+            (header.placement.grid_cols, header.placement.grid_rows),
+            (2, 3)
+        );
+    }
+
     #[test]
     fn m836_terminal_none_never_invokes_reset() {
         for reset_fails in [false, true] {
@@ -965,6 +1092,8 @@ mod tests {
                 "stream_timeout".into(),
                 PaneGraphicsStreamParams {
                     pane_id: "pane_1".into(),
+                    layer_id: None,
+                    z_index: 0,
                     owner: String::new(),
                 },
                 &api_tx,
@@ -1135,6 +1264,8 @@ mod tests {
                 "stream-cancel".into(),
                 PaneGraphicsStreamParams {
                     pane_id: "pane_1".into(),
+                    layer_id: None,
+                    z_index: 0,
                     owner: String::new(),
                 },
                 &api_tx,
@@ -1284,6 +1415,8 @@ mod tests {
                 "stream-timeout".into(),
                 PaneGraphicsStreamParams {
                     pane_id: "pane_1".into(),
+                    layer_id: None,
+                    z_index: 0,
                     owner: String::new(),
                 },
                 &api_tx,
@@ -1359,6 +1492,8 @@ mod tests {
                 "stream-oversized",
                 "owner-1",
                 "pane_1",
+                None,
+                0,
                 &api_tx,
                 &server_running,
                 &stream_active,

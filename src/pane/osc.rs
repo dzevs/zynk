@@ -472,22 +472,26 @@ impl AgentOscStateTracker {
         self.terminal_title = title;
     }
 
-    pub(super) fn observe(&mut self, bytes: &[u8]) {
+    pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
         let (collector, latest_title, latest_progress, terminal_title) = (
             &mut self.collector,
             &mut self.latest_title,
             &mut self.latest_progress,
             &mut self.terminal_title,
         );
+        let mut terminal_title_changed = false;
         collector.observe(bytes, |body| {
             let Some((command, payload)) = parse_agent_osc_body(body) else {
                 return;
             };
             match command {
                 b"0" | b"2" => {
-                    *latest_title = (!payload.is_empty())
-                        .then(|| sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS));
-                    *terminal_title = latest_title.clone().filter(|title| !title.is_empty());
+                    let title = (!payload.is_empty())
+                        .then(|| sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS))
+                        .filter(|title| !title.is_empty());
+                    terminal_title_changed |= *terminal_title != title;
+                    *latest_title = title.clone();
+                    *terminal_title = title;
                 }
                 b"9" => {
                     *latest_progress =
@@ -496,6 +500,7 @@ impl AgentOscStateTracker {
                 _ => {}
             }
         });
+        terminal_title_changed
     }
 
     /// Returns the latest retained OSC title, or `""` if none has been seen or
@@ -992,7 +997,7 @@ mod tests {
         assert_eq!(tracker.latest_title(), "before\u{fffd}after");
         tracker.observe(b"\x1b]2;\x01\x02\x07");
         assert_eq!(tracker.terminal_title(), None);
-        assert_eq!(tracker.latest_title.as_deref(), Some(""));
+        assert_eq!(tracker.latest_title, None);
         tracker.observe(b"\x1b]2; \t \x07");
         assert_eq!(tracker.terminal_title(), Some("  "));
         for command in ["0", "2"] {

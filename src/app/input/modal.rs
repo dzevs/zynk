@@ -1295,6 +1295,27 @@ impl App {
                 ContextMenuKind::Pane {
                     ws_idx, pane_id, ..
                 },
+                Some(action @ ("Send right-clicks to pane" | "Use Zynk right-click menu")),
+            ) => {
+                if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                    self.runtime_pane_input_set(
+                        "tui.pane.input.set",
+                        crate::api::schema::PaneInputSetParams {
+                            pane_id,
+                            right_click: if action == "Send right-clicks to pane" {
+                                crate::api::schema::PaneRightClickTarget::Pane
+                            } else {
+                                crate::api::schema::PaneRightClickTarget::Zynk
+                            },
+                        },
+                    );
+                }
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
                 Some("Clear pane name"),
             ) => {
                 if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
@@ -1469,6 +1490,39 @@ mod tests {
         assert_eq!(
             workspace_create_label("  logs  ", "project").as_deref(),
             Some("logs")
+        );
+    }
+
+    #[test]
+    fn context_menu_toggles_pane_right_click_passthrough() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+                source_pane_id: None,
+                has_manual_label: false,
+                right_click_passthrough: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Send right-clicks to pane")
+            .unwrap();
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(pane_id)
+                .unwrap()
+                .right_click_passthrough
         );
     }
 
@@ -2261,6 +2315,7 @@ mod tests {
                 pane_id,
                 source_pane_id: None,
                 has_manual_label: false,
+                right_click_passthrough: false,
             },
             x: 0,
             y: 0,
@@ -2326,6 +2381,7 @@ mod tests {
                 pane_id,
                 source_pane_id: None,
                 has_manual_label: false,
+                right_click_passthrough: false,
             },
             x: 0,
             y: 0,

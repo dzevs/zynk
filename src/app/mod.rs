@@ -13,11 +13,13 @@ mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 mod api_helpers;
+pub(crate) use api_helpers::limit_snapshot_lines;
 mod config_io;
 mod creation;
 mod git_refresh;
 mod ids;
 mod input;
+pub(crate) mod pane_graphics;
 mod popup;
 mod runtime;
 mod runtime_mutations;
@@ -26,6 +28,7 @@ pub mod state;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+mod window_title;
 mod worktrees;
 
 use std::collections::{HashMap, HashSet};
@@ -97,14 +100,11 @@ impl PaneClickState {
 
 pub struct App {
     pub state: AppState,
+    pub(crate) pane_graphics: pane_graphics::Runtime,
+    pub(crate) pane_graphics_files: Arc<crate::pane_graphics_files::FileStore>,
+    pub(crate) direct_graphics_available: bool,
+    pub(crate) pixel_mouse_available: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
-    pub(crate) pane_graphics_stream_registrations: HashMap<
-        String,
-        (
-            crate::layout::PaneId,
-            std::sync::Weak<std::sync::atomic::AtomicBool>,
-        ),
-    >,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -147,6 +147,8 @@ pub struct App {
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) detached_process_children: Vec<std::process::Child>,
+    /// Parsed `ui.window_title` plus the hostname resolved when it was applied.
+    window_title_template: Option<(crate::config::WindowTitleTemplate, String)>,
     pub(crate) persist_pane_history: bool,
     /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
@@ -689,11 +691,9 @@ impl App {
             installed_plugins: load_plugin_registry(no_session),
             plugin_startup_hooks_started: false,
             plugin_panes: std::collections::HashMap::new(),
-            pane_graphics_layers: std::collections::HashMap::new(),
-            pane_graphics_streams: std::collections::HashMap::new(),
-            pane_graphics_revision: 0,
             popup_pane: None,
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
+            host_mouse_pixels: None,
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,
@@ -737,14 +737,17 @@ impl App {
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
 
-        Self {
+        let mut app = Self {
             config_diagnostic_deadline: None,
             toast_deadline: None,
             copy_feedback_deadline: None,
             last_api_notification_at: None,
             state,
+            pane_graphics: pane_graphics::Runtime::default(),
+            pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
+            direct_graphics_available: false,
+            pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
-            pane_graphics_stream_registrations: HashMap::new(),
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -772,6 +775,7 @@ impl App {
             session_save_deadline: None,
             session_save_thread: None,
             detached_process_children: Vec::new(),
+            window_title_template: None,
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
             persist_pane_history: config.experimental.pane_history,
@@ -792,7 +796,9 @@ impl App {
             config_reloaded_from_disk: false,
             zynk_receipt_worker: None,
             zynk_embedding_worker: None,
-        }
+        };
+        app.configure_window_title(&config.ui.window_title);
+        app
     }
 
     pub fn new_from_handoff(
@@ -837,6 +843,15 @@ impl App {
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
+        for pane_id in app
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.keys().copied())
+        {
+            app.render_dirty.request_terminal_title(pane_id);
+        }
         app.state.active = snapshot
             .active
             .filter(|&idx| idx < app.state.workspaces.len());
@@ -884,15 +899,12 @@ impl App {
         self.query_host_terminal_theme();
 
         let mut needs_render = true;
+        let mut sent_window_title: Option<Option<String>> = None;
         let mut host_mouse_capture_active = self.state.mouse_capture;
 
         while !self.state.should_quit {
             self.reap_finished_detached_processes();
             if self.render_dirty.is_pending() {
-                needs_render = true;
-            }
-
-            if self.sync_terminal_titles_for_sidebar() {
                 needs_render = true;
             }
 
@@ -909,7 +921,7 @@ impl App {
             }
 
             self.sync_focus_events();
-            if self.sync_pane_graphics_streams() {
+            if self.pane_graphics.retain_live_panes(&self.state) {
                 needs_render = true;
             }
             self.sync_session_save_schedule();
@@ -1014,7 +1026,20 @@ impl App {
             self.sync_host_mouse_capture(&mut host_mouse_capture_active)?;
 
             if needs_render && self.can_render_now(now) {
-                let _ = self.render_dirty.take();
+                let render_request = self.render_dirty.take();
+                self.sync_terminal_title_sources(&render_request.terminal_title_sources);
+                if self.window_title_configured() {
+                    let title = self
+                        .window_title()
+                        .and_then(|title| crate::config::sanitize_window_title_text(&title));
+                    if sent_window_title.as_ref() != Some(&title) {
+                        crate::terminal_effects::write_window_title(
+                            &mut std::io::stdout(),
+                            title.as_deref(),
+                        )?;
+                        sent_window_title = Some(title);
+                    }
+                }
                 let _sync_output = SyncOutputGuard::begin()?;
                 let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
                 if self.full_redraw_pending {
@@ -1057,6 +1082,7 @@ impl App {
                 if kitty_graphics_enabled {
                     crate::kitty_graphics::paint_local_pane_graphics(
                         &self.state,
+                        &self.pane_graphics,
                         &self.terminal_runtimes,
                         cell_size,
                     )?;
@@ -1373,6 +1399,9 @@ impl App {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 diagnostics.extend(config.ui.sound.diagnostics());
+                diagnostics.extend(crate::config::window_title_diagnostics(
+                    &config.ui.window_title,
+                ));
 
                 self.state.default_sidebar_width = config.ui.sidebar_width;
                 if self.state.sidebar_width_source == state::SidebarWidthSource::ConfigDefault {
@@ -1420,6 +1449,7 @@ impl App {
                 }
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
+                self.configure_window_title(&config.ui.window_title);
             }
         }
 
@@ -1429,9 +1459,7 @@ impl App {
             crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
             if was_kitty_graphics_enabled && !config.experimental.kitty_graphics {
                 let _ = crate::kitty_graphics::clear_all_host_graphics();
-                self.state.pane_graphics_layers.clear();
-                self.state.pane_graphics_streams.clear();
-                self.sync_pane_graphics_streams();
+                self.pane_graphics.clear();
                 self.state.host_cell_size = crate::kitty_graphics::HostCellSize::default();
             }
             self.state.reveal_hidden_cursor_for_cjk_ime =
@@ -1653,6 +1681,31 @@ impl App {
         apply_host_terminal_theme: bool,
     ) {
         self.route_client_events_from(LOCAL_INPUT_SOURCE, events, apply_host_terminal_theme);
+    }
+
+    pub(crate) fn route_client_pixel_mouse(
+        &mut self,
+        source_id: InputSourceId,
+        data: &[u8],
+        geometry: crate::input::mouse::HostGeometry,
+    ) -> bool {
+        let Some((x, y)) = crate::input::mouse::parse_report(data) else {
+            return false;
+        };
+        let Some((column, row)) = geometry.cell(x, y) else {
+            return false;
+        };
+        let Some(cell_report) = crate::input::mouse::report_at_cell(data, column, row) else {
+            return false;
+        };
+        let mut events = crate::raw_input::parse_raw_input_bytes_sync(&cell_report);
+        if events.len() != 1 || !matches!(events[0], crate::raw_input::RawInputEvent::Mouse(_)) {
+            return false;
+        }
+        self.state.host_mouse_pixels = Some(crate::input::mouse::HostPixels { x, y, geometry });
+        self.route_client_events_from(source_id, std::mem::take(&mut events), false);
+        self.state.host_mouse_pixels = None;
+        true
     }
 
     pub(crate) fn route_client_events_from(
@@ -2347,6 +2400,8 @@ mod tests {
             method: Method::PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams {
                 params: PaneGraphicsStreamParams {
                     pane_id: target,
+                    layer_id: None,
+                    z_index: 0,
                     owner: "disable".into(),
                 },
                 active: active.clone(),
@@ -2357,12 +2412,10 @@ mod tests {
         config.experimental.pane_history = true;
         app.apply_live_config(&config, &[], &[], false);
         assert!(!active.load(Ordering::Acquire));
-        assert!(app.state.pane_graphics_streams.is_empty());
-        assert!(app.pane_graphics_stream_registrations.is_empty());
+        assert!(app.pane_graphics.slots.is_empty());
         config.experimental.kitty_graphics = true;
         app.apply_live_config(&config, &[], &[], false);
-        assert!(app.state.pane_graphics_streams.is_empty());
-        assert!(app.pane_graphics_stream_registrations.is_empty());
+        assert!(app.pane_graphics.slots.is_empty());
     }
     #[test]
     fn m832a_config_disable_discards_static_layers_and_observed_cell_size() {
@@ -2373,26 +2426,35 @@ mod tests {
             width_px: 11,
             height_px: 22,
         };
-        app.state.pane_graphics_layers.insert(
+        let key = (
             pane,
-            crate::app::state::PaneGraphicsLayer::new(
-                crate::api::schema::PaneGraphicsFormat::Rgba,
-                1,
-                1,
-                vec![1, 2, 3, 4],
-                crate::api::schema::PaneGraphicsPlacementParams::default(),
+            crate::api::schema::PANE_GRAPHICS_PRIMARY_LAYER_ID.to_owned(),
+        );
+        let host_image_id = app.pane_graphics.reserve_image_id(&key).unwrap();
+        app.pane_graphics.slots.insert(
+            key,
+            crate::app::pane_graphics::Slot::test(
+                host_image_id,
+                Some(crate::app::pane_graphics::Layer::inline(
+                    crate::api::schema::PaneGraphicsFormat::Rgba,
+                    1,
+                    1,
+                    vec![1, 2, 3, 4],
+                    crate::api::schema::PaneGraphicsPlacementParams::default(),
+                    0,
+                )),
             ),
         );
         let mut config = crate::config::Config::default();
         config.experimental.pane_history = true;
         app.apply_live_config(&config, &[], &[], false);
         assert!(!app.state.kitty_graphics_enabled);
-        assert!(app.state.pane_graphics_layers.is_empty());
+        assert!(app.pane_graphics.slots.is_empty());
         assert!(!app.state.host_cell_size.is_known());
         config.experimental.kitty_graphics = true;
         app.apply_live_config(&config, &[], &[], false);
         assert!(app.state.kitty_graphics_enabled);
-        assert!(app.state.pane_graphics_layers.is_empty());
+        assert!(app.pane_graphics.slots.is_empty());
         assert!(!app.state.host_cell_size.is_known());
     }
 
@@ -5400,6 +5462,7 @@ mod tests {
                             ratio: None,
                             cwd: None,
                             focus: false,
+                            right_click: Default::default(),
                         })
                     }
                     "tab" => {
@@ -5736,6 +5799,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: false,
+                right_click: Default::default(),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5815,6 +5879,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: true,
+                right_click: Default::default(),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5860,6 +5925,7 @@ mod tests {
                 ratio: Some(0.333),
                 cwd: None,
                 focus: false,
+                right_click: crate::api::schema::PaneRightClickTarget::Pane,
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5870,6 +5936,14 @@ mod tests {
             .splits(ratatui::layout::Rect::new(0, 0, 100, 20));
         assert_eq!(splits.len(), 1);
         assert!((splits[0].ratio - 0.333).abs() < f32::EPSILON);
+        let created = response["result"]["pane"]["pane_id"].as_str().unwrap();
+        let (_, created) = app.parse_pane_id(created).unwrap();
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(created)
+                .unwrap()
+                .right_click_passthrough
+        );
 
         let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
         for (_terminal_id, runtime) in runtimes {
@@ -5905,6 +5979,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: false,
+                right_click: Default::default(),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5946,6 +6021,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: true,
+                right_click: Default::default(),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -6576,6 +6652,112 @@ last_pane = "prefix+tab"
             rx.recv().await.unwrap(),
             bytes::Bytes::from_static(b"\x1bOS")
         );
+    }
+
+    #[tokio::test]
+    async fn host_report_all_supplies_printable_releases_for_event_type_only_panes() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            80,
+            24,
+            0,
+            b"\x1b[>4;2m\x1b[=3;1u",
+            4,
+        );
+        assert_eq!(
+            runtime.keyboard_protocol(),
+            crate::input::KeyboardProtocol::Kitty { flags: 3 }
+        );
+        assert!(runtime
+            .input_state()
+            .is_some_and(|state| state.modify_other_keys));
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        assert!(app.host_keyboard_report_all_requested());
+
+        app.route_client_input(b"\x1b[106;1:1u\x1b[106;1:2u\x1b[106;1:3u".to_vec());
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from_static(b"j"));
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from_static(b"j"));
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            bytes::Bytes::from_static(b"\x1b[106;1:3u")
+        );
+        assert!(rx.try_recv().is_err());
+
+        let runtime = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, focused)
+            .unwrap();
+        runtime.test_process_pty_bytes(b"\x1b[>4;0m");
+        assert!(!runtime
+            .input_state()
+            .is_some_and(|state| state.modify_other_keys));
+        assert!(!app.host_keyboard_report_all_requested());
+    }
+
+    #[tokio::test]
+    async fn host_report_all_follows_terminal_protocol_and_command_modes() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, _rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>15u", 1);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        assert!(app.host_keyboard_report_all_requested());
+
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, focused)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b[<u");
+        assert!(!app.host_keyboard_report_all_requested());
+
+        app.state.mode = Mode::Prefix;
+        assert!(app.host_keyboard_report_all_requested());
+        app.state.mode = Mode::Navigate;
+        assert!(app.host_keyboard_report_all_requested());
+        app.state.mode = Mode::RenameWorkspace;
+        assert!(!app.host_keyboard_report_all_requested());
+    }
+
+    #[tokio::test]
+    async fn route_client_input_forwards_report_all_printable_event_kinds() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>15u", 4);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_input(b"\x1b[106u\x1b[106;1:2u\x1b[106;1:3u".to_vec());
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            bytes::Bytes::from_static(b"\x1b[106;1:1u")
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            bytes::Bytes::from_static(b"\x1b[106;1:2u")
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            bytes::Bytes::from_static(b"\x1b[106;1:3u")
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

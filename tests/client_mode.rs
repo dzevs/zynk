@@ -910,6 +910,143 @@ fn client_restores_terminal_on_sighup() {
     });
 }
 
+fn read_until_client_attaches(client: &SpawnedZynk) -> String {
+    let master = client._master.as_ref().expect("thin client master");
+    let fd = master.as_raw_fd().expect("thin client PTY file descriptor");
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert_ne!(flags, -1, "read thin client PTY flags");
+    assert_ne!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        -1,
+        "make thin client PTY nonblocking"
+    );
+
+    let mut reader = master.try_clone_reader().expect("clone client PTY reader");
+    let mut output = String::new();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        let mut buf = [0u8; 4096];
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => panic!("read thin client PTY: {err}"),
+        }
+        if output.contains('\u{2500}')
+            || output.contains("workspace")
+            || output.contains("pane")
+            || output.contains("terminal")
+        {
+            return output;
+        }
+    }
+    panic!("thin client must attach and render a frame; output: {output:?}");
+}
+
+#[test]
+fn client_exits_cleanly_when_terminal_hangs_up() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let client_socket = runtime_dir.join("zynk-client.sock");
+
+    let spawned_server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
+    let attached_output = read_until_client_attaches(&thin_client);
+
+    thin_client.close_master();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let status = loop {
+        if let Some(status) = thin_client.child.try_wait().expect("poll thin client") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let server_response = ping_socket(&api_socket);
+
+    drop(spawned_server);
+    cleanup_spawned_zynk(thin_client, base);
+
+    let status = status.unwrap_or_else(|| {
+        panic!("thin client did not exit after PTY hangup; attach output: {attached_output:?}")
+    });
+    assert!(
+        status.success(),
+        "thin client should exit cleanly after PTY hangup, got {status}; attach output: {attached_output:?}"
+    );
+    assert!(
+        server_response.contains("pong"),
+        "server should survive client PTY hangup: {server_response}"
+    );
+}
+
+#[test]
+fn client_exits_cleanly_when_terminal_and_transport_hang_up() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let client_socket = runtime_dir.join("zynk-client.sock");
+
+    let mut spawned_server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
+    read_until_client_attaches(&thin_client);
+
+    let client_pid = thin_client.child.process_id().expect("thin client pid") as libc::pid_t;
+    assert_eq!(
+        unsafe { libc::kill(client_pid, libc::SIGSTOP) },
+        0,
+        "stop thin client"
+    );
+    let server_pid = spawned_server.child.process_id().expect("server pid") as libc::pid_t;
+    assert_eq!(
+        unsafe { libc::kill(server_pid, libc::SIGKILL) },
+        0,
+        "kill server transport"
+    );
+    spawned_server.close_master();
+    thin_client.close_master();
+    assert_eq!(
+        unsafe { libc::kill(client_pid, libc::SIGCONT) },
+        0,
+        "resume thin client"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let status = loop {
+        if let Some(status) = thin_client.child.try_wait().expect("poll thin client") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    drop(spawned_server);
+    cleanup_spawned_zynk(thin_client, base);
+
+    let status = status.expect("thin client should exit after terminal and transport hang up");
+    assert!(
+        status.success(),
+        "thin client should exit cleanly after terminal and transport hang up, got {status}"
+    );
+}
+
 #[test]
 fn client_receives_frame_after_pane_output() {
     // End-to-end test: server renders, client receives Frame.

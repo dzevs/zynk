@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,13 @@ pub struct WorkspaceRenameParams {
 pub struct WorkspaceMoveParams {
     pub workspace_id: String,
     pub insert_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceMoveBlockParams {
+    pub workspace_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

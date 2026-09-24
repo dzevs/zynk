@@ -75,6 +75,7 @@ mod layout;
 mod logging;
 mod metadata_tokens;
 mod pane;
+mod pane_graphics_files;
 mod persist;
 mod platform;
 mod plugin_command;
@@ -93,6 +94,7 @@ mod server;
 mod session;
 mod sound;
 mod terminal;
+mod terminal_effects;
 mod terminal_modes;
 mod terminal_notify;
 mod terminal_theme;
@@ -471,8 +473,28 @@ fn exit_if_nested_disabled(config: &config::Config) {
     }
 }
 
+fn args_as_utf8<I>(args: I) -> Result<Vec<String>, String>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    args.into_iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            arg.into_string()
+                .map_err(|_| format!("argument {index} is not valid UTF-8"))
+        })
+        .collect()
+}
+
 fn main() -> io::Result<()> {
-    let raw_args: Vec<String> = std::env::args().collect();
+    let raw_args: Vec<String> = match args_as_utf8(std::env::args_os()) {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("error: {err}");
+            eprintln!("run 'zynk --help' for usage");
+            std::process::exit(2);
+        }
+    };
     let args = match session::configure_from_args(&raw_args) {
         Ok(args) => args,
         Err(err) => {
@@ -571,6 +593,7 @@ fn main() -> io::Result<()> {
     }
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
+        platform::begin_cli_output();
         println!("zynk — terminal workspace manager for AI coding agents");
         println!();
         println!("Usage: zynk [options]");
@@ -731,16 +754,19 @@ fn main() -> io::Result<()> {
     }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
+        platform::begin_cli_output();
         println!("{}", crate::build_info::version_line());
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--default-config") {
+        platform::begin_cli_output();
         print!("{DEFAULT_CONFIG}");
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--skill") {
+        platform::begin_cli_output();
         print!("{SKILL}");
         return Ok(());
     }
@@ -962,5 +988,39 @@ mod tests {
         assert!(NESTED_ZYNK_MESSAGES
             .iter()
             .all(|message| !message.starts_with("zynk:")));
+    }
+
+    #[cfg(unix)]
+    fn invalid_utf8_arg() -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(vec![0xff])
+    }
+
+    #[cfg(windows)]
+    fn invalid_utf8_arg() -> std::ffi::OsString {
+        use std::os::windows::ffi::OsStringExt;
+        std::ffi::OsString::from_wide(&[0xd800])
+    }
+
+    #[test]
+    fn args_as_utf8_passes_through_valid_arguments() {
+        let args = ["zynk", "pane", "get", "pane-1"].map(std::ffi::OsString::from);
+        assert_eq!(
+            args_as_utf8(args).unwrap(),
+            ["zynk", "pane", "get", "pane-1"]
+        );
+    }
+
+    #[test]
+    fn args_as_utf8_reports_the_offending_argument_instead_of_panicking() {
+        let args = vec![
+            std::ffi::OsString::from("zynk"),
+            std::ffi::OsString::from("pane"),
+            invalid_utf8_arg(),
+        ];
+        assert_eq!(
+            args_as_utf8(args).unwrap_err(),
+            "argument 2 is not valid UTF-8"
+        );
     }
 }

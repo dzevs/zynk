@@ -40,6 +40,24 @@ pub(crate) fn resolve_new_terminal_cwd(
     }
 }
 
+pub(super) fn launch_cwd_for_terminal(
+    terminal_id: &crate::terminal::TerminalId,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+) -> Option<PathBuf> {
+    terminal_runtimes
+        .get(terminal_id)
+        .and_then(|runtime| runtime.follow_cwd())
+        .or_else(|| {
+            terminals
+                .get(terminal_id)
+                .map(|terminal| terminal.cwd.clone())
+        })
+}
+
 impl App {
     pub(super) fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         self.state
@@ -48,15 +66,17 @@ impl App {
             .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
     }
 
-    pub(super) fn follow_cwd_for_pane_in_workspace(
+    pub(super) fn launch_cwd_for_pane_in_workspace(
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) -> Option<PathBuf> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
-        ws.tabs.get(tab_idx)?.follow_cwd_for_pane(
-            pane_id,
+        let workspace = self.state.workspaces.get(ws_idx)?;
+        let tab = workspace
+            .tabs
+            .get(workspace.find_tab_index_for_pane(pane_id)?)?;
+        launch_cwd_for_terminal(
+            tab.terminal_id(pane_id)?,
             &self.state.terminals,
             &self.terminal_runtimes,
         )
@@ -64,7 +84,7 @@ impl App {
 
     pub(super) fn focused_pane_cwd_in_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
-        self.follow_cwd_for_pane_in_workspace(ws_idx, pane_id)
+        self.launch_cwd_for_pane_in_workspace(ws_idx, pane_id)
     }
 
     pub(super) fn workspace_creation_cwd(&self, ws_idx: usize) -> Option<PathBuf> {
@@ -749,6 +769,7 @@ pub(super) mod tests {
                     focus: false,
                     direction: api::SplitDirection::Right,
                     ratio: None,
+                    right_click: Default::default(),
                 }),
             };
             self.call(method);
@@ -1057,11 +1078,11 @@ pub(super) mod tests {
         for (ws, tab, name) in [(0, 0, "seed"), (0, 1, "cached"), (1, 0, "other")] {
             let pane = fixture.app.state.workspaces[ws].tabs[tab].root_pane;
             assert_eq!(
-                fixture.app.follow_cwd_for_pane_in_workspace(ws, pane),
+                fixture.app.launch_cwd_for_pane_in_workspace(ws, pane),
                 Some(fixture.root.join(name))
             );
             assert_eq!(
-                fixture.app.follow_cwd_for_pane_in_workspace(1 - ws, pane),
+                fixture.app.launch_cwd_for_pane_in_workspace(1 - ws, pane),
                 None
             );
         }
@@ -1075,11 +1096,11 @@ pub(super) mod tests {
         );
         assert_eq!(fixture.app.focused_pane_cwd_in_workspace(2), None);
         let pane = fixture.app.state.workspaces[0].tabs[1].root_pane;
-        assert_eq!(fixture.app.follow_cwd_for_pane_in_workspace(2, pane), None);
+        assert_eq!(fixture.app.launch_cwd_for_pane_in_workspace(2, pane), None);
         assert_eq!(
             fixture
                 .app
-                .follow_cwd_for_pane_in_workspace(0, crate::layout::PaneId::alloc()),
+                .launch_cwd_for_pane_in_workspace(0, crate::layout::PaneId::alloc()),
             None
         );
         let terminal_id = fixture.app.state.workspaces[0].tabs[1]
@@ -1087,7 +1108,7 @@ pub(super) mod tests {
             .unwrap()
             .clone();
         fixture.app.state.terminals.remove(&terminal_id);
-        assert_eq!(fixture.app.follow_cwd_for_pane_in_workspace(0, pane), None);
+        assert_eq!(fixture.app.launch_cwd_for_pane_in_workspace(0, pane), None);
         assert_eq!(fixture.app.focused_pane_cwd_in_workspace(0), None);
     }
 
@@ -1117,7 +1138,7 @@ pub(super) mod tests {
             .unwrap()
             .test_publish_reported_cwd(reported.clone());
         assert_eq!(
-            fixture.app.follow_cwd_for_pane_in_workspace(0, pane),
+            fixture.app.launch_cwd_for_pane_in_workspace(0, pane),
             Some(reported.clone())
         );
         assert_eq!(fixture.app.focused_pane_cwd_in_workspace(0), Some(reported));
@@ -1146,6 +1167,7 @@ pub(super) mod tests {
             ratio: Some(0.4),
             cwd: None,
             focus: false,
+            right_click: Default::default(),
         }));
         let api::ResponseResult::PaneInfo { pane: created } = result else {
             panic!("not a split response")

@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use crate::api::schema::{EventData, PluginInvocationContext};
 use crate::app::App;
 
@@ -54,6 +56,12 @@ impl App {
                     context.workspace_id = Some(workspace_id.clone());
                     context
                 }),
+            EventData::WorkspaceReordered { workspace_ids, .. } => workspace_ids
+                .first()
+                .and_then(|workspace_id| {
+                    self.plugin_context_for_workspace_id(workspace_id, correlation_id)
+                })
+                .unwrap_or_else(|| empty_plugin_context(correlation_id)),
             EventData::WorkspaceRenamed { workspace_id, .. }
             | EventData::WorkspaceMoved { workspace_id, .. }
             | EventData::WorkspaceFocused { workspace_id } => self

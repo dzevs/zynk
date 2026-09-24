@@ -1,6 +1,31 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
+use std::collections::HashSet;
+
 use super::App;
+use crate::layout::PaneId;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct TerminalTitleChanges {
+    pub(crate) raw_changed: bool,
+    pub(crate) stripped_changed: bool,
+}
 
 impl App {
+    pub(crate) fn terminal_title_sidebar_changed(&self, changes: &TerminalTitleChanges) -> bool {
+        let config = &self.state.sidebar_agents;
+        std::iter::once(&config.rows)
+            .chain(config.rows_by_agent.values())
+            .flatten()
+            .flatten()
+            .any(|token| match token {
+                crate::config::AgentSidebarToken::TerminalTitle => changes.raw_changed,
+                crate::config::AgentSidebarToken::TerminalTitleStripped => changes.stripped_changed,
+                _ => false,
+            })
+    }
+
+    #[cfg(test)]
     pub(crate) fn terminal_title_sidebar_configured(&self) -> bool {
         let config = &self.state.sidebar_agents;
         std::iter::once(&config.rows)
@@ -16,16 +41,49 @@ impl App {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn sync_terminal_titles_for_sidebar(&mut self) -> bool {
         let raw_changed = self.sync_terminal_titles();
         raw_changed && self.terminal_title_sidebar_configured()
     }
 
+    pub(crate) fn sync_pending_terminal_titles(&mut self) -> TerminalTitleChanges {
+        let sources = self.render_dirty.pending_terminal_title_sources();
+        let changes = self.sync_terminal_title_sources(&sources);
+        if self.terminal_title_sidebar_changed(&changes) {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+        changes
+    }
+
+    #[cfg(test)]
     pub(crate) fn sync_terminal_titles(&mut self) -> bool {
-        let mut observations = Vec::new();
+        let sources = self
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.keys().copied())
+            .collect();
+        self.sync_terminal_title_sources(&sources).raw_changed
+    }
+
+    pub(crate) fn sync_terminal_title_sources(
+        &mut self,
+        sources: &HashSet<PaneId>,
+    ) -> TerminalTitleChanges {
+        if sources.is_empty() {
+            return TerminalTitleChanges::default();
+        }
+
+        let mut observations = Vec::with_capacity(sources.len());
         for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
             for tab in &workspace.tabs {
                 for (pane_id, pane) in &tab.panes {
+                    if !sources.contains(pane_id) {
+                        continue;
+                    }
                     let terminal_id = &pane.attached_terminal_id;
                     let Some(runtime) = self.terminal_runtimes.get(terminal_id) else {
                         continue;
@@ -40,14 +98,15 @@ impl App {
             }
         }
 
-        let mut raw_changed = false;
+        let mut changes = TerminalTitleChanges::default();
         let mut publish = Vec::new();
         for (ws_idx, pane_id, terminal_id, title) in observations {
             let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
                 continue;
             };
             let change = terminal.set_terminal_title(title);
-            raw_changed |= change.raw_changed;
+            changes.raw_changed |= change.raw_changed;
+            changes.stripped_changed |= change.stripped_changed;
             if change.stripped_changed {
                 publish.push((ws_idx, pane_id));
             }
@@ -57,7 +116,7 @@ impl App {
             self.emit_pane_updated(ws_idx, pane_id);
         }
 
-        raw_changed
+        changes
     }
 }
 

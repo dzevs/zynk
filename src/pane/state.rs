@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use crate::terminal::TerminalId;
 
 /// Viewport state for a pane.
@@ -8,6 +10,8 @@ pub struct PaneState {
     /// Whether the user has seen this pane since its last state change to Idle.
     /// False = "Done" (agent finished while user was in another workspace).
     pub seen: bool,
+    /// Whether unmodified right-click gestures should be forwarded to the pane.
+    pub right_click_passthrough: bool,
 }
 
 impl PaneState {
@@ -15,6 +19,7 @@ impl PaneState {
         Self {
             attached_terminal_id,
             seen: true,
+            right_click_passthrough: false,
         }
     }
 }

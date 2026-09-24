@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use clap::{Arg, ArgAction, Command, ValueHint};
 
 // Completion data only. Manual dispatchers remain the CLI execution authority.
@@ -212,8 +214,7 @@ fn worktree_command() -> Command {
             Command::new("list")
                 .about("List worktree workspaces")
                 .arg(option("workspace", "ID"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(json_flag()),
+                .arg(path_option("cwd", "PATH")),
         )
         .subcommand(
             Command::new("create")
@@ -225,8 +226,7 @@ fn worktree_command() -> Command {
                 .arg(path_option("path", "PATH"))
                 .arg(option("label", "TEXT"))
                 .arg(flag("focus"))
-                .arg(flag("no-focus"))
-                .arg(json_flag()),
+                .arg(flag("no-focus")),
         )
         .subcommand(
             Command::new("open")
@@ -237,15 +237,13 @@ fn worktree_command() -> Command {
                 .arg(option("branch", "NAME"))
                 .arg(option("label", "TEXT"))
                 .arg(flag("focus"))
-                .arg(flag("no-focus"))
-                .arg(json_flag()),
+                .arg(flag("no-focus")),
         )
         .subcommand(
             Command::new("remove")
                 .about("Remove a worktree checkout")
                 .arg(option("workspace", "ID"))
-                .arg(flag("force"))
-                .arg(json_flag()),
+                .arg(flag("force")),
         )
 }
 
@@ -461,6 +459,17 @@ fn pane_command() -> Command {
                 .arg(flag("clear")),
         )
         .subcommand(
+            Command::new("input")
+                .about("Set pane input routing")
+                .arg(Arg::new("pane_id").value_name("PANE_ID"))
+                .args(current_pane_args())
+                .arg(
+                    option("right-click", "TARGET")
+                        .value_parser(["zynk", "pane"])
+                        .required(true),
+                ),
+        )
+        .subcommand(
             Command::new("split")
                 .about("Split a pane")
                 .arg(Arg::new("pane_id").value_name("PANE_ID"))
@@ -468,6 +477,7 @@ fn pane_command() -> Command {
                 .arg(split_direction_option())
                 .arg(option("ratio", "FLOAT"))
                 .arg(path_option("cwd", "PATH"))
+                .arg(option("right-click", "TARGET").value_parser(["zynk", "pane"]))
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
@@ -1085,7 +1095,7 @@ mod tests {
             ("tab", "list create get focus rename close"),
             ("notification", "show"),
             ("agent", "list get read send send-keys prompt rename focus wait attach start explain"),
-            ("pane", "list get layout neighbor edges focus resize zoom read rename split swap move close send-text send-keys report-agent report-agent-session release-agent report-metadata run"),
+            ("pane", "list get layout neighbor edges focus resize zoom read input rename split swap move close send-text send-keys report-agent report-agent-session release-agent report-metadata run"),
             ("wait", "output agent-status"),
             ("terminal", "attach session"),
             ("terminal session", "observe control"),
@@ -1343,6 +1353,18 @@ mod tests {
         let cmd = super::command();
         let pane_read = command_path(&cmd, &["pane", "read"]);
         assert!(has_option(pane_read, "raw"));
+    }
+
+    #[test]
+    fn worktree_json_compatibility_flag_stays_out_of_public_spec() {
+        let cmd = super::command();
+        for subcommand in ["list", "create", "open", "remove"] {
+            let worktree_command = command_path(&cmd, &["worktree", subcommand]);
+            assert!(
+                !has_option(worktree_command, "json"),
+                "zynk worktree {subcommand} should not advertise --json"
+            );
+        }
     }
 
     #[test]

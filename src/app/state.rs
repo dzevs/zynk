@@ -4,7 +4,6 @@ use crate::config::{Keybinds, NewTerminalCwdConfig, SoundConfig, ToastConfig, To
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
-use std::hash::{Hash, Hasher};
 
 use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
@@ -17,37 +16,6 @@ pub(crate) type InstalledPluginRegistry =
 pub(crate) struct PluginPaneRecord {
     pub plugin_id: String,
     pub entrypoint: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PaneGraphicsLayer {
-    pub format: crate::api::schema::PaneGraphicsFormat,
-    pub image_width: u32,
-    pub image_height: u32,
-    pub data: Vec<u8>,
-    pub data_fingerprint: u64,
-    pub render: crate::api::schema::PaneGraphicsPlacementParams,
-}
-
-impl PaneGraphicsLayer {
-    pub(crate) fn new(
-        format: crate::api::schema::PaneGraphicsFormat,
-        image_width: u32,
-        image_height: u32,
-        data: Vec<u8>,
-        render: crate::api::schema::PaneGraphicsPlacementParams,
-    ) -> Self {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        data.hash(&mut hasher);
-        Self {
-            format,
-            image_width,
-            image_height,
-            data,
-            data_fingerprint: hasher.finish(),
-            render,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1196,11 +1164,17 @@ pub struct SettingsState {
     pub original_theme: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceDropTarget {
+    Before(usize),
+    End,
+}
+
 pub(crate) enum DragTarget {
     WorkspaceReorder {
         source_id: crate::app::InputSourceId,
         source_ws_idx: usize,
-        insert_idx: Option<usize>,
+        drop_target: Option<WorkspaceDropTarget>,
     },
     TabReorder {
         source_id: crate::app::InputSourceId,
@@ -1276,6 +1250,7 @@ pub enum ContextMenuKind {
         pane_id: PaneId,
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
+        right_click_passthrough: bool,
     },
 }
 
@@ -1288,24 +1263,24 @@ pub struct ContextMenuState {
 }
 
 impl ContextMenuState {
-    pub fn items(&self) -> &'static [&'static str] {
+    pub fn items(&self) -> Vec<&'static str> {
         match self.kind {
-            ContextMenuKind::Workspace { .. } => &["Rename", "Close"],
+            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => &["Rename", "Close", "New worktree", "Open worktree..."],
+            } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => &["Rename", "Close", "Delete worktree checkout..."],
+            } => vec!["Rename", "Close", "Delete worktree checkout..."],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: true,
                 ..
-            } => &[
+            } => vec![
                 "Rename",
                 "Close group",
                 "New worktree",
@@ -1317,62 +1292,36 @@ impl ContextMenuState {
                 has_worktree_children: true,
                 collapsed: false,
                 ..
-            } => &[
+            } => vec![
                 "Rename",
                 "Close group",
                 "New worktree",
                 "Open worktree...",
                 "Collapse",
             ],
-            ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
+            ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
             ContextMenuKind::Pane {
-                has_manual_label: true,
-                source_pane_id: Some(_),
+                source_pane_id,
+                has_manual_label,
+                right_click_passthrough,
                 ..
-            } => &[
-                "Rename pane",
-                "Clear pane name",
-                "Swap with focused pane",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
-            ContextMenuKind::Pane {
-                has_manual_label: false,
-                source_pane_id: Some(_),
-                ..
-            } => &[
-                "Rename pane",
-                "Swap with focused pane",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
-            ContextMenuKind::Pane {
-                has_manual_label: true,
-                source_pane_id: None,
-                ..
-            } => &[
-                "Rename pane",
-                "Clear pane name",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
-            ContextMenuKind::Pane {
-                has_manual_label: false,
-                source_pane_id: None,
-                ..
-            } => &[
-                "Rename pane",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
+            } => {
+                let mut items = vec!["Rename pane"];
+                if has_manual_label {
+                    items.push("Clear pane name");
+                }
+                if source_pane_id.is_some() {
+                    items.push("Swap with focused pane");
+                }
+                items.extend(["Split right", "Split down", "Zoom"]);
+                items.push(if right_click_passthrough {
+                    "Use Zynk right-click menu"
+                } else {
+                    "Send right-clicks to pane"
+                });
+                items.push("Close pane");
+                items
+            }
         }
     }
 }
@@ -1656,13 +1605,11 @@ pub struct AppState {
     pub(crate) plugin_startup_hooks_started: bool,
     /// Pane ids opened through the plugin pane API.
     pub(crate) plugin_panes: std::collections::HashMap<PaneId, PluginPaneRecord>,
-    /// Session-local API image layers, excluded from persistence and handoff.
-    pub(crate) pane_graphics_layers: std::collections::HashMap<PaneId, PaneGraphicsLayer>,
-    pub(crate) pane_graphics_streams: std::collections::HashMap<PaneId, String>,
-    pub(crate) pane_graphics_revision: u64,
     /// Session-local terminal, outside workspace layouts and public pane identities.
     pub(crate) popup_pane: Option<PopupPaneState>,
     pub(crate) host_cell_size: crate::kitty_graphics::HostCellSize,
+    /// Exact pixel provenance only while one confirmed SGR report is dispatched.
+    pub(crate) host_mouse_pixels: Option<crate::input::mouse::HostPixels>,
     /// Recent plugin action/event command executions.
     pub(crate) plugin_command_logs: Vec<crate::api::schema::PluginCommandLogInfo>,
     pub(crate) next_plugin_command_log_id: u64,
@@ -2053,11 +2000,9 @@ impl AppState {
             installed_plugins: std::collections::HashMap::new(),
             plugin_startup_hooks_started: false,
             plugin_panes: std::collections::HashMap::new(),
-            pane_graphics_layers: std::collections::HashMap::new(),
-            pane_graphics_streams: std::collections::HashMap::new(),
-            pane_graphics_revision: 0,
             popup_pane: None,
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
+            host_mouse_pixels: None,
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,
@@ -2349,17 +2294,12 @@ impl AppState {
             match &drag.target {
                 DragTarget::WorkspaceReorder {
                     source_ws_idx,
-                    insert_idx,
+                    drop_target,
                     ..
                 } => {
                     assert_workspace_index(*source_ws_idx, "workspace drag source");
-                    if let Some(insert_idx) = insert_idx {
-                        assert!(
-                            *insert_idx <= self.workspaces.len(),
-                            "workspace drag insert index {} out of bounds for {} workspaces",
-                            insert_idx,
-                            self.workspaces.len()
-                        );
+                    if let Some(WorkspaceDropTarget::Before(ws_idx)) = drop_target {
+                        assert_workspace_index(*ws_idx, "workspace drag target");
                     }
                 }
                 DragTarget::TabReorder {

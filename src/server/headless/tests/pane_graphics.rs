@@ -114,14 +114,19 @@ async fn m832c_full_lane_retry_commits_latest_graphics_not_speculative_cache() {
     );
     set_graphics_layer(&mut server, pane, vec![7, 8, 9]);
     let mut expected_cache = before.clone();
-    let expected =
-        frame_pane_graphics_for_client(crate::kitty_graphics::encode_local_pane_graphics(
+    let expected = frame_pane_graphics_for_client(
+        crate::kitty_graphics::encode_local_pane_graphics(
             &server.app.state,
+            &server.app.pane_graphics,
             &server.app.terminal_runtimes,
             server.app.state.view.tab_surface(),
             server.clients[&1].cell_size,
+            Some(crate::kitty_graphics::HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
+            false,
             &mut expected_cache,
-        ));
+        )
+        .bytes,
+    );
     assert!(!expected.is_empty());
     assert!(matches!(
         read_server_message(rx.try_recv().unwrap()),
@@ -288,7 +293,7 @@ fn m832c_stop_fences_precede_dequeue_and_stream_mutation() {
         server.app.state.kitty_graphics_enabled = true;
         server.shutting_down = !atomic;
         server.should_quit.store(atomic, Ordering::Release);
-        let before = server.app.state.pane_graphics_revision;
+        let before = server.app.pane_graphics.revision();
         let (msg, rx) = stream_set_message("stop", "1:p1", "owner", vec![4, 5, 6]);
         assert_eq!(
             server.handle_api_request_with_render_impact(msg),
@@ -297,8 +302,8 @@ fn m832c_stop_fences_precede_dequeue_and_stream_mutation() {
         let response: api::schema::ErrorResponse =
             serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
         assert_eq!(response.error.code, "server_unavailable", "atomic={atomic}");
-        assert_eq!(server.app.state.pane_graphics_revision, before);
-        assert!(server.app.state.pane_graphics_layers.is_empty());
+        assert_eq!(server.app.pane_graphics.revision(), before);
+        assert!(server.app.pane_graphics.slots.is_empty());
     }
     assert_eq!(replies.len(), 3);
 }
@@ -324,6 +329,8 @@ fn m832c_idle_owner_cleanup_promotes_full_impact_without_queued_work() {
             api::schema::PaneGraphicsStreamOpenParams {
                 params: api::schema::PaneGraphicsStreamParams {
                     pane_id: target,
+                    layer_id: None,
+                    z_index: 0,
                     owner: "cleanup".into(),
                 },
                 active: active.clone(),
@@ -332,17 +339,15 @@ fn m832c_idle_owner_cleanup_promotes_full_impact_without_queued_work() {
     });
     assert!(serde_json::from_str::<api::schema::SuccessResponse>(&response).is_ok());
     set_graphics_layer(&mut server, pane, vec![1, 2, 3]);
-    let revision = server.app.state.pane_graphics_revision;
+    let revision = server.app.pane_graphics.revision();
     active.store(false, Ordering::Release);
     assert_eq!(
         server.drain_api_requests_with_render_impact(),
         RenderImpact::Full
     );
-    assert!(server.app.state.pane_graphics_layers.is_empty());
-    assert!(server.app.state.pane_graphics_streams.is_empty());
-    assert!(server.app.pane_graphics_stream_registrations.is_empty());
+    assert!(server.app.pane_graphics.slots.is_empty());
     assert_eq!(
-        server.app.state.pane_graphics_revision,
+        server.app.pane_graphics.revision(),
         revision.wrapping_add(1)
     );
     assert_eq!(
@@ -402,7 +407,7 @@ fn m832c_due_metadata_expiry_dominates_rejected_graphics_frame() {
     assert!(!server.app.state.terminals[&terminal]
         .agent_metadata
         .contains_key("user:graphics-expiry"));
-    assert!(server.app.state.pane_graphics_layers.is_empty());
+    assert!(server.app.pane_graphics.slots.is_empty());
 }
 
 #[tokio::test]
@@ -474,16 +479,32 @@ fn enable_graphics_and_render(
 }
 
 fn set_graphics_layer(server: &mut HeadlessServer, pane_id: crate::layout::PaneId, data: Vec<u8>) {
-    server.app.state.pane_graphics_layers.insert(
+    let key = (
         pane_id,
-        crate::app::state::PaneGraphicsLayer::new(
-            api::schema::PaneGraphicsFormat::Png,
-            1,
-            1,
-            data,
-            api::schema::PaneGraphicsPlacementParams::default(),
-        ),
+        api::schema::PANE_GRAPHICS_PRIMARY_LAYER_ID.to_string(),
     );
+    let image_id = server
+        .app
+        .pane_graphics
+        .reserve_image_id(&key)
+        .expect("test layer image id");
+    let layer = crate::app::pane_graphics::Layer::inline(
+        api::schema::PaneGraphicsFormat::Png,
+        1,
+        1,
+        data,
+        api::schema::PaneGraphicsPlacementParams::default(),
+        0,
+    );
+    if let Some(slot) = server.app.pane_graphics.slots.get_mut(&key) {
+        slot.layer = Some(layer);
+    } else {
+        server.app.pane_graphics.slots.insert(
+            key,
+            crate::app::pane_graphics::Slot::test(image_id, Some(layer)),
+        );
+    }
+    server.app.pane_graphics.mark_changed();
 }
 
 fn fill_render_lane(server: &HeadlessServer) {
@@ -515,6 +536,8 @@ fn stream_set_message(
                 method: api::schema::Method::PaneGraphicsStreamSet(
                     api::schema::PaneGraphicsSetParams {
                         pane_id: pane_id.into(),
+                        layer_id: None,
+                        z_index: 0,
                         owner: owner.into(),
                         format: api::schema::PaneGraphicsFormat::Png,
                         image_width: 1,
@@ -666,6 +689,8 @@ fn stream_set_has_graphics_only_render_impact() {
             api::schema::PaneGraphicsStreamOpenParams {
                 params: api::schema::PaneGraphicsStreamParams {
                     pane_id: public_pane_id.clone(),
+                    layer_id: None,
+                    z_index: 0,
                     owner: "owner-a".into(),
                 },
                 active: active.clone(),
@@ -673,7 +698,14 @@ fn stream_set_has_graphics_only_render_impact() {
         ),
     });
     assert!(serde_json::from_str::<api::schema::SuccessResponse>(&open).is_ok());
-    assert_eq!(server.app.state.pane_graphics_streams[&pane_id], "owner-a");
+    let key = (
+        pane_id,
+        api::schema::PANE_GRAPHICS_PRIMARY_LAYER_ID.to_string(),
+    );
+    assert_eq!(
+        server.app.pane_graphics.slots[&key].stream_owner.as_deref(),
+        Some("owner-a")
+    );
 
     let (request, response_rx) =
         stream_set_message("wrong-owner", &public_pane_id, "owner-b", vec![1, 2, 3]);
@@ -720,13 +752,15 @@ fn stream_set_has_graphics_only_render_impact() {
         RenderImpact::Full
     );
 
-    server.app.state.pane_graphics_streams.clear();
+    server.app.pane_graphics.clear();
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     let impact = server.handle_api_request_with_render_impact(api::ApiRequestMessage {
         request: api::schema::Request {
             id: "direct-frame".into(),
             method: api::schema::Method::PaneGraphicsSet(api::schema::PaneGraphicsSetParams {
                 pane_id: public_pane_id,
+                layer_id: None,
+                z_index: 0,
                 owner: String::new(),
                 format: api::schema::PaneGraphicsFormat::Png,
                 image_width: 1,
@@ -759,6 +793,8 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
             id: "disabled-set".into(),
             method: api::schema::Method::PaneGraphicsSet(api::schema::PaneGraphicsSetParams {
                 pane_id: public_pane_id.clone(),
+                layer_id: None,
+                z_index: 0,
                 owner: String::new(),
                 format: api::schema::PaneGraphicsFormat::Png,
                 image_width: 1,
@@ -785,11 +821,16 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
     );
 
     server.app.state.kitty_graphics_enabled = true;
-    server
-        .app
-        .state
-        .pane_graphics_streams
-        .insert(pane_id, "current-owner".into());
+    let key = (
+        pane_id,
+        api::schema::PANE_GRAPHICS_PRIMARY_LAYER_ID.to_string(),
+    );
+    let mut slot = crate::app::pane_graphics::Slot::test(1 << 31, None);
+    slot.stream_owner = Some("current-owner".into());
+    slot.stream_active = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    server.app.pane_graphics.slots.insert(key.clone(), slot);
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let impact = server.handle_api_request_with_render_impact(api::ApiRequestMessage {
         request: api::schema::Request {
@@ -797,6 +838,8 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
             method: api::schema::Method::PaneGraphicsStreamClose(
                 api::schema::PaneGraphicsStreamParams {
                     pane_id: public_pane_id,
+                    layer_id: None,
+                    z_index: 0,
                     owner: "stale-owner".into(),
                 },
             ),
@@ -807,8 +850,8 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
     });
     assert_eq!(impact, RenderImpact::None);
     assert_eq!(
-        server.app.state.pane_graphics_streams.get(&pane_id),
-        Some(&"current-owner".to_string())
+        server.app.pane_graphics.slots[&key].stream_owner.as_deref(),
+        Some("current-owner")
     );
     assert!(serde_json::from_str::<api::schema::SuccessResponse>(
         &response_rx
@@ -829,6 +872,7 @@ async fn m833_popup_graphics_deletion_waits_for_writer_acceptance() {
     server.app.install_test_popup_runtime(runtime);
     assert!(!crate::kitty_graphics::has_visible_pane_graphics(
         &server.app.state,
+        &server.app.pane_graphics,
         &server.app.terminal_runtimes,
         server.app.state.view.tab_surface(),
         server.clients[&1].cell_size,
@@ -864,12 +908,13 @@ async fn m833_popup_graphics_deletion_waits_for_writer_acceptance() {
     match read_server_message(rx.try_recv().unwrap()) {
         ServerMessage::Graphics { bytes } => {
             let bytes = std::str::from_utf8(&bytes).unwrap();
-            assert!(bytes.contains("a=d,d=I,"));
+            assert!(bytes.contains("a=d,d=i,"));
             assert!(!bytes.contains("a=t,"));
         }
         other => panic!("expected Graphics deletion, got {other:?}"),
     }
-    assert!(server.clients[&1].graphics_cache.is_empty());
+    assert_eq!(server.clients[&1].graphics_cache.test_image_count(), 1);
+    assert_eq!(server.clients[&1].graphics_cache.test_placement_count(), 0);
     assert_frame_data_eq(
         server.clients[&1].render_state.last_frame().unwrap(),
         &baseline,
@@ -881,7 +926,9 @@ async fn m833_popup_graphics_deletion_waits_for_writer_acceptance() {
     );
     match read_server_message(rx.try_recv().unwrap()) {
         ServerMessage::Graphics { bytes } => {
-            assert!(std::str::from_utf8(&bytes).unwrap().contains("a=t,"))
+            let bytes = std::str::from_utf8(&bytes).unwrap();
+            assert!(bytes.contains("a=p,"));
+            assert!(!bytes.contains("a=t,"));
         }
         other => panic!("expected Graphics reveal, got {other:?}"),
     }
@@ -906,6 +953,8 @@ async fn m833_popup_hidden_stream_replaces_data_without_losing_claim() {
             api::schema::PaneGraphicsStreamOpenParams {
                 params: api::schema::PaneGraphicsStreamParams {
                     pane_id: target.clone(),
+                    layer_id: None,
+                    z_index: 0,
                     owner: "popup-owner".into(),
                 },
                 active: active.clone(),
@@ -920,13 +969,22 @@ async fn m833_popup_hidden_stream_replaces_data_without_losing_claim() {
             stream_set_message("frame", &target, "popup-owner", data.clone());
         let reply = server.app.handle_api_request(message.request);
         assert!(serde_json::from_str::<api::schema::SuccessResponse>(&reply).is_ok());
-        assert_eq!(server.app.state.pane_graphics_layers.len(), 1);
-        assert_eq!(
-            server.app.state.pane_graphics_layers[&pane].data.as_slice(),
-            data.as_slice()
+        assert_eq!(server.app.pane_graphics.slots.len(), 1);
+        let key = (
+            pane,
+            api::schema::PANE_GRAPHICS_PRIMARY_LAYER_ID.to_string(),
         );
-        assert_eq!(server.app.state.pane_graphics_streams[&pane], "popup-owner");
-        assert_eq!(server.app.pane_graphics_stream_registrations.len(), 1);
+        assert_eq!(
+            server.app.pane_graphics.slots[&key]
+                .layer
+                .as_ref()
+                .and_then(crate::app::pane_graphics::Layer::inline_data),
+            Some(data.as_slice())
+        );
+        assert_eq!(
+            server.app.pane_graphics.slots[&key].stream_owner.as_deref(),
+            Some("popup-owner")
+        );
         assert!(active.load(Ordering::Acquire));
         assert!(!server.app.sync_pane_graphics_streams());
         assert_eq!(
@@ -947,7 +1005,14 @@ async fn m833_popup_hidden_stream_replaces_data_without_losing_claim() {
     };
     assert!(graphics.contains("BwgJ"));
     assert!(!graphics.contains("AQID"));
-    assert_eq!(server.app.state.pane_graphics_streams[&pane], "popup-owner");
+    let key = (
+        pane,
+        api::schema::PANE_GRAPHICS_PRIMARY_LAYER_ID.to_string(),
+    );
+    assert_eq!(
+        server.app.pane_graphics.slots[&key].stream_owner.as_deref(),
+        Some("popup-owner")
+    );
     assert!(active.load(Ordering::Acquire));
     shutdown_test_runtimes(&mut server);
 }
@@ -986,8 +1051,9 @@ async fn m833_popup_full_frame_pressure_preserves_baseline_until_retry() {
     assert!(frame_text(&shown).contains("POPUP"));
     assert!(std::str::from_utf8(&shown.graphics)
         .unwrap()
-        .contains("a=d,d=I,"));
-    assert!(server.clients[&1].graphics_cache.is_empty());
+        .contains("a=d,d=i,"));
+    assert_eq!(server.clients[&1].graphics_cache.test_image_count(), 1);
+    assert_eq!(server.clients[&1].graphics_cache.test_placement_count(), 0);
     assert_eq!(server.clients[&1].deferred_render(), DeferredRender::None);
     assert_frame_data_eq(
         server.clients[&1].render_state.last_frame().unwrap(),

@@ -56,6 +56,8 @@ zynk gives the terminal that missing coordination layer:
 - **Integrations** — official agent hooks add native session identity and semantic state reporting.
 - **Agent automation** — typed raw keys, bounded status waits, readiness-gated prompts, and managed launches.
 - **Global plugins** — shared private registry, argv-preserving commands, startup hooks, and agent-view filters.
+- **Protocol-20 terminal fidelity** — Kitty key event identity, pixel mouse input, bells, outer titles, bounded
+  direct graphics, and clean Linux hangup/pipe handling.
 - Mouse-native throughout, 18 built-in themes, keyboard copy mode, and sound/toast notifications.
 
 ## Install
@@ -127,6 +129,16 @@ New workspaces likewise prefer their source workspace's focused-pane CWD before
 its identity seed. A named-workspace prompt remembers the source workspace and
 rechecks its current focused pane when confirmed, rather than freezing the
 suggested directory or following a different globally focused workspace.
+
+The binary client/server protocol is version 20. It carries the complete agent-automation surface together
+with Kitty press/repeat/release identity, report-all state, pixel mouse input, pane bells, direct graphics,
+and outer-title updates. Compatibility is equality-only: a version-19 peer receives a typed upgrade error
+before any version-20 operation executes.
+
+`ui.window_title` defaults to `{hostname}: {workspace}`. It can also use `{tab}`, `{pane}`, and
+`{terminal_title}`; doubled braces render literals, and an empty value leaves the outer title alone. The
+server strips terminal control characters, sends changes only to the foreground client, and retains an
+explicit API title override across live handoff until it is cleared.
 
 Removing a linked worktree returns focus to its surviving parent workspace in
 the same worktree group, even if another workspace became active during removal.
@@ -275,9 +287,18 @@ Seed from `pane.get`; snapshot acquisition and subscription are not atomic.
 The existing pane/agent info `revision` field counts changed token patches and expiry, including
 TTL-only changes, and changes to the stripped terminal title. It does not count terminal output.
 The same pane's `pane.read`, `agent.read` and `pane.wait_for_output` read-result revisions retain
-their existing zero values. This is not a content-revision implementation or an equality guarantee
-across those surfaces. The info counter is not persisted and starts at zero in reconstructed state;
-no cross-handoff monotonicity is promised.
+their existing zero values. Read results now include `truncated`; bounded requests set it when older content
+was omitted. Idle alternate-screen reads can recover server-observed history, without creating conversation
+rows or delivery events. This is not a content-revision implementation or an equality guarantee across those
+surfaces. The info counter is not persisted and starts at zero in reconstructed state; no cross-handoff
+monotonicity is promised.
+
+Pane CLI value options accept either `--flag value` or `--flag=value` and may precede the pane id for
+`pane read` and `wait output`. Pane query `--current` is resolved from the authenticated caller's
+`ZYNK_PANE_ID`, not UI focus; an unbound `--current` is refused. Worktree commands do not advertise `--json`,
+but continue accepting it as a hidden compatibility no-op because their output is always JSON.
+`zynk pane input ... --right-click zynk|pane` selects per-pane right-click routing; split can set the initial
+route. The ownership and caller checks used by ordinary pane input still apply.
 
 Pane token values, TTLs and presentation payloads are ephemeral across restart and live handoff.
 Unlike workspace admission, pane replay sequences and token-source slots survive live handoff;
@@ -342,6 +363,13 @@ feature experimental and default-off unless this resource limitation is resolved
 or explicitly accepted and documented for the changed release policy. API
 acceptance or render enqueue is not proof of display, peer parsing, or native
 message receipt.
+
+An eligible local app client can receive one validated Zynk-owned direct RGBA file transfer at a time. The
+server binds ownership and image/transfer ids, bounds queueing, retires stale work, and keeps source/cache
+files private and regular; unrelated terminal input cannot satisfy the acknowledgement matcher. Pixel mouse
+reports use read-time host geometry. High-DPI delivery scales by the measured cell geometry, while unavailable
+or refused direct delivery retains the bounded encoded-frame fallback. This optimization does not widen the
+public upload limits or turn API acceptance into display proof.
 
 #### Migrating custom status
 

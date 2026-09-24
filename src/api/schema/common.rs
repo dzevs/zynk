@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use serde::{Deserialize, Serialize};
 
 pub(super) fn metadata_token_patch_schema(
@@ -64,6 +66,13 @@ pub enum ReadSource {
     Recent,
     RecentUnwrapped,
     Detection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ReadIntent {
+    #[default]
+    Interactive,
+    Passive,
 }
 
 #[derive(

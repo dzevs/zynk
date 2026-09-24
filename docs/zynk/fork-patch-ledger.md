@@ -7337,3 +7337,67 @@ recorded only after execution. `M839-F21-UNATTRIBUTED-LOCK-DEADLINE-PAIR`, its F
 approval-order histories, reviewer gaps, M7-20, origins, standing limits, capped instruments, and
 resource/schema/handoff bounds all remain OPEN. This batch authorizes no merge, push, install, tag, publish,
 release, cleanup, or live-runtime action.
+
+### B2 end-state batch - input, protocol, read, render, and graphics
+
+The operator-approved B2 end state starts from exact B1 tip
+`f421bcc2131354ca00ff35e5447a7078c5734bda`. It raises the binary client/server protocol directly from 19 to
+20 and applies each authority row once to its final Linux/fork region:
+
+- M8-40 `c1f7b6f331501a784bfad896310eae1d064bd9b9` (ADAPT_LINUX): preserve lone-Escape host boundaries;
+  omit the Windows VTI module.
+- M8-41 `02a6e874f67800891b5a549297219ed6f3ce0f2f` (PORT): batch safe contiguous terminal diff writes.
+- M8-49 `a02c3a69bb5cea3832ef54e7cbe29425cc392eb3` (ADAPT_FORK): centralize creation CWD selection while
+  retaining final absolute-directory validation.
+- M8-50 `e7fc85bfdb51f89488430adbfe5bbced3be79c2f` (ADAPT_LINUX): preserve Kitty event identity and
+  report-all forwarding, without Windows VTI or protocol-17/18 states.
+- M8-51 `c0fb777ed7c7950c6a2f397113c1842c2e679306` (ADAPT_LINUX): report read truncation on common/Linux
+  history surfaces; omit the Windows recent-history fallback.
+- M8-52 `8843bbb0c4dc4e6b52ca5d0a6592ce80be56a19c` (ADAPT_FORK): workspace hierarchy/reorder/events while
+  preserving fork tokens, glyphs, projection, and authority.
+- M8-54 `61f6400675b065bf8f801816ed78c1f3206bcc06` (PORT): repaint after transient resize.
+- M8-56 `a79b3d558026d0703f848882d652bb5db65df26e` (PORT): close a workspace when API closes its last tab.
+- M8-58 `bc1c052d1524749b3f24d91e83f120ca8b7f37c4` (ADAPT_FORK): alternate-screen history through the
+  server observer, retaining sequence and zero-delivery boundaries.
+- M8-60 `9a4ce5e13c1d4622ca63c2947d0eaa018ec35715` (PORT): remove worktree `--json` from public help/spec while
+  retaining all four parser arms as hidden compatibility no-ops. `B2-M860-JSON-COMPAT` corrects the reviewed
+  V3 map wording; the pre-fix integration control failed on the first JSON-flagged request, then all four
+  flagged forms produced the same request as their unflagged forms.
+- M8-61 `0f14e279a783f456f3506086a0945cc8fb15a66c` (PORT): diagnose non-UTF-8 argv instead of panicking.
+- M8-62 `d8838082dc06b0d85ef164650b979e57a87f7721` (PORT): caller-bind pane query `--current`.
+- M8-63 `ee8429fb79ed0c53d2f23fa1b75b415e7f0cd377` (PORT): parse default mouse reports without leakage.
+- M8-64 `ecddecec6221174dc0557b0cbea9a6322f7e77e3` (PORT): reordered and equals-form pane read/wait flags.
+- M8-65 `6f311498aeeb27c0973781961ef94e8d0016ed17` (ADAPT_FORK): active-client bells and the direct
+  protocol-19 to protocol-20 transition with all fork methods retained.
+- M8-66 `10974c822d607f03e20e9741ec027910f0c1f93a` (ADAPT_FORK): per-pane right-click routing behind
+  caller/pane ownership and context-menu boundaries.
+- M8-67 `1777e9bba32b953ed1ad203b4a16d01105539000` (ADAPT_FORK): bounded direct pane-frame streaming while
+  retaining M8-32 canonical RGBA, ownership, resource, fallback, and cleanup constraints.
+- M8-68 `ca1af383a82733608a0563fce2252058b478498c` (PORT): clean local terminal hangup/EOF teardown.
+- M8-69 `350f001320ec4a119f09c38157973126962a6121` (ADAPT_FORK): escape-safe outer title sync while
+  preserving generic and immediate PTY wake sources.
+- M8-72 `b7dca4bb2a2cf488407ae051b40782f03fcabc62` (PORT): high-DPI direct-file scaling with fallback ACK.
+- M8-76 `b660cad80450147610091e0e5758faa6276e5983` (PORT): clean remote terminal hangup teardown.
+- M8-77 `e3c3d443584b629803a73ad66e0e298943c7f201` (ADAPT_LINUX): quiet Unix broken-pipe exit without
+  fallback-platform helpers.
+
+Five deferred authority sources are discharged in this batch: M8-50 integrates report-all and input work from
+`a5c69beabfc82d9c3f9563eb821139b2e0f3e14f`, `d57cefb879e685b4876a84fa20cbfd0702ce4140`, and
+`e536bd8bd99de975cb2d15bb384e6e35f88ef88e`; M8-58 applies the history optimization from
+`d76657f2c7fc18dcce3b9af43842c8afaba1646b`; M8-69 joins title wakes through the render-signal work from
+`2d24950ad9a02096921bc764e2e3dcd8900c3366`. No B2 deferred source remains.
+
+The Linux-only omissions are explicit: no Windows VTI, Windows recent-history fallback, macOS host-input
+compatibility, non-Unix broken-pipe helper, website copy, or generated upstream API artifact is imported.
+Runtime schema/help/wire population tests replace the generated artifact. The M8-39 managed interactive and
+headless deadline calls, B1 automation and plugin surfaces, F4 authority/receipt rules, M7 input/render paths,
+paint diagnostics, and M8-32 resource limits remain fork-preserved regions rather than upstream replacements.
+
+The B2.4/B2.5 chronology recovery uses a scratch copy with only named production regions restored to the B1
+tip. It records the behavior reds and separately identifies negative/compatibility characterizations that
+already pass on the parent. The terminal-attach resize control likewise stops against the parent branch. The
+three upstream semantic replacements are explicit: the public maximum-initial-line control uses the fork's
+strictest typed graphics envelope, the duplicate-method control preserves one-method decoding, and terminal
+no-data completion proves neither reset closure is invoked. Final B2 checks, performance evidence, bounded
+faults, commits, exact residue table, seal, and Gate-2 are recorded only after execution; this entry does not
+pre-approve them.

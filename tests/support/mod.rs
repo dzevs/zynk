@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 #![allow(dead_code)]
 
 use std::collections::HashSet;
@@ -15,7 +17,7 @@ static INIT: Once = Once::new();
 static CLEANUP_GUARD: OnceLock<CleanupGuard> = OnceLock::new();
 const WATCHDOG_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const RUNTIME_OWNER_MARKER: &str = ".zynk-test-owner-pid";
-pub const CURRENT_PROTOCOL: u32 = 19;
+pub const CURRENT_PROTOCOL: u32 = 20;
 
 pub fn register_spawned_zynk_pid(pid: Option<u32>) {
     let Some(pid) = pid else {

@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::io::{self, Write};
 
 const DISABLE_HOST_MOUSE_REPORTING_SEQUENCE: &[u8] =
@@ -6,6 +8,27 @@ const DISABLE_HOST_MOUSE_REPORTING_SEQUENCE: &[u8] =
 pub(crate) fn clear_host_mouse_reporting<W: Write>(writer: &mut W) -> io::Result<()> {
     writer.write_all(DISABLE_HOST_MOUSE_REPORTING_SEQUENCE)?;
     writer.flush()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn set_host_kitty_keyboard_report_all<W: Write>(
+    writer: &mut W,
+    report_all_keys: bool,
+) -> io::Result<()> {
+    let mut flags = crate::input::ime_compatible_keyboard_enhancement_flags();
+    if report_all_keys {
+        flags |= crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+    }
+    write!(writer, "\x1b[={}u", flags.bits())?;
+    writer.flush()
+}
+
+#[cfg(windows)]
+pub(crate) fn set_host_kitty_keyboard_report_all<W: Write>(
+    _writer: &mut W,
+    _report_all_keys: bool,
+) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -75,5 +98,16 @@ mod tests {
         );
         assert_eq!(writer.bytes, DISABLE_HOST_MOUSE_REPORTING_SEQUENCE);
         assert_eq!(writer.flushes, 1);
+    }
+
+    #[test]
+    fn host_keyboard_report_all_only_changes_the_current_zynk_stack_entry() {
+        let mut writer = Writer::default();
+
+        set_host_kitty_keyboard_report_all(&mut writer, true).unwrap();
+        set_host_kitty_keyboard_report_all(&mut writer, false).unwrap();
+
+        assert_eq!(writer.bytes, b"\x1b[=15u\x1b[=7u");
+        assert_eq!(writer.flushes, 2);
     }
 }

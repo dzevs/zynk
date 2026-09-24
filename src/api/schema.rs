@@ -80,6 +80,8 @@ pub enum Method {
     WorkspaceRename(WorkspaceRenameParams),
     #[serde(rename = "workspace.move")]
     WorkspaceMove(WorkspaceMoveParams),
+    #[serde(rename = "workspace.move_block")]
+    WorkspaceMoveBlock(WorkspaceMoveBlockParams),
     #[serde(rename = "workspace.report_metadata")]
     WorkspaceReportMetadata(WorkspaceReportMetadataParams),
     #[serde(rename = "workspace.close")]
@@ -166,6 +168,8 @@ pub enum Method {
     PaneGet(PaneTarget),
     #[serde(rename = "pane.focus")]
     PaneFocus(PaneTarget),
+    #[serde(rename = "pane.input.set")]
+    PaneInputSet(PaneInputSetParams),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
     #[serde(rename = "pane.send_text")]
@@ -188,6 +192,9 @@ pub enum Method {
     #[serde(skip)]
     #[schemars(skip)]
     PaneGraphicsStreamSet(PaneGraphicsSetParams),
+    #[serde(skip)]
+    #[schemars(skip)]
+    PaneGraphicsStreamDirect(PaneGraphicsDirectParams),
     #[serde(skip)]
     #[schemars(skip)]
     PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams),
@@ -343,7 +350,7 @@ mod tests {
                 "{wire_id}"
             );
         }
-        assert_eq!(crate::protocol::PROTOCOL_VERSION, 19);
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 20);
     }
 
     #[test]
@@ -400,7 +407,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(crate::protocol::PROTOCOL_VERSION, 19);
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 20);
     }
 
     #[test]
@@ -545,7 +552,7 @@ mod tests {
             }
         });
         assert!(serde_json::from_value::<Request>(legacy).is_err());
-        assert_eq!(crate::protocol::PROTOCOL_VERSION, 19);
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 20);
     }
 
     #[test]
@@ -608,7 +615,7 @@ mod tests {
     #[test]
     fn m839a_runtime_schema_names_start_and_readiness_contracts() {
         let document = export::protocol_schema_document();
-        assert_eq!(document["protocol"], 19);
+        assert_eq!(document["protocol"], 20);
         let start = &document["schemas"]["request"]["$defs"]["AgentStartParams"];
         let mut required: Vec<_> = start["required"]
             .as_array()
@@ -844,6 +851,44 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn b26_graphics_schema_binds_layers_direct_frames_and_bgra() {
+        let set: PaneGraphicsSetParams = serde_json::from_value(serde_json::json!({
+            "pane_id": "w1:p1",
+            "layer_id": "overlay.status",
+            "z_index": 7,
+            "format": "bgra",
+            "image_width": 1,
+            "image_height": 1,
+            "data_base64": "AQIDBA=="
+        }))
+        .unwrap();
+        assert_eq!(set.layer_id.as_deref(), Some("overlay.status"));
+        assert_eq!(set.z_index, 7);
+        assert_eq!(set.format, PaneGraphicsFormat::Bgra);
+
+        let direct = PaneGraphicsDirectParams {
+            pane_id: "w1:p1".into(),
+            layer_id: Some("overlay.status".into()),
+            z_index: 7,
+            owner: "owned-stream".into(),
+            image_width: 2,
+            image_height: 3,
+            format: PaneGraphicsFormat::Rgba,
+            path: "/private/source/frame".into(),
+            sequence: 11,
+            revision: 13,
+            placement: Default::default(),
+        };
+        assert!(serde_json::to_string(&Request {
+            id: "internal".into(),
+            method: Method::PaneGraphicsStreamDirect(direct),
+        })
+        .is_err());
+        assert_eq!(PANE_GRAPHICS_MAX_LAYERS_PER_PANE, 16);
+        assert_eq!(PANE_GRAPHICS_DIRECT_FILE_MAX_BYTES, 400 * 1024 * 1024);
+    }
     #[test]
     fn m832a_static_wire_names_formats_defaults_and_response_are_explicit() {
         for format in ["png", "rgb", "rgba"] {
@@ -851,6 +896,7 @@ mod tests {
                 "id": "static-set", "method": "pane.graphics.set",
                 "params": {"pane_id": "w1:p1", "format": format,
                     "image_width": 1, "image_height": 1, "data_base64": "AQIDBA==",
+                    "z_index": 0,
                     "placement": {"viewport_col": -2, "viewport_row": 3,
                         "grid_cols": 4, "grid_rows": 5}}
             });
@@ -891,7 +937,9 @@ mod tests {
             "viewport_col": 0, "viewport_row": 0, "grid_cols": 0, "grid_rows": 0})
         );
         let response = serde_json::json!({"id": "info", "result": {
-            "type": "pane_graphics_info", "cell_width_px": 11, "cell_height_px": 22}});
+            "type": "pane_graphics_info", "cell_width_px": 11, "cell_height_px": 22,
+            "pane_visible": false, "file_frame_damage": false,
+            "max_layers_per_pane": 0, "pixel_mouse": false}});
         let decoded: SuccessResponse =
             serde_json::from_value(response.clone()).expect("info response ID");
         assert_eq!(serde_json::to_value(decoded).unwrap(), response);
@@ -1205,7 +1253,7 @@ mod tests {
             assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
         }
         let kinds = serde_declared_event_kind_wire_ids();
-        assert_eq!(kinds.len(), 22);
+        assert_eq!(kinds.len(), 23);
         let created = kinds
             .iter()
             .position(|name| name == "pane_created")
@@ -1867,10 +1915,13 @@ mod tests {
         "#;
 
         let request: Request = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert!(serialized["params"].get("intent").is_none());
         let Method::PaneRead(params) = request.method else {
             panic!("wrong method parsed");
         };
         assert_eq!(params.format, ReadFormat::Text);
+        assert_eq!(params.intent, ReadIntent::Interactive);
     }
 
     #[test]
@@ -2230,6 +2281,7 @@ mod tests {
         "workspace.focus",
         "workspace.rename",
         "workspace.move",
+        "workspace.move_block",
         "workspace.report_metadata",
         "workspace.close",
         "worktree.list",
@@ -2273,6 +2325,7 @@ mod tests {
         "pane.current",
         "pane.get",
         "pane.focus",
+        "pane.input.set",
         "pane.rename",
         "pane.send_text",
         "pane.send_keys",
@@ -2337,6 +2390,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn m865_protocol_20_absorbs_b1_and_b2_wire_populations() {
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 20);
+        assert_eq!(serde_declared_method_wire_ids(), METHOD_WIRE_IDS);
+        for wire_id in [
+            "agent.send_keys",
+            "agent.wait",
+            "agent.view.set",
+            "agent.view.clear",
+        ] {
+            assert_eq!(
+                METHOD_WIRE_IDS
+                    .iter()
+                    .filter(|candidate| **candidate == wire_id)
+                    .count(),
+                1,
+                "{wire_id}"
+            );
+        }
+
+        let legacy = serde_json::json!({
+            "id":"old", "method":"agent.start", "params":{
+                "name":"worker", "cwd":"/tmp", "argv":["sh"], "focus":true
+            }
+        });
+        assert!(serde_json::from_value::<Request>(legacy).is_err());
+    }
+
     /// Every wire id `serde` will accept for an [`EventKind`], in declaration
     /// order, paired with the dot name published on the socket and to plugin
     /// event hooks. Both columns are published values: renaming one, reordering
@@ -2373,6 +2454,11 @@ mod tests {
             EventKind::WorkspaceMoved,
             "workspace_moved",
             "workspace.moved",
+        ),
+        (
+            EventKind::WorkspaceReordered,
+            "workspace_reordered",
+            "workspace.reordered",
         ),
         (
             EventKind::WorkspaceFocused,

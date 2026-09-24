@@ -1,9 +1,9 @@
-//! ADR 0014 — the pane-tree binding for identity reports and receipts.
+//! ADR 0014 — the pane-tree binding for pane-scoped requests.
 //!
 //! The API socket is `0o600` and owned by the user, so the server already knew
 //! every caller was the same UID. What it did not know is WHICH process called,
-//! and that is what let a passive process in one pane report an agent identity
-//! for another pane and then receipt its messages.
+//! and that is what let a passive process in one pane report an agent identity,
+//! receipt messages, or change pane-local input routing for another pane.
 //!
 //! The principal is the target pane's process tree: a caller is accepted only
 //! when the peer the kernel reported for its connection is the pane's PTY child,
@@ -98,7 +98,7 @@ impl CallerRejection {
             ),
             Self::OutsidePane { peer_pid } => format!(
                 "caller pid {peer_pid} is not inside pane {pane_id}'s process tree; \
-                 identity reports and receipts are accepted only from the target pane \
+                pane-scoped requests are accepted only from the target pane \
                  (ADR 0014)"
             ),
         }
@@ -172,6 +172,11 @@ pub(crate) fn pane_bound_target(method: &Method) -> Option<(&'static str, &str)>
         Method::ZynkMessageReceived(params) => {
             Some(("zynk.message_received", params.pane_id.as_str()))
         }
+        Method::PaneCurrent(params) => params
+            .caller_pane_id
+            .as_deref()
+            .map(|pane_id| ("pane.current", pane_id)),
+        Method::PaneInputSet(params) => Some(("pane.input.set", params.pane_id.as_str())),
         _ => None,
     }
 }
@@ -225,6 +230,37 @@ mod tests {
     use super::*;
     use crate::platform::place_process_in_tree;
     use std::collections::HashMap;
+
+    #[test]
+    fn pane_current_with_a_claimed_caller_is_pane_bound() {
+        let method = Method::PaneCurrent(crate::api::schema::PaneCurrentParams {
+            caller_pane_id: Some("w1:p1".into()),
+        });
+        assert_eq!(
+            super::pane_bound_target(&method),
+            Some(("pane.current", "w1:p1"))
+        );
+    }
+
+    #[test]
+    fn focused_pane_current_without_a_caller_claim_is_not_pane_bound() {
+        let method = Method::PaneCurrent(crate::api::schema::PaneCurrentParams {
+            caller_pane_id: None,
+        });
+        assert_eq!(super::pane_bound_target(&method), None);
+    }
+
+    #[test]
+    fn pane_input_set_is_bound_to_the_target_pane() {
+        let method = Method::PaneInputSet(crate::api::schema::PaneInputSetParams {
+            pane_id: "w1:p1".into(),
+            right_click: crate::api::schema::PaneRightClickTarget::Pane,
+        });
+        assert_eq!(
+            super::pane_bound_target(&method),
+            Some(("pane.input.set", "w1:p1"))
+        );
+    }
 
     /// A synthetic process table: pid -> (parent, start time).
     fn table(rows: &[(u32, u32, u64)]) -> impl Fn(u32) -> Option<(u32, u64)> + '_ {

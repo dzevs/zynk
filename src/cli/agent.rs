@@ -372,11 +372,11 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
 
         let deadline = *retry_deadline
             .get_or_insert_with(|| Instant::now() + PANE_SHELL_READINESS_RETRY_TIMEOUT);
-        previous_busy_response = Some(response);
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return super::print_response(previous_busy_response.as_ref().unwrap());
+            return super::print_response(&response);
         }
+        previous_busy_response = Some(response);
         std::thread::sleep(AGENT_START_POLL_INTERVAL.min(remaining));
     };
     let decoded = decode_agent_response(&response, "cli:agent:start", true);

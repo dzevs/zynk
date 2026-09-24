@@ -12,6 +12,20 @@ use crate::api::schema::{
     SubscriptionEventKind,
 };
 
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        crate::platform::begin_cli_output();
+        std::print!($($arg)*);
+    }};
+}
+
+macro_rules! println {
+    ($($arg:tt)*) => {{
+        crate::platform::begin_cli_output();
+        std::println!($($arg)*);
+    }};
+}
+
 mod agent;
 mod api;
 mod completion;
@@ -284,6 +298,7 @@ fn channel_set(args: &[String]) -> std::io::Result<i32> {
         ChannelSetInstallAction::RunSelfUpdate => {}
     }
 
+    crate::platform::end_cli_output();
     if let Err(err) = crate::update::self_update(crate::update::SelfUpdateOptions::default()) {
         eprintln!("update failed: {err}");
         eprintln!("Run `zynk update` to retry.");
@@ -811,12 +826,33 @@ pub(super) fn parse_attach_target(args: &[String], usage: &str) -> Result<(Strin
 }
 
 fn wait_output(args: &[String]) -> std::io::Result<i32> {
-    let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: zynk wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--timeout MS] [--regex]");
-        return Ok(2);
+    let params = match parse_wait_output_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
     };
 
-    let pane_id = normalize_pane_id(raw_pane_id);
+    let response = send_request(&Request {
+        id: "cli:wait:output".into(),
+        method: Method::PaneWaitForOutput(params),
+    })?;
+
+    if response.get("error").is_some() {
+        eprintln!("{}", serde_json::to_string(&response).unwrap());
+        return Ok(1);
+    }
+
+    println!("{}", serde_json::to_string(&response).unwrap());
+    Ok(0)
+}
+
+fn parse_wait_output_args(args: &[String]) -> Result<PaneWaitForOutputParams, String> {
+    const USAGE: &str = "usage: zynk wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--timeout MS] [--regex] [--raw]";
+
+    let args = expand_equals_args(args, &["--match", "--source", "--lines", "--timeout"]);
+    let mut pane_id = None;
     let mut source = ReadSource::Recent;
     let mut lines = None;
     let mut timeout_ms = None;
@@ -824,39 +860,36 @@ fn wait_output(args: &[String]) -> std::io::Result<i32> {
     let mut regex = false;
     let mut match_value = None;
 
-    let mut index = 1;
+    let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--match" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --match");
-                    return Ok(2);
+                    return Err("missing value for --match".into());
                 };
                 match_value = Some(value.clone());
                 index += 2;
             }
             "--source" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --source");
-                    return Ok(2);
+                    return Err("missing value for --source".into());
                 };
-                source = parse_read_source(value)?;
+                source = parse_read_source(value).map_err(|err| err.to_string())?;
                 index += 2;
             }
             "--lines" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --lines");
-                    return Ok(2);
+                    return Err("missing value for --lines".into());
                 };
-                lines = Some(parse_u32_flag("--lines", value)?);
+                lines = Some(parse_u32_flag("--lines", value).map_err(|err| err.to_string())?);
                 index += 2;
             }
             "--timeout" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --timeout");
-                    return Ok(2);
+                    return Err("missing value for --timeout".into());
                 };
-                timeout_ms = Some(parse_u64_flag("--timeout", value)?);
+                timeout_ms =
+                    Some(parse_u64_flag("--timeout", value).map_err(|err| err.to_string())?);
                 index += 2;
             }
             "--regex" => {
@@ -867,16 +900,24 @@ fn wait_output(args: &[String]) -> std::io::Result<i32> {
                 strip_ansi = false;
                 index += 1;
             }
-            other => {
-                eprintln!("unknown option: {other}");
-                return Ok(2);
+            option if option.starts_with('-') => {
+                return Err(format!("unknown option: {option}"));
+            }
+            positional => {
+                if pane_id.is_some() {
+                    return Err(format!("unexpected argument: {positional}"));
+                }
+                pane_id = Some(normalize_pane_id(positional));
+                index += 1;
             }
         }
     }
 
+    let Some(pane_id) = pane_id else {
+        return Err(USAGE.into());
+    };
     let Some(match_value) = match_value else {
-        eprintln!("missing required --match");
-        return Ok(2);
+        return Err("missing required --match".into());
     };
 
     let matcher = if regex {
@@ -885,25 +926,14 @@ fn wait_output(args: &[String]) -> std::io::Result<i32> {
         OutputMatch::Substring { value: match_value }
     };
 
-    let response = send_request(&Request {
-        id: "cli:wait:output".into(),
-        method: Method::PaneWaitForOutput(PaneWaitForOutputParams {
-            pane_id,
-            source,
-            lines,
-            r#match: matcher,
-            timeout_ms,
-            strip_ansi,
-        }),
-    })?;
-
-    if response.get("error").is_some() {
-        eprintln!("{}", serde_json::to_string(&response).unwrap());
-        return Ok(1);
-    }
-
-    println!("{}", serde_json::to_string(&response).unwrap());
-    Ok(0)
+    Ok(PaneWaitForOutputParams {
+        pane_id,
+        source,
+        lines,
+        r#match: matcher,
+        timeout_ms,
+        strip_ansi,
+    })
 }
 
 fn wait_agent_status(args: &[String]) -> std::io::Result<i32> {
@@ -1190,6 +1220,22 @@ pub(super) fn parse_u64_flag(flag: &str, value: &str) -> std::io::Result<u64> {
         .map_err(|_| std::io::Error::other(format!("invalid value for {flag}: {value}")))
 }
 
+/// Expand `--flag=value` tokens for options that take values. Boolean and
+/// unknown options remain intact so their owning parser still rejects them.
+pub(super) fn expand_equals_args(args: &[String], value_options: &[&str]) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(args.len());
+    for arg in args {
+        match arg.split_once('=') {
+            Some((flag, value)) if value_options.contains(&flag) => {
+                expanded.push(flag.to_string());
+                expanded.push(value.to_string());
+            }
+            _ => expanded.push(arg.clone()),
+        }
+    }
+    expanded
+}
+
 fn parse_session_json_only(args: &[String], usage: &str) -> Result<bool, i32> {
     match args {
         [] => Ok(false),
@@ -1293,7 +1339,7 @@ mod tests {
     fn m835_mismatch_response_pins_protocol_not_package_and_keeps_typed_error() {
         use super::protocol_guard::{error_response, mismatch_error, mismatch_response};
         let current = crate::protocol::PROTOCOL_VERSION;
-        assert_eq!(current, 19);
+        assert_eq!(current, 20);
         assert!(mismatch_response("same", current, "restart-fixture").is_none());
         for (server, guidance_present) in [(current - 1, true), (current + 1, false)] {
             let response = mismatch_response("original-id", server, "restart-fixture").unwrap();
@@ -1558,6 +1604,59 @@ mod tests {
         assert_eq!(
             super::pane::run_pane_command(&v(&["bogus", "--help"])).unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn expand_equals_args_splits_value_options_only() {
+        let args = v(&[
+            "--match=a=b",
+            "name=value",
+            "--raw=value",
+            "--bogus=value",
+            "--timeout=5000",
+        ]);
+        assert_eq!(
+            super::expand_equals_args(&args, &["--match", "--timeout"]),
+            v(&[
+                "--match",
+                "a=b",
+                "name=value",
+                "--raw=value",
+                "--bogus=value",
+                "--timeout",
+                "5000",
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_wait_output_args_accepts_reordered_equals_options() {
+        let params =
+            super::parse_wait_output_args(&v(&["--match=a=b", "--timeout=100", "issue-1"]))
+                .unwrap();
+
+        assert_eq!(params.pane_id, "issue-1");
+        assert_eq!(
+            params.r#match,
+            super::OutputMatch::Substring {
+                value: "a=b".into()
+            }
+        );
+        assert_eq!(params.timeout_ms, Some(100));
+    }
+
+    #[test]
+    fn parse_wait_output_args_preserves_regex_flag_semantics() {
+        let params =
+            super::parse_wait_output_args(&v(&["--regex", "--match", "ready.*", "issue-1"]))
+                .unwrap();
+
+        assert_eq!(
+            params.r#match,
+            super::OutputMatch::Regex {
+                value: "ready.*".into()
+            }
         );
     }
 }

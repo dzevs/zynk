@@ -511,6 +511,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::WorkspaceFocus(_) => "workspace.focus",
         Method::WorkspaceRename(_) => "workspace.rename",
         Method::WorkspaceMove(_) => "workspace.move",
+        Method::WorkspaceMoveBlock(_) => "workspace.move_block",
         Method::WorkspaceReportMetadata(_) => "workspace.report_metadata",
         Method::WorkspaceClose(_) => "workspace.close",
         Method::WorktreeList(_) => "worktree.list",
@@ -554,6 +555,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneCurrent(_) => "pane.current",
         Method::PaneGet(_) => "pane.get",
         Method::PaneFocus(_) => "pane.focus",
+        Method::PaneInputSet(_) => "pane.input.set",
         Method::PaneRename(_) => "pane.rename",
         Method::PaneSendText(_) => "pane.send_text",
         Method::PaneSendKeys(_) => "pane.send_keys",
@@ -564,6 +566,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneGraphicsInfo(_) => "pane.graphics.info",
         Method::PaneGraphicsStream(_) => "pane.graphics.stream",
         Method::PaneGraphicsStreamSet(_) => "pane.graphics.stream.set",
+        Method::PaneGraphicsStreamDirect(_) => "pane.graphics.stream.direct",
         Method::PaneGraphicsStreamOpen(_) => "pane.graphics.stream.open",
         Method::PaneGraphicsStreamClose(_) => "pane.graphics.stream.close",
         Method::PaneReportAgent(_) => "pane.report_agent",
@@ -1155,9 +1158,27 @@ mod tests {
     #[test]
     fn m832b_initial_line_fits_public_maximum_and_rejects_duplicate_method() {
         use base64::Engine as _;
-        let request = serde_json::json!({"id":"max","method":"pane.graphics.set","params":{
-            "pane_id":"1:p1","format":"png","image_width":1,"image_height":1,
-            "data_base64":base64::engine::general_purpose::STANDARD.encode(vec![1;512*1024])}});
+        let request = Request {
+            id: "max".into(),
+            method: Method::PaneGraphicsSet(crate::api::schema::PaneGraphicsSetParams {
+                pane_id: "1:p1".into(),
+                layer_id: Some("x".repeat(64)),
+                z_index: i32::MIN,
+                owner: String::new(),
+                format: crate::api::schema::PaneGraphicsFormat::Png,
+                image_width: u32::MAX,
+                image_height: u32::MAX,
+                data: None,
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode(vec![1; crate::api::schema::PANE_GRAPHICS_SET_MAX_BYTES]),
+                placement: crate::api::schema::PaneGraphicsPlacementParams {
+                    viewport_col: i32::MIN,
+                    viewport_row: i32::MIN,
+                    grid_cols: u32::MAX,
+                    grid_rows: u32::MAX,
+                },
+            }),
+        };
         assert!(serde_json::to_vec(&request).unwrap().len() < MAX_INITIAL_REQUEST_BYTES);
         assert!(serde_json::from_str::<Request>(r#"{"id":"duplicate","method":"ping","method":"pane.graphics.stream","params":{"pane_id":"1:p1"}}"#).is_err());
     }

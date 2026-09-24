@@ -1,9 +1,11 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use crate::api::schema::{
-    EmptyParams, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneRenameParams,
-    PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomParams, TabCreateParams,
-    TabMoveParams, TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceMoveParams,
-    WorkspaceRenameParams, WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams,
-    WorktreeRemoveParams,
+    EmptyParams, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneInputSetParams,
+    PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
+    PaneZoomParams, TabCreateParams, TabMoveParams, TabRenameParams, TabTarget,
+    WorkspaceCreateParams, WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
+    WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 use super::App;
@@ -51,6 +53,14 @@ impl App {
         params: WorkspaceMoveParams,
     ) -> String {
         self.dispatch_runtime_mutation(id, Method::WorkspaceMove(params))
+    }
+
+    pub(crate) fn runtime_workspace_move_block(
+        &mut self,
+        id: &'static str,
+        params: WorkspaceMoveBlockParams,
+    ) -> String {
+        self.dispatch_runtime_mutation(id, Method::WorkspaceMoveBlock(params))
     }
 
     pub(crate) fn runtime_workspace_close(
@@ -107,6 +117,16 @@ impl App {
         params: PaneRenameParams,
     ) -> String {
         self.dispatch_runtime_mutation(id, Method::PaneRename(params))
+    }
+
+    pub(crate) fn runtime_pane_input_set(
+        &mut self,
+        id: &'static str,
+        params: PaneInputSetParams,
+    ) -> String {
+        // The TUI selected this pane from server-owned state. Socket callers use
+        // Method::PaneInputSet and pass the process-tree admission check instead.
+        self.handle_pane_input_set(id.into(), params)
     }
 
     pub(crate) fn runtime_pane_focus_direction(
@@ -245,6 +265,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: true,
+                right_click: Default::default(),
             },
         );
         let split_error =

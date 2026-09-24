@@ -61,17 +61,20 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
-        let changed = match ev {
+        match ev {
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
             } => self.handle_git_status_refreshed(results, cache_updates),
+            ev @ AppEvent::TerminalBell { .. } => {
+                self.handle_internal_event(ev);
+                false
+            }
             ev => {
                 self.handle_internal_event(ev);
                 true
             }
-        };
-        changed | self.sync_pane_graphics_streams()
+        }
     }
 
     fn handle_git_status_refreshed(
@@ -100,6 +103,15 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+        if let AppEvent::TerminalBell { count, .. } = ev {
+            if let Err(err) =
+                crate::terminal_effects::write_terminal_bells(&mut std::io::stdout(), count)
+            {
+                tracing::warn!(err = %err, "failed to emit terminal bell");
+            }
+            return;
+        }
+
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
@@ -919,8 +931,8 @@ impl App {
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
 
-        // ADR 0014: identity reports and receipts are accepted only from a
-        // process inside the TARGET pane's tree. The check lives here, at the
+        // ADR 0014: pane-scoped requests are accepted only from a process
+        // inside the TARGET pane's tree. The check lives here, at the
         // socket-to-state boundary, so no bound handler can be reached without
         // it, and the bound set is one greppable list (`pane_bound_target`).
         if let Some((method, pane_id)) = caller::pane_bound_target(&request.method) {
@@ -936,7 +948,7 @@ impl App {
             }
         }
 
-        self.sync_terminal_titles();
+        self.sync_pending_terminal_titles();
 
         let response = match request.method {
             Method::SessionSnapshot(_) => {
@@ -1028,6 +1040,9 @@ impl App {
             Method::WorkspaceMove(params) => {
                 return self.handle_workspace_move(request.id, params);
             }
+            Method::WorkspaceMoveBlock(params) => {
+                return self.handle_workspace_move_block(request.id, params);
+            }
             Method::WorkspaceReportMetadata(params) => {
                 return self.handle_workspace_report_metadata(request.id, params);
             }
@@ -1110,6 +1125,7 @@ impl App {
             Method::PaneCurrent(params) => return self.handle_pane_current(request.id, params),
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
+            Method::PaneInputSet(params) => return self.handle_pane_input_set(request.id, params),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
             Method::PaneGraphicsSet(params) => {
@@ -1128,6 +1144,9 @@ impl App {
             }
             Method::PaneGraphicsStreamSet(params) => {
                 return self.handle_pane_graphics_stream_set(request.id, params);
+            }
+            Method::PaneGraphicsStreamDirect(params) => {
+                return self.handle_pane_graphics_stream_direct(request.id, params);
             }
             Method::PaneGraphicsStreamOpen(params) => {
                 return self.handle_pane_graphics_stream_open(request.id, params);
@@ -1387,6 +1406,7 @@ mod tests {
         let runtime = app.terminal_runtimes.get(&terminal).unwrap();
         runtime.test_process_pty_bytes(b"\x1b]2;pending-title\x07");
         assert_eq!(runtime.agent_osc_title(), "pending-title");
+        app.render_dirty.request_terminal_title(pane);
         let sequence = app.event_hub.current_sequence();
         let refused = serde_json::from_value(serde_json::json!({"id": "refused", "method": "pane.report_agent", "params": {"pane_id": target, "source": "zynk:claude", "agent": "claude", "state": "working"}})).unwrap();
         let response: serde_json::Value = serde_json::from_str(

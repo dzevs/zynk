@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use serde::{Deserialize, Serialize};
 
 use super::agents::AgentInfo;
@@ -151,9 +153,31 @@ pub enum ResponseResult {
     PaneRead {
         read: PaneReadResult,
     },
+    PaneGraphicsFrameAck {
+        sequence: u64,
+        revision: u64,
+    },
     PaneGraphicsInfo {
         cell_width_px: u32,
         cell_height_px: u32,
+        /// True only when this pane is on the currently rendered terminal surface.
+        pane_visible: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_frame_directory: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        file_frame_formats: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_frame_max_bytes: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_frame_direct_max_bytes: Option<usize>,
+        #[serde(default)]
+        file_frame_damage: bool,
+        #[serde(default)]
+        max_layers_per_pane: usize,
+        #[serde(default)]
+        pixel_mouse: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_frame_transport: Option<String>,
     },
     PaneProcessInfo {
         process_info: PaneProcessInfo,

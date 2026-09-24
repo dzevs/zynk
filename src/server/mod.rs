@@ -1,3 +1,6 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
+mod alt_screen_read;
 pub mod autodetect;
 pub(crate) mod client_accept;
 pub(crate) mod client_transport;

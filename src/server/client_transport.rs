@@ -41,6 +41,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Maximum input payload size (bytes) for a single `ClientMessage::Input`.
 const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
+/// Pixel mouse reports are one short control sequence, never arbitrary input.
+const MAX_PIXEL_MOUSE_PAYLOAD: usize = 128;
 /// Maximum structured input events accepted in one client message.
 const MAX_INPUT_EVENT_BATCH: usize = 4096;
 
@@ -730,6 +732,14 @@ impl ClientRenderWriter {
             ClientRenderTarget::Channel(sender) => sender.try_send(data),
         }
     }
+
+    pub(crate) fn send_ordered(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
+        match &self.target {
+            ClientRenderTarget::Queue(queue) => queue.send_ordered(data),
+            #[cfg(test)]
+            ClientRenderTarget::Channel(sender) => sender.try_send(data),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -741,6 +751,7 @@ struct ClientWriterQueue {
 #[derive(Debug, Default)]
 struct ClientWriterQueueState {
     control: VecDeque<Vec<u8>>,
+    ordered: VecDeque<Vec<u8>>,
     render: Option<Vec<u8>>,
     senders: usize,
     writer_alive: bool,
@@ -797,11 +808,31 @@ impl ClientWriterQueue {
         Ok(())
     }
 
+    fn send_ordered(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
+        let mut state = self.lock_state();
+        if !state.writer_alive {
+            return Err(TrySendError::Disconnected(data));
+        }
+        if !state.ordered.is_empty() {
+            return Err(TrySendError::Full(data));
+        }
+        if let Some(older) = state.render.take() {
+            state.ordered.push_back(older);
+        }
+        state.ordered.push_back(data);
+        self.ready.notify_one();
+        Ok(())
+    }
+
     fn recv(&self) -> Option<ClientWriteItem> {
         let mut state = self.lock_state();
         loop {
             if let Some(data) = state.control.pop_front() {
                 return Some(ClientWriteItem::Control(data));
+            }
+            if let Some(data) = state.ordered.pop_front() {
+                self.ready.notify_one();
+                return Some(ClientWriteItem::Render(data));
             }
             if let Some(data) = state.render.take() {
                 self.ready.notify_one();
@@ -820,6 +851,8 @@ impl ClientWriterQueue {
     fn close_writer(&self) {
         let mut state = self.lock_state();
         state.writer_alive = false;
+        state.render = None;
+        state.ordered.clear();
         self.ready.notify_all();
     }
 
@@ -850,10 +883,29 @@ pub(crate) enum ServerEvent {
         render_encoding: RenderEncoding,
         keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
         direct_attach_requested: bool,
+        direct_graphics: bool,
         writer: ClientWriter,
     },
     /// A client sent an input message.
     ClientInput { client_id: u64, data: Vec<u8> },
+    /// A client reported the one armed Kitty regular-file response.
+    GraphicsTransmissionResult {
+        client_id: u64,
+        transfer_id: u64,
+        image_id: u32,
+        success: bool,
+    },
+    GraphicsTransmissionStarted {
+        client_id: u64,
+        transfer_id: u64,
+        image_id: u32,
+    },
+    /// One confirmed SGR pixel report with client read-time geometry.
+    ClientInputPixels {
+        client_id: u64,
+        data: Vec<u8>,
+        geometry: crate::input::mouse::HostGeometry,
+    },
     /// A client transport retained raw input before reading later messages.
     ClientRawInputPending { client_id: u64 },
     /// A client sent structured input events.
@@ -1081,6 +1133,7 @@ fn handle_client_handshake_inner(
         render_encoding,
         keybindings,
         direct_attach_requested,
+        direct_graphics,
     ) = match hello {
         ClientMessage::Hello {
             version,
@@ -1130,6 +1183,7 @@ fn handle_client_handshake_inner(
                 requested_encoding,
                 keybindings,
                 launch_mode == ClientLaunchMode::TerminalAttach,
+                launch_mode == ClientLaunchMode::AppDirectGraphics,
             )
         }
         _ => {
@@ -1195,6 +1249,7 @@ fn handle_client_handshake_inner(
         render_encoding,
         keybindings,
         direct_attach_requested,
+        direct_graphics,
         writer,
     };
     if let Err(err) = server_event_tx.blocking_send(connected) {
@@ -1353,6 +1408,47 @@ fn client_read_loop(
 
         let event = match msg {
             ClientMessage::Input { .. } => unreachable!("raw input handled before dispatch"),
+            ClientMessage::InputPixels {
+                data,
+                cols,
+                rows,
+                width_px,
+                height_px,
+            } => {
+                let Some(geometry) =
+                    crate::input::mouse::HostGeometry::new(cols, rows, width_px, height_px)
+                else {
+                    warn!(
+                        client_id,
+                        cols,
+                        rows,
+                        width_px,
+                        height_px,
+                        "invalid pixel mouse geometry from client, closing"
+                    );
+                    let _ = server_event_tx
+                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    break;
+                };
+                if data.len() > MAX_PIXEL_MOUSE_PAYLOAD
+                    || crate::input::mouse::parse_report(&data).is_none()
+                {
+                    warn!(
+                        client_id,
+                        size = data.len(),
+                        max = MAX_PIXEL_MOUSE_PAYLOAD,
+                        "invalid pixel mouse report from client, closing"
+                    );
+                    let _ = server_event_tx
+                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    break;
+                }
+                ServerEvent::ClientInputPixels {
+                    client_id,
+                    data,
+                    geometry,
+                }
+            }
             ClientMessage::InputEvents { events } => match input_event_limit(&events) {
                 InputEventLimit::WithinLimits => {
                     ServerEvent::ClientInputEvents { client_id, events }
@@ -1394,6 +1490,24 @@ fn client_read_loop(
                     takeover,
                 }
             }
+            ClientMessage::GraphicsTransmissionResult {
+                transfer_id,
+                image_id,
+                success,
+            } => ServerEvent::GraphicsTransmissionResult {
+                client_id,
+                transfer_id,
+                image_id,
+                success,
+            },
+            ClientMessage::GraphicsTransmissionStarted {
+                transfer_id,
+                image_id,
+            } => ServerEvent::GraphicsTransmissionStarted {
+                client_id,
+                transfer_id,
+                image_id,
+            },
             ClientMessage::ClipboardImage { extension, data } => {
                 if data.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
                     warn!(
@@ -1672,6 +1786,30 @@ mod tests {
         assert!(matches!(
             writer.render.try_send(second),
             Err(TrySendError::Full(_))
+        ));
+    }
+
+    #[test]
+    fn ordered_direct_follows_older_render_and_stays_bounded() {
+        let (writer, queue) = test_queue_writer();
+        writer.render.try_send(b"old".to_vec()).unwrap();
+        writer.render.send_ordered(b"direct".to_vec()).unwrap();
+        assert!(matches!(
+            writer.render.send_ordered(b"second".to_vec()),
+            Err(TrySendError::Full(_))
+        ));
+        writer.render.try_send(b"new".to_vec()).unwrap();
+
+        for expected in [b"old".as_slice(), b"direct", b"new"] {
+            assert_eq!(
+                queue.recv(),
+                Some(ClientWriteItem::Render(expected.to_vec()))
+            );
+        }
+        queue.close_writer();
+        assert!(matches!(
+            writer.render.send_ordered(b"closed".to_vec()),
+            Err(TrySendError::Disconnected(_))
         ));
     }
 
@@ -2080,6 +2218,7 @@ new_tab = "ctrl+notakey"
                 render_encoding,
                 keybindings,
                 direct_attach_requested,
+                direct_graphics,
                 writer,
             } => {
                 assert_eq!(client_id, 42);
@@ -2088,6 +2227,7 @@ new_tab = "ctrl+notakey"
                 assert_eq!(render_encoding, RenderEncoding::TerminalAnsi);
                 assert!(keybindings.is_none());
                 assert!(!direct_attach_requested);
+                assert!(!direct_graphics);
                 drop(writer);
             }
             other => panic!("expected ClientConnected, got {other:?}"),
@@ -2095,6 +2235,55 @@ new_tab = "ctrl+notakey"
 
         drop(client_stream);
         should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+    }
+
+    #[test]
+    fn m865_protocol_19_peer_refuses_protocol_20_without_effect() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-handshake-protocol-19");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit)
+        });
+
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::Hello {
+                version: 19,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                requested_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: ClientKeybindings::Server,
+                launch_mode: ClientLaunchMode::App,
+            },
+        )
+        .expect("write protocol 19 hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read rejection");
+        match welcome {
+            ServerMessage::Welcome {
+                version,
+                error: Some(error),
+                ..
+            } => {
+                assert_eq!(version, 20);
+                assert!(error.contains("client version 19 is older than server version 20"));
+            }
+            other => panic!("expected protocol rejection, got {other:?}"),
+        }
+        assert!(
+            server_event_rx.try_recv().is_err(),
+            "an incompatible peer must not produce ClientConnected"
+        );
         handle
             .join()
             .expect("handshake thread join")
@@ -3131,6 +3320,34 @@ new_tab = "ctrl+notakey"
         for (name, data) in cases {
             assert_client_message_disconnects(name, ClientMessage::Input { data });
         }
+    }
+
+    #[test]
+    fn client_read_loop_disconnects_invalid_pixel_mouse_geometry() {
+        assert_client_message_disconnects(
+            "client-read-invalid-pixel-geometry",
+            ClientMessage::InputPixels {
+                data: b"\x1b[<35;1;1M".to_vec(),
+                cols: 0,
+                rows: 24,
+                width_px: 800,
+                height_px: 480,
+            },
+        );
+    }
+
+    #[test]
+    fn client_read_loop_disconnects_invalid_pixel_mouse_report() {
+        assert_client_message_disconnects(
+            "client-read-invalid-pixel-report",
+            ClientMessage::InputPixels {
+                data: vec![b'x'; MAX_PIXEL_MOUSE_PAYLOAD + 1],
+                cols: 80,
+                rows: 24,
+                width_px: 800,
+                height_px: 480,
+            },
+        );
     }
 
     #[test]

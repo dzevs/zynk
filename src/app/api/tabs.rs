@@ -225,18 +225,41 @@ impl App {
             return tab_not_found(id, &target.tab_id);
         };
         let workspace_id = self.public_workspace_id(ws_idx);
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return tab_not_found(id, &target.tab_id);
+        };
+        let closes_workspace = ws.tabs.len() <= 1;
         let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
         let pane_ids = self.state.pane_ids_for_tab(ws_idx, tab_idx);
+
+        if closes_workspace {
+            if self.state.confirm_implicit_worktree_group_close(ws_idx) {
+                return encode_error(
+                    id,
+                    "confirmation_required",
+                    "closing this tab would close a worktree group",
+                );
+            }
+            self.state.selected = ws_idx;
+            self.state.close_selected_workspace();
+            self.shutdown_detached_terminal_runtimes();
+            self.emit_event(EventEnvelope {
+                event: EventKind::TabClosed,
+                data: EventData::TabClosed {
+                    tab_id,
+                    workspace_id: workspace_id.clone(),
+                },
+            });
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed { workspace_id },
+            });
+            return encode_success(id, ResponseResult::Ok {});
+        }
+
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &target.tab_id);
         };
-        if ws.tabs.len() <= 1 {
-            return encode_error(
-                id,
-                "tab_close_failed",
-                "cannot close the last tab in a workspace",
-            );
-        }
         if !ws.close_tab(tab_idx) {
             return encode_error(
                 id,
@@ -288,6 +311,50 @@ fn tab_not_found(id: String, tab_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
+
+    #[test]
+    fn api_tab_close_last_tab_closes_workspace_and_emits_both_events() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("tabs")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let workspace_id = app.public_workspace_id(0);
+
+        let response = app.handle_tab_close(
+            "req".into(),
+            TabTarget {
+                tab_id: tab_id.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert!(app.state.workspaces.is_empty());
+        assert!(app.state.active.is_none());
+        let events = event_hub.events_after(0);
+        assert_eq!(
+            events
+                .iter()
+                .map(|(_, event)| event.event)
+                .collect::<Vec<_>>(),
+            [EventKind::TabClosed, EventKind::WorkspaceClosed]
+        );
+        assert!(matches!(
+            &events[0].1.data,
+            EventData::TabClosed {
+                tab_id: closed_tab_id,
+                workspace_id: closed_workspace_id,
+            } if closed_tab_id == &tab_id && closed_workspace_id == &workspace_id
+        ));
+        assert!(matches!(
+            &events[1].1.data,
+            EventData::WorkspaceClosed { workspace_id: closed_workspace_id }
+                if closed_workspace_id == &workspace_id
+        ));
+    }
 
     #[test]
     fn api_tab_move_reorders_tabs_in_target_workspace() {

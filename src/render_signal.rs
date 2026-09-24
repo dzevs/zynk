@@ -10,6 +10,7 @@ use crate::layout::PaneId;
 pub(crate) struct RenderRequest {
     pub(crate) generic: bool,
     pub(crate) pty_sources: HashSet<PaneId>,
+    pub(crate) terminal_title_sources: HashSet<PaneId>,
 }
 
 /// Coalesces render requests while retaining enough origin information for the
@@ -56,6 +57,28 @@ impl RenderSignal {
         became_pending || wake_for_source
     }
 
+    /// Coalesces completed OSC title changes independently from screen damage.
+    /// A newly observed source wakes the consumer even when hidden PTY damage is
+    /// already pending, because the title may affect a client-local side effect.
+    pub(crate) fn request_terminal_title(&self, pane_id: PaneId) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let source_added = state.request.terminal_title_sources.insert(pane_id);
+        let became_pending = !self.pending.swap(true, Ordering::AcqRel);
+        became_pending || source_added
+    }
+
+    pub(crate) fn pending_terminal_title_sources(&self) -> HashSet<PaneId> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request
+            .terminal_title_sources
+            .clone()
+    }
+
     pub(crate) fn set_immediate_pty_sources(&self, sources: HashSet<PaneId>) {
         self.state
             .lock()
@@ -69,6 +92,7 @@ impl RenderSignal {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.request.generic
+            || !state.request.terminal_title_sources.is_empty()
             || state
                 .request
                 .pty_sources
@@ -148,6 +172,27 @@ mod tests {
         assert!(signal.request_pty(visible));
         assert!(signal.has_immediate_work());
         assert!(!signal.request_pty(visible));
+    }
+
+    #[test]
+    fn terminal_title_source_wakes_pending_hidden_pty_work() {
+        let signal = RenderSignal::new();
+        let hidden = PaneId::from_raw(10);
+        let titled = PaneId::from_raw(20);
+        signal.set_immediate_pty_sources(HashSet::from([PaneId::from_raw(30)]));
+
+        assert!(signal.request_pty(hidden));
+        assert!(!signal.request_pty(PaneId::from_raw(11)));
+        assert!(signal.request_terminal_title(titled));
+        assert!(!signal.request_terminal_title(titled));
+        assert!(signal.has_immediate_work());
+
+        let request = signal.take();
+        assert_eq!(
+            request.pty_sources,
+            HashSet::from([hidden, PaneId::from_raw(11)])
+        );
+        assert_eq!(request.terminal_title_sources, HashSet::from([titled]));
     }
 
     #[test]

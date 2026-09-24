@@ -1,7 +1,10 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use crate::api::schema::{
     WorktreeCreateParams, WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
+// Worktree output is always JSON. The parsers retain `--json` as a hidden compatibility no-op.
 pub(super) fn run_worktree_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
         print_worktree_help();
@@ -60,7 +63,7 @@ fn worktree_list(args: &[String]) -> std::io::Result<i32> {
         }
     }
     if workspace_id.is_some() && cwd.is_some() {
-        eprintln!("usage: zynk worktree list [--workspace ID | --cwd PATH] [--json]");
+        eprintln!("usage: zynk worktree list [--workspace ID | --cwd PATH]");
         return Ok(2);
     }
 
@@ -144,7 +147,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
     }
     if workspace_id.is_some() && cwd.is_some() {
         eprintln!(
-            "usage: zynk worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--json]"
+            "usage: zynk worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus]"
         );
         return Ok(2);
     }
@@ -228,13 +231,13 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
     }
     if workspace_id.is_some() && cwd.is_some() {
         eprintln!(
-            "usage: zynk worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--json]"
+            "usage: zynk worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus]"
         );
         return Ok(2);
     }
     if path.is_some() == branch.is_some() {
         eprintln!(
-            "usage: zynk worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--json]"
+            "usage: zynk worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus]"
         );
         return Ok(2);
     }
@@ -277,7 +280,7 @@ fn worktree_remove(args: &[String]) -> std::io::Result<i32> {
     }
 
     let Some(workspace_id) = workspace_id else {
-        eprintln!("usage: zynk worktree remove --workspace ID [--force] [--json]");
+        eprintln!("usage: zynk worktree remove --workspace ID [--force]");
         return Ok(2);
     };
 
@@ -289,14 +292,14 @@ fn worktree_remove(args: &[String]) -> std::io::Result<i32> {
 
 fn print_worktree_help() {
     eprintln!("zynk worktree commands:");
-    eprintln!("  zynk worktree list [--workspace ID | --cwd PATH] [--json]");
+    eprintln!("  zynk worktree list [--workspace ID | --cwd PATH]");
     eprintln!(
-        "  zynk worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--json]"
+        "  zynk worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus]"
     );
     eprintln!(
-        "  zynk worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--json]"
+        "  zynk worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus]"
     );
-    eprintln!("  zynk worktree remove --workspace ID [--force] [--json]");
+    eprintln!("  zynk worktree remove --workspace ID [--force]");
 }
 
 fn normalize_path_arg(value: &str) -> std::io::Result<String> {

@@ -1392,6 +1392,73 @@ impl AppState {
         true
     }
 
+    pub fn move_workspace_block(
+        &mut self,
+        workspace_ids: &[String],
+        before_workspace_id: Option<&str>,
+    ) -> bool {
+        let moved_ids = workspace_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        if moved_ids.is_empty()
+            || moved_ids.len() != workspace_ids.len()
+            || !workspace_ids
+                .iter()
+                .all(|id| self.workspaces.iter().any(|workspace| workspace.id == *id))
+            || before_workspace_id.is_some_and(|id| {
+                moved_ids.contains(id)
+                    || !self.workspaces.iter().any(|workspace| workspace.id == id)
+            })
+        {
+            return false;
+        }
+
+        let mut desired_ids = self
+            .workspaces
+            .iter()
+            .filter(|workspace| !moved_ids.contains(workspace.id.as_str()))
+            .map(|workspace| workspace.id.clone())
+            .collect::<Vec<_>>();
+        let insert_idx = before_workspace_id
+            .and_then(|id| desired_ids.iter().position(|candidate| candidate == id))
+            .unwrap_or(desired_ids.len());
+        desired_ids.splice(insert_idx..insert_idx, workspace_ids.iter().cloned());
+        if self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id.as_str())
+            .eq(desired_ids.iter().map(String::as_str))
+        {
+            return false;
+        }
+
+        let active_id = self.active.map(|idx| self.workspaces[idx].id.clone());
+        let selected_id = self
+            .workspaces
+            .get(self.selected)
+            .map(|workspace| workspace.id.clone());
+        let desired_positions = desired_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (id.clone(), index))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        self.mark_session_dirty();
+        self.workspaces.sort_by_key(|workspace| {
+            desired_positions
+                .get(&workspace.id)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+        self.active = active_id.and_then(|id| self.workspaces.iter().position(|ws| ws.id == id));
+        self.selected = selected_id
+            .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
+            .unwrap_or(0);
+        self.ensure_workspace_visible(self.selected);
+        true
+    }
+
     pub fn scroll_tabs_left(&mut self) {
         self.tab_scroll_follow_active = false;
         self.tab_scroll = self.tab_scroll.saturating_sub(1);
@@ -1596,8 +1663,6 @@ impl AppState {
         }
         for pane_id in pane_ids {
             self.plugin_panes.remove(&pane_id);
-            self.pane_graphics_layers.remove(&pane_id);
-            self.pane_graphics_streams.remove(&pane_id);
         }
     }
 
@@ -2874,8 +2939,8 @@ impl AppState {
                     .collect()
                 }
             }
-            // Intercepted in App::handle_internal_event before reaching this
-            // dispatch; never touches AppState.
+            // Intercepted before this dispatch; never touches AppState.
+            AppEvent::TerminalBell { .. } => Vec::new(),
             AppEvent::ClipboardWrite { .. } => Vec::new(),
             AppEvent::TerminalCwdReported { pane_id, cwd } => {
                 if !cwd.is_absolute() || !cwd.is_dir() {
@@ -3636,12 +3701,22 @@ mod tests {
             state.workspaces[0].switch_tab(0);
             assert_eq!(state.workspaces[0].focused_pane_id(), Some(closed));
             state.ensure_test_terminals();
+            let mut graphics = crate::app::pane_graphics::Runtime::default();
             for pane in [closed, same_tab, other_tab, other_workspace] {
-                state
-                    .pane_graphics_streams
-                    .insert(pane, format!("owner-{}", pane.raw()));
+                let key = (
+                    pane,
+                    crate::api::schema::PANE_GRAPHICS_PRIMARY_LAYER_ID.to_owned(),
+                );
+                let image_id = graphics.reserve_image_id(&key).unwrap();
+                let mut slot = crate::app::pane_graphics::Slot::test(image_id, None);
+                slot.stream_owner = Some(format!("owner-{}", pane.raw()));
+                slot.stream_active = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    true,
+                )));
+                graphics.slots.insert(key, slot);
             }
-            let mut expected = state.pane_graphics_streams.clone();
+            let mut expected =
+                std::collections::HashSet::from([closed, same_tab, other_tab, other_workspace]);
             expected.remove(&closed);
             if kind >= 1 {
                 expected.remove(&same_tab);
@@ -3658,7 +3733,13 @@ mod tests {
                 }
                 _ => state.close_selected_workspace(),
             }
-            assert_eq!(state.pane_graphics_streams, expected, "kind={kind}");
+            assert!(graphics.retain_live_panes(&state), "kind={kind}");
+            let actual = graphics
+                .slots
+                .keys()
+                .map(|(pane, _)| *pane)
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(actual, expected, "kind={kind}");
             state.assert_invariants_for_test();
         }
     }
@@ -3674,19 +3755,30 @@ mod tests {
             state.workspaces[0].switch_tab(0);
             assert_eq!(state.workspaces[0].focused_pane_id(), Some(closed));
             state.ensure_test_terminals();
+            let mut graphics = crate::app::pane_graphics::Runtime::default();
             for pane in [closed, same_tab, other_tab, other_workspace] {
-                state.pane_graphics_layers.insert(
+                let key = (
                     pane,
-                    crate::app::state::PaneGraphicsLayer::new(
-                        crate::api::schema::PaneGraphicsFormat::Rgba,
-                        1,
-                        1,
-                        vec![1, 2, 3, 4],
-                        crate::api::schema::PaneGraphicsPlacementParams::default(),
+                    crate::api::schema::PANE_GRAPHICS_PRIMARY_LAYER_ID.to_owned(),
+                );
+                let image_id = graphics.reserve_image_id(&key).unwrap();
+                graphics.slots.insert(
+                    key,
+                    crate::app::pane_graphics::Slot::test(
+                        image_id,
+                        Some(crate::app::pane_graphics::Layer::inline(
+                            crate::api::schema::PaneGraphicsFormat::Rgba,
+                            1,
+                            1,
+                            vec![1, 2, 3, 4],
+                            crate::api::schema::PaneGraphicsPlacementParams::default(),
+                            0,
+                        )),
                     ),
                 );
             }
-            let mut expected = state.pane_graphics_layers.clone();
+            let mut expected =
+                std::collections::HashSet::from([closed, same_tab, other_tab, other_workspace]);
             expected.remove(&closed);
             if kind >= 1 {
                 expected.remove(&same_tab);
@@ -3703,11 +3795,14 @@ mod tests {
                 }
                 _ => state.close_selected_workspace(),
             }
-            assert!(
-                !state.pane_graphics_layers.contains_key(&closed),
-                "close kind={kind}"
-            );
-            assert_eq!(state.pane_graphics_layers, expected, "close kind={kind}");
+            assert!(graphics.retain_live_panes(&state), "kind={kind}");
+            let actual = graphics
+                .slots
+                .keys()
+                .map(|(pane, _)| *pane)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(!actual.contains(&closed), "close kind={kind}");
+            assert_eq!(actual, expected, "close kind={kind}");
             state.assert_invariants_for_test();
         }
     }
@@ -5389,6 +5484,57 @@ mod tests {
             .map(|ws| ws.display_name())
             .collect();
         assert_eq!(names, vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn move_workspace_block_collects_non_contiguous_members() {
+        let mut state =
+            app_with_workspaces(&["child-one", "normal", "parent", "child-two", "tail"]);
+        let parent_id = state.workspaces[2].id.clone();
+        let child_one_id = state.workspaces[0].id.clone();
+        let child_two_id = state.workspaces[3].id.clone();
+        let tail_id = state.workspaces[4].id.clone();
+        state.active = Some(0);
+        state.selected = 4;
+
+        assert!(state.move_workspace_block(
+            &[parent_id, child_one_id.clone(), child_two_id],
+            Some(&tail_id),
+        ));
+        assert_eq!(
+            state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.display_name())
+                .collect::<Vec<_>>(),
+            ["normal", "parent", "child-one", "child-two", "tail"]
+        );
+        assert_eq!(state.workspaces[state.active.unwrap()].id, child_one_id);
+        assert_eq!(state.workspaces[state.selected].id, tail_id);
+    }
+
+    #[test]
+    fn move_workspace_block_rejects_invalid_and_noop_orders() {
+        let mut state = app_with_workspaces(&["a", "b", "c"]);
+        let ids = state
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id.clone())
+            .collect::<Vec<_>>();
+
+        assert!(!state.move_workspace_block(&[], None));
+        assert!(!state.move_workspace_block(&[ids[0].clone(), ids[0].clone()], None));
+        assert!(!state.move_workspace_block(&["missing".into()], None));
+        assert!(!state.move_workspace_block(&[ids[0].clone()], Some(&ids[0])));
+        assert!(!state.move_workspace_block(&[ids[0].clone()], Some(&ids[1])));
+        assert_eq!(
+            state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.display_name())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
     }
 
     #[test]

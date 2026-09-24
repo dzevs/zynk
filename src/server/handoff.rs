@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -40,6 +42,8 @@ pub(crate) struct HandoffManifest {
     pub expected_protocol: Option<u32>,
     pub snapshot: crate::persist::SessionSnapshot,
     pub panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
+    #[serde(default)]
+    pub api_window_title: Option<String>,
 }
 
 pub(crate) struct ReceivedHandoff {
@@ -347,6 +351,7 @@ pub(crate) fn manifest_for(
     panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
+    api_window_title: Option<String>,
 ) -> HandoffManifest {
     HandoffManifest {
         version: sender_handoff_version(),
@@ -356,6 +361,7 @@ pub(crate) fn manifest_for(
         expected_protocol,
         snapshot,
         panes,
+        api_window_title,
     }
 }
 
@@ -504,10 +510,58 @@ pub(crate) fn log_import_result(panes: usize) {
 
 #[cfg(test)]
 mod daemon_tests {
+    use super::*;
+
+    fn empty_snapshot() -> crate::persist::SessionSnapshot {
+        crate::persist::SessionSnapshot {
+            version: 0,
+            workspaces: Vec::new(),
+            active: None,
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        }
+    }
+
     #[test]
     fn handoff_import_launcher_creates_new_session() {
         super::super::test_support::assert_detached_launch(|exe| {
             super::spawn_handoff_import(Some(exe), &exe.with_extension("sock"), "probe-token")
         });
+    }
+
+    #[test]
+    fn handoff_carries_an_api_window_title_override() {
+        let manifest = manifest_for(
+            empty_snapshot(),
+            Vec::new(),
+            None,
+            None,
+            Some("deploying".to_string()),
+        );
+
+        assert_eq!(manifest.api_window_title.as_deref(), Some("deploying"));
+    }
+
+    #[test]
+    fn handoff_manifest_without_window_title_override_remains_compatible() {
+        let manifest = manifest_for(
+            empty_snapshot(),
+            Vec::new(),
+            None,
+            None,
+            Some("deploying".to_string()),
+        );
+        let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        value
+            .as_object_mut()
+            .expect("manifest should be a JSON object")
+            .remove("api_window_title");
+
+        let older: HandoffManifest =
+            serde_json::from_value(value).expect("older manifest should still load");
+
+        assert!(older.api_window_title.is_none());
     }
 }

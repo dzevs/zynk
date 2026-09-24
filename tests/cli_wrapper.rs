@@ -3224,7 +3224,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  protocol: 19"),
+        full_stdout.contains("  protocol: 20"),
         "stdout: {full_stdout}"
     );
     assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
@@ -3257,7 +3257,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains("protocol: 19"),
+        server_stdout.contains("protocol: 20"),
         "stdout: {server_stdout}"
     );
 
@@ -3269,7 +3269,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
-        client_stdout.contains("protocol: 19"),
+        client_stdout.contains("protocol: 20"),
         "stdout: {client_stdout}"
     );
     assert!(
@@ -3279,7 +3279,7 @@ fn status_commands_report_client_and_server_versions() {
 
     let full_json = run_cli_json(&socket_path, &["status", "--json"]);
     assert_eq!(full_json["client"]["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(full_json["client"]["protocol"], 19);
+    assert_eq!(full_json["client"]["protocol"], 20);
     assert_eq!(full_json["server"]["status"], "running");
     assert_eq!(full_json["server"]["running"], true);
     assert_eq!(full_json["server"]["compatible"], true);
@@ -3293,12 +3293,12 @@ fn status_commands_report_client_and_server_versions() {
     let server_json = run_cli_json(&socket_path, &["status", "server", "--json"]);
     assert_eq!(server_json["status"], "running");
     assert_eq!(server_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(server_json["protocol"], 19);
+    assert_eq!(server_json["protocol"], 20);
     assert_eq!(server_json["compatible"], true);
 
     let client_json = run_cli_json(&socket_path, &["status", "client", "--json"]);
     assert_eq!(client_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(client_json["protocol"], 19);
+    assert_eq!(client_json["protocol"], 20);
     assert!(client_json["binary"]
         .as_str()
         .is_some_and(|path| !path.is_empty()));
@@ -3798,7 +3798,6 @@ fn worktree_management_commands_work() {
             branch,
             "--path",
             checkout.to_str().unwrap(),
-            "--json",
         ],
     );
     assert_eq!(created["result"]["type"], "worktree_created");
@@ -3824,13 +3823,7 @@ fn worktree_management_commands_work() {
 
     let listed = run_cli_json(
         &socket_path,
-        &[
-            "worktree",
-            "list",
-            "--workspace",
-            &parent_workspace_id,
-            "--json",
-        ],
+        &["worktree", "list", "--workspace", &parent_workspace_id],
     );
     let listed_entry = listed["result"]["worktrees"]
         .as_array()
@@ -3852,7 +3845,6 @@ fn worktree_management_commands_work() {
             &parent_workspace_id,
             "--branch",
             branch,
-            "--json",
         ],
     );
     assert_eq!(opened["result"]["type"], "worktree_opened");
@@ -3865,13 +3857,7 @@ fn worktree_management_commands_work() {
     fs::write(checkout.join("README.md"), "dirty\n").unwrap();
     let safe_remove = run_cli(
         &socket_path,
-        &[
-            "worktree",
-            "remove",
-            "--workspace",
-            &child_workspace_id,
-            "--json",
-        ],
+        &["worktree", "remove", "--workspace", &child_workspace_id],
     );
     assert_eq!(safe_remove.status.code(), Some(1));
     let safe_remove_json: serde_json::Value = serde_json::from_slice(&safe_remove.stderr).unwrap();
@@ -3889,7 +3875,6 @@ fn worktree_management_commands_work() {
             "--workspace",
             &child_workspace_id,
             "--force",
-            "--json",
         ],
     );
     assert_eq!(force_removed["result"]["type"], "worktree_removed");
@@ -3926,7 +3911,6 @@ fn forced_worktree_remove_terminates_processes_inside_checkout() {
             "worktree/force-process",
             "--path",
             checkout.to_str().unwrap(),
-            "--json",
         ],
     );
     let child_workspace_id = created["result"]["workspace"]["workspace_id"]
@@ -3962,7 +3946,6 @@ fn forced_worktree_remove_terminates_processes_inside_checkout() {
             "--workspace",
             &child_workspace_id,
             "--force",
-            "--json",
         ],
     );
     assert_eq!(removed["result"]["type"], "worktree_removed");
@@ -4007,7 +3990,6 @@ fn worktree_open_existing_checkout_by_path_and_branch() {
             "repo",
             "--path",
             "external-checkout",
-            "--json",
         ],
         &base,
     );
@@ -4034,13 +4016,7 @@ fn worktree_open_existing_checkout_by_path_and_branch() {
 
     let listed = run_cli_json(
         &socket_path,
-        &[
-            "worktree",
-            "list",
-            "--workspace",
-            &parent_workspace_id,
-            "--json",
-        ],
+        &["worktree", "list", "--workspace", &parent_workspace_id],
     );
     let listed_entry = listed["result"]["worktrees"]
         .as_array()
@@ -4062,7 +4038,6 @@ fn worktree_open_existing_checkout_by_path_and_branch() {
             &parent_workspace_id,
             "--branch",
             branch,
-            "--json",
         ],
     );
     assert_eq!(reopened["result"]["type"], "worktree_opened");
@@ -4080,7 +4055,6 @@ fn worktree_open_existing_checkout_by_path_and_branch() {
             "--workspace",
             &child_workspace_id,
             "--force",
-            "--json",
         ],
     );
     assert_eq!(removed["result"]["type"], "worktree_removed");
@@ -5191,6 +5165,16 @@ fn run_snapshot_cli_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> std::process::Output {
+    run_snapshot_cli_with_timeout_and_env(base, socket, args, timeout, &[])
+}
+
+fn run_snapshot_cli_with_timeout_and_env(
+    base: &Path,
+    socket: &Path,
+    args: &[&str],
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
     command
         .args(args)
@@ -5208,6 +5192,9 @@ fn run_snapshot_cli_with_timeout(
             base.join("cli-runtime/client.sock"),
         )
         .current_dir(base);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
     let database = base.join("cli-sqlite/zynk.db");
     run_cli_child_bounded(
         command,
@@ -6489,7 +6476,7 @@ fn m835_ordinary_mismatch_has_one_json_error_and_no_operational_request() {
             "100",
         ],
     ] {
-        for protocol in [18, 20] {
+        for protocol in [19, 21] {
             let (requests, output) = m835_scripted_cli(
                 &args,
                 vec![
@@ -6526,7 +6513,7 @@ fn m835_matching_protocol_ignores_package_version_and_replacement_is_not_recheck
     let (requests, output) = m835_scripted_cli(
         &["pane", "list"],
         vec![
-            serde_json::json!({"result":{"type":"pong", "version":"999.999.999", "protocol":19}}),
+            serde_json::json!({"result":{"type":"pong", "version":"999.999.999", "protocol":20}}),
             serde_json::json!({"result":{"type":"pane_list", "panes":[]}, "replacement":"observed"}),
         ],
         true,
@@ -6545,7 +6532,7 @@ fn m835_matching_protocol_ignores_package_version_and_replacement_is_not_recheck
     let (requests, output) = m835_scripted_cli(
         &["pane", "list"],
         vec![
-            serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}}),
+            serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":20}}),
             serde_json::Value::Null,
         ],
         true,
@@ -6587,9 +6574,9 @@ fn m839c_poll_rechecks_after_resolution_without_opening_mismatched_request() {
     let (requests, output) = m835_scripted_cli(
         &["agent", "wait", "worker", "--timeout", "100"],
         vec![
-            serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}}),
+            serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":20}}),
             m839_agent_reply(m839_agent_json("working", "worker", "term_original", 7)),
-            serde_json::json!({"result":{"type":"pong", "version":"replacement", "protocol":20}}),
+            serde_json::json!({"result":{"type":"pong", "version":"replacement", "protocol":21}}),
         ],
         false,
     );
@@ -6695,7 +6682,7 @@ fn m835_f4_refusal(verb: &[&str], late: bool, wrong_protocol: u32) {
                 requests.push(request.clone());
                 let n = requests.len();
                 let result = if request["method"] == "ping" {
-                    json!({"type":"pong", "version":"fixture", "protocol":if n == expected.len() { wrong_protocol } else { 19 }})
+                    json!({"type":"pong", "version":"fixture", "protocol":if n == expected.len() { wrong_protocol } else { support::CURRENT_PROTOCOL }})
                 } else {
                     json!({"type":format!("{key}_info"), (key):{"pane_id":"w1:p1", "terminal_id":"term_m835", "workspace_id":"w1", "tab_id":"w1:t1"}})
                 };
@@ -6778,7 +6765,7 @@ fn m835_f4_refusal(verb: &[&str], late: bool, wrong_protocol: u32) {
 #[test]
 fn m835_pre_resolution_mismatch_preserves_unknown_f4_without_attempt() {
     for verb in M835_MUTATING_VERBS {
-        for protocol in [18, 20] {
+        for protocol in [19, 21] {
             m835_f4_refusal(verb, false, protocol);
         }
     }
@@ -6787,7 +6774,7 @@ fn m835_pre_resolution_mismatch_preserves_unknown_f4_without_attempt() {
 #[test]
 fn m835_post_recorded_attempt_mismatch_appends_failed_without_submit_or_receipt() {
     for verb in M835_MUTATING_VERBS {
-        for protocol in [18, 20] {
+        for protocol in [19, 21] {
             m835_f4_refusal(verb, true, protocol);
         }
     }
@@ -6820,7 +6807,7 @@ fn m833_popup_cli_preserves_dimensions_and_close_wire_shape_under_guard() {
         let (requests, output) = m835_scripted_cli(
             &args,
             vec![
-                serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}}),
+                serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":20}}),
                 serde_json::json!({"result":{"type":"ok"}}),
             ],
             false,
@@ -7032,7 +7019,7 @@ fn m839_agent_json(status: &str, name: &str, terminal: &str, sequence: u64) -> s
 }
 
 fn m839_pong() -> serde_json::Value {
-    serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}})
+    serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":20}})
 }
 
 fn m839_agent_reply(agent: serde_json::Value) -> serde_json::Value {
@@ -7041,6 +7028,21 @@ fn m839_agent_reply(agent: serde_json::Value) -> serde_json::Value {
 
 fn m839_cli_exchange<F>(
     args: &[&str],
+    respond: F,
+) -> (
+    SnapshotCliFixture,
+    Vec<serde_json::Value>,
+    std::process::Output,
+)
+where
+    F: FnMut(&serde_json::Value, &Path) -> serde_json::Value + Send,
+{
+    m839_cli_exchange_with_env(args, &[], respond)
+}
+
+fn m839_cli_exchange_with_env<F>(
+    args: &[&str],
+    extra_env: &[(&str, &str)],
     mut respond: F,
 ) -> (
     SnapshotCliFixture,
@@ -7094,12 +7096,46 @@ where
             }
             requests
         });
-        let output =
-            run_snapshot_cli_with_timeout(&fixture.base, &socket, args, M839_CLI_CHILD_TIMEOUT);
+        let output = run_snapshot_cli_with_timeout_and_env(
+            &fixture.base,
+            &socket,
+            args,
+            M839_CLI_CHILD_TIMEOUT,
+            extra_env,
+        );
         done.store(true, Ordering::Release);
         (worker.join().unwrap(), output)
     });
     (fixture, requests, output)
+}
+
+#[test]
+fn pane_input_current_authenticates_then_updates_the_canonical_pane() {
+    let (fixture, requests, output) = m839_cli_exchange_with_env(
+        &["pane", "input", "--current", "--right-click", "pane"],
+        &[("ZYNK_PANE_ID", "claimed-pane")],
+        |request, _| match request["method"].as_str().unwrap() {
+            "ping" => m839_pong(),
+            "pane.current" => serde_json::json!({
+                "result": {"type": "pane_current", "pane": {"pane_id": "canonical-pane"}}
+            }),
+            "pane.input.set" => serde_json::json!({"result": {"type": "ok"}}),
+            other => panic!("unexpected {other}"),
+        },
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ping", "pane.current", "ping", "pane.input.set"]
+    );
+    assert_eq!(requests[1]["params"]["caller_pane_id"], "claimed-pane");
+    assert_eq!(requests[3]["params"]["pane_id"], "canonical-pane");
+    assert_eq!(requests[3]["params"]["right_click"], "pane");
+    fixture.assert_no_runtime_created();
 }
 
 #[test]
@@ -7316,7 +7352,7 @@ fn m839c_wait_checks_later_unchecked_responses_and_first_poll_guard() {
         assert_eq!(error["error"]["code"], code);
     }
     let mut incompatible = m839_pong();
-    incompatible["result"]["protocol"] = serde_json::json!(20);
+    incompatible["result"]["protocol"] = serde_json::json!(21);
     let (requests, output) = m835_scripted_cli(
         &["agent", "wait", "worker", "--timeout", "1500"],
         vec![
@@ -8056,7 +8092,7 @@ fn m839c_prompt_wait_failures_preserve_one_durable_submission_and_exit_three() {
                             .into_value(),
                         );
                         if case == "protocol" {
-                            return serde_json::json!({"result":{"type":"pong", "version":"replacement", "protocol":20}});
+                            return serde_json::json!({"result":{"type":"pong", "version":"replacement", "protocol":21}});
                         }
                     }
                     return m839_pong();
@@ -8250,7 +8286,7 @@ fn m839c_prompt_wait_requires_new_sequence_and_keeps_original_party() {
             "--until",
             "blocked",
             "--timeout",
-            "1500",
+            "5000",
             "body",
         ],
         |request, base| {
@@ -8594,7 +8630,7 @@ fn m839c_prompt_precondition_refusal_and_unresolved_transport_stay_distinct() {
                     return serde_json::Value::Null;
                 }
                 let mut pong = m839_pong();
-                pong["result"]["protocol"] = serde_json::json!(20);
+                pong["result"]["protocol"] = serde_json::json!(21);
                 pong
             });
         assert_eq!(requests.len(), 1);
@@ -8840,6 +8876,19 @@ fn m839c_real_agent_reads_with_managed_state_add_no_persistence_rows() {
         let after = m839_persistence_snapshot(&db, &phase).record(&mut database_phases);
         assert_eq!(after, before, "{method} response {index}");
     }
+    let pane_read = m837_exchange(
+        &socket,
+        serde_json::json!({
+            "id":"m839:pane-read",
+            "method":"pane.read",
+            "params":{"pane_id":pane,"source":"visible"}
+        }),
+    );
+    assert!(pane_read.get("error").is_none(), "{pane_read}");
+    let after_pane_read =
+        m839_persistence_snapshot(&db, "pane.read response received; server live")
+            .record(&mut database_phases);
+    assert_eq!(after_pane_read, before, "pane.read response");
     assert_eq!(
         database_phases
             .iter()
@@ -8852,6 +8901,7 @@ fn m839c_real_agent_reads_with_managed_state_add_no_persistence_rows() {
             "agent.list response 1 received; server live",
             "agent.get response 2 received; server live",
             "agent.list response 3 received; server live",
+            "pane.read response received; server live",
         ]
     );
     assert!(database_phases.iter().all(|observation| {

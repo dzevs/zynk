@@ -669,6 +669,13 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    fn m832b_primary_key(pane: crate::layout::PaneId) -> crate::app::pane_graphics::Key {
+        (
+            pane,
+            crate::api::schema::PANE_GRAPHICS_PRIMARY_LAYER_ID.to_owned(),
+        )
+    }
+
     #[test]
     fn m832b_late_queued_open_preserves_future_static_layer() {
         use crate::api::schema::*;
@@ -680,13 +687,15 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.kitty_graphics_enabled = true;
         let target = app.public_pane_id(0, pane).unwrap();
-        let revision = app.state.pane_graphics_revision;
+        let revision = app.pane_graphics.revision();
         let active = Arc::new(AtomicBool::new(true));
         let late = Request {
             id: "late".into(),
             method: Method::PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams {
                 params: PaneGraphicsStreamParams {
                     pane_id: target.clone(),
+                    layer_id: None,
+                    z_index: 0,
                     owner: "late".into(),
                 },
                 active: active.clone(),
@@ -717,10 +726,13 @@ mod tests {
         assert_eq!(first["result"]["type"], "ok");
         assert_eq!(second["error"]["code"], "stream_closed");
         assert!(!app.sync_pane_graphics_streams());
-        assert!(app.state.pane_graphics_streams.is_empty());
-        assert!(app.pane_graphics_stream_registrations.is_empty());
-        assert_eq!(app.state.pane_graphics_layers[&pane].data, vec![1, 2, 3, 4]);
-        assert_eq!(app.state.pane_graphics_revision, revision.wrapping_add(1));
+        let slot = &app.pane_graphics.slots[&m832b_primary_key(pane)];
+        assert!(slot.stream_owner.is_none());
+        assert_eq!(
+            slot.layer.as_ref().unwrap().inline_data().unwrap(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(app.pane_graphics.revision(), revision.wrapping_add(1));
         drop(retained);
     }
 
@@ -745,6 +757,8 @@ mod tests {
                     method: Method::PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams {
                         params: PaneGraphicsStreamParams {
                             pane_id: target,
+                            layer_id: None,
+                            z_index: 0,
                             owner: "same".into(),
                         },
                         active: active.clone(),
@@ -752,32 +766,41 @@ mod tests {
                 });
                 assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
             }
-            a.state.pane_graphics_layers.insert(
-                pane,
-                crate::app::state::PaneGraphicsLayer::new(
-                    PaneGraphicsFormat::Rgba,
-                    1,
-                    1,
-                    vec![1, 2, 3, 4],
-                    Default::default(),
-                ),
-            );
-            let revision = a.state.pane_graphics_revision;
+            a.pane_graphics
+                .slots
+                .get_mut(&m832b_primary_key(pane))
+                .unwrap()
+                .layer = Some(crate::app::pane_graphics::Layer::inline(
+                PaneGraphicsFormat::Rgba,
+                1,
+                1,
+                vec![1, 2, 3, 4],
+                Default::default(),
+                0,
+            ));
+            let revision = a.pane_graphics.revision();
             let _ = a.render_dirty.take();
             if drop_token {
-                drop(aa);
+                a.pane_graphics
+                    .slots
+                    .get_mut(&m832b_primary_key(pane))
+                    .unwrap()
+                    .stream_active = None;
             } else {
                 aa.store(false, Ordering::Release);
             }
             assert!(a.drain_api_requests(), "drop_token={drop_token}");
             assert!(a.render_dirty.take().generic);
-            assert!(!a.state.pane_graphics_layers.contains_key(&pane));
-            assert!(a.state.pane_graphics_streams.is_empty());
-            assert!(a.pane_graphics_stream_registrations.is_empty());
-            assert_eq!(a.state.pane_graphics_revision, revision.wrapping_add(1));
+            assert!(a.pane_graphics.slots.is_empty());
+            assert_eq!(a.pane_graphics.revision(), revision.wrapping_add(1));
             assert!(bb.load(Ordering::Acquire));
             assert!(!b.sync_pane_graphics_streams());
-            assert_eq!(b.state.pane_graphics_streams[&b_pane], "same");
+            assert_eq!(
+                b.pane_graphics.slots[&m832b_primary_key(b_pane)]
+                    .stream_owner
+                    .as_deref(),
+                Some("same")
+            );
         }
     }
 
@@ -798,13 +821,15 @@ mod tests {
             method: Method::PaneGraphicsStreamOpen(PaneGraphicsStreamOpenParams {
                 params: PaneGraphicsStreamParams {
                     pane_id: target,
+                    layer_id: None,
+                    z_index: 0,
                     owner: "removed".into(),
                 },
                 active: active.clone(),
             }),
         });
         assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
-        app.state.pane_graphics_streams.remove(&pane);
+        app.state.workspaces.clear();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         app.api_rx = rx;
         let (respond_to, replies) = std::sync::mpsc::channel();
@@ -823,7 +848,7 @@ mod tests {
         let first = app.api_rx.try_recv().unwrap();
         app.handle_api_request_message(first);
         assert!(!active.load(Ordering::Acquire));
-        assert!(app.pane_graphics_stream_registrations.is_empty());
+        assert!(app.pane_graphics.slots.is_empty());
         assert_eq!(app.api_rx.len(), 2);
         assert!(replies.try_recv().is_ok());
     }
@@ -869,6 +894,7 @@ mod tests {
         let runtime = app.terminal_runtimes.get(&terminal).unwrap();
         runtime.test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
         assert_eq!(runtime.agent_osc_title(), raw);
+        app.render_dirty.request_terminal_title(pane);
         assert_eq!(app.state.terminals[&terminal].revision, 0);
         let sequence = app.event_hub.current_sequence();
         let first =
@@ -910,6 +936,7 @@ mod tests {
             .get(&terminal)
             .unwrap()
             .test_process_pty_bytes(format!("\x1b]2;{spinner}\x07").as_bytes());
+        app.render_dirty.request_terminal_title(pane);
         let response =
             m828c_wrapper_request(&mut app, "pane.get", serde_json::json!({"pane_id": target}));
         assert_eq!(response["result"]["pane"]["terminal_title"], spinner);
@@ -960,6 +987,7 @@ mod tests {
                 .get(&terminal)
                 .unwrap()
                 .test_process_pty_bytes(format!("\x1b]2;{raw}\x07").as_bytes());
+            app.render_dirty.request_terminal_title(pane);
             let response =
                 m828c_wrapper_request(&mut app, "pane.get", serde_json::json!({"pane_id": target}));
             let info = &response["result"]["pane"];

@@ -13,6 +13,25 @@ use super::{
     LimitedRead, Signal,
 };
 
+fn set_sigpipe_disposition(handler: libc::sighandler_t) {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = handler;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        // Rust starts with SIGPIPE ignored. If this best-effort transition
+        // fails, stdout retains the existing Rust behavior.
+        libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut());
+    }
+}
+
+pub(crate) fn begin_cli_output() {
+    set_sigpipe_disposition(libc::SIG_DFL);
+}
+
+pub(crate) fn end_cli_output() {
+    set_sigpipe_disposition(libc::SIG_IGN);
+}
+
 const PROCESS_DETECTION_ENV_VAR: &str = "ZYNK_PROCESS_DETECTION";
 const CHILD_GROUPS_SCAN_LIMIT: usize = 64;
 
@@ -69,6 +88,20 @@ pub fn detach_server_daemon_command(command: &mut Command) {
 pub fn current_process_is_detached_server_daemon() -> bool {
     // SAFETY: both calls inspect the current process without touching memory.
     unsafe { libc::getsid(0) == libc::getpid() }
+}
+
+pub(crate) fn hostname() -> io::Result<String> {
+    let mut buffer = [0_u8; 256];
+    let status =
+        unsafe { libc::gethostname(buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len()) };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    Ok(String::from_utf8_lossy(&buffer[..end]).into_owned())
 }
 
 /// The parent PID of `pid` and the start time the kernel stamped on it, from a

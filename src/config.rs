@@ -8,6 +8,7 @@ mod model;
 mod sidebar;
 mod sound;
 mod theme;
+mod window_title;
 
 pub use self::{
     io::{
@@ -34,10 +35,12 @@ pub use self::{
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},
+    window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
 };
 
 pub(crate) use self::io::upsert_top_level_bool;
 pub(crate) use self::keybinds::parse_key_combo;
+pub(crate) use self::window_title::{sanitize_window_title_text, window_title_diagnostics};
 
 /// Zynk-branded config-path override (ADR 0007 §5): the primary, documented name.
 pub const ZYNK_CONFIG_PATH_ENV_VAR: &str = "ZYNK_CONFIG_PATH";
@@ -89,6 +92,7 @@ impl Config {
             .chain(keybind_diags)
             .chain(self.remote_image_paste_key().err())
             .chain(self.ui.sound.diagnostics())
+            .chain(window_title_diagnostics(&self.ui.window_title))
             .chain(self.invalid_sidebar_bounds_diagnostic())
             .collect()
     }

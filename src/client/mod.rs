@@ -14,9 +14,13 @@
 //! - Forwards OSC 52 clipboard writes from server to its own stdout
 //! - Displays sound/toast notifications forwarded from server
 
+#[cfg(unix)]
+mod direct_graphics;
 mod input;
 
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::io::IsTerminal as _;
 use std::io::{self, BufRead as _, Write as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -29,6 +33,7 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
+use crossterm::terminal::{DisableLineWrap, EnableLineWrap};
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::TryClone as _;
 use tracing::{debug, info, warn};
@@ -63,12 +68,20 @@ struct ClientState {
     blit_encoder: render_ansi::BlitEncoder,
     /// Whether host mouse capture is currently active.
     mouse_capture_active: bool,
+    /// Whether the host terminal currently reports all keys as Kitty sequences.
+    keyboard_report_all_active: bool,
     /// The terminal size we reported to the server in our last Hello/Resize.
     reported_size: (u16, u16),
     /// Client-local sound playback config, refreshed on server request.
     sound_config: crate::config::SoundConfig,
     /// Whether this client may write Kitty graphics bytes to its host terminal.
     kitty_graphics_enabled: bool,
+    /// One bounded matcher, inactive unless a direct transmission is armed.
+    #[cfg(unix)]
+    direct_graphics_response: Arc<Mutex<direct_graphics::ResponseMatcher>>,
+    /// One server-retired direct transfer to suppress if it was still queued.
+    #[cfg(unix)]
+    retired_direct_graphics: Option<(u64, u32)>,
     /// Direct attach prefix escape state. None for full-app clients.
     attach_escape: Option<AttachEscapeState>,
     /// Rows scrolled for one direct-attach wheel notch.
@@ -336,9 +349,9 @@ fn setup_terminal_with_capabilities(
 
     if enable_client_protocols {
         if mouse_capture {
-            set_mouse_capture(true)?;
+            set_mouse_capture(true, false)?;
         } else {
-            set_mouse_capture(false)?;
+            set_mouse_capture(false, false)?;
         }
         execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
         if host_color_scheme_reports {
@@ -350,9 +363,9 @@ fn setup_terminal_with_capabilities(
             write_host_color_scheme_report_mode(&mut io::stdout(), false)?;
         }
         if mouse_capture {
-            set_mouse_capture(true)?;
+            set_mouse_capture(true, false)?;
         } else {
-            set_mouse_capture(false)?;
+            set_mouse_capture(false, false)?;
         }
     }
 
@@ -364,9 +377,12 @@ fn setup_terminal_with_capabilities(
         io::stdout().flush()?;
     }
 
+    execute!(io::stdout(), DisableLineWrap)?;
+
     Ok(TerminalGuard {
         reset_modify_other_keys: modify_other_keys_mode.is_some(),
         reset_host_color_scheme_reports: host_color_scheme_reports,
+        restored: false,
     })
 }
 
@@ -378,6 +394,7 @@ fn should_enable_host_color_scheme_reports(enable_client_protocols: bool) -> boo
 struct TerminalGuard {
     reset_modify_other_keys: bool,
     reset_host_color_scheme_reports: bool,
+    restored: bool,
 }
 
 fn write_host_color_scheme_report_mode(
@@ -407,10 +424,15 @@ fn write_terminal_restore_postlude(
     writer.flush()
 }
 
-fn set_mouse_capture(enabled: bool) -> io::Result<()> {
+fn set_mouse_capture(enabled: bool, sgr_pixels: bool) -> io::Result<()> {
     crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     if enabled {
-        execute!(io::stdout(), EnableMouseCapture)
+        execute!(io::stdout(), EnableMouseCapture)?;
+        if sgr_pixels {
+            io::stdout().write_all(b"\x1b[?1016h")?;
+            io::stdout().flush()?;
+        }
+        Ok(())
     } else {
         match execute!(io::stdout(), DisableMouseCapture) {
             Ok(()) => Ok(()),
@@ -419,7 +441,10 @@ fn set_mouse_capture(enabled: bool) -> io::Result<()> {
     }
 }
 
-fn restore_terminal_state(reset_modify_other_keys: bool, reset_host_color_scheme_reports: bool) {
+fn restore_terminal_state(
+    reset_modify_other_keys: bool,
+    reset_host_color_scheme_reports: bool,
+) -> io::Result<()> {
     let _ = clear_received_kitty_graphics(&mut io::stdout());
 
     // Reset modifyOtherKeys if we enabled it.
@@ -431,13 +456,17 @@ fn restore_terminal_state(reset_modify_other_keys: bool, reset_host_color_scheme
     let _ = pop_keyboard_enhancement_flags();
     let _ = execute!(
         io::stdout(),
+        EnableLineWrap,
         DisableFocusChange,
         DisableBracketedPaste,
         DisableMouseCapture
     );
     let _ = crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout());
-    ratatui::restore();
-    let _ = write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
+    let restore_result = ratatui::try_restore();
+    let postlude_result =
+        write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
+
+    restore_result.and(postlude_result)
 }
 
 fn push_keyboard_enhancement_flags() -> io::Result<()> {
@@ -451,12 +480,24 @@ fn pop_keyboard_enhancement_flags() -> io::Result<()> {
     execute!(io::stdout(), PopKeyboardEnhancementFlags)
 }
 
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
+impl TerminalGuard {
+    fn restore(mut self) -> io::Result<()> {
+        self.restored = true;
         restore_terminal_state(
             self.reset_modify_other_keys,
             self.reset_host_color_scheme_reports,
-        );
+        )
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = restore_terminal_state(
+                self.reset_modify_other_keys,
+                self.reset_host_color_scheme_reports,
+            );
+        }
     }
 }
 
@@ -492,6 +533,44 @@ fn handshake_read_timeout() -> Duration {
     LOCAL_HANDSHAKE_READ_TIMEOUT
 }
 
+#[cfg(any(unix, test))]
+fn direct_graphics_profile_values(
+    term_program: &str,
+    term: &str,
+    kitty_window: bool,
+    blocked_transport: bool,
+    terminals: bool,
+) -> bool {
+    let supported = term_program.eq_ignore_ascii_case("ghostty")
+        || term_program.eq_ignore_ascii_case("wezterm")
+        || matches!(term, "xterm-ghostty" | "xterm-kitty" | "xterm-wezterm")
+        || kitty_window;
+    supported && !blocked_transport && terminals
+}
+
+#[cfg(unix)]
+fn direct_graphics_profile_allowed(direct_attach: bool) -> bool {
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let term = std::env::var("TERM").unwrap_or_default();
+    direct_graphics_profile_values(
+        &term_program,
+        &term,
+        std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        direct_attach
+            || is_remote_client_process()
+            || std::env::var_os("SSH_CONNECTION").is_some()
+            || std::env::var_os("SSH_TTY").is_some()
+            || std::env::var_os("TMUX").is_some()
+            || std::env::var_os("STY").is_some(),
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+    )
+}
+
+#[cfg(not(unix))]
+fn direct_graphics_profile_allowed(_direct_attach: bool) -> bool {
+    false
+}
+
 fn requested_keybindings() -> ClientKeybindings {
     match std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR)
         .ok()
@@ -516,6 +595,25 @@ fn set_handshake_recv_timeout(
         .map_err(ClientError::ConnectionFailed)
 }
 
+fn client_launch_mode(
+    direct_attach_requested: bool,
+    exact_cell_size: bool,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> ClientLaunchMode {
+    if direct_attach_requested {
+        ClientLaunchMode::TerminalAttach
+    } else if exact_cell_size
+        && cell_width_px > 0
+        && cell_height_px > 0
+        && direct_graphics_profile_allowed(false)
+    {
+        ClientLaunchMode::AppDirectGraphics
+    } else {
+        ClientLaunchMode::App
+    }
+}
+
 /// Performs the client→server handshake.
 ///
 /// Sends Hello with the terminal size and protocol version, reads the Welcome
@@ -526,6 +624,7 @@ fn do_handshake(
     rows: u16,
     cell_width_px: u32,
     cell_height_px: u32,
+    exact_cell_size: bool,
     requested_encoding: RenderEncoding,
     direct_attach_requested: bool,
 ) -> Result<RenderEncoding, ClientError> {
@@ -542,11 +641,12 @@ fn do_handshake(
         cell_height_px,
         requested_encoding,
         keybindings: requested_keybindings(),
-        launch_mode: if direct_attach_requested {
-            ClientLaunchMode::TerminalAttach
-        } else {
-            ClientLaunchMode::App
-        },
+        launch_mode: client_launch_mode(
+            direct_attach_requested,
+            exact_cell_size,
+            cell_width_px,
+            cell_height_px,
+        ),
     };
     protocol::write_message(stream, &hello)
         .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
@@ -590,6 +690,10 @@ fn do_handshake(
 enum ClientLoopEvent {
     /// Raw input bytes from stdin.
     StdinInput(Vec<u8>),
+    /// One confirmed SGR pixel report with geometry captured by the reader.
+    PixelMouse(Vec<u8>, crate::input::mouse::HostGeometry),
+    /// One response consumed from the Kitty direct-transmission stream.
+    DirectGraphicsResponse(direct_graphics::Response),
     /// Terminal resize detected.
     Resize(u16, u16, u32, u32),
     /// Server message received.
@@ -692,6 +796,7 @@ fn connect_terminal_session_stream(
         rows,
         0,
         0,
+        false,
         RenderEncoding::TerminalAnsi,
         true,
     )
@@ -932,7 +1037,7 @@ fn run_client_with_mode(
     };
 
     // Get the terminal geometry before handshake (before raw mode).
-    let (cols, rows, cell_width_px, cell_height_px) =
+    let (cols, rows, cell_width_px, cell_height_px, exact_cell_size) =
         initial_terminal_geometry(kitty_graphics_enabled);
 
     // Perform handshake while the stream is still in blocking mode.
@@ -942,6 +1047,7 @@ fn run_client_with_mode(
         rows,
         cell_width_px,
         cell_height_px,
+        exact_cell_size,
         requested_encoding,
         direct_attach_requested,
     ) {
@@ -980,7 +1086,7 @@ fn run_client_with_mode(
     let panic_resets_host_color_scheme_reports = terminal_guard.reset_host_color_scheme_reports;
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_state(
+        let _ = restore_terminal_state(
             panic_resets_modify_other_keys,
             panic_resets_host_color_scheme_reports,
         );
@@ -1017,19 +1123,22 @@ fn run_client_with_mode(
     });
 
     // Restore the terminal before printing any final status message.
-    drop(terminal_guard);
+    let terminal_restore_failed = terminal_guard.restore().is_err();
 
     if let Err(err) = result {
-        eprintln!("zynk: {err}");
+        let _ = writeln!(io::stderr(), "zynk: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));
         crate::logging::shutdown("client");
 
-        if matches!(
-            err,
+        let detached = matches!(
+            &err,
             ClientError::ServerShutdown {
                 reason: Some(reason)
             } if reason == "detached"
-        ) {
+        );
+        let connection_lost_during_terminal_hangup =
+            terminal_restore_failed && matches!(&err, ClientError::ConnectionLost(_));
+        if detached || connection_lost_during_terminal_hangup {
             return Ok(());
         }
 
@@ -1060,9 +1169,12 @@ async fn run_client_loop(
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
         mouse_capture_active: config.mouse_capture_active,
+        keyboard_report_all_active: false,
         reported_size: (initial_geometry.0, initial_geometry.1),
         sound_config: config.sound_config,
         kitty_graphics_enabled: config.kitty_graphics_enabled,
+        direct_graphics_response: Arc::new(Mutex::new(direct_graphics::ResponseMatcher::default())),
+        retired_direct_graphics: None,
         attach_escape,
         mouse_scroll_lines: config.mouse_scroll_lines,
         remote_image_paste_key: config.remote_image_paste_key,
@@ -1073,6 +1185,7 @@ async fn run_client_loop(
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
     // Width and height share one observation across the input and resize threads.
     let reported_cell_size = Arc::new(AtomicU64::new(0));
+    let host_sgr_pixels_active = Arc::new(AtomicBool::new(false));
 
     // Channel for events from the stdin, resize, and server reader threads.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
@@ -1085,6 +1198,12 @@ async fn run_client_loop(
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
+    let stdin_sgr_pixels_active = host_sgr_pixels_active.clone();
+    let stdin_direct_response = state.direct_graphics_response.clone();
+    let stdin_direct_response_active = stdin_direct_response
+        .lock()
+        .map(|matcher| matcher.active_handle())
+        .unwrap_or_default();
     std::thread::spawn(move || {
         input::stdin_reader_loop(
             stdin_tx,
@@ -1092,6 +1211,9 @@ async fn run_client_loop(
             will_query_host_terminal_theme,
             will_query_host_cell_size,
             stdin_mouse_capture_active,
+            stdin_sgr_pixels_active,
+            stdin_direct_response,
+            stdin_direct_response_active,
         );
     });
 
@@ -1258,8 +1380,32 @@ async fn run_client_loop(
                     return Err(ClientError::ConnectionLost(e));
                 }
             }
+            ClientLoopEvent::DirectGraphicsResponse(response) => {
+                let message = ClientMessage::GraphicsTransmissionResult {
+                    transfer_id: response.transfer_id,
+                    image_id: response.image_id,
+                    success: response.success,
+                };
+                if let Err(err) = write_to_server(&mut write_stream, &message) {
+                    return Err(ClientError::ConnectionLost(err));
+                }
+            }
+            ClientLoopEvent::PixelMouse(data, geometry) => {
+                let message = ClientMessage::InputPixels {
+                    data,
+                    cols: geometry.cols,
+                    rows: geometry.rows,
+                    width_px: geometry.width_px,
+                    height_px: geometry.height_px,
+                };
+                if let Err(err) = write_to_server(&mut write_stream, &message) {
+                    return Err(ClientError::ConnectionLost(err));
+                }
+            }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
                 state.reported_size = (new_cols, new_rows);
+                // Resizing invalidates the host-side blit baseline.
+                state.request_repaint();
                 let msg = ClientMessage::Resize {
                     cols: new_cols,
                     rows: new_rows,
@@ -1303,6 +1449,88 @@ async fn run_client_loop(
                         let _ = stdout.flush();
                     }
                 }
+                ServerMessage::GraphicsFile {
+                    path,
+                    expected_len,
+                    image_id,
+                    transfer_id,
+                    leading,
+                    control,
+                } => {
+                    if state.retired_direct_graphics.take() == Some((transfer_id, image_id)) {
+                        continue;
+                    }
+                    let valid = state.kitty_graphics_enabled
+                        && usize::try_from(expected_len).ok().is_some_and(|len| {
+                            crate::pane_graphics_files::validate_direct_source(
+                                std::path::Path::new(&path),
+                                len,
+                            )
+                            .is_ok()
+                                && direct_graphics::valid_control(&control, image_id, len)
+                        })
+                        && state
+                            .direct_graphics_response
+                            .lock()
+                            .is_ok_and(|mut matcher| matcher.arm(transfer_id, image_id));
+                    let sent = if valid {
+                        let mut command = Vec::new();
+                        crate::kitty_graphics::encode_kitty_regular_file(
+                            &mut command,
+                            &leading,
+                            &control,
+                            &path,
+                        );
+                        let mut stdout = io::stdout();
+                        let written = stdout
+                            .write_all(&command)
+                            .and_then(|()| stdout.flush())
+                            .is_ok();
+                        if written {
+                            record_received_kitty_graphics(&command);
+                        }
+                        written
+                    } else {
+                        false
+                    };
+                    if sent {
+                        if let Ok(mut matcher) = state.direct_graphics_response.lock() {
+                            matcher.start(transfer_id);
+                        }
+                        let started = ClientMessage::GraphicsTransmissionStarted {
+                            transfer_id,
+                            image_id,
+                        };
+                        if let Err(err) = write_to_server(&mut write_stream, &started) {
+                            return Err(ClientError::ConnectionLost(err));
+                        }
+                    } else {
+                        if let Ok(mut matcher) = state.direct_graphics_response.lock() {
+                            if valid {
+                                matcher.retire(transfer_id);
+                            } else {
+                                matcher.cancel(transfer_id);
+                            }
+                        }
+                        let result = ClientMessage::GraphicsTransmissionResult {
+                            transfer_id,
+                            image_id,
+                            success: false,
+                        };
+                        if let Err(err) = write_to_server(&mut write_stream, &result) {
+                            return Err(ClientError::ConnectionLost(err));
+                        }
+                    }
+                }
+                ServerMessage::GraphicsTransmissionRetired {
+                    transfer_id,
+                    image_id,
+                } => {
+                    state.retired_direct_graphics = Some((transfer_id, image_id));
+                    if let Ok(mut matcher) = state.direct_graphics_response.lock() {
+                        matcher.retire(transfer_id);
+                    }
+                }
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });
                 }
@@ -1318,8 +1546,10 @@ async fn run_client_loop(
                     let _ = io::stdout().flush();
                 }
                 ServerMessage::WindowTitle { title } => {
-                    write_window_title(title.as_deref());
-                    let _ = io::stdout().flush();
+                    let _ = crate::terminal_effects::write_window_title(
+                        &mut io::stdout(),
+                        title.as_deref(),
+                    );
                 }
                 ServerMessage::ReloadSoundConfig => {
                     reload_local_client_config(
@@ -1328,12 +1558,36 @@ async fn run_client_loop(
                         &mut state.remote_image_paste_key,
                     );
                 }
-                ServerMessage::MouseCapture { enabled } => {
-                    let desired = enabled;
-                    if desired != state.mouse_capture_active {
-                        set_mouse_capture(desired).map_err(ClientError::ConnectionFailed)?;
-                        state.mouse_capture_active = desired;
-                        host_mouse_capture_active.store(desired, Ordering::Release);
+                ServerMessage::MouseCapture {
+                    enabled,
+                    sgr_pixels,
+                } => {
+                    let next_sgr_pixels = enabled && sgr_pixels;
+                    let mouse_mode_changed = enabled != state.mouse_capture_active
+                        || next_sgr_pixels != host_sgr_pixels_active.load(Ordering::Acquire);
+                    if mouse_mode_changed {
+                        set_mouse_capture(enabled, next_sgr_pixels)
+                            .map_err(ClientError::ConnectionFailed)?;
+                    }
+                    state.mouse_capture_active = enabled;
+                    host_mouse_capture_active.store(enabled, Ordering::Release);
+                    host_sgr_pixels_active.store(next_sgr_pixels, Ordering::Release);
+                }
+                ServerMessage::KittyKeyboardReportAll { enabled } => {
+                    if enabled != state.keyboard_report_all_active {
+                        crate::terminal_modes::set_host_kitty_keyboard_report_all(
+                            &mut io::stdout(),
+                            enabled,
+                        )
+                        .map_err(ClientError::ConnectionFailed)?;
+                        state.keyboard_report_all_active = enabled;
+                    }
+                }
+                ServerMessage::TerminalBell { count } => {
+                    if let Err(err) =
+                        crate::terminal_effects::write_terminal_bells(&mut io::stdout(), count)
+                    {
+                        warn!(err = %err, "failed to emit terminal bell");
                     }
                 }
                 ServerMessage::Welcome { .. } => {
@@ -1346,7 +1600,11 @@ async fn run_client_loop(
                     "server closed connection",
                 )));
             }
-            ClientLoopEvent::Timer => {}
+            ClientLoopEvent::Timer => {
+                if let Ok(mut matcher) = state.direct_graphics_response.lock() {
+                    matcher.expire();
+                }
+            }
         }
     }
 
@@ -1654,19 +1912,6 @@ fn forward_clipboard(data: &str) {
     crate::selection::write_osc52_bytes(&bytes);
 }
 
-fn window_title_osc(title: Option<&str>) -> Vec<u8> {
-    let title = title.unwrap_or("zynk");
-    let safe_title = title
-        .chars()
-        .filter(|ch| !matches!(*ch, '\u{1b}' | '\u{7}' | '\u{9c}'))
-        .collect::<String>();
-    format!("\x1b]0;{safe_title}\x07").into_bytes()
-}
-
-fn write_window_title(title: Option<&str>) {
-    let _ = io::stdout().write_all(&window_title_osc(title));
-}
-
 // ---------------------------------------------------------------------------
 // Frame output
 // ---------------------------------------------------------------------------
@@ -1806,11 +2051,33 @@ fn current_terminal_geometry(
     (cols, rows, cell_width_px, cell_height_px)
 }
 
-fn initial_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u32) {
-    current_terminal_geometry(kitty_graphics_enabled, &AtomicU64::new(0))
+fn initial_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u32, bool) {
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    if !kitty_graphics_enabled {
+        return (cols, rows, 0, 0, false);
+    }
+    match ioctl_cell_size() {
+        Some((width, height)) => (cols, rows, width, height, true),
+        None => (
+            cols,
+            rows,
+            DEFAULT_CELL_WIDTH_PX,
+            DEFAULT_CELL_HEIGHT_PX,
+            false,
+        ),
+    }
 }
 
-/// Polls the terminal size and sends resize events when it changes.
+/// Reports polled changes and signalled resizes that return to the same size.
+fn resize_report_required(
+    signalled: bool,
+    new_size: (u16, u16, u32, u32),
+    last_size: (u16, u16, u32, u32),
+) -> bool {
+    signalled || new_size != last_size
+}
+
+/// Watches the terminal size and sends resize events when it changes.
 /// The initial cell size is the handshake's baseline, not a fresh observation
 /// that could race the host reply and swallow the first size change.
 fn resize_poll_loop(
@@ -1820,11 +2087,13 @@ fn resize_poll_loop(
     reported_cell_size: &AtomicU64,
     should_quit: &Arc<AtomicBool>,
 ) {
+    crate::platform::watch_terminal_resize_signal();
     let mut last_size = initial_geometry;
     while !should_quit.load(Ordering::Acquire) {
         std::thread::sleep(Duration::from_millis(100));
+        let signalled = crate::platform::take_terminal_resize_signal();
         let new_size = current_terminal_geometry(kitty_graphics_enabled, reported_cell_size);
-        if new_size != last_size {
+        if resize_report_required(signalled, new_size, last_size) {
             last_size = new_size;
             if resize_tx
                 .blocking_send(ClientLoopEvent::Resize(
@@ -1911,6 +2180,49 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_signal_reports_even_when_polled_size_is_unchanged() {
+        let size = (120, 40, 8, 16);
+        assert!(resize_report_required(true, size, size));
+        assert!(!resize_report_required(false, size, size));
+        assert!(resize_report_required(false, (120, 41, 8, 16), size));
+        assert!(resize_report_required(false, (120, 40, 9, 18), size));
+    }
+
+    #[test]
+    fn approximate_cell_size_never_enables_direct_graphics() {
+        assert_eq!(
+            client_launch_mode(false, false, 8, 16),
+            ClientLaunchMode::App
+        );
+        assert_eq!(
+            client_launch_mode(true, false, 8, 16),
+            ClientLaunchMode::TerminalAttach
+        );
+    }
+
+    #[test]
+    fn direct_graphics_profile_is_narrow_and_transport_safe() {
+        for (program, term, kitty, expected) in [
+            ("ghostty", "", false, true),
+            ("WezTerm", "", false, true),
+            ("", "xterm-kitty", false, true),
+            ("", "xterm-256color", true, true),
+            ("", "xterm-256color", false, false),
+        ] {
+            assert_eq!(
+                direct_graphics_profile_values(program, term, kitty, false, true),
+                expected
+            );
+        }
+        assert!(!direct_graphics_profile_values(
+            "ghostty", "", false, true, true
+        ));
+        assert!(!direct_graphics_profile_values(
+            "ghostty", "", false, false, false
+        ));
+    }
 
     #[test]
     fn m820_image_drop_grammar_preserves_single_path_contract() {
@@ -2860,14 +3172,5 @@ mod tests {
         unsafe {
             std::env::remove_var("SSH_CONNECTION");
         }
-    }
-
-    #[test]
-    fn window_title_osc_strips_terminators_and_defaults_to_zynk() {
-        assert_eq!(
-            window_title_osc(Some("zynk\x1b api\u{7}\u{9c}")),
-            b"\x1b]0;zynk api\x07"
-        );
-        assert_eq!(window_title_osc(None), b"\x1b]0;zynk\x07");
     }
 }

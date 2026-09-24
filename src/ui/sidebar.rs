@@ -735,6 +735,18 @@ pub(crate) fn compute_workspace_card_areas(
     compute_workspace_list_areas(app, area).0
 }
 
+pub(crate) fn workspace_group_chevron_rect(card: &crate::app::state::WorkspaceCardArea) -> Rect {
+    if card.rect.width == 0 || card.rect.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        card.rect.x + card.rect.width.saturating_sub(1),
+        card.rect.y,
+        1,
+        1,
+    )
+}
+
 /// Auto-scale sidebar width based on workspace identity + agent summary.
 pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
@@ -894,6 +906,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     render_sidebar_toggle(app, frame, area, true, p);
 }
 
+#[cfg(test)]
 pub(crate) fn workspace_drop_indicator_row(
     cards: &[crate::app::state::WorkspaceCardArea],
     area: Rect,
@@ -923,6 +936,102 @@ pub(crate) fn workspace_drop_indicator_row(
     }
 
     None
+}
+
+pub(crate) fn workspace_drop_slots(
+    app: &AppState,
+    cards: &[crate::app::state::WorkspaceCardArea],
+    area: Rect,
+) -> Vec<(crate::app::state::WorkspaceDropTarget, u16)> {
+    if area.height == 0 || cards.is_empty() {
+        return Vec::new();
+    }
+    let list_bottom = area.y + area.height.saturating_sub(1);
+    let entries = workspace_list_entries(app);
+    let entry_position = |ws_idx| {
+        entries.iter().position(|entry| {
+            matches!(
+                entry,
+                WorkspaceListEntry::Workspace {
+                    ws_idx: entry_ws_idx,
+                    ..
+                } if *entry_ws_idx == ws_idx
+            )
+        })
+    };
+    let block_root_at = |entry_idx: usize| {
+        entries[..=entry_idx]
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                WorkspaceListEntry::Workspace {
+                    ws_idx,
+                    indented: false,
+                } => Some(*ws_idx),
+                WorkspaceListEntry::Workspace { .. } => None,
+            })
+    };
+
+    let mut slots = Vec::new();
+    let mut previous_root = None;
+    for card in cards {
+        let Some(entry_idx) = entry_position(card.ws_idx) else {
+            continue;
+        };
+        let Some(root_idx) = block_root_at(entry_idx) else {
+            continue;
+        };
+        if previous_root == Some(root_idx) {
+            continue;
+        }
+        previous_root = Some(root_idx);
+        if let Some(row) = card.rect.y.checked_sub(1).filter(|row| *row < list_bottom) {
+            slots.push((
+                crate::app::state::WorkspaceDropTarget::Before(root_idx),
+                row,
+            ));
+        }
+    }
+
+    let Some(last) = cards.last() else {
+        return slots;
+    };
+    let Some(last_entry_idx) = entry_position(last.ws_idx) else {
+        return slots;
+    };
+    let next_entry = entries.get(last_entry_idx.saturating_add(1));
+    if matches!(
+        next_entry,
+        Some(WorkspaceListEntry::Workspace { indented: true, .. })
+    ) {
+        return slots;
+    }
+    let target = match next_entry {
+        Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => {
+            crate::app::state::WorkspaceDropTarget::Before(*ws_idx)
+        }
+        None => crate::app::state::WorkspaceDropTarget::End,
+    };
+    let row = last.rect.y.saturating_add(last.rect.height);
+    if row < list_bottom
+        && slots
+            .last()
+            .is_none_or(|(last_target, _)| *last_target != target)
+    {
+        slots.push((target, row));
+    }
+    slots
+}
+
+pub(crate) fn workspace_drop_indicator_row_for_target(
+    app: &AppState,
+    cards: &[crate::app::state::WorkspaceCardArea],
+    area: Rect,
+    target: crate::app::state::WorkspaceDropTarget,
+) -> Option<u16> {
+    workspace_drop_slots(app, cards, area)
+        .into_iter()
+        .find_map(|(candidate, row)| (candidate == target).then_some(row))
 }
 
 pub(super) fn render_sidebar(
@@ -1313,9 +1422,14 @@ fn render_workspace_list(
     };
     let insertion_row = match app.drag.as_ref().map(|drag| &drag.target) {
         Some(crate::app::state::DragTarget::WorkspaceReorder {
-            insert_idx: Some(insert_idx),
+            drop_target: Some(drop_target),
             ..
-        }) => workspace_drop_indicator_row(&app.view.workspace_card_areas, area, *insert_idx),
+        }) => workspace_drop_indicator_row_for_target(
+            app,
+            &app.view.workspace_card_areas,
+            area,
+            *drop_target,
+        ),
         _ => None,
     };
 
@@ -1333,6 +1447,7 @@ fn render_workspace_list(
     let metrics = workspace_list_scroll_metrics(app, area);
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
     let cards = &app.view.workspace_card_areas;
+    let entries = workspace_list_entries(app);
 
     for card in cards {
         let i = card.ws_idx;
@@ -1381,6 +1496,16 @@ fn render_workspace_list(
         let parent_group = (!card.indented)
             .then(|| workspace_parent_group_state(app, i))
             .flatten();
+        let is_last_child = card.indented
+            && entries
+                .iter()
+                .position(|entry| {
+                    matches!(
+                        entry,
+                        WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == i
+                    )
+                })
+                .is_none_or(|entry_idx| !next_entry_is_indented_workspace(&entries, entry_idx));
         let (display_state, display_seen) = parent_group
             .as_ref()
             .filter(|(_, collapsed)| *collapsed)
@@ -1419,21 +1544,20 @@ fn render_workspace_list(
                 break;
             }
             let mut spans = Vec::new();
-            if row_index == 0 {
-                if card.indented {
-                    spans.push(Span::raw("   "));
-                } else if let Some((_, collapsed)) = parent_group.as_ref() {
+            if card.indented {
+                spans.push(Span::raw("   "));
+                if row_index == 0 {
                     spans.push(Span::styled(
-                        if *collapsed { "▸" } else { "▾" },
-                        Style::default().fg(p.accent),
+                        if is_last_child { "└─ " } else { "├─ " },
+                        Style::default().fg(p.overlay0),
                     ));
-                    spans.push(Span::raw(" "));
+                } else if is_last_child {
+                    spans.push(Span::raw("     "));
                 } else {
-                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
+                    spans.push(Span::raw("    "));
                 }
-            } else if card.indented {
-                spans.push(Span::raw("     "));
-            } else if matches!(resolved.first(), Some(ResolvedToken::Branch(_))) {
+            } else if row_index == 0 || matches!(resolved.first(), Some(ResolvedToken::Branch(_))) {
                 spans.push(Span::raw(" "));
             } else {
                 spans.push(Span::raw("   "));
@@ -1442,17 +1566,28 @@ fn render_workspace_list(
                 .iter()
                 .map(|span| display_width(&span.content))
                 .sum::<usize>();
+            let trailing_width = usize::from(row_index == 0 && parent_group.is_some()) * 2;
             spans.extend(resolved_token_spans(
                 resolved,
                 state_icon,
                 styles,
                 p,
-                (card.rect.width as usize).saturating_sub(prefix_width),
+                (card.rect.width as usize).saturating_sub(prefix_width + trailing_width),
                 false,
             ));
             frame.render_widget(
                 Paragraph::new(Line::from(spans)).style(row_style),
                 Rect::new(card.rect.x, y, card.rect.width, 1),
+            );
+        }
+
+        if let Some((_, collapsed)) = parent_group {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    if collapsed { "▸" } else { "▾" },
+                    Style::default().fg(p.accent),
+                )),
+                workspace_group_chevron_rect(card),
             );
         }
     }
@@ -2227,7 +2362,7 @@ mod tests {
                             target: crate::app::state::DragTarget::WorkspaceReorder {
                                 source_id: 0,
                                 source_ws_idx: 0,
-                                insert_idx: None,
+                                drop_target: None,
                             },
                         });
                     }
@@ -5458,7 +5593,7 @@ mod tests {
             target: crate::app::state::DragTarget::WorkspaceReorder {
                 source_id: 0,
                 source_ws_idx: 0,
-                insert_idx: Some(1),
+                drop_target: Some(crate::app::state::WorkspaceDropTarget::End),
             },
         });
         app.view.sidebar_rect = Rect::new(0, 0, 26, 12);

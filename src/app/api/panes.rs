@@ -5,15 +5,16 @@ use bytes::Bytes;
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCurrentParams,
     PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
-    PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneLayoutPane, PaneLayoutParams,
-    PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams, PaneMoveDestination,
-    PaneMoveParams, PaneMoveReason, PaneMoveResult, PaneNeighborParams, PaneNeighborResult,
-    PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneInputSetParams,
+    PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit,
+    PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
+    PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
+    PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
+    PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
     PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ReadFormat, ReadSource, ResponseResult,
+    PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::{App, Mode};
@@ -46,7 +47,7 @@ impl App {
         };
         let (rows, cols) = self.state.estimate_pane_size();
         let split_cwd = params.cwd.map(std::path::PathBuf::from).or_else(|| {
-            let follow_cwd = self.follow_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
+            let follow_cwd = self.launch_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
             Some(self.resolve_new_terminal_cwd(follow_cwd))
         });
         let default_shell = self.state.default_shell.clone();
@@ -94,6 +95,12 @@ impl App {
             Some(Err(err)) => return encode_error(id, "pane_split_failed", err.to_string()),
             None => return encode_error(id, "pane_not_found", "pane not found"),
         };
+        if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(new_pane.pane_id) {
+            pane.right_click_passthrough = matches!(
+                params.right_click,
+                crate::api::schema::PaneRightClickTarget::Pane
+            );
+        }
         if params.focus {
             self.state.switch_workspace_tab(ws_idx, target_tab_idx);
             self.state
@@ -123,6 +130,29 @@ impl App {
             Ok(panes) => encode_success(id, ResponseResult::PaneList { panes }),
             Err((code, message)) => encode_error(id, &code, message),
         }
+    }
+
+    pub(crate) fn handle_pane_input_set(
+        &mut self,
+        id: String,
+        params: PaneInputSetParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(pane) = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|workspace| workspace.pane_state_mut(pane_id))
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        pane.right_click_passthrough = matches!(
+            params.right_click,
+            crate::api::schema::PaneRightClickTarget::Pane
+        );
+        encode_success(id, ResponseResult::Ok {})
     }
 
     pub(super) fn handle_pane_current(&mut self, id: String, params: PaneCurrentParams) -> String {
@@ -1370,21 +1400,12 @@ impl App {
         else {
             return pane_not_found(id, &params.pane_id);
         };
-        let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
-        let text = match params.format {
-            ReadFormat::Text => match params.source {
-                ReadSource::Visible => pane.visible_text(),
-                ReadSource::Recent => pane.recent_text(requested_lines),
-                ReadSource::RecentUnwrapped => pane.recent_unwrapped_text(requested_lines),
-                ReadSource::Detection => pane.detection_text(),
-            },
-            ReadFormat::Ansi => match params.source {
-                ReadSource::Visible => pane.visible_ansi(),
-                ReadSource::Recent => pane.recent_ansi(requested_lines),
-                ReadSource::RecentUnwrapped => pane.recent_unwrapped_ansi(requested_lines),
-                ReadSource::Detection => pane.detection_text(),
-            },
-        };
+        let snapshot = crate::app::api_helpers::read_terminal_snapshot(
+            pane,
+            params.source,
+            params.format,
+            params.lines,
+        );
 
         encode_success(
             id,
@@ -1395,9 +1416,9 @@ impl App {
                     tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
                     source: params.source,
                     format: params.format,
-                    text,
+                    text: snapshot.text,
                     revision: 0,
-                    truncated: false,
+                    truncated: snapshot.truncated,
                 },
             },
         )
@@ -2078,6 +2099,36 @@ fn invalid_agent(id: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn pane_input_set_changes_only_the_target_pane() {
+        let (mut app, public_pane_id, _rx) = app_with_send_key_runtime(1);
+        let target = app.state.workspaces[0].tabs[0].root_pane;
+        let other = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+
+        let response = app.handle_pane_input_set(
+            "req".into(),
+            PaneInputSetParams {
+                pane_id: public_pane_id,
+                right_click: crate::api::schema::PaneRightClickTarget::Pane,
+            },
+        );
+
+        let response: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(response.result, ResponseResult::Ok {});
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(target)
+                .unwrap()
+                .right_click_passthrough
+        );
+        assert!(
+            !app.state.workspaces[0]
+                .pane_state(other)
+                .unwrap()
+                .right_click_passthrough
+        );
+    }
+
     #[tokio::test]
     async fn m839a_submission_encoder_and_send_input_share_protocol_bytes() {
         use crate::input::KeyboardProtocol;
@@ -3327,6 +3378,7 @@ mod tests {
                 ratio: Some(0.65),
                 focus: false,
                 cwd: Some(std::env::temp_dir().display().to_string()),
+                right_click: Default::default(),
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -3697,6 +3749,42 @@ mod tests {
         assert!(app.event_hub.events_after(0).is_empty());
     }
 
+    #[tokio::test]
+    async fn api_pane_read_reports_when_older_rows_are_omitted() {
+        let mut app = app_with_linked_worktree();
+        seed_terminal_states(&mut app);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        let lines = (0..20)
+            .map(|line| format!("line {line:02}\r\n"))
+            .collect::<String>();
+        let runtime = crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+            20,
+            5,
+            1_000,
+            lines.as_bytes(),
+        );
+        app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+
+        let response = app.handle_pane_read(
+            "req".into(),
+            PaneReadParams {
+                pane_id: public_pane_id,
+                source: crate::api::schema::ReadSource::Recent,
+                lines: Some(2),
+                format: crate::api::schema::ReadFormat::Text,
+                strip_ansi: true,
+                intent: crate::api::schema::ReadIntent::Interactive,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneRead { read } = success.result else {
+            panic!("expected pane read response");
+        };
+        assert!(read.text.contains("line 19"));
+        assert!(read.truncated);
+    }
+
     #[test]
     fn m821_pane_get_omits_unavailable_scroll() {
         let mut app = app_with_linked_worktree();
@@ -3937,6 +4025,7 @@ mod tests {
                 pane_id: source,
                 source_pane_id: None,
                 has_manual_label: false,
+                right_click_passthrough: false,
             },
             x: 2,
             y: 2,
@@ -4709,7 +4798,7 @@ mod tests {
                         target: crate::app::state::DragTarget::WorkspaceReorder {
                             source_id: 7,
                             source_ws_idx: 0,
-                            insert_idx: Some(1),
+                            drop_target: Some(crate::app::state::WorkspaceDropTarget::Before(1)),
                         },
                     });
                 }

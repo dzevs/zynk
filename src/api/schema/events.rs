@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,8 @@ pub enum Subscription {
     WorkspaceRenamed {},
     #[serde(rename = "workspace.moved")]
     WorkspaceMoved {},
+    #[serde(rename = "workspace.reordered")]
+    WorkspaceReordered {},
     #[serde(rename = "workspace.closed")]
     WorkspaceClosed {},
     #[serde(rename = "workspace.focused")]
@@ -189,6 +193,7 @@ pub enum EventKind {
     WorkspaceClosed,
     WorkspaceRenamed,
     WorkspaceMoved,
+    WorkspaceReordered,
     WorkspaceFocused,
     TabCreated,
     TabClosed,
@@ -216,6 +221,7 @@ impl EventKind {
             EventKind::WorkspaceClosed => "workspace.closed",
             EventKind::WorkspaceRenamed => "workspace.renamed",
             EventKind::WorkspaceMoved => "workspace.moved",
+            EventKind::WorkspaceReordered => "workspace.reordered",
             EventKind::WorkspaceFocused => "workspace.focused",
             EventKind::TabCreated => "tab.created",
             EventKind::TabClosed => "tab.closed",
@@ -245,6 +251,7 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceClosed,
     EventKind::WorkspaceRenamed,
     EventKind::WorkspaceMoved,
+    EventKind::WorkspaceReordered,
     EventKind::WorkspaceFocused,
     EventKind::TabCreated,
     EventKind::TabClosed,
@@ -351,6 +358,12 @@ pub enum EventData {
     WorkspaceMoved {
         workspace_id: String,
         insert_index: usize,
+        workspaces: Vec<WorkspaceInfo>,
+    },
+    WorkspaceReordered {
+        workspace_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_workspace_id: Option<String>,
         workspaces: Vec<WorkspaceInfo>,
     },
     WorkspaceFocused {
