@@ -7401,3 +7401,29 @@ strictest typed graphics envelope, the duplicate-method control preserves one-me
 no-data completion proves neither reset closure is invoked. Final B2 checks, performance evidence, bounded
 faults, commits, exact residue table, seal, and Gate-2 are recorded only after execution; this entry does not
 pre-approve them.
+
+#### B2 Gate-2 correction batch
+
+- The Linux-only boundary is source-enforced after Gate-2 finding `B2-LINUX-CFG`: B2-introduced
+  `cfg(windows)`, `cfg(not(unix))`, and production `cfg(unix)` forks are removed, their Linux regions are
+  unconditional, and the SIGWINCH state/handler installation lives in `src/platform/linux.rs`. The
+  `scripts.test_linux_only_source` maintenance control rejects non-Linux selectors under `src/` and `tests/`
+  and pins the finite seven pre-B2 test-only `cfg(unix)` gates. Its pre-fix run failed on the reintroduced
+  selectors before this correction.
+- `src/cli/agent.rs` now carries the Apache-2.0 provenance header and a matching `NOTICE` entry because B2
+  edits code derived from post-relicense upstream commits. The M-FINAL license audit remains responsible for
+  the separately identified pre-B2 heuristic candidates.
+- Active test fixtures use zynk or neutral workspace names; no B2 source fixture names the upstream product.
+  The published `workspace.move_block` method and `workspace.reordered` event are documented in README,
+  SPEC, CHANGELOG, and this ledger. The method moves a validated block atomically, returns the complete list,
+  and emits the event only when the order changes.
+- B2 reads `TERM_PROGRAM`, `TERM`, `KITTY_WINDOW_ID`, `SSH_CONNECTION`, `SSH_TTY`, `TMUX`, and `STY` only to
+  select host capability, transport, or runtime behavior already represented by the parent environment
+  surface. `XDG_RUNTIME_DIR` selects the private same-uid graphics root with the existing `/var/tmp` fallback.
+  None of these values establishes identity, authority, or receipt proof, and none adds a persistent test path
+  outside the isolated roots.
+- M-FINAL retains the open concurrency review for an idle alternate-screen history read overlapping agent
+  detection or ADR 0015 prompt-proof evaluation; B2 claims no exclusion or false-state proof here.
+
+These corrections are **IMPLEMENTED / PENDING VERIFICATION** until their exact-tip lint, FULL, check, gate,
+and short delta Gate-2 complete. They do not alter protocol 20 or discharge any inherited carry.

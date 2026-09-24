@@ -13295,7 +13295,7 @@ next_tab = ""
 
     fn window_title_test_server() -> (HeadlessServer, std::sync::mpsc::Receiver<Vec<u8>>) {
         let mut server = test_headless_server();
-        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("herd")];
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("workspace")];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
         let (client_tx, control_rx, _render_rx) = test_client_writer();
@@ -13336,7 +13336,10 @@ next_tab = ""
         server.app.configure_window_title("{workspace}/{tab}");
 
         server.sync_window_title();
-        assert_eq!(next_window_title(&control_rx), Some(Some("herd/1".into())));
+        assert_eq!(
+            next_window_title(&control_rx),
+            Some(Some("workspace/1".into()))
+        );
         server.sync_window_title();
         assert!(control_rx.recv_timeout(Duration::from_millis(100)).is_err());
 
@@ -13344,7 +13347,7 @@ next_tab = ""
         server.sync_window_title();
         assert_eq!(
             next_window_title(&control_rx),
-            Some(Some("herd/build".into()))
+            Some(Some("workspace/build".into()))
         );
         shutdown_test_runtimes(&mut server);
     }
@@ -13356,7 +13359,7 @@ next_tab = ""
         server.sync_window_title();
         assert_eq!(
             next_window_title(&first_control_rx),
-            Some(Some("herd".into()))
+            Some(Some("workspace".into()))
         );
 
         let (client_tx, second_control_rx, _render_rx) = test_client_writer();
@@ -13379,7 +13382,7 @@ next_tab = ""
 
         assert_eq!(
             next_window_title(&second_control_rx),
-            Some(Some("herd".into()))
+            Some(Some("workspace".into()))
         );
         shutdown_test_runtimes(&mut server);
     }

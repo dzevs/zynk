@@ -1356,7 +1356,6 @@ fn direct_file_command(
     ))
 }
 
-#[cfg(unix)]
 pub(crate) fn encode_kitty_regular_file(
     out: &mut Vec<u8>,
     leading: &[u8],
@@ -2114,7 +2113,6 @@ mod tests {
         assert_ne!(host_placement_id(&placement_source(&pane_layer)), expected);
     }
 
-    #[cfg(unix)]
     #[test]
     fn regular_file_command_is_rgba_quiet_zero_and_path_encoded() {
         let mut bytes = Vec::new();

@@ -3526,7 +3526,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(unix)]
     #[test]
     fn kitty_graphics_file_upload_can_be_placed_later() {
         let dir = std::env::temp_dir().join(format!(

@@ -170,6 +170,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
   keep precedence; public CWD reporting can still show a nonleader group member.
 - CLI workspace, tab, worktree, and pane-placement requests share typed internal adapters;
   argument parsing, target selection, JSON responses, and exit statuses are unchanged.
+- The socket API adds `workspace.move_block` for atomic block reordering. It returns the complete workspace
+  list and emits `workspace.reordered` only when the order changes, with the moved IDs, optional anchor, and
+  resulting order.
 - New workspaces follow the source workspace's focused-pane CWD instead of its
   first-tab root. A named-workspace prompt rechecks that source's current focus
   on confirmation, even after workspace focus or ordering changes.

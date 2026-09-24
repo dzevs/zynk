@@ -10,7 +10,6 @@ pub(crate) fn clear_host_mouse_reporting<W: Write>(writer: &mut W) -> io::Result
     writer.flush()
 }
 
-#[cfg(not(windows))]
 pub(crate) fn set_host_kitty_keyboard_report_all<W: Write>(
     writer: &mut W,
     report_all_keys: bool,
@@ -21,14 +20,6 @@ pub(crate) fn set_host_kitty_keyboard_report_all<W: Write>(
     }
     write!(writer, "\x1b[={}u", flags.bits())?;
     writer.flush()
-}
-
-#[cfg(windows)]
-pub(crate) fn set_host_kitty_keyboard_report_all<W: Write>(
-    _writer: &mut W,
-    _report_all_keys: bool,
-) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

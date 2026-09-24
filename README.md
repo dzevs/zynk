@@ -144,6 +144,12 @@ Removing a linked worktree returns focus to its surviving parent workspace in
 the same worktree group, even if another workspace became active during removal.
 If no parent remains, normal workspace-close selection applies.
 
+The published `workspace.move_block` socket method atomically moves a nonempty,
+duplicate-free list of workspace IDs before an optional `before_workspace_id`,
+or to the end when that field is absent. It returns the complete workspace list
+and emits `workspace.reordered` only when the order changes; the event carries
+the moved IDs, optional anchor, and resulting complete workspace list.
+
 ## Agent messaging
 
 This is zynk's net-new layer on top of the multiplexer. Agents send each other **plain-text messages**; zynk

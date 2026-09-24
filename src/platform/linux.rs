@@ -13,6 +13,32 @@ use super::{
     LimitedRead, Signal,
 };
 
+/// Raised by the SIGWINCH handler, consumed by the host resize watcher.
+static TERMINAL_RESIZE_SIGNALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn record_terminal_resize_signal(_signal: libc::c_int) {
+    TERMINAL_RESIZE_SIGNALLED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Records SIGWINCH events that size polling can miss.
+pub(crate) fn watch_terminal_resize_signal() {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction =
+        record_terminal_resize_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    // Keep blocking stdin and socket reads from failing with EINTR.
+    action.sa_flags = libc::SA_RESTART;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGWINCH, &action, std::ptr::null_mut());
+    }
+}
+
+/// Returns whether a terminal size change was signalled since the last call.
+pub(crate) fn take_terminal_resize_signal() -> bool {
+    TERMINAL_RESIZE_SIGNALLED.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
 fn set_sigpipe_disposition(handler: libc::sighandler_t) {
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = handler;

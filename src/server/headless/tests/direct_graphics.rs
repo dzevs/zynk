@@ -163,7 +163,6 @@ fn stream_set_message(
     )
 }
 
-#[cfg(unix)]
 fn sparse_direct_frame(
     server: &HeadlessServer,
     name: &str,
@@ -189,7 +188,6 @@ fn sparse_direct_frame(
     path.to_string_lossy().into_owned()
 }
 
-#[cfg(unix)]
 fn direct_stream_message(
     id: &str,
     pane_id: &str,
@@ -694,7 +692,7 @@ fn stream_set_has_graphics_only_render_impact() {
         .event_tx
         .try_send(AppEvent::UpdateReady {
             version: "9.9.9".into(),
-            install_command: "herdr update".into(),
+            install_command: "zynk update".into(),
         })
         .unwrap();
     let (request, _response_rx) = stream_set_message(
@@ -813,7 +811,6 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
     .is_ok());
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn hidden_large_direct_frame_uploads_then_replays_placement_without_closing_stream() {
     let (mut server, client_rx, _) = retained_test_server(b"active");
@@ -947,7 +944,6 @@ async fn hidden_large_direct_frame_uploads_then_replays_placement_without_closin
     assert!(server.app.pane_graphics.slots[&graphics_key(pane_id)].stream_is_active());
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn hidden_small_direct_frame_preserves_owned_inline_fallback() {
     let (mut server, client_rx, _) = retained_test_server(b"active");
@@ -985,7 +981,6 @@ async fn hidden_small_direct_frame_preserves_owned_inline_fallback() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn direct_frame_during_internal_redraw_uploads_without_placement() {
     let (mut server, client_rx, pane_id) = retained_test_server(b"active");
@@ -1005,7 +1000,7 @@ async fn direct_frame_during_internal_redraw_uploads_without_placement() {
         .event_tx
         .try_send(AppEvent::UpdateReady {
             version: "9.9.9".into(),
-            install_command: "herdr update".into(),
+            install_command: "zynk update".into(),
         })
         .unwrap();
 
@@ -1059,7 +1054,6 @@ async fn direct_frame_during_internal_redraw_uploads_without_placement() {
     assert!(!graphics.contains("a=t,"), "{graphics:?}");
 }
 
-#[cfg(unix)]
 fn direct_gate_server(
     data: &[u8],
 ) -> (
@@ -1070,7 +1064,6 @@ fn direct_gate_server(
     direct_gate_server_with_file(data.len(), Some(data))
 }
 
-#[cfg(unix)]
 fn direct_gate_server_with_file(
     len: usize,
     data: Option<&[u8]>,
@@ -1124,7 +1117,6 @@ fn direct_gate_server_with_file(
     (server, key, response_rx)
 }
 
-#[cfg(unix)]
 fn direct_ids(server: &HeadlessServer, key: &crate::app::pane_graphics::Key) -> (u64, u32) {
     let slot = &server.app.pane_graphics.slots[key];
     (
@@ -1133,7 +1125,6 @@ fn direct_ids(server: &HeadlessServer, key: &crate::app::pane_graphics::Key) -> 
     )
 }
 
-#[cfg(unix)]
 fn add_direct_client(server: &mut HeadlessServer, client_id: u64) {
     let (writer, control_rx, render_rx) = test_client_writer();
     std::mem::forget((control_rx, render_rx));
@@ -1154,7 +1145,6 @@ fn add_direct_client(server: &mut HeadlessServer, client_id: u64) {
     server.clients.insert(client_id, client);
 }
 
-#[cfg(unix)]
 #[test]
 fn terminal_response_deadline_starts_only_after_client_flush() {
     let (mut server, key, _response_rx) = direct_gate_server(&[1, 2, 3, 4]);
@@ -1171,7 +1161,6 @@ fn terminal_response_deadline_starts_only_after_client_flush() {
     assert!(gate.written && gate.deadline > std::time::Instant::now());
 }
 
-#[cfg(unix)]
 #[test]
 fn outer_timeout_covers_both_direct_phases_and_cancellation_blocks_late_results() {
     assert!(
@@ -1200,7 +1189,6 @@ fn outer_timeout_covers_both_direct_phases_and_cancellation_blocks_late_results(
         .is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn matching_terminal_ok_releases_producer_and_acknowledges() {
     let (mut server, key, response_rx) = direct_gate_server(&[1, 2, 3, 4]);
@@ -1214,7 +1202,6 @@ fn matching_terminal_ok_releases_producer_and_acknowledges() {
     assert!(layer.direct_lease().is_none());
 }
 
-#[cfg(unix)]
 #[test]
 fn explicit_terminal_error_acks_only_after_owned_inline_fallback() {
     let (mut server, key, response_rx) = direct_gate_server(&[1, 2, 3, 4]);
@@ -1242,7 +1229,6 @@ fn explicit_terminal_error_acks_only_after_owned_inline_fallback() {
     assert!(server.clients[&7].graphics_cache.is_empty());
 }
 
-#[cfg(unix)]
 #[test]
 fn large_direct_terminal_error_closes_without_acknowledging_or_copying() {
     let len = crate::api::schema::PANE_GRAPHICS_STREAM_MAX_BYTES + 4;
@@ -1258,7 +1244,6 @@ fn large_direct_terminal_error_closes_without_acknowledging_or_copying() {
     ));
 }
 
-#[cfg(unix)]
 #[test]
 fn unwritten_direct_full_falls_back_without_stickiness_but_disconnect_retires() {
     for error in [
@@ -1300,7 +1285,6 @@ fn unwritten_direct_full_falls_back_without_stickiness_but_disconnect_retires() 
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn client_loss_retires_only_its_direct_stream() {
     let (mut pending, key, response_rx) = direct_gate_server(&[1, 2, 3, 4]);
@@ -1325,7 +1309,6 @@ fn client_loss_retires_only_its_direct_stream() {
     assert!(!resident.app.pane_graphics.slots.contains_key(&key));
 }
 
-#[cfg(unix)]
 #[test]
 fn pane_removal_and_shutdown_drop_direct_without_ack() {
     let setups: [fn(&mut HeadlessServer); 2] = [
@@ -1342,7 +1325,6 @@ fn pane_removal_and_shutdown_drop_direct_without_ack() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn timeout_retires_stream_without_producer_ack() {
     let (mut server, key, response_rx) = direct_gate_server(&[1, 2, 3, 4]);

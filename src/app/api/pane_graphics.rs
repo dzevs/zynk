@@ -688,7 +688,6 @@ mod tests {
         assert!(!app.pane_graphics_files.is_initialized());
     }
 
-    #[cfg(unix)]
     #[test]
     fn info_advertises_rgba_direct_and_bgra_fallback_file_formats_on_demand() {
         let (mut app, pane_id, _) = m832a_static_app();
@@ -1041,7 +1040,6 @@ mod tests {
         assert!(app.pane_graphics.slots.is_empty());
     }
 
-    #[cfg(unix)]
     fn endstate_direct_file(app: &App, name: &str, data: &[u8]) -> String {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -1060,7 +1058,6 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    #[cfg(unix)]
     fn endstate_sparse_direct_file(app: &App, name: &str, len: usize) -> String {
         use std::os::unix::fs::OpenOptionsExt as _;
         let path = app
@@ -1078,7 +1075,6 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    #[cfg(unix)]
     fn endstate_direct_params(
         pane_id: String,
         owner: &str,
@@ -1099,7 +1095,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn direct_file_is_leased_or_safely_copied_for_inline_fallback() {
         let (mut app, pane_id, _) = m832a_static_app();
@@ -1190,7 +1185,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn direct_primary_rgba_accepts_fullscreen_retina_frame() {
         let (mut app, pane_id, _) = m832a_static_app();
@@ -1231,7 +1225,6 @@ mod tests {
             .is_some());
     }
 
-    #[cfg(unix)]
     #[test]
     fn bgra_and_secondary_file_frames_are_canonical_owned_rgba() {
         let (mut app, pane_id, pane) = m832a_static_app();

@@ -990,16 +990,9 @@ mod tests {
             .all(|message| !message.starts_with("zynk:")));
     }
 
-    #[cfg(unix)]
     fn invalid_utf8_arg() -> std::ffi::OsString {
         use std::os::unix::ffi::OsStringExt;
         std::ffi::OsString::from_vec(vec![0xff])
-    }
-
-    #[cfg(windows)]
-    fn invalid_utf8_arg() -> std::ffi::OsString {
-        use std::os::windows::ffi::OsStringExt;
-        std::ffi::OsString::from_wide(&[0xd800])
     }
 
     #[test]

@@ -282,6 +282,10 @@ Workspace hierarchy and reorder events preserve fork metadata tokens, agent-view
 selection, and authority boundaries. Closing a workspace's final tab closes the workspace through the normal
 mutation/event path. Right-click routing is typed per pane as `zynk` or `pane`; API/CLI mutation requires the
 same caller/pane admission as input, and context-menu handling cannot mutate an unowned target.
+`workspace.move_block` atomically moves a nonempty, duplicate-free ordered set of workspace IDs before an
+optional `before_workspace_id`, or to the end when the anchor is absent. It returns the complete workspace
+list and emits `workspace.reordered` only on an actual move; that event carries the moved IDs, optional anchor,
+and resulting complete workspace list.
 
 Contiguous ANSI diff runs may share one write only when cursor, style, and flush semantics are unchanged.
 Transient resize requests repaint. Pane BEL counts route only to the active client. Local or remote terminal

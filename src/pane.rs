@@ -4293,7 +4293,6 @@ mod tests {
         assert!(history.contains("handoff-primary-history"));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn spawned_pty_reader_aggregates_terminal_bells() {
         let (events, mut event_rx) = mpsc::channel(8);

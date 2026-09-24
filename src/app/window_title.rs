@@ -98,7 +98,7 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
-        app.state.workspaces = vec![Workspace::test_new("herd")];
+        app.state.workspaces = vec![Workspace::test_new("workspace")];
         app.state.active = Some(0);
         app.state.ensure_test_terminals();
         let pane = app.state.workspaces[0].tabs[0].root_pane;
@@ -109,6 +109,6 @@ mod tests {
             .unwrap()
             .set_manual_label("shell".into());
         app.configure_window_title("{workspace}/{tab}/{pane}");
-        assert_eq!(app.window_title().as_deref(), Some("herd/1/shell"));
+        assert_eq!(app.window_title().as_deref(), Some("workspace/1/shell"));
     }
 }

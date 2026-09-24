@@ -14,12 +14,10 @@
 //! - Forwards OSC 52 clipboard writes from server to its own stdout
 //! - Displays sound/toast notifications forwarded from server
 
-#[cfg(unix)]
 mod direct_graphics;
 mod input;
 
 use std::collections::HashSet;
-#[cfg(unix)]
 use std::io::IsTerminal as _;
 use std::io::{self, BufRead as _, Write as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -77,10 +75,8 @@ struct ClientState {
     /// Whether this client may write Kitty graphics bytes to its host terminal.
     kitty_graphics_enabled: bool,
     /// One bounded matcher, inactive unless a direct transmission is armed.
-    #[cfg(unix)]
     direct_graphics_response: Arc<Mutex<direct_graphics::ResponseMatcher>>,
     /// One server-retired direct transfer to suppress if it was still queued.
-    #[cfg(unix)]
     retired_direct_graphics: Option<(u64, u32)>,
     /// Direct attach prefix escape state. None for full-app clients.
     attach_escape: Option<AttachEscapeState>,
@@ -533,7 +529,6 @@ fn handshake_read_timeout() -> Duration {
     LOCAL_HANDSHAKE_READ_TIMEOUT
 }
 
-#[cfg(any(unix, test))]
 fn direct_graphics_profile_values(
     term_program: &str,
     term: &str,
@@ -548,7 +543,6 @@ fn direct_graphics_profile_values(
     supported && !blocked_transport && terminals
 }
 
-#[cfg(unix)]
 fn direct_graphics_profile_allowed(direct_attach: bool) -> bool {
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
     let term = std::env::var("TERM").unwrap_or_default();
@@ -564,11 +558,6 @@ fn direct_graphics_profile_allowed(direct_attach: bool) -> bool {
             || std::env::var_os("STY").is_some(),
         io::stdin().is_terminal() && io::stdout().is_terminal(),
     )
-}
-
-#[cfg(not(unix))]
-fn direct_graphics_profile_allowed(_direct_attach: bool) -> bool {
-    false
 }
 
 fn requested_keybindings() -> ClientKeybindings {

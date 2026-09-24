@@ -31,7 +31,6 @@ impl HostGeometry {
         })
     }
 
-    #[cfg(unix)]
     pub(crate) fn current() -> Option<Self> {
         let size = crossterm::terminal::window_size().ok()?;
         Self::new(

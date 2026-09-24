@@ -111,6 +111,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/window_title.rs
 - src/app/worktrees.rs
 - src/cli.rs
+- src/cli/agent.rs
 - src/cli/completion.rs
 - src/cli/integration.rs
 - src/cli/pane.rs

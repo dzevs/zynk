@@ -1,6 +1,5 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
-#[cfg(unix)]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io;
@@ -8,12 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-#[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
-#[cfg(unix)]
 const DIRECTORY_MODE: u32 = 0o700;
-#[cfg(unix)]
 const FILE_MODE: u32 = 0o600;
 
 #[derive(Debug)]
@@ -144,7 +140,6 @@ impl Drop for Generation {
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn validate_direct_source(path: &Path, expected_len: usize) -> io::Result<()> {
     let source = path.parent().ok_or_else(invalid_path)?;
     let generation = source.parent().ok_or_else(invalid_path)?;
@@ -169,72 +164,41 @@ pub(crate) fn validate_direct_source(path: &Path, expected_len: usize) -> io::Re
 }
 
 fn create_generation(base: &Path) -> io::Result<Generation> {
-    #[cfg(not(unix))]
-    {
-        let _ = base;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "file-backed pane graphics require Unix",
-        ))
-    }
-    #[cfg(unix)]
-    {
-        fs::create_dir_all(base)?;
-        fs::set_permissions(base, fs::Permissions::from_mode(DIRECTORY_MODE))?;
-        validate_directory(base)?;
-        remove_stale_generations(base);
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let root = base.join(format!("server-{}-{nonce}", std::process::id()));
-        fs::create_dir(&root)?;
-        fs::set_permissions(&root, fs::Permissions::from_mode(DIRECTORY_MODE))?;
-        let source = root.join("source");
-        fs::create_dir(&source)?;
-        fs::set_permissions(&source, fs::Permissions::from_mode(DIRECTORY_MODE))?;
-        validate_directory(&root)?;
-        validate_directory(&source)?;
-        Ok(Generation { root, source })
-    }
+    fs::create_dir_all(base)?;
+    fs::set_permissions(base, fs::Permissions::from_mode(DIRECTORY_MODE))?;
+    validate_directory(base)?;
+    remove_stale_generations(base);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let root = base.join(format!("server-{}-{nonce}", std::process::id()));
+    fs::create_dir(&root)?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(DIRECTORY_MODE))?;
+    let source = root.join("source");
+    fs::create_dir(&source)?;
+    fs::set_permissions(&source, fs::Permissions::from_mode(DIRECTORY_MODE))?;
+    validate_directory(&root)?;
+    validate_directory(&source)?;
+    Ok(Generation { root, source })
 }
 
 fn runtime_base() -> PathBuf {
-    #[cfg(unix)]
-    {
-        let root = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| PathBuf::from("/var/tmp"));
-        root.join(format!("zynk-pane-graphics-{}", effective_uid()))
-    }
-    #[cfg(not(unix))]
-    {
-        PathBuf::from("pane-graphics-unavailable")
-    }
+    let root = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| PathBuf::from("/var/tmp"));
+    root.join(format!("zynk-pane-graphics-{}", effective_uid()))
 }
 
-#[cfg(unix)]
 fn read_exact_at(file: &File, data: &mut [u8]) -> io::Result<()> {
     file.read_exact_at(data, 0)
 }
 
-#[cfg(not(unix))]
-fn read_exact_at(_file: &File, _data: &mut [u8]) -> io::Result<()> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "Unix only"))
-}
-
-#[cfg(unix)]
 fn has_byte_at(file: &File, offset: u64) -> io::Result<bool> {
     Ok(file.read_at(&mut [0], offset)? != 0)
 }
 
-#[cfg(not(unix))]
-fn has_byte_at(_file: &File, _offset: u64) -> io::Result<bool> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "Unix only"))
-}
-
-#[cfg(unix)]
 fn remove_stale_generations(base: &Path) {
     let Ok(entries) = fs::read_dir(base) else {
         return;
@@ -278,43 +242,26 @@ fn validate_child(path: &Path, directory: &Path) -> io::Result<()> {
 }
 
 fn open_no_follow(path: &Path) -> io::Result<File> {
-    #[cfg(unix)]
-    {
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Err(io::Error::new(io::ErrorKind::Unsupported, "Unix only"))
-    }
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
 }
 
 fn validate_metadata(metadata: &fs::Metadata, expected_len: usize) -> io::Result<()> {
-    #[cfg(unix)]
+    if !metadata.file_type().is_file()
+        || metadata.uid() != effective_uid()
+        || metadata.mode() & 0o777 != FILE_MODE
+        || metadata.nlink() != 1
+        || metadata.len() != expected_len as u64
     {
-        if !metadata.file_type().is_file()
-            || metadata.uid() != effective_uid()
-            || metadata.mode() & 0o777 != FILE_MODE
-            || metadata.nlink() != 1
-            || metadata.len() != expected_len as u64
-        {
-            return Err(invalid(
-                "frame must be same-uid regular 0600 single-link exact-length file",
-            ));
-        }
-        Ok(())
+        return Err(invalid(
+            "frame must be same-uid regular 0600 single-link exact-length file",
+        ));
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (metadata, expected_len);
-        Err(io::Error::new(io::ErrorKind::Unsupported, "Unix only"))
-    }
+    Ok(())
 }
 
-#[cfg(unix)]
 fn validate_directory(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_dir()
@@ -327,33 +274,22 @@ fn validate_directory(path: &Path) -> io::Result<()> {
 }
 
 fn validate_path_identity(path: &Path, expected: &fs::Metadata) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let actual = fs::symlink_metadata(path)?;
-        if actual.dev() != expected.dev() || actual.ino() != expected.ino() {
-            return Err(invalid("frame path changed while leased"));
-        }
-        Ok(())
+    let actual = fs::symlink_metadata(path)?;
+    if actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+        return Err(invalid("frame path changed while leased"));
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, expected);
-        Err(io::Error::new(io::ErrorKind::Unsupported, "Unix only"))
-    }
+    Ok(())
 }
 
-#[cfg(unix)]
 fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments and has no preconditions.
     unsafe { libc::geteuid() }
 }
 
-#[cfg(unix)]
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-#[cfg(unix)]
 fn invalid_path() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -361,7 +297,7 @@ fn invalid_path() -> io::Error {
     )
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;

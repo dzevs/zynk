@@ -7,7 +7,7 @@
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
     just ui-hot-path-architecture-test
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked scripts.test_hermes_integration_asset scripts.test_license_docs scripts.test_release_binary_audit
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked scripts.test_hermes_integration_asset scripts.test_license_docs scripts.test_linux_only_source scripts.test_release_binary_audit
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
@@ -36,7 +36,7 @@ ci filter='all()': lint test-ts
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked scripts.test_hermes_integration_asset scripts.test_license_docs scripts.test_release_binary_audit
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_vendor_libghostty_vt scripts.test_conventional_commits scripts.test_check_public_tree scripts.test_gitleaks_config scripts.test_scrub_check scripts.test_skills_catalog scripts.test_release_audit_refs scripts.test_gitleaks_tracked scripts.test_hermes_integration_asset scripts.test_license_docs scripts.test_linux_only_source scripts.test_release_binary_audit
 
 # Install repo-local git hooks
 install-hooks:
