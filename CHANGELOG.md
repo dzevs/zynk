@@ -21,6 +21,11 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 - `zynk --skill` prints the bundled root agent skill. Commands that need a local server now report one typed
   `server_not_running` diagnostic with startup guidance, without masking protocol or API errors. Codex
   trust-directory prompts are recognized as Blocked observations through manifest engine version 3.
+- The desktop tab bar can render bounded right-side zoom, hostname, datetime, text, and command status entries.
+  Status commands run outside rendering with bounded output, interval, timeout, and process-group cancellation.
+  Headless servers also accept startup-only `server.headless_cols` and `server.headless_rows` dimensions.
+- Direct pane-resize and move-tab keybindings are available as typed actions. Sidebar token occurrences may
+  add `fg`, `bold`, and `dim` styles without changing plain-token demand, metadata, or selection semantics.
 - Managed-agent launch and prompt automation. `agent start` reserves a name while Pending, launches
   into an existing supported shell, and waits for interactive readiness; `agent prompt` persists the
   resolved Party, enforces terminal and foreground readiness, submits once, and can optionally wait
@@ -58,7 +63,7 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
   final agent state text is right aligned. Collapsed/mobile rendering is unchanged.
   Title synchronization remains unconditional, with configured-title redraw
   consumers in both loops. Periodic Git detail demand follows builtin space tokens.
-  Styled tokens and parts remain unsupported; malformed rows invalidate the UI
+  Styled token tables retain the same demand and occurrence semantics; malformed rows invalidate the UI
   section under the existing startup and partial-reload policy.
 - Expanded sidebar agents and spaces accept reloadable `row_gap` values from 0
   through 65535, both defaulting to zero. Workspace parents and indented children
@@ -179,6 +184,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 - Remote restart checks now recognize detached-daemon support. Older servers
   without that capability trigger a restart recommendation even when version
   and protocol match; existing stop, handoff, and install confirmation gates remain.
+- Remote attach now reuses one managed SSH connection by default, preserves SSH authentication causes,
+  discovers package-managed and canonical mise installs, uses portable atomic helper replacement, falls back
+  to `sh` for path discovery, and restores accepted bridge streams to blocking mode before forwarding.
 - Binary client protocol 20 carries the complete protocol-19 automation surface plus Kitty key event identity,
   report-all state, pane-originated bells, pixel mouse input, direct graphics transfer state, and window-title
   synchronization. Clients and servers must use the same protocol version; protocol-19 peers fail before
@@ -191,11 +199,10 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
   handoff and remain dominant until cleared; unsafe control terminators are removed before host output.
 - The Experiments tab is removed from Settings. Pane history remains available
   through `experimental.pane_history` in the config file; Header settings remain.
-- `ui.agent_panel_scope` is **no longer supported**; the agent panel shows all workspaces.
-  `ui.agent_panel_sort` controls ordering only and does not restore current-workspace filtering. An old
-  `agent_panel_scope` key is ignored and reported as a startup diagnostic. *Policy note:* Zynk may remove a
-  documented config key in a minor release when the changelog carries a migration note and startup reports the
-  removed key; this is a deliberate config change, not a backward-compatible one.
+- `ui.agent_panel_scope` no longer controls filtering; the agent panel shows all workspaces.
+  `ui.agent_panel_sort` controls ordering only and does not restore current-workspace filtering. Historical
+  `current` and `all` values remain accepted and ignored as compatibility no-ops without a startup diagnostic;
+  other values remain invalid.
 - Custom keys and prefixes now **displace** conflicting default bindings instead of being rejected; a config
   reload keeps the valid subset of bindings.
 - The raw image-paste shortcut is remote-only: `keys.remote_image_paste` (default `ctrl+v`; empty disables).
@@ -224,6 +231,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 - Pane-originated bells reach only the active client. Transient terminal resizes repaint, contiguous ANSI diffs
   batch safe writes, and local/remote hangup, server EOF, and broken CLI output pipes restore or exit cleanly.
 - Non-UTF-8 process arguments now produce a bounded usage diagnostic instead of panicking.
+- Linux foreground-process-group probes use an invalidated cache, sound and status subprocesses have bounded
+  lifetime, WSL defaults to a drawn host cursor, and host palette queries are skipped under WSL. Unknown theme
+  names are diagnosed while reload retains the previous live palette.
 - Pane graphics stream reads skip mode reset on terminal no-data completion.
   Successful reads still reset their mode; a read error remains the reported
   error if the reset attempt also fails. Linux setup errors remain visible.

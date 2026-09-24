@@ -55,6 +55,7 @@ struct ClientLoopConfig {
     sound_config: crate::config::SoundConfig,
     mouse_scroll_lines: usize,
     redraw_on_focus_gained: bool,
+    host_cursor: crate::config::HostCursorModeConfig,
     kitty_graphics_enabled: bool,
     mouse_capture_active: bool,
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
@@ -88,6 +89,8 @@ struct ClientState {
     redraw_on_focus_gained: bool,
     /// Whether the next semantic frame must repaint every cell without clearing the surface.
     repaint_pending: bool,
+    /// Whether this client draws the cursor into frame cells instead of using the host cursor.
+    draw_host_cursor: bool,
 }
 
 #[derive(Debug, Default)]
@@ -384,6 +387,16 @@ fn setup_terminal_with_capabilities(
 
 fn should_enable_host_color_scheme_reports(enable_client_protocols: bool) -> bool {
     enable_client_protocols && should_query_host_terminal_theme()
+}
+
+fn should_draw_host_cursor(mode: crate::config::HostCursorModeConfig) -> bool {
+    match mode {
+        crate::config::HostCursorModeConfig::Auto => {
+            crate::platform::should_draw_host_cursor_by_default()
+        }
+        crate::config::HostCursorModeConfig::Native => false,
+        crate::config::HostCursorModeConfig::Drawn => true,
+    }
 }
 
 /// Guard that restores the terminal when dropped.
@@ -997,6 +1010,7 @@ fn run_client_with_mode(
     let direct_attach = attach_escape.is_some();
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
+    let host_cursor = loaded_config.config.ui.host_cursor;
     let direct_attach_requested = attach_request.is_some();
     let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
     let kitty_graphics_enabled =
@@ -1005,6 +1019,7 @@ fn run_client_with_mode(
         sound_config: loaded_config.config.ui.sound,
         mouse_scroll_lines,
         redraw_on_focus_gained,
+        host_cursor,
         kitty_graphics_enabled,
         mouse_capture_active: initial_mouse_capture_active(direct_attach, mouse_capture),
         remote_image_paste_key,
@@ -1155,6 +1170,7 @@ async fn run_client_loop(
     attach_escape: Option<AttachEscapeState>,
 ) -> Result<(), ClientError> {
     let is_remote_client = is_remote_client_process();
+    let draw_host_cursor = attach_escape.is_none() && should_draw_host_cursor(config.host_cursor);
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
         mouse_capture_active: config.mouse_capture_active,
@@ -1169,6 +1185,7 @@ async fn run_client_loop(
         remote_image_paste_key: config.remote_image_paste_key,
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         repaint_pending: false,
+        draw_host_cursor,
     };
     debug!(?negotiated_encoding, "client render encoding active");
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
@@ -1407,9 +1424,21 @@ async fn run_client_loop(
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
                 ServerMessage::Frame(frame_data) => {
-                    let encoded = state
-                        .blit_encoder
-                        .encode(&frame_data, state.repaint_pending);
+                    let frame_data = if state.draw_host_cursor {
+                        render_ansi::frame_with_drawn_cursor(frame_data)
+                    } else {
+                        frame_data
+                    };
+                    let encoded = if state.draw_host_cursor {
+                        state.blit_encoder.encode_with_suppressed_visible_cursor(
+                            &frame_data,
+                            state.repaint_pending,
+                        )
+                    } else {
+                        state
+                            .blit_encoder
+                            .encode(&frame_data, state.repaint_pending)
+                    };
                     let mut stdout = io::stdout();
                     let graphics = if state.kitty_graphics_enabled {
                         frame_data.graphics.as_slice()
@@ -1544,6 +1573,7 @@ async fn run_client_loop(
                     reload_local_client_config(
                         &mut state.sound_config,
                         &mut state.redraw_on_focus_gained,
+                        &mut state.draw_host_cursor,
                         &mut state.remote_image_paste_key,
                     );
                 }
@@ -1692,6 +1722,7 @@ fn client_remote_image_paste_key(
 fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
     redraw_on_focus_gained: &mut bool,
+    draw_host_cursor: &mut bool,
     remote_image_paste_key: &mut Option<(
         crossterm::event::KeyCode,
         crossterm::event::KeyModifiers,
@@ -1705,6 +1736,7 @@ fn reload_local_client_config(
             let loaded_remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
             *sound_config = loaded.config.ui.sound;
             *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
+            *draw_host_cursor = should_draw_host_cursor(loaded.config.ui.host_cursor);
             *remote_image_paste_key = loaded_remote_image_paste_key;
             debug!("reloaded local client config");
         }
@@ -2119,7 +2151,9 @@ fn should_query_host_terminal_theme() -> bool {
 }
 
 fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
-    let query = crate::terminal_theme::host_terminal_theme_query_sequence();
+    let query = crate::terminal_theme::host_terminal_theme_query_sequence(
+        crate::platform::should_query_host_terminal_palette(),
+    );
     writer.write_all(query.as_bytes())?;
     writer.flush()
 }
@@ -2576,7 +2610,10 @@ mod tests {
         write_host_terminal_theme_query(&mut output).unwrap();
         assert_eq!(
             output,
-            crate::terminal_theme::host_terminal_theme_query_sequence().as_bytes()
+            crate::terminal_theme::host_terminal_theme_query_sequence(
+                crate::platform::should_query_host_terminal_palette(),
+            )
+            .as_bytes()
         );
         assert!(!output
             .windows(crate::terminal_theme::HOST_COLOR_SCHEME_QUERY_SEQUENCE.len())
@@ -2612,6 +2649,24 @@ mod tests {
     #[test]
     fn host_terminal_theme_query_is_disabled_on_windows() {
         assert!(should_query_host_terminal_theme());
+    }
+
+    #[test]
+    fn host_cursor_policy_auto_uses_platform_default() {
+        assert_eq!(
+            should_draw_host_cursor(crate::config::HostCursorModeConfig::Auto),
+            crate::platform::should_draw_host_cursor_by_default()
+        );
+    }
+
+    #[test]
+    fn host_cursor_policy_native_and_drawn_override_auto_detection() {
+        assert!(!should_draw_host_cursor(
+            crate::config::HostCursorModeConfig::Native
+        ));
+        assert!(should_draw_host_cursor(
+            crate::config::HostCursorModeConfig::Drawn
+        ));
     }
 
     #[test]
@@ -2975,20 +3030,27 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::write(&path, "[ui]\nredraw_on_focus_gained = false\n").unwrap();
+        std::fs::write(
+            &path,
+            "[ui]\nredraw_on_focus_gained = false\nhost_cursor = \"drawn\"\n",
+        )
+        .unwrap();
         let path_string = path.to_string_lossy().to_string();
         let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
         let mut sound_config = crate::config::SoundConfig::default();
         let mut redraw_on_focus_gained = true;
+        let mut draw_host_cursor = false;
         let mut remote_image_paste_key = None;
 
         reload_local_client_config(
             &mut sound_config,
             &mut redraw_on_focus_gained,
+            &mut draw_host_cursor,
             &mut remote_image_paste_key,
         );
 
         assert!(!redraw_on_focus_gained);
+        assert!(draw_host_cursor);
         let _ = std::fs::remove_file(path);
     }
 

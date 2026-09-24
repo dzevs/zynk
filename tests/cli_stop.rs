@@ -38,6 +38,7 @@ struct MockStop {
     reply: Option<String>,
     keep_api: bool,
     keep_client: bool,
+    minimum_wait: Option<Duration>,
     decoys: Vec<PathBuf>,
 }
 
@@ -49,6 +50,7 @@ impl MockStop {
             reply: Some(json!({"id":"fixture:ack", "result":{}}).to_string()),
             keep_api: false,
             keep_client: false,
+            minimum_wait: None,
             decoys: Vec::new(),
         }
     }
@@ -128,7 +130,7 @@ impl Fixture {
         let mut client = Some(bind(&scenario.client));
         let decoys: Vec<_> = scenario.decoys.iter().map(|path| bind(path)).collect();
         let done = AtomicBool::new(false);
-        let result = thread::scope(|scope| {
+        let (result, elapsed) = thread::scope(|scope| {
             let server = scope.spawn(|| {
                 let started = Instant::now();
                 let mut request = None;
@@ -196,24 +198,46 @@ impl Fixture {
                 if let Some(status) = child.0.try_wait().unwrap() {
                     break status;
                 }
-                assert!(
-                    started.elapsed() < Duration::from_secs(6),
-                    "stop CLI exceeded fixture bound"
-                );
+                if started.elapsed() >= Duration::from_secs(20) {
+                    let elapsed = started.elapsed();
+                    let _ = child.0.kill();
+                    let status = child.0.wait();
+                    drop(finish);
+                    let _ = server.join();
+                    let stdout = out.join().unwrap_or_default();
+                    let stderr = err.join().unwrap_or_default();
+                    panic!(
+                        "stop CLI exceeded fixture bound after {elapsed:?}; status={status:?}; stdout={}; stderr={}",
+                        String::from_utf8_lossy(&stdout),
+                        String::from_utf8_lossy(&stderr)
+                    );
+                }
                 thread::sleep(Duration::from_millis(5));
             };
+            let elapsed = started.elapsed();
             drop(finish);
             let (request, decoy_connections) = server.join().unwrap();
             assert_eq!(decoy_connections, 0, "stop touched an unselected socket");
             (
-                request,
-                Output {
-                    status,
-                    stdout: out.join().unwrap(),
-                    stderr: err.join().unwrap(),
-                },
+                (
+                    request,
+                    Output {
+                        status,
+                        stdout: out.join().unwrap(),
+                        stderr: err.join().unwrap(),
+                    },
+                ),
+                elapsed,
             )
         });
+        if let Some(minimum_wait) = scenario.minimum_wait {
+            assert!(
+                elapsed >= minimum_wait,
+                "stop CLI returned after {elapsed:?}, before the required {minimum_wait:?}; stdout={}; stderr={}",
+                String::from_utf8_lossy(&result.1.stdout),
+                String::from_utf8_lossy(&result.1.stderr)
+            );
+        }
         assert!(scenario.api.exists(), "fixture must leave a stale API path");
         assert!(
             scenario.client.exists(),
@@ -261,6 +285,7 @@ fn stop_active_ack_with_api_still_reachable_fails() {
     let f = Fixture::new();
     let mut scenario = MockStop::new(f.api(), f.client());
     scenario.keep_api = true;
+    scenario.minimum_wait = Some(Duration::from_secs(14));
     let (request, output) = f.exchange(f.command(&["server", "stop"]), scenario);
     assert_request(request, "cli:request");
     assert_timeout(&output, &f.api());
@@ -271,6 +296,7 @@ fn stop_active_ack_with_client_still_reachable_fails() {
     let f = Fixture::new();
     let mut scenario = MockStop::new(f.api(), f.client());
     scenario.keep_client = true;
+    scenario.minimum_wait = Some(Duration::from_secs(14));
     let (request, output) = f.exchange(f.command(&["server", "stop"]), scenario);
     assert_request(request, "cli:request");
     assert_timeout(&output, &f.client());
@@ -296,6 +322,7 @@ fn stop_active_eof_requires_both_sockets_unreachable() {
         let mut scenario = MockStop::new(f.api(), f.client());
         scenario.keep_client = keep_client;
         scenario.reply = None;
+        scenario.minimum_wait = keep_client.then_some(Duration::from_secs(14));
         let (request, output) = f.exchange(f.command(&["server", "stop"]), scenario);
         assert_request(request, "cli:request");
         if keep_client {

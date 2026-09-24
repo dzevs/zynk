@@ -582,20 +582,27 @@ fn m826_config_check_preserves_all_diagnostics_read_only() {
     let fixture = ConfigCheckFixture::new();
     fixture.write_config("onboarding = false\n[ui]\nmouse_capture = false\n");
     let valid = config_check_outcome(fixture.run(&["config", "check"], None));
-    fixture.write_config("[keys]\nnew_tabb = \"prefix+t\"\n[ui]\nagent_panel_scope = \"workspace\"\nalpha = 1\nbravo = 2\ncharlie = 3\ndelta = 4\nmouse_captur = false\n[zynk]\nsqlite_hmoe = \"unused\"\n");
+    fixture.write_config("[keys]\nnew_tabb = \"prefix+t\"\n[ui]\nagent_panel_scope = \"current\"\nalpha = 1\nbravo = 2\ncharlie = 3\ndelta = 4\nmouse_captur = false\n[zynk]\nsqlite_hmoe = \"unused\"\n");
     let issues = config_check_outcome(fixture.run(&["config", "check"], None));
     assert_eq!(valid, (Some(0), "config: ok\n".into(), String::new()));
-    assert_eq!(issues, (Some(1), concat!(
-        "config: issues found\n",
-        "ui.agent_panel_scope is no longer supported (removed in 3.1.0); the agent panel shows all workspaces. ui.agent_panel_sort controls ordering only and does not restore current-workspace filtering; ignoring key\n",
-        "unknown config key keys.new_tabb; ignoring key\n",
-        "unknown config key ui.alpha; ignoring key\n",
-        "unknown config key ui.bravo; ignoring key\n",
-        "unknown config key ui.charlie; ignoring key\n",
-        "unknown config key ui.delta; ignoring key\n",
-        "unknown config key ui.mouse_captur; ignoring key\n",
-        "unknown config key zynk.sqlite_hmoe; ignoring key\n",
-    ).into(), String::new()));
+    assert_eq!(
+        issues,
+        (
+            Some(1),
+            concat!(
+                "config: issues found\n",
+                "unknown config key keys.new_tabb; ignoring key\n",
+                "unknown config key ui.alpha; ignoring key\n",
+                "unknown config key ui.bravo; ignoring key\n",
+                "unknown config key ui.charlie; ignoring key\n",
+                "unknown config key ui.delta; ignoring key\n",
+                "unknown config key ui.mouse_captur; ignoring key\n",
+                "unknown config key zynk.sqlite_hmoe; ignoring key\n",
+            )
+            .into(),
+            String::new()
+        )
+    );
 }
 
 #[test]

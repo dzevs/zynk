@@ -140,6 +140,11 @@ before any version-20 operation executes.
 server strips terminal control characters, sends changes only to the foreground client, and retains an
 explicit API title override across live handoff until it is cleared.
 
+Remote attach reuses one managed SSH connection by default, preserves the underlying SSH authentication
+diagnostic, discovers package-manager and canonical mise installs, and installs helpers with an atomic
+POSIX-shell replacement. Bridge streams return to blocking mode before forwarding. The remote host must run
+the same reviewed Linux x86_64 source build; these conveniences do not weaken the existing custody checks.
+
 Removing a linked worktree returns focus to its surviving parent workspace in
 the same worktree group, even if another workspace became active during removal.
 If no parent remains, normal workspace-close selection applies.
@@ -563,6 +568,9 @@ pane_scrollbars = true           # false: hide pane scrollbars and reclaim their
 pane_gaps = true                 # keep split panes visually separated
 tab_bar_position = "top"         # or "bottom"; desktop only
 status_indicators = "dots"       # preserve existing marks, or use distinct "symbols"
+host_cursor = "auto"             # native on ordinary Linux, drawn under WSL; or "native" / "drawn"
+tab_bar_right = []                # ordered zoom/hostname/datetime/text/command status entries
+tab_bar_right_separator = " "    # separator between visible right-side entries
 
 [ui.sidebar.agents]
 row_gap = 0                     # blank rows before each later agent entry
@@ -582,9 +590,23 @@ light_name = "catppuccin-latte"  # theme used for a light appearance when auto_s
 version_check = true             # background checks only; self-update stays unavailable (see below)
 manifest_check = true            # background agent-detection manifest checks
 
+[remote]
+manage_ssh_config = true          # reuse one SSH connection; user SSH config keeps precedence
+
+[server]
+headless_cols = 120               # initial size when starting without an attached client
+headless_rows = 40
+
 [keys]
 remote_image_paste = "ctrl+v"    # raw-key image paste, only in `zynk --remote`; "" disables it
 ```
+
+A status entry is one of `{ type = "zoom" }`, `{ type = "hostname" }`,
+`{ type = "datetime", format = "%H:%M" }`, `{ type = "text", text = "prod" }`, or
+`{ type = "command", command = "...", interval_seconds = 5, timeout_seconds = 2 }`. At most 16 entries
+are used. Commands run through `/bin/sh -lc` on the server, have bounded output and lifetime, are terminated
+with their process group when cancelled, and never run during rendering. Invalid entries are hidden with a
+config diagnostic. Headless dimensions are startup-only; reload does not resize existing panes.
 
 Expanded sidebar gaps accept integers from 0 through 65535 and can be reloaded.
 Both default to zero, packing entries more tightly. Spaces keep a parent and its
@@ -604,8 +626,10 @@ Expanded sidebar `rows` are arrays of arrays of plain string tokens, with at mos
 `workspace`, `branch`, and `git_status`. Custom tokens use `$` followed by 1..32
 ASCII letters, digits, underscores or hyphens; case is significant. Agent custom
 tokens read pane metadata, while space custom tokens read workspace metadata.
-`$terminal_title` is a custom key, not the title builtin. Styled token tables and
-token parts are unsupported.
+`$terminal_title` is a custom key, not the title builtin. A token occurrence may instead be a table such as
+`{ token = "workspace", fg = "#89b4fa", bold = true, dim = false }`; plain strings retain their contextual
+style. Unknown themes and malformed styles are diagnosed while the previous live palette/UI section remains
+active on reload.
 
 Override agent rows by canonical detected agent, independently of a renamed
 display label. For example, replace `rows_by_agent = {}` above with this table
@@ -670,8 +694,9 @@ drag-intent detection. Local clients and JSON terminal controllers do not use
 this interpretation. Signature checks are not full image decoding, and slow
 filesystems can still delay reads.
 
-`ui.agent_panel_scope` (3.0.x) is no longer supported: the agent panel shows all workspaces, and
-`ui.agent_panel_sort` controls ordering only. Custom keys and prefixes displace conflicting defaults.
+`ui.agent_panel_scope` (3.0.x) no longer controls filtering: the agent panel shows all workspaces, and
+`ui.agent_panel_sort` controls ordering only. Historical `current` and `all` values remain accepted and ignored
+as compatibility no-ops. Custom keys and prefixes displace conflicting defaults.
 
 For environments without native terminal foreground-group information, start a new server with
 `ZYNK_PROCESS_DETECTION=child-groups` to opt into best-effort process detection from direct child

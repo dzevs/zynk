@@ -486,22 +486,10 @@ fn workspace_list_and_create_round_trip() {
     );
     assert_eq!(send_enter["result"]["type"], "ok");
 
-    std::thread::sleep(Duration::from_millis(300));
-
-    let recent = send_request(
-        &socket_path,
-        &format!(
-            r#"{{"id":"req_11","method":"pane.read","params":{{"pane_id":"{}","source":"recent","lines":20}}}}"#,
-            pane_id
-        ),
-    );
-    let recent_text = recent["result"]["read"]["text"].as_str().unwrap();
-    assert!(recent_text.contains("beta") || recent_text.contains("gamma"));
-
     let waited = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_12","method":"pane.wait_for_output","params":{{"pane_id":"{}","source":"recent","lines":40,"match":{{"type":"substring","value":"gamma"}},"timeout_ms":2000}}}}"#,
+            r#"{{"id":"req_11","method":"pane.wait_for_output","params":{{"pane_id":"{}","source":"recent","lines":40,"match":{{"type":"substring","value":"gamma"}},"timeout_ms":2000}}}}"#,
             legacy_pane_id
         ),
     );
@@ -512,6 +500,16 @@ fn workspace_list_and_create_round_trip() {
         .as_str()
         .unwrap()
         .contains("gamma"));
+
+    let recent = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_12","method":"pane.read","params":{{"pane_id":"{}","source":"recent","lines":50}}}}"#,
+            pane_id
+        ),
+    );
+    let recent_text = recent["result"]["read"]["text"].as_str().unwrap();
+    assert!(recent_text.contains("beta") || recent_text.contains("gamma"));
     assert!(waited["result"]["read"]["text"]
         .as_str()
         .unwrap()

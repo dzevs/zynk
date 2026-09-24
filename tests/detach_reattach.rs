@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Integration tests for detach/reattach flow.
 //!
 
@@ -18,6 +20,32 @@ use support::{
     register_spawned_zynk_pid, send_detach, send_input, unregister_spawned_zynk_pid,
     wait_for_disconnect, wait_for_message_variant, wait_for_socket, wait_until, CURRENT_PROTOCOL,
 };
+
+const CUSTOM_HEADLESS_SIZE_CONFIG: &str = r#"onboarding = false
+
+[server]
+headless_cols = 132
+headless_rows = 41
+
+[ui]
+sidebar_start_collapsed = true
+sidebar_collapsed_mode = "hidden"
+hide_tab_bar_when_single_tab = true
+pane_scrollbars = false
+"#;
+
+const RELOADED_HEADLESS_SIZE_CONFIG: &str = r#"onboarding = false
+
+[server]
+headless_cols = 150
+headless_rows = 45
+
+[ui]
+sidebar_start_collapsed = true
+sidebar_collapsed_mode = "hidden"
+hide_tab_bar_when_single_tab = true
+pane_scrollbars = false
+"#;
 
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
@@ -72,14 +100,26 @@ fn spawn_server(
     api_socket_path: &PathBuf,
     _client_socket_path: &PathBuf,
 ) -> SpawnedZynk {
+    spawn_server_with_config(
+        config_home,
+        runtime_dir,
+        api_socket_path,
+        _client_socket_path,
+        "onboarding = false\n",
+    )
+}
+
+fn spawn_server_with_config(
+    config_home: &PathBuf,
+    runtime_dir: &PathBuf,
+    api_socket_path: &PathBuf,
+    _client_socket_path: &PathBuf,
+    config: &str,
+) -> SpawnedZynk {
     fs::create_dir_all(config_home.join("zynk-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
-    fs::write(
-        config_home.join("zynk-dev/config.toml"),
-        "onboarding = false\n",
-    )
-    .unwrap();
+    fs::write(config_home.join("zynk-dev/config.toml"), config).unwrap();
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -692,6 +732,180 @@ fn detached_output_preserves_last_attached_pty_size() {
         while_detached, before,
         "detached renders should not resize live pane PTYs to a fallback size"
     );
+
+    cleanup_spawned_zynk(spawned, base);
+}
+
+#[test]
+fn pane_created_without_client_uses_configured_headless_size() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let client_socket = runtime_dir.join("zynk-client.sock");
+
+    let spawned = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        CUSTOM_HEADLESS_SIZE_CONFIG,
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    let create = workspace_create(&api_socket, "headless-size");
+    let pane_id = create["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("root pane id")
+        .to_string();
+    assert!(ping_socket(&api_socket).contains("pong"));
+    let size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &pane_id,
+        "HEADLESS_SIZE",
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(size, (41, 132));
+    cleanup_spawned_zynk(spawned, base);
+}
+
+#[test]
+fn pane_created_after_detach_uses_configured_headless_size() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let client_socket = runtime_dir.join("zynk-client.sock");
+
+    let spawned = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        CUSTOM_HEADLESS_SIZE_CONFIG,
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let mut stream = UnixStream::connect(&client_socket).expect("client should connect");
+    let (version, error) =
+        client_handshake(&mut stream, CURRENT_PROTOCOL, 160, 50).expect("handshake should succeed");
+    assert_eq!(version, CURRENT_PROTOCOL);
+    assert!(error.is_none(), "{error:?}");
+    drain_messages(&mut stream);
+
+    let first = workspace_create(&api_socket, "attached-size");
+    let first_pane_id = first["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("first root pane id")
+        .to_string();
+    let attached_size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &first_pane_id,
+        "ATTACHED_SIZE",
+        Duration::from_secs(5),
+    );
+    assert_eq!(attached_size, (50, 160));
+
+    send_detach(&mut stream).expect("send detach");
+    assert!(
+        wait_for_disconnect(&mut stream, Duration::from_secs(2)).expect("wait for detach"),
+        "detached client connection should close"
+    );
+    drop(stream);
+
+    let second = workspace_create(&api_socket, "headless-size");
+    let second_pane_id = second["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("second root pane id")
+        .to_string();
+    let headless_size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &second_pane_id,
+        "HEADLESS_SIZE_AFTER_DETACH",
+        Duration::from_secs(5),
+    );
+    let preserved_size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &first_pane_id,
+        "PRESERVED_SIZE_AFTER_DETACH",
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(headless_size, (41, 132));
+    assert_eq!(preserved_size, attached_size);
+
+    cleanup_spawned_zynk(spawned, base);
+}
+
+#[test]
+fn live_reload_keeps_startup_headless_size_and_existing_pane_geometry() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("zynk.sock");
+    let client_socket = runtime_dir.join("zynk-client.sock");
+
+    let spawned = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        CUSTOM_HEADLESS_SIZE_CONFIG,
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    let first = workspace_create(&api_socket, "startup-size");
+    let first_pane_id = first["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("first root pane id")
+        .to_string();
+    assert!(ping_socket(&api_socket).contains("pong"));
+    let startup_size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &first_pane_id,
+        "STARTUP_HEADLESS_SIZE",
+        Duration::from_secs(5),
+    );
+    assert_eq!(startup_size, (41, 132));
+
+    fs::write(
+        config_home.join("zynk-dev/config.toml"),
+        RELOADED_HEADLESS_SIZE_CONFIG,
+    )
+    .unwrap();
+    let reload = send_json_request(
+        &api_socket,
+        r#"{"id":"reload_config","method":"server.reload_config","params":{}}"#,
+    );
+    assert_eq!(reload["result"]["type"], "config_reload");
+    assert_eq!(reload["result"]["status"], "applied");
+
+    let second = workspace_create(&api_socket, "post-reload-size");
+    let second_pane_id = second["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("second root pane id")
+        .to_string();
+    assert!(ping_socket(&api_socket).contains("pong"));
+    let existing_size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &first_pane_id,
+        "EXISTING_SIZE_AFTER_RELOAD",
+        Duration::from_secs(5),
+    );
+    let new_size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &second_pane_id,
+        "NEW_SIZE_AFTER_RELOAD",
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(existing_size, startup_size);
+    assert_eq!(new_size, startup_size);
 
     cleanup_spawned_zynk(spawned, base);
 }

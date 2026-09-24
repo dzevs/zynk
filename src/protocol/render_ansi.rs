@@ -35,6 +35,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::protocol::{underline_style_from_modifier, CellData, FrameData};
 
+const REVERSED_MODIFIER: u16 = 1 << 6;
 const SYNC_OUTPUT_END: &[u8] = b"\x1b[?2026l";
 
 pub(crate) fn final_sync_output_end(bytes: &[u8]) -> Option<usize> {
@@ -67,10 +68,23 @@ impl BlitEncoder {
     }
 
     pub(crate) fn encode(&self, frame: &FrameData, repaint: bool) -> EncodedBlit {
-        self.encode_inner(frame, repaint)
+        self.encode_inner(frame, repaint, false)
     }
 
-    fn encode_inner(&self, frame: &FrameData, repaint: bool) -> EncodedBlit {
+    pub(crate) fn encode_with_suppressed_visible_cursor(
+        &self,
+        frame: &FrameData,
+        repaint: bool,
+    ) -> EncodedBlit {
+        self.encode_inner(frame, repaint, true)
+    }
+
+    fn encode_inner(
+        &self,
+        frame: &FrameData,
+        repaint: bool,
+        suppress_visible_cursor: bool,
+    ) -> EncodedBlit {
         let previous_frame = self.last_frame.as_ref();
         let prev = if repaint { None } else { previous_frame };
         let full = repaint
@@ -91,7 +105,7 @@ impl BlitEncoder {
             &mut next_last_cursor_shape,
             repeat_ime_anchor_after_sync(),
             clear_before_full_redraw,
-            false,
+            suppress_visible_cursor,
         );
         if let Some(stats) = prof_stats {
             crate::render_prof::duration_since("ansi_encode.total", prof_started);
@@ -126,6 +140,19 @@ impl BlitEncoder {
     pub(crate) fn last_frame(&self) -> Option<&FrameData> {
         self.last_frame.as_ref()
     }
+}
+
+pub(crate) fn frame_with_drawn_cursor(mut frame: FrameData) -> FrameData {
+    if let Some(cursor) = frame.cursor.as_ref().filter(|cursor| cursor.visible) {
+        let (x, y) = clamp_cursor_position(&frame, cursor.x, cursor.y);
+        let idx = (y as usize)
+            .saturating_mul(frame.width as usize)
+            .saturating_add(x as usize);
+        if let Some(cell) = frame.cells.get_mut(idx) {
+            cell.modifier ^= REVERSED_MODIFIER;
+        }
+    }
+    frame
 }
 
 #[derive(Clone, Copy, Default)]
@@ -290,7 +317,6 @@ fn modifier_to_sgr_parts(val: u16) -> Vec<&'static str> {
     const UNDERLINED: u16 = 1 << 3; // 0x08
     const SLOW_BLINK: u16 = 1 << 4; // 0x10
     const RAPID_BLINK: u16 = 1 << 5; // 0x20
-    const REVERSED: u16 = 1 << 6; // 0x40
     const HIDDEN: u16 = 1 << 7; // 0x80
     const CROSSED_OUT: u16 = 1 << 8; // 0x100
 
@@ -318,7 +344,7 @@ fn modifier_to_sgr_parts(val: u16) -> Vec<&'static str> {
     if val & RAPID_BLINK != 0 {
         parts.push("6");
     }
-    if val & REVERSED != 0 {
+    if val & REVERSED_MODIFIER != 0 {
         parts.push("7");
     }
     if val & HIDDEN != 0 {
@@ -1163,6 +1189,62 @@ mod tests {
             trailing_cursor, "",
             "should not expose a post-sync cursor repeat when the target terminal flickers on it"
         );
+    }
+
+    #[test]
+    fn drawn_cursor_reverses_visible_cursor_cell() {
+        let frame = FrameData {
+            cells: vec![make_cell("A", 0, 0, 0); 9],
+            width: 3,
+            height: 3,
+            cursor: Some(CursorState {
+                x: 2,
+                y: 1,
+                visible: true,
+                shape: 6,
+            }),
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+        let drawn = frame_with_drawn_cursor(frame.clone());
+
+        assert_eq!(drawn.cells[5].modifier, REVERSED_MODIFIER);
+        assert_eq!(frame.cells[5].modifier, 0);
+
+        let encoded = BlitEncoder::new().encode_with_suppressed_visible_cursor(&drawn, false);
+        let output_str = String::from_utf8(encoded.bytes).unwrap();
+
+        assert!(
+            output_str.contains("\x1b[2;3H\x1b[6 q\x1b[?25l"),
+            "drawn cursor mode should park the host cursor hidden at the focused cursor position"
+        );
+        assert!(
+            !output_str.contains("\x1b[?25h"),
+            "drawn cursor mode should not show the host cursor"
+        );
+        assert!(
+            output_str.contains("\x1b[0;7;39;49mA"),
+            "drawn cursor should be emitted as reverse-video cell content"
+        );
+    }
+
+    #[test]
+    fn drawn_cursor_ignores_hidden_cursor() {
+        let frame = FrameData {
+            cells: vec![make_cell("A", 0, 0, 0)],
+            width: 1,
+            height: 1,
+            cursor: Some(CursorState {
+                x: 0,
+                y: 0,
+                visible: false,
+                shape: 0,
+            }),
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+
+        assert_eq!(frame_with_drawn_cursor(frame.clone()), frame);
     }
 
     #[test]

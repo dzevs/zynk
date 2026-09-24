@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::path::{Path, PathBuf};
 
 use tracing::warn;
@@ -15,6 +17,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "keys",
     "onboarding",
     "remote",
+    "server",
     "session",
     "terminal",
     "theme",
@@ -271,6 +274,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
     load_live_section(
         table,
+        "server",
+        "server config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.server = section,
+    );
+    load_live_section(
+        table,
         "update",
         "update config",
         &mut diagnostics,
@@ -341,6 +352,12 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         |section| config.header = section,
     );
 
+    let theme_diagnostics = config.theme.diagnostics();
+    if !theme_diagnostics.is_empty() {
+        diagnostics.extend(theme_diagnostics);
+        invalid_sections.push("theme".to_string());
+    }
+
     Ok(LoadedConfig {
         config,
         diagnostics,
@@ -351,22 +368,13 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
 /// Removed config keys that are still likely to be present in older config files. Serde ignores
 /// unknown keys, so without this the removal would be silent; the diagnostic makes the migration
 /// visible (3.1.0 policy: documented keys may be removed in a minor with a changelog note + this).
-const REMOVED_CONFIG_KEYS: &[(&str, &str, &str)] = &[
-    (
-        "ui",
-        "agent_panel_scope",
-        "ui.agent_panel_scope is no longer supported (removed in 3.1.0); the agent panel shows all \
-         workspaces. ui.agent_panel_sort controls ordering only and does not restore \
-         current-workspace filtering; ignoring key",
-    ),
-    (
-        "experimental",
-        "switch_ascii_input_source_in_prefix",
-        "experimental.switch_ascii_input_source_in_prefix is no longer supported (removed in \
+const REMOVED_CONFIG_KEYS: &[(&str, &str, &str)] = &[(
+    "experimental",
+    "switch_ascii_input_source_in_prefix",
+    "experimental.switch_ascii_input_source_in_prefix is no longer supported (removed in \
          3.1.0); it switched the macOS host input source during prefix mode and zynk targets \
          Linux only; ignoring key",
-    ),
-];
+)];
 
 fn removed_config_key_diagnostics_from_str(content: &str) -> Vec<String> {
     content
@@ -859,7 +867,6 @@ mod tests {
                 overlong.as_str(),
                 "\"$\u{e9}\"",
                 "42",
-                "{ token = \"workspace\", bold = true }",
             ] {
                 let valid = format!("[ui.sidebar.{panel}]\nrow_gap = 2\nrows = [[\"{token}\"]]\n");
                 let generic: toml::Value = valid.parse().unwrap();
@@ -896,6 +903,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn m93_live_config_accepts_retired_agent_panel_scope_without_warning() {
+        let loaded = load_live_config_from_str(
+            r#"
+[ui]
+agent_panel_scope = "current"
+agent_panel_sort = "priority"
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert!(loaded.invalid_sections.is_empty());
+        assert_eq!(
+            loaded.config.ui.agent_panel_sort,
+            super::super::AgentPanelSortConfig::Priority
+        );
+    }
+
+    #[test]
+    fn m93_non_historical_agent_panel_scope_invalidates_only_ui() {
+        let loaded = load_live_config_from_str(
+            r#"
+[keys]
+zoom = "prefix+z"
+
+[ui]
+agent_panel_scope = "workspace"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.invalid_sections, vec!["ui"]);
+        assert_eq!(loaded.diagnostics.len(), 1, "{:?}", loaded.diagnostics);
+        assert!(loaded.diagnostics[0].contains("invalid ui config"));
+        assert!(loaded.diagnostics[0].contains("unknown variant `workspace`"));
+        assert_eq!(
+            loaded.config.keys.zoom,
+            super::super::BindingConfig::one("prefix+z")
+        );
+    }
+
+    #[test]
+    fn m93_unknown_live_theme_is_diagnosed_and_marks_only_theme_invalid() {
+        let loaded = load_live_config_from_str(
+            r#"
+[theme]
+name = "catppucin"
+
+[ui]
+mouse_capture = false
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.invalid_sections, vec!["theme"]);
+        assert_eq!(loaded.diagnostics.len(), 1);
+        assert!(loaded.diagnostics[0].contains("theme.name = \"catppucin\""));
+        assert!(!loaded.config.ui.mouse_capture);
     }
 
     #[test]
@@ -1527,24 +1595,17 @@ mouse_captur = true
     }
 
     #[test]
-    fn load_live_config_warns_about_removed_agent_panel_scope_key() {
+    fn load_live_config_accepts_all_retired_agent_panel_scope_without_warning() {
         let loaded = load_live_config_from_str(
             r#"
 [ui]
-agent_panel_scope = "current"
+agent_panel_scope = "all"
 agent_panel_sort = "priority"
 "#,
         )
         .unwrap();
 
-        assert_eq!(
-            loaded.diagnostics,
-            vec![
-                "ui.agent_panel_scope is no longer supported (removed in 3.1.0); the agent panel \
-                 shows all workspaces. ui.agent_panel_sort controls ordering only and does not \
-                 restore current-workspace filtering; ignoring key"
-            ]
-        );
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         assert!(loaded.invalid_sections.is_empty());
         assert_eq!(
             loaded.config.ui.agent_panel_sort,
@@ -1589,7 +1650,7 @@ agent_panel_sort = "spaces"
     }
 
     #[test]
-    fn startup_config_load_warns_about_removed_agent_panel_scope_key() {
+    fn startup_config_load_accepts_retired_agent_panel_scope_without_warning() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let path = std::env::temp_dir().join(format!(
             "zynk-config-removed-key-{}.toml",
@@ -1607,12 +1668,7 @@ agent_panel_scope = "all"
 
         let loaded = Config::load();
 
-        assert_eq!(loaded.diagnostics.len(), 1);
-        assert!(
-            loaded.diagnostics[0].starts_with("ui.agent_panel_scope is no longer supported"),
-            "{:?}",
-            loaded.diagnostics
-        );
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
 
         std::env::remove_var(CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_file(path);
@@ -1851,9 +1907,7 @@ max_width = 72
     }
 
     #[test]
-    fn load_live_config_reports_removed_keys_without_duplicate_unknown_key_warnings() {
-        // A key on the removed list is also an unknown key to serde; it must produce
-        // exactly its removed-key diagnostic, never a second generic unknown-key warning.
+    fn load_live_config_accepts_retired_scope_and_reports_removed_input_source_key_once() {
         let loaded = load_live_config_from_str(
             r#"
 [ui]
@@ -1867,14 +1921,9 @@ pane_history = true
         )
         .unwrap();
 
-        assert_eq!(loaded.diagnostics.len(), 2, "{:?}", loaded.diagnostics);
+        assert_eq!(loaded.diagnostics.len(), 1, "{:?}", loaded.diagnostics);
         assert!(
-            loaded.diagnostics[0].starts_with("ui.agent_panel_scope is no longer supported"),
-            "{:?}",
-            loaded.diagnostics
-        );
-        assert!(
-            loaded.diagnostics[1]
+            loaded.diagnostics[0]
                 .starts_with("experimental.switch_ascii_input_source_in_prefix is no longer"),
             "{:?}",
             loaded.diagnostics
@@ -1888,6 +1937,10 @@ pane_history = true
             loaded.diagnostics
         );
         assert!(loaded.invalid_sections.is_empty());
+        assert_eq!(
+            loaded.config.ui.agent_panel_sort,
+            super::super::AgentPanelSortConfig::Priority
+        );
         assert!(loaded.config.experimental.pane_history);
     }
 
@@ -1930,7 +1983,7 @@ mouse_captur = false
     }
 
     #[test]
-    fn startup_config_load_reports_removed_key_without_duplicate_unknown_key_warning() {
+    fn startup_config_load_never_reports_retired_agent_panel_scope_as_unknown() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let path = std::env::temp_dir().join(format!(
             "zynk-config-removed-key-no-dup-{}.toml",
@@ -1951,12 +2004,7 @@ agent_panel_scope = "all"
         std::env::remove_var(CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(loaded.diagnostics.len(), 1, "{:?}", loaded.diagnostics);
-        assert!(
-            loaded.diagnostics[0].starts_with("ui.agent_panel_scope is no longer supported"),
-            "{:?}",
-            loaded.diagnostics
-        );
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
     }
 
     // The two keys M5-07 registers get the fork's standard new-key pair: the key itself

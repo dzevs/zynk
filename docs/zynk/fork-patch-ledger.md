@@ -7427,3 +7427,132 @@ pre-approve them.
 
 These corrections are **IMPLEMENTED / PENDING VERIFICATION** until their exact-tip lint, FULL, check, gate,
 and short delta Gate-2 complete. They do not alter protocol 20 or discharge any inherited carry.
+
+### B3 end-state batch - Linux platform, remote, configuration, and status
+
+The operator-approved B3 end state starts from exact B2 tip
+`06ccb0bb896eb2d43988203131921fe9f90d8fd7`. Protocol remains 20. Each M9 authority row is applied once to
+its final Linux/fork region:
+
+- M9-01 `3cd2e7b6b71e25300bc8831ff6721a773103f308` (ADAPT_FORK): discover package-managed remote zynk
+  installs while retaining custody and no-download boundaries.
+- M9-02 `e9bcea9c0da2ebd996b4b570c504582740f3466e` (ADAPT_FORK): reuse one managed SSH connection while
+  keeping user configuration first and a plain-SSH opt-out.
+- M9-03 `a9111cbab2a7550c7e84ec94c8b388de9a44daa3` (ADAPT_LINUX): construct scrollback-editor argv in the
+  Linux platform boundary; omit the Windows command path.
+- M9-04 `d1471e64834d0c7daf072f11c01c30db35324850` (ADAPT_LINUX): add native/drawn/auto host-cursor policy,
+  with auto selecting drawn under WSL.
+- M9-05 `ef67a97047c92e4af6b9d69c7292962426109bc1` (PORT): cache Linux foreground-process-group scans with
+  explicit invalidation and process identity checks.
+- M9-06 `220b99a9fabf10fad83a570f641ad39737d85875` (ADAPT_LINUX): route custom shell commands through the
+  explicit Linux `/bin/sh` argv builder; omit fallback/macOS/Windows branches.
+- M9-07 `d9230f517a88be0eb88c9af39f7a4212644c9a3d` (ADAPT_FORK): preserve the underlying SSH
+  authentication cause in zynk-native diagnostics.
+- M9-08 `c3df61b564a8de3337b8be075a5d16f64d32850e` (PORT): install the remote helper through portable POSIX
+  shell with atomic replacement.
+- M9-09 `36b2e2f5463139a284483732131ce44977881239` (PORT_LINUX): detect WSL and default host cursor
+  presentation to drawn there.
+- M9-10 `64de9279e39cbdce07b97b4ded1ea439ff7192e8` (PORT): allow bounded slow server shutdown rather than
+  truncating the session stream.
+- M9-11 `947328fa79fcefd2fa8087de014168d46a641312` (VERIFY_EQUIVALENT): retain the existing Linux
+  `ZYNK_AGENT` `/proc` environment-hint implementation and controls; no source edit is made merely for parity.
+- M9-12 `b16465afbbf8e4e959076fceb7e84377f2ecc379` (ADAPT_FORK): add per-occurrence sidebar token styles
+  while preserving B1 agent views and B2 hierarchy, demand, selection, and metadata semantics.
+- M9-13 `e907e6a3664608b34351344dfdfbc0431dab8760` (OMIT_NON_LINUX): omit the Windows agent-manifest curl
+  hiding path.
+- M9-14 `616d1dd8125ece4a9102b231864cb4fc4b761497` (OMIT_NON_LINUX): omit the Windows noninteractive-process
+  suppression path.
+- M9-15 `de94cf833072251ff58f60e3478c00f6ceb1dbeb` (PORT): discover canonical mise remote installs while
+  excluding mutable shim paths.
+- M9-16 `fd29addd719e3451bea0a1cc20d93374d7bea2d9` (ADAPT_LINUX): bound Linux sound-player lifetime and
+  process-group cleanup.
+- M9-17 `08640bb3ddc0a9c299e855d6a459d2f82970cf86` (PORT): fall back to `sh` for remote path discovery.
+- M9-18 `5b0be42e043e25e34ceeecf72e72bdb043164997` (OMIT_NON_LINUX): omit restored Windows notification and
+  sound branches.
+- M9-19 `14df4d219dd36ba5f553ddcffc9fc1a4cb7c141a` (OMIT_NON_LINUX): omit the Windows sound timing test.
+- M9-20 `0732039eaf74f2f2a235535b2f3602d3926b12ec` (OMIT_NON_LINUX): omit the Windows session-survival arm.
+- M9-21 `1f1e434268ad6e8102fdac6d5996e3f190138a28` (PORT): accept and ignore retired
+  `ui.agent_panel_scope` for compatibility without restoring the removed panel behavior.
+- M9-22 `2863b715132fe29e53089e06f105943d1df0b3b4` (ADAPT_LINUX): split Unix remote attach and host bridge
+  responsibilities while preserving private zynk paths, source custody, peer checks, and cleanup.
+- M9-23 `374d3eddc55ac0d8b21df2b6bf7f056634fb86f9` (PORT): restore accepted remote bridge streams to
+  blocking mode before forwarding.
+- M9-24 `bdb5222eec9109f4a337ab79d12c3f3ee3cd7a4b` (PORT): diagnose unknown themes and preserve the prior
+  live palette on reload.
+- M9-25 `4e31084495120674a0cf403a27d3d91c5efb34fe` (PORT): add typed direct pane-resize keybindings.
+- M9-26 `f5067ed829ae5743499916b941b2310c50681f29` (PORT): add typed move-tab keybindings.
+- M9-27 `bbd7c2094a44fcbcc4a3a3aedef236c4d697d793` (OMIT_NON_LINUX): omit the Windows media-player
+  environment serialization test.
+- M9-28 `1ac44afcc091ef70890ebcb5ff409ae6dc0eef53` (OMIT_NON_LINUX): omit Windows elevated-title cleanup.
+- M9-29 `3f752a72fdd073d875cf941e3049f9860e30d841` (ADAPT_LINUX): synchronously terminate and reap cancelled
+  tab-status process groups on Linux.
+- M9-30 `15539d3dec40bcc40e6f4bb0eaa4f073ad26b74f` (ADAPT_FORK): configure startup-only headless rows and
+  columns without dropping the fork-owned managed-agent scheduler or changing live geometry on reload.
+- M9-31 `2b4b3849ca7760d6fcff10cd560553bb8081a8e2` (PORT_LINUX): skip host palette queries under WSL while
+  preserving ordinary Linux theme synchronization.
+
+Three deferred source groups are discharged. M9-12 integrates sidebar demand from
+`d4e0dd3d903c50d2edb8c3cec71952a83989b310` and occurrence-style handling from
+`d2c317adc4b5fd73a7054d74f92d633a31069391` without weakening plain-token guarantees. M9-22 also carries the
+complete tab-status arrival from `e48d83067a5a9b05dfd0a82761068866ab2d294d`: typed configuration, bounded
+Linux command execution, shared deadlines, render wake, cancellation, headless scheduling, and controls. No
+deferred M8/M9 source remains after B3.
+
+The Linux-only omissions are source-enforced rather than hidden behind no-op branches. The maintenance scanner
+recognizes outer and inner attributes, `cfg!`, `cfg_attr`, char/byte-char literals, negated Linux selectors,
+MSVC and Apple vendor selectors, and checks its parsed attribute count against every Rust file. Its sole
+non-Linux allowlist entry is the ADR-0013 compile-error boundary in `src/main.rs`. `tests/broken_pipe.rs` is
+unconditionally Linux. M9-13, M9-14, M9-18, M9-19, M9-20, M9-27, and M9-28 therefore introduce no dormant
+platform seam.
+
+Fork adaptations retain protocol 20, zynk naming and private paths, source-custody rules, B1 agent views,
+M8-39 authority and receipt semantics, B2 input/render ownership, paint diagnostics, and the fork-owned
+headless managed-agent call. Final scheduled order in both loops is metadata expiry, managed reconciliation,
+tab status, then geometry/resume. Consuming a due status deadline advances or clears it. Status commands run
+outside rendering through `/bin/sh -lc`, cap output and schedule bounds, and synchronously terminate their
+process group on cancellation. Sentinel HOME/XDG plus cleared/rebound inherited `ZYNK_*` variables cover
+remote helper and tab-status fixtures under plain checks; no production environment value establishes agent
+identity, receipt authority, or a persistent test path.
+
+The parent residue table was generated from exact `06ccb0bb` blobs and contains 3370 classified hunks with no
+unresolved or deferred item; its 703 `PENDING_ADOPTION` hunks are the explicit B3 work set. The binding
+candidate table must contain no `PENDING_ADOPTION` or `DEFERRED` row. Focused B3 evidence includes the revised
+Linux-source scanner, platform/config/remote controls, 30 tab-status/config unit controls, both configured
+headless-size controls, the hot-path architecture test, and fixed-geometry one-versus-15 render-scale probes.
+Exact-tip lint, FULL, check, gate, bounded critical faults, residue, packet, and Gate-2 remain execution
+evidence rather than pre-approved claims.
+
+The first B3 FULL remains retained with four fixture stops. Three `cli_stop` controls reached the fork-owned
+six-second watchdog after M9-10 deliberately widened the production shutdown window from two to fifteen
+seconds; their test-only watchdog is now twenty seconds, includes captured child streams on expiry, and the
+three timeout scenarios require at least fourteen seconds so a silent return to the old production window is
+observable. `workspace_list_and_create_round_trip` exposed a missed M9-30 authority hunk: its recent-history
+window is now the upstream 50 lines required by the configured 40-row headless screen. The fork replaces the
+upstream 300 ms sleep with the existing bounded `pane.wait_for_output` observation before making the same
+recent-history assertion. M9-30's default-size unit control and post-detach integration control are also
+ported. Unlike upstream, SPEC section 7.3 keeps headless rows and columns startup-only: a live reload changes
+neither the cached headless size nor existing or subsequently created pane geometry, as the fork integration
+control pins. These test changes do not alter production timeout or pane-read semantics, and the original FULL
+and focused stops remain evidence.
+
+M9-21 supersedes the historical M8 removed-key policy recorded earlier in this ledger for
+`ui.agent_panel_scope`: released configs could write only `current` or `all`, and both now deserialize as
+silent compatibility no-ops exactly as upstream does. The existing M8-26 aggregate diagnostics control keeps
+all seven unknown-key observations with `current` as its valid compatibility value; live and startup controls
+pin both historical values, while `workspace` deliberately invalidates only `[ui]` and leaves a valid sibling
+section applied.
+
+M9-30's 40-row startup geometry also exposed an M8-33 popup control that inspected only the bottom 12 rows
+after its child printed at the top and waited for input. The unchanged candidate failed both FULL and the one
+approved same-byte diagnostic. The control now inspects 50 rows, preserving its argv/shell identity-stripping
+contract independently of terminal height, and the upstream
+`pane_size_estimate_uses_headless_size_before_first_view` unit is retained under its upstream identity. No
+production timeout or popup behavior changed.
+
+Apache-era changes earn 4(b) headers and NOTICE entries for the B3-modified config, IPC, remote, session,
+sound, sidebar-token, tab-status, and detach/reattach files. `M839-F21-UNATTRIBUTED-LOCK-DEADLINE-PAIR`, its
+F23 and green-byte companions, N14 through N23, the B2 alternate-history concurrency carry, the M-FINAL
+license audit, `M839-G1-N1`, `M83335-EXACT-PAINT-ABSENCE`, `MPD-FORMAT-APPROVAL-ORDER`, prerequisite and
+approval-order histories, reviewer gaps, M7-20, origins, standing limits, capped instruments, and
+resource/schema/handoff bounds all remain OPEN. This batch authorizes no merge, push, install, tag, publish,
+release, cleanup, or live-runtime action.

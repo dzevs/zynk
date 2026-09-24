@@ -568,24 +568,24 @@ impl Palette {
 
     /// Resolve a theme by name. Returns None for unknown names.
     pub fn from_name(name: &str) -> Option<Self> {
-        match name.to_lowercase().replace([' ', '_'], "-").as_str() {
-            "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin()),
-            "catppuccin-latte" | "latte" | "light" => Some(Self::catppuccin_latte()),
+        match crate::config::canonical_theme_name(name)? {
+            "catppuccin" => Some(Self::catppuccin()),
+            "catppuccin-latte" => Some(Self::catppuccin_latte()),
             "terminal" => Some(Self::terminal()),
-            "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
-            "tokyo-night-day" | "tokyo-day" | "tokyonight-day" => Some(Self::tokyo_night_day()),
+            "tokyo-night" => Some(Self::tokyo_night()),
+            "tokyo-night-day" => Some(Self::tokyo_night_day()),
             "dracula" => Some(Self::dracula()),
             "nord" => Some(Self::nord()),
-            "gruvbox" | "gruvbox-dark" => Some(Self::gruvbox()),
+            "gruvbox" => Some(Self::gruvbox()),
             "gruvbox-light" => Some(Self::gruvbox_light()),
-            "one-dark" | "onedark" => Some(Self::one_dark()),
-            "one-light" | "onelight" => Some(Self::one_light()),
-            "solarized" | "solarized-dark" => Some(Self::solarized()),
+            "one-dark" => Some(Self::one_dark()),
+            "one-light" => Some(Self::one_light()),
+            "solarized" => Some(Self::solarized()),
             "solarized-light" => Some(Self::solarized_light()),
             "kanagawa" => Some(Self::kanagawa()),
-            "kanagawa-lotus" | "lotus" => Some(Self::kanagawa_lotus()),
-            "rose-pine" | "rosepine" => Some(Self::rose_pine()),
-            "rose-pine-dawn" | "rosepine-dawn" | "dawn" => Some(Self::rose_pine_dawn()),
+            "kanagawa-lotus" => Some(Self::kanagawa_lotus()),
+            "rose-pine" => Some(Self::rose_pine()),
+            "rose-pine-dawn" => Some(Self::rose_pine_dawn()),
             "vesper" => Some(Self::vesper()),
             _ => None,
         }
@@ -1070,26 +1070,7 @@ impl HeaderSettingRow {
 }
 
 /// All built-in theme names in display order.
-pub const THEME_NAMES: &[&str] = &[
-    "catppuccin",
-    "catppuccin-latte",
-    "terminal",
-    "tokyo-night",
-    "tokyo-night-day",
-    "dracula",
-    "nord",
-    "gruvbox",
-    "gruvbox-light",
-    "one-dark",
-    "one-light",
-    "solarized",
-    "solarized-light",
-    "kanagawa",
-    "kanagawa-lotus",
-    "rose-pine",
-    "rose-pine-dawn",
-    "vesper",
-];
+pub const THEME_NAMES: &[&str] = crate::config::THEME_NAMES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuListState {
@@ -1434,6 +1415,12 @@ impl PendingWorkspaceCreateCwd {
 
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabBarStatusSegment {
+    Zoom,
+    Text(Option<String>),
+}
+
 pub struct AppState {
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
@@ -1514,6 +1501,8 @@ pub struct AppState {
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
+    /// Virtual terminal size (columns, rows) used when no client is attached.
+    pub(crate) headless_size: (u16, u16),
     pub default_sidebar_width: u16,
     pub sidebar_width: u16,
     pub sidebar_min_width: u16,
@@ -1552,6 +1541,8 @@ pub struct AppState {
     pub show_agent_labels_on_pane_borders: bool,
     pub hide_tab_bar_when_single_tab: bool,
     pub tab_bar_position: crate::config::TabBarPositionConfig,
+    pub tab_bar_right: Vec<TabBarStatusSegment>,
+    pub tab_bar_right_separator: String,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1739,7 +1730,7 @@ impl AppState {
         if let Some(info) = self.view.pane_infos.first() {
             (info.rect.height, info.rect.width)
         } else {
-            (24, 80)
+            (self.headless_size.1, self.headless_size.0)
         }
     }
 
@@ -1921,6 +1912,10 @@ impl AppState {
             outer_terminal_focus: None,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
+            headless_size: (
+                crate::config::DEFAULT_HEADLESS_COLS,
+                crate::config::DEFAULT_HEADLESS_ROWS,
+            ),
             default_sidebar_width: 26,
             sidebar_width: 26,
             sidebar_min_width: 18,
@@ -1954,6 +1949,8 @@ impl AppState {
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             tab_bar_position: crate::config::TabBarPositionConfig::Top,
+            tab_bar_right: Vec::new(),
+            tab_bar_right_separator: " ".into(),
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,
@@ -2402,6 +2399,14 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_size_estimate_uses_headless_size_before_first_view() {
+        let mut state = AppState::test_new();
+        state.headless_size = (132, 41);
+
+        assert_eq!(state.estimate_pane_size(), (41, 132));
+    }
     use crossterm::event::KeyEvent;
 
     #[test]

@@ -200,6 +200,8 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # rename_tab = "prefix+shift+t"
 # previous_tab = "prefix+p"
 # next_tab = "prefix+n"
+# move_tab_previous = ""   # optional, e.g. "alt+shift+left" moves the tab toward the front
+# move_tab_next = ""       # optional, e.g. "alt+shift+right" moves the tab toward the back
 # switch_tab = "prefix+1..9"
 # switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
 # close_tab = "prefix+shift+x"
@@ -217,6 +219,10 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # close_pane = "prefix+x"
 # zoom = "prefix+z"       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
+# resize_pane_left = ""    # optional direct or prefix binding
+# resize_pane_down = ""
+# resize_pane_up = ""
+# resize_pane_right = ""
 # toggle_sidebar = "prefix+b"
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
@@ -246,6 +252,12 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # [worktrees]
 # directory = "~/.zynk/worktrees"
 
+# Virtual terminal size used for panes created before any client attaches.
+# Changes require a server restart and never resize already-running panes.
+# [server]
+# headless_cols = 120
+# headless_rows = 40
+
 [ui]
 # Sidebar width (auto-scaled based on workspace names, this sets the default)
 # sidebar_width = 26
@@ -270,6 +282,11 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Set false to let the terminal handle normal clicks, such as Cmd-clicking URLs.
 # Pane apps like lazygit and btop can still receive mouse when they request it.
 # mouse_capture = true
+
+# Host cursor policy: "auto", "native", or "drawn".
+# "auto" draws Zynk's cursor under WSL and uses the native terminal cursor on ordinary Linux.
+# "native" always uses the outer terminal cursor. "drawn" renders the cursor as cell content.
+# host_cursor = "auto"
 
 # Automatically copy text selected with the mouse.
 # Set false to retain drag or double-click word selection until Ctrl+C,
@@ -322,6 +339,12 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Desktop tab row placement: "top" or "bottom".
 # tab_bar_position = "top"
 
+# Ordered status entries at the right edge of the desktop tab bar.
+# Supported types: zoom, hostname, datetime, text, and command.
+# Hostname, datetime, and command entries resolve on the Zynk server.
+# tab_bar_right = []
+# tab_bar_right_separator = " "
+
 # Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
 # "workspaces" is accepted as an alias for "spaces".
 # agent_panel_sort = "spaces"
@@ -340,7 +363,8 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Collapsed and mobile layouts do not use these gaps or token rows.
 # No gap value restores both old agents rules (within-group zero, between-group one).
 # Spaces at one do not restore the old trailing-gap admission rule at the bottom.
-# Plain rows: at most 16 rows, at most 16 string tokens per row; no Styled tables.
+# Rows allow at most 16 rows and 16 tokens per row. A token occurrence may use
+# { token = "workspace", fg = "#89b4fa", bold = true, dim = false }.
 # Agent tokens: state_icon, state_text, workspace, tab, pane, agent,
 # terminal_title, terminal_title_stripped. Space tokens: state_icon, state_text,
 # workspace, branch, git_status. Custom tokens: "$" + 1..32 ASCII letters,
@@ -366,7 +390,8 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # Indented worktree children suppress builtin branch/git_status, not custom tokens.
 # Title observation sync remains unconditional; configured title builtins request
 # sidebar redraw. Periodic Git details follow builtin branch/git_status demand;
-# one-shot identity refresh remains independent. Styled/parts tokens are unsupported.
+# one-shot identity refresh remains independent. Styled token maps can set fg,
+# bold and dim on each occurrence; plain string tokens retain contextual styling.
 
 # Background notification popup delivery
 [ui.toast]
@@ -403,13 +428,9 @@ pub(crate) const DEFAULT_CONFIG: &str = r##"# zynk configuration
 # resume_agents_on_restore = true
 
 [remote]
-# Whether zynk manages the ssh config used for the `zynk --remote` bridge.
-# When true (default), zynk runs the bridge ssh through a generated config that
-# includes your ~/.ssh/config first and adds ServerAliveInterval/
-# ServerAliveCountMax as a fallback (so any keepalive you set yourself still
-# wins) to survive idle network/NAT timeouts. Set false to run plain ssh against
-# your ssh config unchanged — this does not force keepalive off, it only stops
-# zynk from adding its own.
+# Reuse one managed SSH connection for discovery, install, and the remote
+# bridge. Zynk includes your SSH config first, then adds keepalive fallbacks so
+# your own settings still win. Set false to run independent plain ssh commands.
 # manage_ssh_config = true
 
 [experimental]
@@ -817,7 +838,13 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(remote_launch) = remote_launch {
-        return remote::run_remote(remote_launch);
+        let remote_target = remote_launch.target.clone();
+        if let Err(err) = remote::run_remote(remote_launch) {
+            eprintln!("error: {err}");
+            remote::print_remote_error_hint(&err, &remote_target);
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     let loaded_config = config::Config::load();

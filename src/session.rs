@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +17,7 @@ pub const SESSION_ENV_VAR: &str = "ZYNK_SESSION";
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
 const MAX_SESSION_NAME_LEN: usize = 64;
-const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_WAIT_POLL: Duration = Duration::from_millis(25);
 const MIN_SOCKET_TIMEOUT: Duration = Duration::from_millis(1);
 
@@ -1170,4 +1172,8 @@ mod tests {
         std::fs::remove_dir_all(&config_home).unwrap();
         std::env::remove_var("XDG_CONFIG_HOME");
     }
+}
+#[test]
+fn b3_stop_wait_timeout_allows_slow_graceful_shutdown() {
+    assert_eq!(STOP_WAIT_TIMEOUT, Duration::from_secs(15));
 }

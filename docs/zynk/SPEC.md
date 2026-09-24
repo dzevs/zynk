@@ -306,6 +306,35 @@ aggregate resource bound remain those in the Experimental pane graphics section.
 from read-time cell geometry; absent geometry or direct-delivery refusal retains the bounded encoded fallback.
 Neither enqueue nor acknowledgement proves physical display.
 
+### B3 Linux platform, remote, configuration, and status contract
+
+Linux owns editor and custom-command argv construction, foreground-process-group caching and invalidation,
+WSL detection, host-cursor selection, sound-player lifetime, cancellation process guards, and palette-query
+policy. `ui.host_cursor = "auto"` selects native cursor handling on ordinary Linux and drawn handling under
+WSL. WSL skips host palette queries without disabling ordinary theme synchronization. The seven M9
+Windows/non-Linux rows are omitted rather than represented by no-op branches; the source maintenance gate
+rejects non-Linux cfg attributes and expressions outside the one ADR-0013 compile-error boundary.
+
+Remote attach uses one managed SSH connection when configured, includes user SSH configuration before zynk's
+keepalive fallback, preserves authentication causes, discovers package-managed and canonical mise installs,
+installs helpers by portable atomic replacement, and falls back to `sh` for path discovery. Accepted bridge
+streams are restored to blocking mode before forwarding. The split Linux attach/host implementation retains
+private paths, same-source custody, peer checks, cleanup, and no implicit local live-server launch. Test
+fixtures bind HOME, XDG, and inherited `ZYNK_*` variables to sentinel roots and prove that no helper path
+escapes them.
+
+Unknown theme names produce diagnostics and retain the prior live palette on reload. Retired
+`ui.agent_panel_scope` remains accepted and ignored for compatibility. Pane-resize and move-tab actions have
+typed keybinding fields and contextual admission. Sidebar token occurrences accept optional `fg`, `bold`, and
+`dim` styling while preserving plain-token demand, occurrence, selection, metadata, and B1 view semantics.
+
+`ui.tab_bar_right` is an ordered list of at most 16 typed `zoom`, `hostname`, `datetime`, `text`, and `command`
+entries. Commands execute outside render through `/bin/sh -lc`, with bounded output, interval, timeout, and
+process-group cancellation; invalid entries are diagnosed and hidden. The shared scheduler advances or clears
+every consumed deadline. Its headless order remains metadata expiry, fork-owned managed-agent reconciliation,
+status work, then geometry. `server.headless_cols` and `server.headless_rows` set only the startup size when no
+client is attached; they do not resize existing panes on reload or erase a pane's last attached size.
+
 **Send response (F4):** every send returns the persisted record + delivery state:
 ```json
 { "result": "ok", "command": "agent send", "message_id": "...", "conversation_id": "...",

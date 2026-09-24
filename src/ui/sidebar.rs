@@ -1220,7 +1220,13 @@ fn resolved_token_spans(
     right_align_state: bool,
 ) -> Vec<Span<'static>> {
     if right_align_state {
-        if let Some(ResolvedToken::StateText(text)) = resolved.last() {
+        if let Some((text, style)) = resolved.last().and_then(|token| {
+            let (token, style) = token.parts();
+            match token {
+                ResolvedToken::StateText(text) => Some((text, style)),
+                _ => None,
+            }
+        }) {
             let text = truncate_end(text, max_width);
             let width = display_width(&text);
             let prefix = &resolved[..resolved.len() - 1];
@@ -1242,13 +1248,16 @@ fn resolved_token_spans(
             if padding > 0 {
                 spans.push(Span::raw(" ".repeat(padding)));
             }
-            spans.push(Span::styled(text, styles.state_text));
+            spans.push(Span::styled(
+                text,
+                apply_token_style(styles.state_text, style),
+            ));
             return spans;
         }
     }
     let fixed_widths = resolved
         .iter()
-        .map(|token| match token {
+        .map(|token| match token.parts().0 {
             ResolvedToken::StateIcon => display_width(state_icon.0),
             ResolvedToken::Branch(_) => display_width("\u{2387} "),
             ResolvedToken::GitStatus { ahead, behind } => {
@@ -1261,7 +1270,7 @@ fn resolved_token_spans(
         .collect::<Vec<_>>();
     let flexible_widths = resolved
         .iter()
-        .map(|token| match token {
+        .map(|token| match token.parts().0 {
             ResolvedToken::StateText(text)
             | ResolvedToken::Workspace(text)
             | ResolvedToken::Tab(text)
@@ -1347,6 +1356,7 @@ fn resolved_token_spans(
     let mut spans = Vec::new();
     for (position, index) in visible_indices.iter().copied().enumerate() {
         let token = &resolved[index];
+        let (kind, token_style) = token.parts();
         if position > 0 {
             let separator = tokens::separator(&resolved[visible_indices[position - 1]], token);
             let style = if separator == " " {
@@ -1356,54 +1366,86 @@ fn resolved_token_spans(
             };
             spans.push(Span::styled(separator, style));
         }
-        match token {
-            ResolvedToken::StateIcon => {
-                spans.push(Span::styled(state_icon.0.to_string(), state_icon.1))
-            }
+        match kind {
+            ResolvedToken::StateIcon => spans.push(Span::styled(
+                state_icon.0.to_string(),
+                apply_token_style(state_icon.1, token_style),
+            )),
             ResolvedToken::StateText(text) => spans.push(Span::styled(
                 truncate_end(text, budgets[index]),
-                styles.state_text,
+                apply_token_style(styles.state_text, token_style),
             )),
             ResolvedToken::Workspace(text) => spans.push(Span::styled(
                 truncate_end(text, budgets[index]),
-                styles.workspace,
+                apply_token_style(styles.workspace, token_style),
             )),
             ResolvedToken::Tab(text) | ResolvedToken::Pane(text) | ResolvedToken::Agent(text) => {
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
-                    styles.secondary,
+                    apply_token_style(styles.secondary, token_style),
                 ))
             }
             ResolvedToken::Branch(text) => {
-                spans.push(Span::styled("\u{2387} ", styles.secondary));
+                spans.push(Span::styled(
+                    "\u{2387} ",
+                    apply_token_style(styles.secondary, token_style),
+                ));
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
-                    styles.secondary,
+                    apply_token_style(styles.secondary, token_style),
                 ));
             }
             ResolvedToken::GitStatus { ahead, behind } => {
                 if *ahead > 0 {
                     spans.push(Span::styled(
                         format!("\u{2191}{ahead}"),
-                        Style::default().fg(p.green),
+                        apply_token_style(Style::default().fg(p.green), token_style),
                     ));
                 }
                 if *ahead > 0 && *behind > 0 {
-                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        " ",
+                        apply_token_style(Style::default(), token_style),
+                    ));
                 }
                 if *behind > 0 {
                     spans.push(Span::styled(
                         format!("\u{2193}{behind}"),
-                        Style::default().fg(p.red),
+                        apply_token_style(Style::default().fg(p.red), token_style),
                     ));
                 }
             }
-            ResolvedToken::TerminalTitle(text) | ResolvedToken::Custom(text) => spans.push(
-                Span::styled(truncate_end(text, budgets[index]), styles.custom),
-            ),
+            ResolvedToken::TerminalTitle(text) | ResolvedToken::Custom(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(styles.custom, token_style),
+                ))
+            }
+            ResolvedToken::Styled { .. } => {}
         }
     }
     spans
+}
+
+fn apply_token_style(mut style: Style, patch: crate::config::SidebarTokenStyle) -> Style {
+    if let Some(fg) = patch.fg {
+        style = style.fg(fg.ratatui());
+    }
+    if let Some(bold) = patch.bold {
+        style = if bold {
+            style.add_modifier(Modifier::BOLD)
+        } else {
+            style.remove_modifier(Modifier::BOLD)
+        };
+    }
+    if let Some(dim) = patch.dim {
+        style = if dim {
+            style.add_modifier(Modifier::DIM)
+        } else {
+            style.remove_modifier(Modifier::DIM)
+        };
+    }
+    style
 }
 
 fn render_workspace_list(
@@ -1557,7 +1599,11 @@ fn render_workspace_list(
                     spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
                     spans.push(Span::raw("    "));
                 }
-            } else if row_index == 0 || matches!(resolved.first(), Some(ResolvedToken::Branch(_))) {
+            } else if row_index == 0
+                || resolved
+                    .first()
+                    .is_some_and(|token| matches!(token.parts().0, ResolvedToken::Branch(_)))
+            {
                 spans.push(Span::raw(" "));
             } else {
                 spans.push(Span::raw("   "));
@@ -3167,6 +3213,29 @@ mod tests {
             .trim_end(),
             "done \u{b7} right"
         );
+    }
+
+    #[test]
+    fn m93_occurrence_style_overrides_and_clears_contextual_modifiers() {
+        let config: crate::config::SidebarConfig = toml::from_str(
+            r##"
+[agents]
+rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
+"##,
+        )
+        .unwrap();
+        let patch = config.agents.rows[0][0].parts().1;
+        let base = Style::default()
+            .fg(Color::Red)
+            .bg(Color::Blue)
+            .add_modifier(Modifier::BOLD);
+
+        let styled = apply_token_style(base, patch);
+
+        assert_eq!(styled.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
+        assert_eq!(styled.bg, Some(Color::Blue));
+        assert!(!styled.add_modifier.contains(Modifier::BOLD));
+        assert!(styled.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]

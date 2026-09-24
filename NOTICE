@@ -106,6 +106,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/runtime.rs
 - src/app/runtime_mutations.rs
 - src/app/state.rs
+- src/app/tab_bar_status.rs
 - src/app/terminal_titles.rs
 - src/app/theme_sync.rs
 - src/app/window_title.rs
@@ -126,9 +127,12 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/client/input.rs
 - src/client/mod.rs
 - src/config.rs
+- src/config/io.rs
 - src/config/keybinds.rs
 - src/config/model.rs
+- src/config/sidebar.rs
 - src/config/sound.rs
+- src/config/tab_bar.rs
 - src/config/theme.rs
 - src/config/window_title.rs
 - src/detect/manifest.rs
@@ -145,6 +149,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/input/model.rs
 - src/input/mouse.rs
 - src/input/parse.rs
+- src/ipc.rs
 - src/integration/actions.rs
 - src/integration/assets/antigravity_cli/zynk-agent-state.sh
 - src/integration/assets/claude/zynk-agent-state.sh
@@ -192,8 +197,12 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/pty/actor/unix.rs
 - src/pty/fd.rs
 - src/raw_input.rs
+- src/remote.rs
+- src/remote/attach.rs
+- src/remote/host_unix.rs
 - src/render_signal.rs
 - src/selection.rs
+- src/session.rs
 - src/server/client_accept.rs
 - src/server/client_transport.rs
 - src/server/clients.rs
@@ -206,6 +215,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/server/render_stream.rs
 - src/server/socket_paths.rs
 - src/server/terminal_attach.rs
+- src/sound.rs
 - src/terminal/id.rs
 - src/terminal/runtime.rs
 - src/terminal/state.rs
@@ -221,6 +231,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/ui/panes.rs
 - src/ui/settings.rs
 - src/ui/sidebar.rs
+- src/ui/sidebar/tokens.rs
 - src/ui/status.rs
 - src/ui/tab_surface.rs
 - src/ui/tabs.rs
@@ -239,6 +250,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - tests/cli_runtime.rs
 - tests/client_mode.rs
 - tests/cross_area.rs
+- tests/detach_reattach.rs
 - tests/fixtures/keyboard_protocol_corpus.tsv
 - tests/live_handoff.rs
 - tests/support/mod.rs

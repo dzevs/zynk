@@ -25,6 +25,7 @@ mod runtime;
 mod runtime_mutations;
 mod session;
 pub mod state;
+mod tab_bar_status;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
@@ -140,6 +141,7 @@ pub struct App {
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
     pub(crate) update_manifest_check_enabled: bool,
+    pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
@@ -147,6 +149,10 @@ pub struct App {
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) detached_process_children: Vec<std::process::Child>,
+    tab_bar_status_generation: u64,
+    tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
+    tab_bar_commands: Vec<tab_bar_status::TabBarCommandRuntime>,
+    next_tab_bar_datetime_refresh: Option<Instant>,
     /// Parsed `ui.window_title` plus the hostname resolved when it was applied.
     window_title_template: Option<(crate::config::WindowTitleTemplate, String)>,
     pub(crate) persist_pane_history: bool,
@@ -623,6 +629,7 @@ impl App {
             outer_terminal_focus: None,
             prefix_code,
             prefix_mods,
+            headless_size: config.headless_size(),
             default_sidebar_width: config.ui.sidebar_width,
             sidebar_width,
             sidebar_min_width,
@@ -656,6 +663,8 @@ impl App {
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             tab_bar_position: config.ui.tab_bar_position,
+            tab_bar_right: Vec::new(),
+            tab_bar_right_separator: String::new(),
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
@@ -770,11 +779,16 @@ impl App {
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             update_version_check_enabled: config.update.version_check,
             update_manifest_check_enabled: config.update.manifest_check,
+            loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
             session_save_thread: None,
             detached_process_children: Vec::new(),
+            tab_bar_status_generation: 0,
+            tab_bar_datetimes: Vec::new(),
+            tab_bar_commands: Vec::new(),
+            next_tab_bar_datetime_refresh: None,
             window_title_template: None,
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
@@ -798,6 +812,7 @@ impl App {
             zynk_embedding_worker: None,
         };
         app.configure_window_title(&config.ui.window_title);
+        app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app
     }
 
@@ -1399,6 +1414,9 @@ impl App {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 diagnostics.extend(config.ui.sound.diagnostics());
+                diagnostics.extend(crate::config::tab_bar_right_diagnostics(
+                    &config.ui.tab_bar_right,
+                ));
                 diagnostics.extend(crate::config::window_title_diagnostics(
                     &config.ui.window_title,
                 ));
@@ -1425,6 +1443,10 @@ impl App {
                     self.state.request_client_config_reload = true;
                 }
                 self.state.redraw_on_focus_gained = config.ui.redraw_on_focus_gained;
+                if self.loaded_host_cursor != config.ui.host_cursor {
+                    self.state.request_client_config_reload = true;
+                }
+                self.loaded_host_cursor = config.ui.host_cursor;
                 self.state.mouse_scroll_lines = config.ui.mouse_scroll_lines();
                 self.state.right_click_passthrough_modifiers =
                     config.ui.right_click_passthrough_modifiers();
@@ -1439,6 +1461,10 @@ impl App {
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
                 self.state.tab_bar_position = config.ui.tab_bar_position;
+                self.configure_tab_bar_status(
+                    &config.ui.tab_bar_right,
+                    &config.ui.tab_bar_right_separator,
+                );
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.status_indicators = config.ui.status_indicators;
@@ -2363,7 +2389,7 @@ mod tests {
             }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
             loop {
-                let text = app.popup_runtime().unwrap().recent_text(12);
+                let text = app.popup_runtime().unwrap().recent_text(50);
                 if text.contains("M833:unset:present") {
                     break;
                 }
@@ -3718,6 +3744,42 @@ mod tests {
     }
 
     #[test]
+    fn m93_reload_unknown_theme_keeps_previous_palette_and_applies_other_sections() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-unknown-theme");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.state.theme_name = "dracula".into();
+        app.state.palette = state::Palette::dracula();
+        app.state.theme_runtime.manual_name = "dracula".into();
+        let palette = app.state.palette.clone();
+        let target_mouse_capture = !app.state.mouse_capture;
+        std::fs::write(
+            &path,
+            format!(
+                "[theme]\nname = \"catppucin\"\n[ui]\nmouse_capture = {target_mouse_capture}\n"
+            ),
+        )
+        .unwrap();
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("theme.name = \"catppucin\"")));
+        assert_eq!(app.state.theme_name, "dracula");
+        assert_eq!(app.state.palette, palette);
+        assert_eq!(app.state.mouse_capture, target_mouse_capture);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn inferred_background_appearance_does_not_override_explicit_report() {
         let mut config = Config::default();
         config.theme.name = Some("catppuccin".to_string());
@@ -3950,6 +4012,30 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_requests_client_reload_for_host_cursor_only_change() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-host-cursor");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[ui]\nhost_cursor = \"native\"\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.state.request_client_config_reload = false;
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.loaded_host_cursor,
+            crate::config::HostCursorModeConfig::Native
+        );
+        assert!(app.state.request_client_config_reload);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn reload_config_updates_sidebar_width_only_when_config_owned() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-sidebar-width");
@@ -4045,6 +4131,24 @@ mod tests {
     }
 
     #[test]
+    fn b3_reload_keeps_startup_headless_geometry() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-headless-size");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let startup_size = app.state.headless_size;
+        std::fs::write(&path, "[server]\nheadless_cols = 132\nheadless_rows = 41\n").unwrap();
+        let report = app.reload_config();
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.headless_size, startup_size);
+    }
+
+    #[test]
     fn reload_config_updates_tab_pane_and_indicator_options() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-pane-options");
@@ -4076,6 +4180,33 @@ mod tests {
         );
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn b3_tab_bar_command_events_render_only_for_visible_changes() {
+        let mut app = test_app();
+        app.configure_tab_bar_status(
+            &[crate::config::TabBarRightEntryConfig::Command {
+                command: "printf ready".into(),
+                interval_seconds: 5,
+                timeout_seconds: 2,
+            }],
+            " ",
+        );
+        let generation = app.tab_bar_status_generation;
+        let event = |generation, output: Option<&str>| AppEvent::TabBarCommandFinished {
+            generation,
+            segment_index: 0,
+            result: Ok(output.map(str::to_string)),
+        };
+
+        assert!(!app.handle_internal_event_with_render_impact(event(generation, None)));
+        assert!(app.handle_internal_event_with_render_impact(event(generation, Some("ready"))));
+        assert!(!app.handle_internal_event_with_render_impact(event(generation, Some("ready"))));
+        assert!(!app.handle_internal_event_with_render_impact(event(
+            generation.wrapping_add(1),
+            Some("stale")
+        )));
     }
 
     #[test]

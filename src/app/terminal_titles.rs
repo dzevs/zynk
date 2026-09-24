@@ -18,7 +18,7 @@ impl App {
             .chain(config.rows_by_agent.values())
             .flatten()
             .flatten()
-            .any(|token| match token {
+            .any(|token| match token.parts().0 {
                 crate::config::AgentSidebarToken::TerminalTitle => changes.raw_changed,
                 crate::config::AgentSidebarToken::TerminalTitleStripped => changes.stripped_changed,
                 _ => false,
@@ -34,7 +34,7 @@ impl App {
             .flatten()
             .any(|token| {
                 matches!(
-                    token,
+                    token.parts().0,
                     crate::config::AgentSidebarToken::TerminalTitle
                         | crate::config::AgentSidebarToken::TerminalTitleStripped
                 )

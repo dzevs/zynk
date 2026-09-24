@@ -204,6 +204,12 @@ pub(crate) struct PlatformCapabilities {
     pub(crate) preserve_legacy_doubled_escape_input: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteSshConfigPaths {
+    pub(crate) user_config: Option<std::path::PathBuf>,
+    pub(crate) system_config: Option<std::path::PathBuf>,
+}
+
 pub(crate) const fn capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         live_handoff: true,

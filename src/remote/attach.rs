@@ -1,11 +1,15 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 //! Remote thin-client launcher over SSH command stdio.
 
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Write as _};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use interprocess::local_socket::traits::Listener as _;
+use interprocess::local_socket::ListenerNonblockingMode;
+use interprocess::TryClone as _;
 use serde::Deserialize;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -162,77 +166,29 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         remote.keybindings,
         remote.live_handoff,
     );
-    let prepared_remote = prepare_remote_zynk(&remote.target, remote.live_handoff)?;
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
+    let remote_ssh = RemoteSsh::new(remote.target.clone(), manage_ssh_config);
+    let prepared_remote = prepare_remote_zynk(&remote_ssh, remote.live_handoff)?;
     ensure_remote_server_ready(
-        &remote.target,
+        &remote_ssh,
         &prepared_remote.remote_zynk,
         prepared_remote.installed_or_replaced,
         prepared_remote.stop_after_install_approved,
         remote.live_handoff,
     )?;
 
-    let manage_ssh_config = crate::config::Config::load()
-        .config
-        .remote
-        .manage_ssh_config;
     let _bridge = SshStdioBridge::start(
         remote.target,
         prepared_remote.remote_zynk,
         local_socket.clone(),
         session_name,
-        manage_ssh_config,
+        remote_ssh.options().cloned(),
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
-}
-
-pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
-    ensure_remote_server_running()?;
-
-    let socket_path = crate::server::socket_paths::client_socket_path();
-    let stream = UnixStream::connect(&socket_path).map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!(
-                "failed to connect to remote Zynk client socket {}: {err}",
-                socket_path.display()
-            ),
-        )
-    })?;
-
-    let mut stdout = io::stdout().lock();
-    let mut socket_to_stdout = stream.try_clone()?;
-    let mut stdin_to_socket = stream;
-
-    let _upload = thread::spawn(move || {
-        let mut stdin = io::stdin();
-        let _ = copy_flush(&mut stdin, &mut stdin_to_socket);
-        let _ = stdin_to_socket.shutdown(std::net::Shutdown::Write);
-    });
-
-    copy_flush(&mut socket_to_stdout, &mut stdout).map(|_| ())
-}
-
-fn ensure_remote_server_running() -> io::Result<()> {
-    let socket_path = crate::server::socket_paths::client_socket_path();
-    if crate::server::autodetect::is_server_listening() {
-        let status = crate::api::read_runtime_status_at(
-            &crate::api::socket_path(),
-            Duration::from_millis(500),
-        )?
-        .ok_or_else(|| io::Error::other("remote server status API is unavailable"))?;
-        if status.protocol == Some(CURRENT_PROTOCOL) {
-            return Ok(());
-        }
-        return Err(io::Error::other(
-            "remote zynk server must restart before this bridge can attach; rerun `zynk --remote` from an interactive terminal to approve stopping it",
-        ));
-    }
-
-    // The bridge was executed through a verified open file. Do not reopen its
-    // install pathname when it starts a daemon after a concurrent replacement.
-    crate::server::autodetect::spawn_server_daemon_at(PathBuf::from("/proc/self/exe"))?;
-    crate::server::autodetect::wait_for_server_socket(&socket_path, Duration::from_secs(5))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,17 +301,207 @@ struct PreparedRemoteZynk {
     stop_after_install_approved: bool,
 }
 
+#[derive(Clone)]
+struct ManagedSshOptions {
+    config_path: PathBuf,
+    control_path: PathBuf,
+}
+
+struct ManagedSshConfig {
+    options: ManagedSshOptions,
+}
+
+impl Drop for ManagedSshConfig {
+    fn drop(&mut self) {
+        if let Some(dir) = self.options.config_path.parent() {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+struct RemoteSsh {
+    target: String,
+    managed_config: Option<ManagedSshConfig>,
+}
+
+impl RemoteSsh {
+    fn new(target: String, manage_ssh_config: bool) -> Self {
+        let managed_config = if manage_ssh_config {
+            write_managed_ssh_config()
+                .inspect_err(|err| {
+                    tracing::debug!(%err, "could not write managed ssh config; using plain ssh");
+                })
+                .ok()
+        } else {
+            None
+        };
+        Self {
+            target,
+            managed_config,
+        }
+    }
+
+    fn options(&self) -> Option<&ManagedSshOptions> {
+        self.managed_config.as_ref().map(|config| &config.options)
+    }
+
+    fn base_command(&self) -> Command {
+        let mut command = Command::new("ssh");
+        apply_managed_ssh_options(&mut command, self.options());
+        command
+    }
+}
+
+impl Drop for RemoteSsh {
+    fn drop(&mut self) {
+        if self.managed_config.is_none() {
+            return;
+        }
+        let _ = self
+            .base_command()
+            .arg("-O")
+            .arg("exit")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg(&self.target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+trait RemoteSshConnection {
+    fn target(&self) -> &str;
+
+    fn options(&self) -> Option<&ManagedSshOptions> {
+        None
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new("ssh");
+        apply_managed_ssh_options(&mut command, self.options());
+        command.arg("-T").arg(self.target());
+        command
+    }
+
+    fn sh_output(&self, script: &str) -> io::Result<Output> {
+        ssh_sh_output(self, script)
+    }
+
+    fn user_shell_output(&self, command: &str) -> io::Result<Output> {
+        self.command().arg(command).output()
+    }
+
+    fn install_zynk(&self, remote_zynk: &RemoteZynk, source_path: &Path) -> io::Result<()> {
+        let output = self.sh_output(&remote_install_prepare_script(remote_zynk))?;
+        if !output.status.success() {
+            return Err(command_failed("remote install preparation failed", &output));
+        }
+        let (tmp_path, dest_path) = parse_remote_install_paths(&output.stdout)?;
+
+        let mut source = match File::open(source_path) {
+            Ok(source) => source,
+            Err(err) => {
+                let _ = self.sh_output(&remote_install_abort_script(&tmp_path));
+                return Err(err);
+            }
+        };
+        let mut child = self
+            .command()
+            .arg(remote_install_stream_command(&tmp_path))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|err| {
+                let _ = self.sh_output(&remote_install_abort_script(&tmp_path));
+                io::Error::new(err.kind(), format!("failed to start ssh install: {err}"))
+            })?;
+        let copy_result = if let Some(mut stdin) = child.stdin.take() {
+            io::copy(&mut source, &mut stdin).map(|_| ())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "ssh install stdin missing",
+            ))
+        };
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = self.sh_output(&remote_install_abort_script(&tmp_path));
+                return Err(err);
+            }
+        };
+        if let Err(err) = copy_result {
+            let _ = self.sh_output(&remote_install_abort_script(&tmp_path));
+            return Err(err);
+        }
+        if !status.success() {
+            let _ = self.sh_output(&remote_install_abort_script(&tmp_path));
+            return Err(io::Error::other(format!(
+                "remote install exited with {status}"
+            )));
+        }
+
+        let output = self.sh_output(&remote_install_commit_script(&tmp_path, &dest_path))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let err = command_failed("remote install commit failed", &output);
+            let _ = self.sh_output(&remote_install_abort_script(&tmp_path));
+            Err(err)
+        }
+    }
+}
+
+impl RemoteSshConnection for RemoteSsh {
+    fn target(&self) -> &str {
+        &self.target
+    }
+
+    fn options(&self) -> Option<&ManagedSshOptions> {
+        self.options()
+    }
+}
+
+impl RemoteSshConnection for str {
+    fn target(&self) -> &str {
+        self
+    }
+}
+
+fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
+    let Some(options) = options else {
+        return;
+    };
+    command
+        .arg("-F")
+        .arg(&options.config_path)
+        .arg("-S")
+        .arg(&options.control_path)
+        .arg("-o")
+        .arg("ControlMaster=auto")
+        .arg("-o")
+        .arg("ControlPersist=yes");
+}
+
 impl InstallSource {
     fn persistent(path: PathBuf) -> Self {
         Self { path }
     }
 }
 
-fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<PreparedRemoteZynk> {
-    let platform = detect_remote_platform(target)?;
+fn prepare_remote_zynk(
+    ssh: &(impl RemoteSshConnection + ?Sized),
+    live_handoff_enabled: bool,
+) -> io::Result<PreparedRemoteZynk> {
+    let platform = detect_remote_platform(ssh)?;
     let remote_zynk = RemoteZynk::for_platform(platform);
     let override_binary = remote_binary_override_path()?;
-    let path_remote_zynk = remote_binary_on_path_any(target, &remote_zynk)?;
+    let remote_binary_candidates = remote_binary_candidates(ssh, &remote_zynk)?;
 
     // ADR 0013 Decision 3: reusing a binary that is already on the remote host is as much a
     // decision to RUN it as installing one is, so the reviewed local binary is read before either
@@ -365,16 +511,16 @@ fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<P
     let custody = local_install_custody(&custody_source)?;
 
     if override_binary.is_none() {
-        if let Some(path_remote_zynk) = path_remote_zynk.as_ref().filter(|candidate| {
-            remote_binary_is_the_reviewed_one(target, candidate, &custody).unwrap_or(false)
-        }) {
-            return Ok(PreparedRemoteZynk {
-                remote_zynk: path_remote_zynk.clone().with_custody(&custody),
-                installed_or_replaced: false,
-                stop_after_install_approved: false,
-            });
+        for candidate in &remote_binary_candidates {
+            if remote_binary_is_the_reviewed_one(ssh, candidate, &custody).unwrap_or(false) {
+                return Ok(PreparedRemoteZynk {
+                    remote_zynk: candidate.clone().with_custody(&custody),
+                    installed_or_replaced: false,
+                    stop_after_install_approved: false,
+                });
+            }
         }
-        if remote_binary_is_the_reviewed_one(target, &remote_zynk, &custody)? {
+        if remote_binary_is_the_reviewed_one(ssh, &remote_zynk, &custody)? {
             return Ok(PreparedRemoteZynk {
                 remote_zynk: remote_zynk.with_custody(&custody),
                 installed_or_replaced: false,
@@ -384,19 +530,19 @@ fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<P
     }
 
     let mut stop_after_install_approved = false;
-    if let Some(status_probe_zynk) = path_remote_zynk.as_ref().or_else(|| {
-        remote_binary_exists(target, &remote_zynk)
+    if let Some(status_probe_zynk) = remote_binary_candidates.first().or_else(|| {
+        remote_binary_exists(ssh, &remote_zynk)
             .ok()
             .and_then(|exists| exists.then_some(&remote_zynk))
     }) {
         stop_after_install_approved = confirm_remote_install_with_running_server(
-            target,
+            ssh,
             status_probe_zynk,
             live_handoff_enabled,
         )?;
     }
     confirm_remote_install(
-        target,
+        ssh,
         &remote_zynk,
         &install_source_description(&remote_zynk.platform, override_binary.as_deref()),
     )?;
@@ -408,12 +554,12 @@ fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<P
             custody_source.display()
         )));
     }
-    install_remote_zynk(target, &remote_zynk, &source.path)?;
+    install_remote_zynk(ssh, &remote_zynk, &source.path)?;
     // The same comparator the reuse decision uses, over the same single round trip: bytes, source
     // commit, version and protocol. The version-only re-check this replaces was both weaker than
     // custody and a second probe, so a binary swapped between the two could pass the pair.
-    verify_remote_custody(target, &remote_zynk, &custody)?;
-    warn_if_remote_bin_not_on_path(target)?;
+    verify_remote_custody(ssh, &remote_zynk, &custody)?;
+    warn_if_remote_bin_not_on_path(ssh)?;
 
     Ok(PreparedRemoteZynk {
         remote_zynk: remote_zynk.with_custody(&custody),
@@ -422,8 +568,8 @@ fn prepare_remote_zynk(target: &str, live_handoff_enabled: bool) -> io::Result<P
     })
 }
 
-fn detect_remote_platform(target: &str) -> io::Result<RemotePlatform> {
-    let output = ssh_sh_output(target, "uname -s\nuname -m\n")?;
+fn detect_remote_platform(ssh: &(impl RemoteSshConnection + ?Sized)) -> io::Result<RemotePlatform> {
+    let output = ssh.sh_output("uname -s\nuname -m\n")?;
     if !output.status.success() {
         return Err(command_failed("remote platform detection failed", &output));
     }
@@ -445,22 +591,109 @@ fn unsupported_remote_platform_error(os: &str, arch: &str) -> io::Error {
 }
 
 fn remote_binary_on_path_any(
-    target: &str,
+    ssh: &(impl RemoteSshConnection + ?Sized),
     remote_zynk: &RemoteZynk,
 ) -> io::Result<Option<RemoteZynk>> {
-    let output = ssh_user_shell_output(target, "command -v zynk")?;
+    let output = ssh.user_shell_output("command -v zynk")?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(candidate) = remote_zynk_from_path_discovery(remote_zynk, &stdout) {
+            return Ok(Some(candidate));
+        }
+    }
+
+    // Non-POSIX login shells such as xonsh reject `command -v`; retry through
+    // /bin/sh while retaining the login-shell probe for shell-initialized PATHs.
+    let output = ssh.sh_output("command -v zynk\n")?;
     if !output.status.success() {
         return Ok(None);
     }
-
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(remote_zynk_from_path_discovery(remote_zynk, &stdout))
 }
 
+fn remote_binary_candidates(
+    ssh: &(impl RemoteSshConnection + ?Sized),
+    remote_zynk: &RemoteZynk,
+) -> io::Result<Vec<RemoteZynk>> {
+    let mut candidates = Vec::new();
+    if let Some(candidate) = remote_binary_on_path_any(ssh, remote_zynk)? {
+        push_if_new_remote_binary_candidate(&mut candidates, candidate);
+    }
+
+    let output = ssh.sh_output(&known_remote_binary_candidate_script(&remote_zynk.platform))?;
+    if !output.status.success() {
+        return Err(command_failed("remote binary discovery failed", &output));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for candidate in remote_zynks_from_path_discovery(remote_zynk, &stdout) {
+        push_if_new_remote_binary_candidate(&mut candidates, candidate);
+    }
+    Ok(candidates)
+}
+
+fn push_if_new_remote_binary_candidate(candidates: &mut Vec<RemoteZynk>, candidate: RemoteZynk) {
+    if !candidates
+        .iter()
+        .any(|existing| existing.shell_path == candidate.shell_path)
+    {
+        candidates.push(candidate);
+    }
+}
+
+fn known_remote_binary_candidate_script(_platform: &RemotePlatform) -> String {
+    let mut script = String::from(
+        r#"home=${HOME:-}
+user=${USER:-}
+version="#,
+    );
+    script.push_str(&shell_quote(&current_version()));
+    script.push_str(
+        r#"
+emit() {
+    path=$1
+    if [ -n "$path" ] && [ -x "$path" ]; then
+        printf '%s\n' "$path"
+    fi
+}
+if [ -n "$home" ]; then
+    emit "$home/.local/bin/zynk"
+fi
+emit "/home/linuxbrew/.linuxbrew/bin/zynk"
+if [ -n "$home" ]; then
+    emit "$home/.local/share/mise/installs/zynk/$version/bin/zynk"
+    emit "$home/.local/share/mise/installs/zynk/$version/zynk"
+    emit "$home/.nix-profile/bin/zynk"
+fi
+if [ -n "$user" ]; then
+    emit "/etc/profiles/per-user/$user/bin/zynk"
+fi
+emit "/nix/var/nix/profiles/default/bin/zynk"
+emit "/run/current-system/sw/bin/zynk"
+"#,
+    );
+    script
+}
+
+fn remote_zynks_from_path_discovery(remote_zynk: &RemoteZynk, stdout: &str) -> Vec<RemoteZynk> {
+    stdout
+        .lines()
+        .filter_map(|path| remote_zynk_from_path(remote_zynk, path))
+        .collect()
+}
+
 fn remote_zynk_from_path_discovery(remote_zynk: &RemoteZynk, stdout: &str) -> Option<RemoteZynk> {
-    let mut lines = stdout.lines();
-    let path = lines.next()?;
+    stdout
+        .lines()
+        .find_map(|path| remote_zynk_from_path(remote_zynk, path))
+}
+
+fn remote_zynk_from_path(remote_zynk: &RemoteZynk, path: &str) -> Option<RemoteZynk> {
+    let path = path.trim();
     if !path.starts_with('/') {
+        return None;
+    }
+    if path.ends_with("/mise/shims/zynk") {
         return None;
     }
     Some(remote_zynk.clone().with_shell_path(shell_quote(path)))
@@ -495,13 +728,13 @@ fn prepared_remote_script(remote_zynk: &RemoteZynk, body: &str) -> io::Result<St
 /// One remote round trip, with bytes and metadata bound to the descriptor opened
 /// there. The hash is checked BEFORE executing even the version/status queries.
 fn remote_custody_probe(
-    target: &str,
+    ssh: &(impl RemoteSshConnection + ?Sized),
     remote_zynk: &RemoteZynk,
     custody: &InstallCustody,
 ) -> io::Result<Output> {
     let command = remote_executable_script(remote_zynk, &custody.sha256,
         "printf '%s\\n' \"$actual\" && /proc/self/fd/3 --version && /proc/self/fd/3 status client --json");
-    ssh_sh_output(target, &command)
+    ssh.sh_output(&command)
 }
 
 /// Reuse is custody-gated exactly as an install is (ADR 0013 Decision 3): a binary already on the
@@ -510,11 +743,11 @@ fn remote_custody_probe(
 /// confirmed install path, which copies the reviewed binary and verifies it with this same
 /// comparator.
 fn remote_binary_is_the_reviewed_one(
-    target: &str,
+    ssh: &(impl RemoteSshConnection + ?Sized),
     remote_zynk: &RemoteZynk,
     custody: &InstallCustody,
 ) -> io::Result<bool> {
-    let output = remote_custody_probe(target, remote_zynk, custody)?;
+    let output = remote_custody_probe(ssh, remote_zynk, custody)?;
     if !output.status.success() {
         if output.status.code() == Some(78) {
             return Err(command_failed(
@@ -528,7 +761,7 @@ fn remote_binary_is_the_reviewed_one(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let (remote_sha256, remote_build_sha) = probed_identifiers(&stdout);
     tracing::info!(
-        target = %target,
+        target = %ssh.target(),
         path = %remote_zynk.shell_path,
         local_sha256 = %custody.sha256,
         remote_sha256 = %remote_sha256,
@@ -541,7 +774,7 @@ fn remote_binary_is_the_reviewed_one(
         Ok(()) => Ok(true),
         Err(refusal) => {
             tracing::info!(
-                target = %target,
+                target = %ssh.target(),
                 path = %remote_zynk.shell_path,
                 reason = %refusal.reason(),
                 "not reusing the remote zynk binary; installing the reviewed one instead"
@@ -577,9 +810,12 @@ fn parse_version_line(line: &str) -> Option<(String, Option<String>)> {
     Some((version.to_string(), Some(sha.to_string())))
 }
 
-fn remote_binary_exists(target: &str, remote_zynk: &RemoteZynk) -> io::Result<bool> {
+fn remote_binary_exists(
+    ssh: &(impl RemoteSshConnection + ?Sized),
+    remote_zynk: &RemoteZynk,
+) -> io::Result<bool> {
     let command = format!("test -x {}", remote_zynk.shell_path);
-    Ok(ssh_sh_output(target, &command)?.status.success())
+    Ok(ssh.sh_output(&command)?.status.success())
 }
 
 fn remote_binary_override_path() -> io::Result<Option<PathBuf>> {
@@ -716,13 +952,14 @@ enum RemoteInstallRunningServerPlan {
 }
 
 fn ensure_remote_server_ready(
-    target: &str,
+    ssh: &(impl RemoteSshConnection + ?Sized),
     remote_zynk: &RemoteZynk,
     remote_binary_changed: bool,
     stop_after_install_approved: bool,
     live_handoff_enabled: bool,
 ) -> io::Result<()> {
-    let status = remote_server_status(target, remote_zynk)?;
+    let target = ssh.target();
+    let status = remote_server_status(ssh, remote_zynk)?;
     let RemoteServerStatus::Running {
         version,
         protocol,
@@ -743,7 +980,7 @@ fn ensure_remote_server_ready(
     };
 
     if live_handoff_enabled && live_handoff {
-        match live_handoff_remote_server(target, remote_zynk) {
+        match live_handoff_remote_server(ssh, remote_zynk) {
             Ok(()) => return Ok(()),
             Err(err) => {
                 eprintln!("remote live handoff failed: {err}");
@@ -753,12 +990,12 @@ fn ensure_remote_server_ready(
     }
 
     if stop_after_install_approved {
-        stop_remote_server(target, remote_zynk)?;
+        stop_remote_server(ssh, remote_zynk)?;
         return Ok(());
     }
 
     if confirm_remote_server_stop(target, version.as_deref(), protocol, reason)? {
-        stop_remote_server(target, remote_zynk)?;
+        stop_remote_server(ssh, remote_zynk)?;
     }
     Ok(())
 }
@@ -785,11 +1022,12 @@ fn remote_server_restart_reason(
 }
 
 fn confirm_remote_install_with_running_server(
-    target: &str,
+    ssh: &(impl RemoteSshConnection + ?Sized),
     remote_zynk: &RemoteZynk,
     live_handoff_enabled: bool,
 ) -> io::Result<bool> {
-    let status = match remote_server_status(target, remote_zynk) {
+    let target = ssh.target();
+    let status = match remote_server_status(ssh, remote_zynk) {
         Ok(status) => status,
         Err(err) => {
             if !io::stdin().is_terminal() {
@@ -917,7 +1155,10 @@ fn remote_install_running_server_plan(
     RemoteInstallRunningServerPlan::StopRequired(reason)
 }
 
-fn remote_server_status(target: &str, remote_zynk: &RemoteZynk) -> io::Result<RemoteServerStatus> {
+fn remote_server_status(
+    ssh: &(impl RemoteSshConnection + ?Sized),
+    remote_zynk: &RemoteZynk,
+) -> io::Result<RemoteServerStatus> {
     let command = if remote_zynk.expected_sha256.is_some() {
         prepared_remote_script(remote_zynk, "/proc/self/fd/3 status server --json")?
     } else {
@@ -925,7 +1166,7 @@ fn remote_server_status(target: &str, remote_zynk: &RemoteZynk) -> io::Result<Re
         // cannot authorize reuse; every prepared executable takes the bound path.
         format!("{} status server --json", remote_zynk.shell_path)
     };
-    let output = ssh_sh_output(target, &command)?;
+    let output = ssh.sh_output(&command)?;
     if !output.status.success() {
         return Err(command_failed("remote server status failed", &output));
     }
@@ -1056,7 +1297,11 @@ fn confirm_remote_server_stop(
     Ok(false)
 }
 
-fn live_handoff_remote_server(target: &str, remote_zynk: &RemoteZynk) -> io::Result<()> {
+fn live_handoff_remote_server(
+    ssh: &(impl RemoteSshConnection + ?Sized),
+    remote_zynk: &RemoteZynk,
+) -> io::Result<()> {
+    let target = ssh.target();
     // Keep the SSH shell alive until the old server has opened the import image.
     // /proc/self here would name the OLD server's fd table, not our held file.
     let command = prepared_remote_script(remote_zynk, &format!(
@@ -1064,7 +1309,7 @@ fn live_handoff_remote_server(target: &str, remote_zynk: &RemoteZynk) -> io::Res
         CURRENT_PROTOCOL,
         shell_quote(&current_version())
     ))?;
-    let output = ssh_sh_output(target, &command)?;
+    let output = ssh.sh_output(&command)?;
     if !output.status.success() {
         return Err(command_failed("remote server live handoff failed", &output));
     }
@@ -1075,22 +1320,30 @@ fn live_handoff_remote_server(target: &str, remote_zynk: &RemoteZynk) -> io::Res
     Ok(())
 }
 
-fn stop_remote_server(target: &str, remote_zynk: &RemoteZynk) -> io::Result<()> {
+fn stop_remote_server(
+    ssh: &(impl RemoteSshConnection + ?Sized),
+    remote_zynk: &RemoteZynk,
+) -> io::Result<()> {
+    let target = ssh.target();
     let command = prepared_remote_script(remote_zynk, "/proc/self/fd/3 server stop")?;
-    let output = ssh_sh_output(target, &command)?;
+    let output = ssh.sh_output(&command)?;
     if !output.status.success() {
         return Err(command_failed("remote server stop failed", &output));
     }
 
-    wait_for_remote_server_shutdown(target, remote_zynk)?;
+    wait_for_remote_server_shutdown(ssh, remote_zynk)?;
     eprintln!("stopped the remote zynk server on {target}; it will restart when the remote client bridge attaches.");
     Ok(())
 }
 
-fn wait_for_remote_server_shutdown(target: &str, remote_zynk: &RemoteZynk) -> io::Result<()> {
+fn wait_for_remote_server_shutdown(
+    ssh: &(impl RemoteSshConnection + ?Sized),
+    remote_zynk: &RemoteZynk,
+) -> io::Result<()> {
+    let target = ssh.target();
     let deadline = Instant::now() + REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT;
     loop {
-        if remote_server_status(target, remote_zynk)? == RemoteServerStatus::NotRunning {
+        if remote_server_status(ssh, remote_zynk)? == RemoteServerStatus::NotRunning {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -1110,8 +1363,8 @@ fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
 }
 
-fn warn_if_remote_bin_not_on_path(target: &str) -> io::Result<()> {
-    let output = ssh_user_shell_output(target, "command -v zynk")?;
+fn warn_if_remote_bin_not_on_path(ssh: &(impl RemoteSshConnection + ?Sized)) -> io::Result<()> {
+    let output = ssh.user_shell_output("command -v zynk")?;
     if output.status.success()
         && remote_shell_resolves_managed_install(&String::from_utf8_lossy(&output.stdout))
     {
@@ -1133,10 +1386,11 @@ fn remote_shell_resolves_managed_install(stdout: &str) -> bool {
 }
 
 fn confirm_remote_install(
-    target: &str,
+    ssh: &(impl RemoteSshConnection + ?Sized),
     remote_zynk: &RemoteZynk,
     source_description: &str,
 ) -> io::Result<()> {
+    let target = ssh.target();
     if !io::stdin().is_terminal() {
         return Err(io::Error::other(format!(
             "matching remote zynk {} is not installed at {}; run from an interactive terminal to approve installation",
@@ -1241,11 +1495,11 @@ fn local_install_custody_from_open_file(path: &Path, source: &File) -> io::Resul
 /// same source commit — over the same ssh channel, and before any version/protocol check, so a
 /// substituted binary is caught by its hash rather than by its self-reported version.
 fn verify_remote_custody(
-    target: &str,
+    ssh: &(impl RemoteSshConnection + ?Sized),
     remote_zynk: &RemoteZynk,
     custody: &InstallCustody,
 ) -> io::Result<()> {
-    let output = remote_custody_probe(target, remote_zynk, custody)?;
+    let output = remote_custody_probe(ssh, remote_zynk, custody)?;
     if !output.status.success() {
         return Err(command_failed(
             "remote custody verification failed (requires sha256sum and executable access through /proc/self/fd)",
@@ -1257,7 +1511,7 @@ fn verify_remote_custody(
     let (remote_sha256, remote_build_sha) = probed_identifiers(&stdout);
 
     tracing::info!(
-        target = %target,
+        target = %ssh.target(),
         path = %remote_zynk.shell_path,
         local_sha256 = %custody.sha256,
         remote_sha256 = %remote_sha256,
@@ -1342,52 +1596,63 @@ fn check_remote_custody(
     Ok(())
 }
 
-fn install_remote_zynk(
-    target: &str,
-    remote_zynk: &RemoteZynk,
-    source_path: &Path,
-) -> io::Result<()> {
-    let script = format!(
-        r#"dest="$HOME/{install_suffix}"
+fn remote_install_prepare_script(remote_zynk: &RemoteZynk) -> String {
+    format!(
+        r#"set -eu
+dest="$HOME/{install_suffix}"
 dir="${{dest%/*}}"
 mkdir -p "$dir"
 tmp="${{dest}}.tmp.$$"
-cat > "$tmp"
-chmod 755 "$tmp"
-mv "$tmp" "$dest"
+printf '%s\0%s\0' "$tmp" "$dest"
 "#,
         install_suffix = remote_zynk.install_suffix
-    );
+    )
+}
 
-    let mut child = Command::new("ssh")
-        .arg("-T")
-        .arg(target)
-        .arg(format!("/bin/sh -eu -c {}", shell_quote(&script)))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|err| io::Error::new(err.kind(), format!("failed to start ssh install: {err}")))?;
-
-    let mut source = File::open(source_path)?;
-    let copy_result = if let Some(mut stdin) = child.stdin.take() {
-        io::copy(&mut source, &mut stdin).map(|_| ())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "ssh install stdin missing",
-        ))
-    };
-    let status = child.wait()?;
-    copy_result?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "remote install exited with {status}"
-        )))
+fn parse_remote_install_paths(stdout: &[u8]) -> io::Result<(String, String)> {
+    let mut parts = stdout.split(|byte| *byte == 0);
+    let tmp_path = parts.next().unwrap_or_default();
+    let dest_path = parts.next().unwrap_or_default();
+    if tmp_path.is_empty() || dest_path.is_empty() {
+        return Err(io::Error::other(
+            "remote install preparation did not return destination paths",
+        ));
     }
+    let tmp_path = String::from_utf8(tmp_path.to_vec()).map_err(|err| {
+        io::Error::other(format!(
+            "remote install temporary path is not valid UTF-8: {err}"
+        ))
+    })?;
+    let dest_path = String::from_utf8(dest_path.to_vec()).map_err(|err| {
+        io::Error::other(format!(
+            "remote install destination path is not valid UTF-8: {err}"
+        ))
+    })?;
+    Ok((tmp_path, dest_path))
+}
+
+fn remote_install_stream_command(tmp_path: &str) -> String {
+    format!("tee {}", shell_quote(tmp_path))
+}
+
+fn remote_install_commit_script(tmp_path: &str, dest_path: &str) -> String {
+    format!(
+        "set -eu\nchmod 755 {tmp_path}\nmv {tmp_path} {dest_path}\n",
+        tmp_path = shell_quote(tmp_path),
+        dest_path = shell_quote(dest_path)
+    )
+}
+
+fn remote_install_abort_script(tmp_path: &str) -> String {
+    format!("rm -f {}\n", shell_quote(tmp_path))
+}
+
+fn install_remote_zynk(
+    ssh: &(impl RemoteSshConnection + ?Sized),
+    remote_zynk: &RemoteZynk,
+    source_path: &Path,
+) -> io::Result<()> {
+    ssh.install_zynk(remote_zynk, source_path)
 }
 
 // Test-only ssh seam: `ssh_sh_output` returns a queued canned `Output` instead of spawning ssh, so
@@ -1419,7 +1684,7 @@ fn take_stubbed_ssh_output() -> Option<Output> {
     STUBBED_SSH_OUTPUT.with(|queue| queue.borrow_mut().pop_front())
 }
 
-fn ssh_sh_output(target: &str, script: &str) -> io::Result<Output> {
+fn ssh_sh_output(ssh: &(impl RemoteSshConnection + ?Sized), script: &str) -> io::Result<Output> {
     #[cfg(test)]
     if let Some(output) = take_stubbed_ssh_output() {
         return Ok(output);
@@ -1433,9 +1698,8 @@ fn ssh_sh_output(target: &str, script: &str) -> io::Result<Output> {
     }
     // Feed POSIX bootstrap scripts to /bin/sh so the user's login shell only
     // has to parse a simple executable invocation.
-    let mut child = Command::new("ssh")
-        .arg("-T")
-        .arg(target)
+    let mut child = ssh
+        .command()
         .arg("/bin/sh -s")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1453,14 +1717,6 @@ fn ssh_sh_output(target: &str, script: &str) -> io::Result<Output> {
     let output = child.wait_with_output()?;
     write_result?;
     Ok(output)
-}
-
-fn ssh_user_shell_output(target: &str, command: &str) -> io::Result<Output> {
-    Command::new("ssh")
-        .arg("-T")
-        .arg(target)
-        .arg(command)
-        .output()
 }
 
 fn remote_bridge_command(remote_zynk: &RemoteZynk, session_name: &str) -> io::Result<String> {
@@ -1481,8 +1737,9 @@ fn reattach_command(
     keybindings: RemoteKeybindings,
     live_handoff: bool,
 ) -> String {
-    let program = if program.is_empty() { "zynk" } else { program };
-    let mut command = format!("{} --remote {}", shell_quote(program), shell_quote(target));
+    let program = crate::platform::remote_reattach_program(program);
+    let target = crate::platform::remote_reattach_argument(target);
+    let mut command = format!("{program} --remote {target}");
     if keybindings != RemoteKeybindings::Local {
         command.push_str(" --remote-keybindings ");
         command.push_str(keybindings.as_str());
@@ -1492,7 +1749,7 @@ fn reattach_command(
     }
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         command.push_str(" --session ");
-        command.push_str(&shell_quote(session_name));
+        command.push_str(&crate::platform::remote_reattach_argument(session_name));
     }
     command
 }
@@ -1525,7 +1782,7 @@ fn command_failed(context: &str, output: &Output) -> io::Error {
 
 struct SshStdioBridge {
     local_socket: PathBuf,
-    keepalive_ssh_config: Option<PathBuf>,
+    socket_identity: crate::ipc::SocketFileIdentity,
     should_stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1536,40 +1793,47 @@ impl SshStdioBridge {
         remote_zynk: RemoteZynk,
         local_socket: PathBuf,
         session_name: String,
-        manage_ssh_config: bool,
+        ssh_options: Option<ManagedSshOptions>,
     ) -> io::Result<Self> {
-        let _ = std::fs::remove_file(&local_socket);
-        let listener = UnixListener::bind(&local_socket)?;
-        crate::ipc::restrict_socket_permissions(&local_socket, BRIDGE_SOCKET_PERMISSION_MODE)?;
-        listener.set_nonblocking(true)?;
-
-        let keepalive_ssh_config = if manage_ssh_config {
-            write_keepalive_ssh_config()
-                .inspect_err(|err| {
-                    tracing::debug!(%err, "could not write ssh keepalive config; using plain ssh");
-                })
-                .ok()
-        } else {
-            None
-        };
+        crate::ipc::prepare_socket_path(&local_socket, |path| {
+            format!("remote bridge is already listening at {}", path.display())
+        })?;
+        let listener = crate::ipc::bind_private_local_listener(&local_socket)?;
+        let socket_identity = crate::ipc::socket_file_identity(&local_socket)?;
+        if let Err(err) =
+            crate::ipc::restrict_socket_permissions(&local_socket, BRIDGE_SOCKET_PERMISSION_MODE)
+        {
+            let _ = crate::ipc::remove_socket_file_if_owned(&local_socket, &socket_identity);
+            return Err(err);
+        }
+        if let Err(err) = listener.set_nonblocking(ListenerNonblockingMode::Accept) {
+            let _ = crate::ipc::remove_socket_file_if_owned(&local_socket, &socket_identity);
+            return Err(err);
+        }
 
         let should_stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&should_stop);
-        let thread_ssh_config = keepalive_ssh_config.clone();
+        let thread_ssh_options = ssh_options;
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok((stream, _addr)) => {
-                        if let Err(err) = stream.set_nonblocking(false) {
-                            eprintln!("zynk: remote bridge failed to prepare client socket: {err}");
-                            continue;
-                        }
+                    Ok(stream) => {
+                        let stream = match prepare_remote_bridge_stream(stream) {
+                            Ok(stream) => stream,
+                            Err(err) => {
+                                eprintln!(
+                                    "zynk: remote bridge failed to prepare client socket: {err}"
+                                );
+                                continue;
+                            }
+                        };
                         if let Err(err) = bridge_connection(
                             stream,
                             &target,
                             &remote_zynk,
                             &session_name,
-                            thread_ssh_config.as_deref(),
+                            thread_ssh_options.as_ref(),
+                            &thread_stop,
                         ) {
                             eprintln!("zynk: remote bridge failed: {err}");
                         }
@@ -1587,7 +1851,7 @@ impl SshStdioBridge {
 
         Ok(Self {
             local_socket,
-            keepalive_ssh_config,
+            socket_identity,
             should_stop,
             thread: Some(thread),
         })
@@ -1597,43 +1861,18 @@ impl SshStdioBridge {
 impl Drop for SshStdioBridge {
     fn drop(&mut self) {
         self.should_stop.store(true, Ordering::Release);
-        let _ = std::fs::remove_file(&self.local_socket);
+        let _ = crate::ipc::remove_socket_file_if_owned(&self.local_socket, &self.socket_identity);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
-        }
-        // Remove the generated ssh config only after the bridge thread has
-        // joined, so it can never start a connection with a config path that
-        // was just deleted.
-        if let Some(dir) = self.keepalive_ssh_config.as_deref().and_then(Path::parent) {
-            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
 
-/// Creates a fresh user-only (`0700`) directory under the temp dir for the
-/// bridge's generated ssh config, returning its path.
-///
-/// Using a private directory created with fail-if-exists semantics — rather
-/// than a predictable file in the world-writable temp dir — stops a local user
-/// from pre-planting a symlink or world-writable file that zynk would write
-/// and `ssh -F` would then read.
-fn private_ssh_config_dir() -> io::Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
-
-    let base = std::env::temp_dir();
-    for attempt in 0..100 {
-        let dir = base.join(format!("zynk-ssh-{}-{attempt}", std::process::id()));
-        match fs::DirBuilder::new().mode(0o700).create(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err),
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "failed to create private zynk ssh config directory",
-    ))
+fn prepare_remote_bridge_stream(
+    mut stream: crate::ipc::LocalStream,
+) -> io::Result<crate::ipc::LocalStream> {
+    crate::ipc::set_local_stream_polling(&mut stream, false)?;
+    Ok(stream)
 }
 
 /// Quotes a path for an ssh_config `Include` so a path containing spaces (or
@@ -1651,49 +1890,55 @@ fn ssh_config_quote(path: &str) -> String {
 /// first-value-wins rule keeps any `ServerAlive*` the user set there (including
 /// an explicit `0` to disable it); zynk's values apply only when the user has
 /// none.
-fn write_keepalive_ssh_config() -> io::Result<PathBuf> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let path = private_ssh_config_dir()?.join("config");
+fn write_managed_ssh_config() -> io::Result<ManagedSshConfig> {
+    let paths = crate::platform::remote_ssh_config_paths();
+    let dir = crate::platform::create_remote_ssh_config_dir("ctl")?;
+    let path = dir.join("config");
+    let control_path = dir.join("ctl");
 
     let mut contents = String::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        let user_config = PathBuf::from(home).join(".ssh").join("config");
-        if user_config.is_file() {
-            contents.push_str(&format!(
-                "Include {}\n",
-                ssh_config_quote(&user_config.to_string_lossy())
-            ));
-        }
+    if let Some(user_config) = paths.user_config.filter(|path| path.is_file()) {
+        contents.push_str(&format!(
+            "Include {}\n",
+            ssh_config_quote(&user_config.to_string_lossy())
+        ));
     }
-    if Path::new("/etc/ssh/ssh_config").is_file() {
-        contents.push_str("Include /etc/ssh/ssh_config\n");
+    if let Some(system_config) = paths.system_config.filter(|path| path.is_file()) {
+        contents.push_str(&format!(
+            "Include {}\n",
+            ssh_config_quote(&system_config.to_string_lossy())
+        ));
     }
     contents.push_str("Host *\n");
     contents.push_str("  ServerAliveInterval 15\n");
     contents.push_str("  ServerAliveCountMax 4\n");
 
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(BRIDGE_SOCKET_PERMISSION_MODE)
-        .open(&path)?;
-    file.write_all(contents.as_bytes())?;
-    Ok(path)
+    let write_result = (|| {
+        let mut file = crate::platform::create_remote_ssh_config_file(&path)?;
+        file.write_all(contents.as_bytes())
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(err);
+    }
+    Ok(ManagedSshConfig {
+        options: ManagedSshOptions {
+            config_path: path,
+            control_path,
+        },
+    })
 }
 
 fn bridge_connection(
-    stream: UnixStream,
+    stream: crate::ipc::LocalStream,
     target: &str,
     remote_zynk: &RemoteZynk,
     session_name: &str,
-    keepalive_ssh_config: Option<&Path>,
+    ssh_options: Option<&ManagedSshOptions>,
+    bridge_stop: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut command = Command::new("ssh");
-    // Use the generated keepalive ssh config when present; otherwise plain ssh.
-    if let Some(ssh_config) = keepalive_ssh_config {
-        command.arg("-F").arg(ssh_config);
-    }
+    apply_managed_ssh_options(&mut command, ssh_options);
     command
         .arg("-T")
         .arg(target)
@@ -1703,6 +1948,14 @@ fn bridge_connection(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
+    bridge_connection_with_command(stream, command, bridge_stop)
+}
+
+fn bridge_connection_with_command(
+    stream: crate::ipc::LocalStream,
+    mut command: Command,
+    bridge_stop: &Arc<AtomicBool>,
+) -> io::Result<()> {
     let mut child = command
         .spawn()
         .map_err(|err| io::Error::new(err.kind(), format!("failed to start ssh bridge: {err}")))?;
@@ -1715,19 +1968,48 @@ fn bridge_connection(
         .take()
         .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "ssh bridge stdout missing"))?;
     let mut stream_to_child = stream.try_clone()?;
+    let cancel_stream = stream.try_clone()?;
     let mut child_to_stream = stream;
 
-    let upload = thread::spawn(move || {
-        let _ = copy_flush(&mut stream_to_child, &mut child_stdin);
-    });
+    let upload = thread::spawn(move || copy_flush(&mut stream_to_child, &mut child_stdin));
     let download = thread::spawn(move || {
-        let _ = copy_flush(&mut child_stdout, &mut child_to_stream);
-        let _ = child_to_stream.shutdown(std::net::Shutdown::Write);
+        let result = copy_flush(&mut child_stdout, &mut child_to_stream);
+        let _ = crate::ipc::shutdown_local_stream_write(&child_to_stream);
+        result
     });
 
-    let status = child.wait()?;
-    let _ = upload.join();
-    let _ = download.join();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if bridge_stop.load(Ordering::Acquire) {
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        thread::sleep(BRIDGE_ACCEPT_POLL);
+    };
+    let stopping = bridge_stop.load(Ordering::Acquire);
+    let shutdown = if stopping {
+        std::net::Shutdown::Both
+    } else {
+        std::net::Shutdown::Read
+    };
+    let _ = crate::ipc::shutdown_local_stream(&cancel_stream, shutdown);
+    let upload_result = upload
+        .join()
+        .map_err(|_| io::Error::other("remote bridge upload worker panicked"))?;
+    let download_result = download
+        .join()
+        .map_err(|_| io::Error::other("remote bridge download worker panicked"))?;
+
+    if stopping {
+        return Ok(());
+    }
+    upload_result
+        .map_err(|err| io::Error::new(err.kind(), format!("remote bridge upload failed: {err}")))?;
+    download_result.map_err(|err| {
+        io::Error::new(err.kind(), format!("remote bridge download failed: {err}"))
+    })?;
 
     if status.success() {
         Ok(())
@@ -1793,30 +2075,14 @@ fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
     let target_clean = sanitize_path_component(target);
     let session_clean = sanitize_path_component(session_name);
 
-    let tmpdir = std::env::temp_dir();
-    let readable = tmpdir.join(format!(
-        "zynk-remote-{pid}-{target_clean}-{session_clean}.sock"
-    ));
-    if fits_unix_socket_path(&readable) {
-        return readable;
-    }
-
-    // macOS' per-user TMPDIR (~49 chars under /var/folders/...) can push the
-    // readable name past sun_path's 104-byte ceiling. Fall back to a hashed
-    // short name in TMPDIR, then to /tmp as a last resort when TMPDIR itself
-    // is longer than the budget. The hash covers the full unsanitized
-    // target/session so uniqueness does not depend on the prefix truncation;
-    // the prefix is kept only for debuggability.
+    let readable_name = format!("zynk-remote-{pid}-{target_clean}-{session_clean}.sock");
     let target_prefix: String = target_clean.chars().take(8).collect();
     let hash = short_socket_hash(target, session_name);
     let short_name = format!("zynk-r-{pid}-{target_prefix}-{hash}.sock");
-    let short_in_tmp = tmpdir.join(&short_name);
-    if fits_unix_socket_path(&short_in_tmp) {
-        return short_in_tmp;
-    }
-    PathBuf::from("/tmp").join(short_name)
+    crate::platform::remote_bridge_endpoint_path(&readable_name, &short_name)
 }
 
+#[cfg(test)]
 fn fits_unix_socket_path(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     // sun_path is byte-limited: 104 bytes on macOS, 108 on Linux. Reserve
@@ -1871,7 +2137,7 @@ mod tests {
             remote_zynk,
             socket.clone(),
             "default".to_string(),
-            false,
+            None,
         )
         .expect("start bridge listener");
 
@@ -1882,11 +2148,81 @@ mod tests {
         let _ = std::fs::remove_file(socket);
     }
 
+    fn local_stream_is_nonblocking(stream: &crate::ipc::LocalStream) -> bool {
+        use std::os::fd::AsRawFd;
+
+        let fd = match stream {
+            crate::ipc::LocalStream::UdSocket(stream) => stream.inner().as_raw_fd(),
+        };
+        // SAFETY: F_GETFL only reads descriptor flags for the borrowed live fd.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(
+            flags >= 0,
+            "fcntl(F_GETFL) failed: {}",
+            io::Error::last_os_error()
+        );
+        flags & libc::O_NONBLOCK != 0
+    }
+
+    #[test]
+    fn b3_accepted_bridge_stream_is_restored_to_blocking() {
+        let (_client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut server = crate::ipc::LocalStream::UdSocket(server.into());
+        crate::ipc::set_local_stream_polling(&mut server, true).unwrap();
+        assert!(local_stream_is_nonblocking(&server));
+
+        let server = prepare_remote_bridge_stream(server).unwrap();
+
+        assert!(!local_stream_is_nonblocking(&server));
+    }
+
+    #[test]
+    fn b3_bridge_cancellation_reaps_ssh_and_unblocks_local_io() {
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = crate::ipc::LocalStream::UdSocket(server.into());
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let worker = thread::spawn(move || {
+            let mut command = Command::new("/bin/sh");
+            command.arg("-c").arg("cat >/dev/null");
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            let result = bridge_connection_with_command(server, command, &worker_stop);
+            let _ = done_tx.send(result);
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        stop.store(true, Ordering::Release);
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("bridge cancellation must be bounded");
+        assert!(result.is_ok(), "bridge cancellation failed: {result:?}");
+        worker.join().unwrap();
+        drop(client);
+    }
+
+    #[test]
+    fn b3_bridge_copy_preserves_bytes_and_stops_at_eof() {
+        let input = b"first\nsecond\0third";
+        let mut reader = io::Cursor::new(input);
+        let mut output = Vec::new();
+
+        let copied = copy_flush(&mut reader, &mut output).unwrap();
+
+        assert_eq!(copied, input.len() as u64);
+        assert_eq!(output, input);
+    }
+
     #[test]
     fn keepalive_ssh_config_includes_user_config_then_fallback() {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = write_keepalive_ssh_config().expect("write keepalive config");
+        let config = write_managed_ssh_config().expect("write managed config");
+        let path = config.options.config_path.clone();
         let contents = std::fs::read_to_string(&path).expect("read keepalive config");
 
         // zynk's fallback keepalive is present...
@@ -1930,7 +2266,77 @@ mod tests {
         let dir_mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "ssh config dir must be user-only");
 
-        let _ = std::fs::remove_dir_all(dir);
+        drop(config);
+    }
+
+    #[test]
+    fn b3_managed_ssh_paths_stay_inside_sentinel_roots_from_a_worker_thread() {
+        let _guard = remote_env_lock().lock().unwrap();
+        let root = PathBuf::from(format!(
+            "/tmp/zynk-remote-hermetic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let ssh_dir = home.join(".ssh");
+        let tmp = root.join("tmp");
+        fs::create_dir_all(&ssh_dir).unwrap();
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(ssh_dir.join("config"), "Host example\n  BatchMode yes\n").unwrap();
+
+        let mut names = vec![
+            "HOME".to_string(),
+            "TMPDIR".to_string(),
+            "XDG_CONFIG_HOME".to_string(),
+            "XDG_DATA_HOME".to_string(),
+            "XDG_STATE_HOME".to_string(),
+            "XDG_CACHE_HOME".to_string(),
+            "XDG_RUNTIME_DIR".to_string(),
+        ];
+        names.extend(
+            std::env::vars_os()
+                .filter_map(|(name, _)| name.into_string().ok())
+                .filter(|name| name.starts_with("ZYNK_")),
+        );
+        names.sort();
+        names.dedup();
+        let mut restore = Vec::new();
+        for name in &names {
+            restore.push((name.clone(), std::env::var_os(name)));
+            std::env::remove_var(name);
+        }
+        let _restore = TestEnvironmentRestore(restore);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("TMPDIR", &tmp);
+        for (name, suffix) in [
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_DATA_HOME", "data"),
+            ("XDG_STATE_HOME", "state"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_RUNTIME_DIR", "runtime"),
+        ] {
+            std::env::set_var(name, root.join(suffix));
+        }
+
+        let config = thread::spawn(write_managed_ssh_config)
+            .join()
+            .expect("managed config worker panicked")
+            .expect("managed config creation failed");
+        assert!(config.options.config_path.starts_with(&root));
+        assert!(config.options.control_path.starts_with(&root));
+        let contents = fs::read_to_string(&config.options.config_path).unwrap();
+        assert!(contents.contains(&ssh_config_quote(&ssh_dir.join("config").to_string_lossy())));
+
+        drop(config);
+        assert!(ssh_dir.join("config").is_file());
+        assert!(
+            fs::read_dir(&tmp).unwrap().next().is_none(),
+            "managed SSH cleanup left a path outside the retained fixture files"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2206,6 +2612,90 @@ mod tests {
             remote_zynk_from_path_discovery(&remote_zynk, "/usr/bin/zynk\n").expect("path binary");
 
         assert_eq!(remote_zynk.shell_path, "/usr/bin/zynk");
+    }
+
+    #[test]
+    fn b3_remote_path_discovery_reads_package_candidates_and_skips_mise_shims() {
+        let remote_zynk = RemoteZynk::for_platform(RemotePlatform::local());
+        let candidates = remote_zynks_from_path_discovery(
+            &remote_zynk,
+            "/home/user/.local/share/mise/shims/zynk\n/home/user/.local/share/mise/installs/zynk/3.1.0/bin/zynk\n/home/linuxbrew/.linuxbrew/bin/zynk\nrelative/zynk\n",
+        );
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[0].shell_path,
+            "/home/user/.local/share/mise/installs/zynk/3.1.0/bin/zynk"
+        );
+        assert_eq!(
+            candidates[1].shell_path,
+            "/home/linuxbrew/.linuxbrew/bin/zynk"
+        );
+
+        let script = known_remote_binary_candidate_script(&RemotePlatform::local());
+        assert!(script.contains("$home/.local/bin/zynk"));
+        assert!(script.contains("$home/.local/share/mise/installs/zynk/$version/bin/zynk"));
+        assert!(script.contains("$home/.local/share/mise/installs/zynk/$version/zynk"));
+        assert!(script.contains("/home/linuxbrew/.linuxbrew/bin/zynk"));
+        assert!(!script.contains("mise/shims/zynk"));
+    }
+
+    #[test]
+    fn b3_remote_install_scripts_use_portable_atomic_replacement() {
+        let remote_zynk = RemoteZynk::for_platform(RemotePlatform::local());
+        let prepare = remote_install_prepare_script(&remote_zynk);
+
+        assert!(prepare.contains("mkdir -p \"$dir\""));
+        assert!(prepare.contains("printf '%s\\0%s\\0' \"$tmp\" \"$dest\""));
+        assert_eq!(
+            parse_remote_install_paths(b"/home/a b/zynk.tmp.42\0/home/a b/zynk\0").unwrap(),
+            (
+                "/home/a b/zynk.tmp.42".to_string(),
+                "/home/a b/zynk".to_string()
+            )
+        );
+        assert_eq!(
+            remote_install_stream_command("/home/a b/zynk.tmp.42"),
+            "tee '/home/a b/zynk.tmp.42'"
+        );
+        assert_eq!(
+            remote_install_commit_script("/home/a b/zynk.tmp.42", "/home/a b/zynk"),
+            "set -eu\nchmod 755 '/home/a b/zynk.tmp.42'\nmv '/home/a b/zynk.tmp.42' '/home/a b/zynk'\n"
+        );
+        assert_eq!(
+            remote_install_abort_script("/home/a b/zynk.tmp.42"),
+            "rm -f '/home/a b/zynk.tmp.42'\n"
+        );
+        assert!(parse_remote_install_paths(b"/tmp/partial\0").is_err());
+    }
+
+    #[test]
+    fn b3_managed_ssh_options_reuse_one_private_control_socket() {
+        let options = ManagedSshOptions {
+            config_path: PathBuf::from("/tmp/private/config"),
+            control_path: PathBuf::from("/tmp/private/ctl"),
+        };
+        let mut command = Command::new("ssh");
+
+        apply_managed_ssh_options(&mut command, Some(&options));
+
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "-F",
+                "/tmp/private/config",
+                "-S",
+                "/tmp/private/ctl",
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPersist=yes",
+            ]
+        );
     }
 
     #[test]
@@ -3238,6 +3728,19 @@ mod tests {
         let source = resolve_install_source(&platform, Some(PathBuf::from("/tmp/zynk-linux")))
             .expect("override source");
         assert_eq!(source.path, PathBuf::from("/tmp/zynk-linux"));
+    }
+
+    struct TestEnvironmentRestore(Vec<(String, Option<std::ffi::OsString>)>);
+
+    impl Drop for TestEnvironmentRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
     }
 
     fn remote_env_lock() -> &'static std::sync::Mutex<()> {

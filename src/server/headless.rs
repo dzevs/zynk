@@ -269,10 +269,6 @@ fn retained_render_plan_with_graphics(
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Default shared runtime size (columns, rows) when no clients are attached.
-const MIN_COLS: u16 = 80;
-const MIN_ROWS: u16 = 24;
-
 /// Timeout for in-flight API requests during shutdown.
 #[allow(dead_code)]
 const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
@@ -334,8 +330,10 @@ pub struct HeadlessServer {
     deferred_alt_screen_reads: Vec<api::ApiRequestMessage>,
     /// Monotonic activity counter used to pick the most recently active client.
     next_activity_stamp: u64,
-    /// Shared pane runtime size derived from the foreground client,
-    /// or MIN_COLS × MIN_ROWS when no clients are connected.
+    /// Configured virtual terminal size used when no clients are connected.
+    headless_size: (u16, u16),
+    /// Shared pane runtime size derived from the foreground client, or the
+    /// configured headless size when no clients are connected.
     effective_size: (u16, u16),
     /// Flag set when shutdown is initiated.
     shutting_down: bool,
@@ -452,6 +450,7 @@ impl HeadlessServer {
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
 
         let server_keybindings = app_keybindings(&app);
+        let headless_size = app.state.headless_size;
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
             server_config_diagnostic_summaries(config_diagnostics);
 
@@ -474,7 +473,8 @@ impl HeadlessServer {
             pending_alt_screen_reads: Vec::new(),
             deferred_alt_screen_reads: Vec::new(),
             next_activity_stamp: 1,
-            effective_size: (MIN_COLS, MIN_ROWS),
+            headless_size,
+            effective_size: headless_size,
             shutting_down: false,
             handoff_in_progress: false,
             pending_handoff_repaint_nudge: false,
@@ -1073,6 +1073,14 @@ impl HeadlessServer {
         }
     }
 
+    fn sync_headless_view_geometry(&mut self) {
+        crate::ui::compute_view_without_resizing_panes(
+            &mut self.app.state,
+            &self.app.terminal_runtimes,
+            Rect::new(0, 0, self.headless_size.0, self.headless_size.1),
+        );
+    }
+
     fn sync_foreground_client_state(&mut self) {
         self.app.direct_graphics_available = self.direct_graphics_available();
         self.app.pixel_mouse_available = self.foreground_client_id.is_some_and(|id| {
@@ -1085,8 +1093,9 @@ impl HeadlessServer {
         }
         self.app.state.host_cell_size = crate::kitty_graphics::HostCellSize::default();
         let Some(client_id) = self.foreground_client_id else {
-            self.effective_size = (MIN_COLS, MIN_ROWS);
+            self.effective_size = self.headless_size;
             self.app.state.outer_terminal_focus = None;
+            self.sync_headless_view_geometry();
             let server_keybindings = self.server_keybindings.clone();
             apply_keybindings(&mut self.app, &server_keybindings);
             self.sync_visible_server_config_diagnostic(false);
@@ -1094,8 +1103,9 @@ impl HeadlessServer {
         };
         let Some(client) = self.clients.get(&client_id) else {
             self.foreground_client_id = None;
-            self.effective_size = (MIN_COLS, MIN_ROWS);
+            self.effective_size = self.headless_size;
             self.app.state.outer_terminal_focus = None;
+            self.sync_headless_view_geometry();
             let server_keybindings = self.server_keybindings.clone();
             apply_keybindings(&mut self.app, &server_keybindings);
             self.sync_visible_server_config_diagnostic(false);
@@ -4886,6 +4896,8 @@ impl HeadlessServer {
 
         changed |= self.app.reconcile_due_managed_agents(now);
 
+        changed |= self.app.handle_tab_bar_status_tasks(now);
+
         if geometry_dirty {
             self.app.pending_agent_resume_deadline = None;
         } else {
@@ -5571,6 +5583,61 @@ mod tests {
             assert!(!server.app.state.session_dirty);
             assert!(server.app.event_hub.events_after(after).is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn b3_headless_status_deadline_advances_without_dropping_managed_timer_work() {
+        let mut server = test_headless_server();
+        server.app.configure_tab_bar_status(
+            &[crate::config::TabBarRightEntryConfig::Command {
+                command: "printf headless-ready".into(),
+                interval_seconds: 5,
+                timeout_seconds: 2,
+            }],
+            " ",
+        );
+        let due = server
+            .app
+            .next_tab_bar_status_deadline()
+            .expect("status deadline");
+        assert_eq!(
+            server
+                .app
+                .next_headless_loop_deadline_with_git_refresh(due, false, false),
+            Some(due)
+        );
+
+        assert!(!server.handle_scheduled_tasks_headless(due, false));
+        assert!(server
+            .app
+            .next_headless_loop_deadline_with_git_refresh(due, false, false)
+            .is_none_or(|next| next > due));
+
+        let event = tokio::time::timeout(Duration::from_secs(3), server.app.event_rx.recv())
+            .await
+            .expect("status command timed out")
+            .expect("status event channel closed");
+        assert!(server.handle_internal_event_with_forwarding(event));
+        assert!(server
+            .app
+            .next_tab_bar_status_deadline()
+            .is_some_and(|next| next > due));
+        assert!(!server.handle_scheduled_tasks_headless(due, false));
+
+        // The fork-owned M8-39 timer stays in the same deadline list and is
+        // still consumed by the same scheduled-work function.
+        let managed_now = Instant::now();
+        let managed_due = managed_now + Duration::from_secs(3);
+        let (mut fixture, terminal_id) = m839a_managed_headless_fixture(managed_now, true);
+        let managed = fixture.server.as_mut().expect("managed fixture server");
+        assert_eq!(
+            managed
+                .app
+                .next_headless_loop_deadline_with_git_refresh(managed_now, false, false),
+            Some(managed_due)
+        );
+        assert!(managed.handle_scheduled_tasks_headless(managed_due, false));
+        assert!(managed.app.state.terminals[&terminal_id].managed_agent_interactive_ready());
     }
 
     #[test]
@@ -6737,6 +6804,7 @@ mod tests {
             .expect("set listener nonblocking");
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
         let server_keybindings = app_keybindings(&app);
+        let headless_size = app.state.headless_size;
 
         let server = HeadlessServer {
             app,
@@ -6757,7 +6825,8 @@ mod tests {
             pending_alt_screen_reads: Vec::new(),
             deferred_alt_screen_reads: Vec::new(),
             next_activity_stamp: 1,
-            effective_size: (MIN_COLS, MIN_ROWS),
+            headless_size,
+            effective_size: headless_size,
             shutting_down: false,
             handoff_in_progress: false,
             pending_handoff_repaint_nudge: false,
@@ -6804,6 +6873,20 @@ mod tests {
             ServerMessage::ServerShutdown { reason } => reason,
             other => panic!("expected shutdown, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn default_headless_size_is_effective_without_clients() {
+        let server = test_headless_server();
+
+        assert_eq!(
+            server.headless_size,
+            (
+                crate::config::DEFAULT_HEADLESS_COLS,
+                crate::config::DEFAULT_HEADLESS_ROWS
+            )
+        );
+        assert_eq!(server.effective_size, server.headless_size);
     }
 
     #[test]

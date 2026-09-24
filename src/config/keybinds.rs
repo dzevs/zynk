@@ -330,6 +330,8 @@ pub struct Keybinds {
     pub rename_tab: ActionKeybinds,
     pub previous_tab: ActionKeybinds,
     pub next_tab: ActionKeybinds,
+    pub move_tab_previous: ActionKeybinds,
+    pub move_tab_next: ActionKeybinds,
     pub switch_tab: Vec<IndexedKeybind>,
     pub switch_workspace: Vec<IndexedKeybind>,
     pub close_tab: ActionKeybinds,
@@ -352,6 +354,10 @@ pub struct Keybinds {
     pub close_pane: ActionKeybinds,
     pub zoom: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
+    pub resize_pane_left: ActionKeybinds,
+    pub resize_pane_down: ActionKeybinds,
+    pub resize_pane_up: ActionKeybinds,
+    pub resize_pane_right: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
@@ -492,6 +498,8 @@ impl Config {
             rename_tab: empty_action!(),
             previous_tab: empty_action!(),
             next_tab: empty_action!(),
+            move_tab_previous: empty_action!(),
+            move_tab_next: empty_action!(),
             switch_tab: Vec::new(),
             switch_workspace: Vec::new(),
             close_tab: empty_action!(),
@@ -514,6 +522,10 @@ impl Config {
             close_pane: empty_action!(),
             zoom: empty_action!(),
             resize_mode: empty_action!(),
+            resize_pane_left: empty_action!(),
+            resize_pane_down: empty_action!(),
+            resize_pane_up: empty_action!(),
+            resize_pane_right: empty_action!(),
             toggle_sidebar: empty_action!(),
             custom_commands: Vec::new(),
         };
@@ -623,6 +635,8 @@ impl Config {
             apply_action!(keybinds.rename_tab, rename_tab, source);
             apply_action!(keybinds.previous_tab, previous_tab, source);
             apply_action!(keybinds.next_tab, next_tab, source);
+            apply_action!(keybinds.move_tab_previous, move_tab_previous, source);
+            apply_action!(keybinds.move_tab_next, move_tab_next, source);
             apply_indexed!(
                 keybinds.switch_tab,
                 switch_tab,
@@ -655,6 +669,10 @@ impl Config {
             apply_action!(keybinds.close_pane, close_pane, source);
             apply_action!(keybinds.zoom, zoom, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
+            apply_action!(keybinds.resize_pane_left, resize_pane_left, source);
+            apply_action!(keybinds.resize_pane_down, resize_pane_down, source);
+            apply_action!(keybinds.resize_pane_up, resize_pane_up, source);
+            apply_action!(keybinds.resize_pane_right, resize_pane_right, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
 
             if source == field_source!(indexed) {

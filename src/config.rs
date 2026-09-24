@@ -7,6 +7,7 @@ mod keybinds;
 mod model;
 mod sidebar;
 mod sound;
+mod tab_bar;
 mod theme;
 mod window_title;
 
@@ -23,23 +24,29 @@ pub use self::{
     },
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, HeaderOptions, NewTerminalCwdConfig, ShellModeConfig,
-        SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
+        ConfigReloadStatus, HeaderOptions, HostCursorModeConfig, NewTerminalCwdConfig,
+        ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
         ToastClipboardPosition, ToastConfig, ToastDelivery, ToastZynkPosition, UpdateChannelConfig,
         HEADER_VERBOSE_ENV_VAR, MAX_HEADER_MAX_WIDTH, MAX_TOAST_DELAY_SECONDS,
         MIN_HEADER_MAX_WIDTH,
     },
     sidebar::{
-        AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SpaceSidebarToken,
-        SpacesSidebarConfig,
+        AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
+        SpaceSidebarToken, SpacesSidebarConfig,
     },
     sound::SoundConfig,
-    theme::{parse_color, CustomThemeColors, ThemeConfig},
+    tab_bar::TabBarRightEntryConfig,
+    theme::{parse_color, CustomThemeColors, ThemeConfig, THEME_NAMES},
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
 };
 
 pub(crate) use self::io::upsert_top_level_bool;
 pub(crate) use self::keybinds::parse_key_combo;
+pub(crate) use self::tab_bar::{
+    parse_tab_bar_datetime_format, tab_bar_right_diagnostics, MAX_TAB_BAR_COMMAND_INTERVAL_SECONDS,
+    MAX_TAB_BAR_COMMAND_TIMEOUT_SECONDS, MAX_TAB_BAR_RIGHT_ENTRIES,
+};
+pub(crate) use self::theme::canonical_theme_name;
 pub(crate) use self::window_title::{sanitize_window_title_text, window_title_diagnostics};
 
 /// Zynk-branded config-path override (ADR 0007 §5): the primary, documented name.
@@ -50,6 +57,8 @@ pub const CONFIG_PATH_ENV_VAR: &str = "ZYNK_CONFIG_PATH";
 pub const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;
 pub const DEFAULT_MOUSE_SCROLL_LINES: usize = 3;
 pub const DEFAULT_MOBILE_WIDTH_THRESHOLD: u16 = 64;
+pub const DEFAULT_HEADLESS_COLS: u16 = 120;
+pub const DEFAULT_HEADLESS_ROWS: u16 = 40;
 
 /// Resolve an override env var from a priority-ordered list of names, returning
 /// the first one that is present in the environment (ADR 0007 §5). The Zynk-branded
@@ -91,10 +100,30 @@ impl Config {
             .into_iter()
             .chain(keybind_diags)
             .chain(self.remote_image_paste_key().err())
+            .chain(self.theme.diagnostics())
             .chain(self.ui.sound.diagnostics())
+            .chain(tab_bar_right_diagnostics(&self.ui.tab_bar_right))
             .chain(window_title_diagnostics(&self.ui.window_title))
             .chain(self.invalid_sidebar_bounds_diagnostic())
+            .chain(self.invalid_headless_size_diagnostic())
             .collect()
+    }
+
+    pub(crate) fn headless_size(&self) -> (u16, u16) {
+        if self.invalid_headless_size_diagnostic().is_some() {
+            (DEFAULT_HEADLESS_COLS, DEFAULT_HEADLESS_ROWS)
+        } else {
+            (self.server.headless_cols, self.server.headless_rows)
+        }
+    }
+
+    pub(crate) fn invalid_headless_size_diagnostic(&self) -> Option<String> {
+        (self.server.headless_cols == 0 || self.server.headless_rows == 0).then(|| {
+            format!(
+                "server.headless_cols and server.headless_rows must be greater than zero (got {}x{})",
+                self.server.headless_cols, self.server.headless_rows
+            )
+        })
     }
 
     pub(crate) fn invalid_sidebar_bounds_diagnostic(&self) -> Option<String> {
@@ -329,5 +358,17 @@ command = "echo one"
     fn remote_image_paste_key_can_be_disabled() {
         let config: Config = toml::from_str("[keys]\nremote_image_paste = ''\n").unwrap();
         assert_eq!(config.remote_image_paste_key().unwrap(), None);
+    }
+
+    #[test]
+    fn ui_host_cursor_defaults_to_auto_and_parses_overrides() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.host_cursor, HostCursorModeConfig::Auto);
+
+        let native: Config = toml::from_str("[ui]\nhost_cursor = 'native'\n").unwrap();
+        assert_eq!(native.ui.host_cursor, HostCursorModeConfig::Native);
+
+        let drawn: Config = toml::from_str("[ui]\nhost_cursor = 'drawn'\n").unwrap();
+        assert_eq!(drawn.ui.host_cursor, HostCursorModeConfig::Drawn);
     }
 }

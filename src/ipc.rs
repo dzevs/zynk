@@ -1,3 +1,5 @@
+// Modified by the zynk project: this file differs from the upstream version it was derived from.
+// See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -69,6 +71,10 @@ pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
         .create_sync()
 }
 
+pub(crate) fn bind_private_local_listener(path: &Path) -> io::Result<LocalListener> {
+    bind_local_listener(path)
+}
+
 pub(crate) fn prepare_socket_path(
     path: &Path,
     busy_message: impl FnOnce(&Path) -> String,
@@ -130,6 +136,19 @@ pub(crate) fn local_stream_peer_closed(stream: &mut LocalStream) -> io::Result<b
 
 pub(crate) fn set_local_stream_polling(stream: &mut LocalStream, enabled: bool) -> io::Result<()> {
     stream.set_nonblocking(enabled)
+}
+
+pub(crate) fn shutdown_local_stream_write(stream: &LocalStream) -> io::Result<()> {
+    shutdown_local_stream(stream, std::net::Shutdown::Write)
+}
+
+pub(crate) fn shutdown_local_stream(
+    stream: &LocalStream,
+    how: std::net::Shutdown,
+) -> io::Result<()> {
+    match stream {
+        LocalStream::UdSocket(stream) => stream.inner().shutdown(how),
+    }
 }
 
 pub(crate) fn poll_local_stream_read(

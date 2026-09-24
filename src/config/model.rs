@@ -172,6 +172,22 @@ impl AgentPanelSortConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LegacyAgentPanelScopeConfig {
+    Current,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostCursorModeConfig {
+    #[default]
+    Auto,
+    Native,
+    Drawn,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StatusIndicatorStyle {
@@ -331,10 +347,28 @@ pub struct SessionConfig {
     pub resume_agents_on_restore: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// Virtual terminal width used when no client is attached. Default: 120.
+    pub headless_cols: u16,
+    /// Virtual terminal height used when no client is attached. Default: 40.
+    pub headless_rows: u16,
+}
+
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             resume_agents_on_restore: true,
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            headless_cols: crate::config::DEFAULT_HEADLESS_COLS,
+            headless_rows: crate::config::DEFAULT_HEADLESS_ROWS,
         }
     }
 }
@@ -373,6 +407,7 @@ pub struct Config {
     pub theme: ThemeConfig,
     pub terminal: TerminalConfig,
     pub session: SessionConfig,
+    pub server: ServerConfig,
     pub update: UpdateConfig,
     pub keys: KeysConfig,
     pub ui: UiConfig,
@@ -459,6 +494,10 @@ pub struct KeysConfig {
     pub previous_tab: BindingConfig,
     /// Select the next tab. Default: "prefix+n".
     pub next_tab: BindingConfig,
+    /// Move the active tab one position toward the front. Unset by default.
+    pub move_tab_previous: BindingConfig,
+    /// Move the active tab one position toward the back. Unset by default.
+    pub move_tab_next: BindingConfig,
     /// Switch to tab 1-9. Default: "prefix+1..9".
     pub switch_tab: BindingConfig,
     /// Switch to workspace 1-9 from prefix mode. Unset by default.
@@ -504,6 +543,14 @@ pub struct KeysConfig {
     pub zoom: BindingConfig,
     /// Enter resize mode. Default: "prefix+r"
     pub resize_mode: BindingConfig,
+    /// Resize the focused pane toward the left. Unset by default.
+    pub resize_pane_left: BindingConfig,
+    /// Resize the focused pane downward. Unset by default.
+    pub resize_pane_down: BindingConfig,
+    /// Resize the focused pane upward. Unset by default.
+    pub resize_pane_up: BindingConfig,
+    /// Resize the focused pane toward the right. Unset by default.
+    pub resize_pane_right: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
@@ -579,6 +626,10 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     next_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    move_tab_previous: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    move_tab_next: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     switch_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     switch_workspace: Option<BindingConfig>,
@@ -622,6 +673,14 @@ pub(crate) struct KeysConfigOverlay {
     zoom: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resize_mode: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_pane_left: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_pane_down: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_pane_up: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_pane_right: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -677,6 +736,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(rename_tab);
         apply_field!(previous_tab);
         apply_field!(next_tab);
+        apply_field!(move_tab_previous);
+        apply_field!(move_tab_next);
         apply_field!(switch_tab);
         apply_field!(switch_workspace);
         apply_field!(close_tab);
@@ -699,6 +760,10 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(close_pane);
         apply_field!(zoom);
         apply_field!(resize_mode);
+        apply_field!(resize_pane_left);
+        apply_field!(resize_pane_down);
+        apply_field!(resize_pane_up);
+        apply_field!(resize_pane_right);
         apply_field!(toggle_sidebar);
         apply_field!(indexed);
         apply_field!(command);
@@ -775,6 +840,8 @@ impl KeysConfig {
         copy_effective_action_field!(rename_tab, keybinds.rename_tab);
         copy_effective_action_field!(previous_tab, keybinds.previous_tab);
         copy_effective_action_field!(next_tab, keybinds.next_tab);
+        copy_effective_action_field!(move_tab_previous, keybinds.move_tab_previous);
+        copy_effective_action_field!(move_tab_next, keybinds.move_tab_next);
         copy_effective_indexed_field!(switch_tab, keybinds.switch_tab);
         copy_effective_indexed_field!(switch_workspace, keybinds.switch_workspace);
         copy_effective_action_field!(close_tab, keybinds.close_tab);
@@ -797,6 +864,10 @@ impl KeysConfig {
         copy_effective_action_field!(close_pane, keybinds.close_pane);
         copy_effective_action_field!(zoom, keybinds.zoom);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
+        copy_effective_action_field!(resize_pane_left, keybinds.resize_pane_left);
+        copy_effective_action_field!(resize_pane_down, keybinds.resize_pane_down);
+        copy_effective_action_field!(resize_pane_up, keybinds.resize_pane_up);
+        copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
         copy_user_field!(indexed);
 
@@ -879,6 +950,8 @@ pub struct UiConfig {
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Zynk's mouse UI. Default: true.
     pub mouse_capture: bool,
+    /// Host cursor policy. Default: auto.
+    pub host_cursor: HostCursorModeConfig,
     /// Copy text selected with the mouse. Default: true.
     pub copy_on_select: bool,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -907,8 +980,15 @@ pub struct UiConfig {
     pub hide_tab_bar_when_single_tab: bool,
     /// Desktop tab row placement. Default: top.
     pub tab_bar_position: TabBarPositionConfig,
+    /// Ordered entries shown at the right edge of the desktop tab row. Empty by default.
+    pub tab_bar_right: Vec<super::TabBarRightEntryConfig>,
+    /// Text inserted between visible right-side tab bar entries. Default: one space.
+    pub tab_bar_right_separator: String,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
+    /// Retired setting retained as a compatibility no-op for existing configs.
+    #[serde(rename = "agent_panel_scope")]
+    _legacy_agent_panel_scope: Option<LegacyAgentPanelScopeConfig>,
     /// Agent status indicator style. Saved values are "dots" or "symbols". Default: "dots".
     pub status_indicators: StatusIndicatorStyle,
     /// Accent color for highlights, borders, and navigation UI.
@@ -960,8 +1040,9 @@ pub struct AdvancedConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct RemoteConfig {
-    /// Add a keepalive fallback under the user's ssh config for the `--remote`
-    /// bridge. Set false to run plain ssh unchanged. Default: true.
+    /// Reuse one managed SSH connection for remote discovery, install, and the
+    /// bridge, while adding keepalive fallbacks after the user's config. Set
+    /// false to run independent plain ssh commands unchanged. Default: true.
     pub manage_ssh_config: bool,
 }
 
@@ -1041,6 +1122,8 @@ impl Default for KeysConfig {
             rename_tab: BindingConfig::one("prefix+shift+t"),
             previous_tab: BindingConfig::one("prefix+p"),
             next_tab: BindingConfig::one("prefix+n"),
+            move_tab_previous: BindingConfig::empty(),
+            move_tab_next: BindingConfig::empty(),
             switch_tab: BindingConfig::one("prefix+1..9"),
             switch_workspace: BindingConfig::empty(),
             close_tab: BindingConfig::one("prefix+shift+x"),
@@ -1063,6 +1146,10 @@ impl Default for KeysConfig {
             close_pane: BindingConfig::one("prefix+x"),
             zoom: BindingConfig::one("prefix+z"),
             resize_mode: BindingConfig::one("prefix+r"),
+            resize_pane_left: BindingConfig::empty(),
+            resize_pane_down: BindingConfig::empty(),
+            resize_pane_up: BindingConfig::empty(),
+            resize_pane_right: BindingConfig::empty(),
             toggle_sidebar: BindingConfig::one("prefix+b"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
@@ -1090,6 +1177,7 @@ impl Default for UiConfig {
             sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
+            host_cursor: HostCursorModeConfig::Auto,
             copy_on_select: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
@@ -1104,7 +1192,10 @@ impl Default for UiConfig {
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             tab_bar_position: TabBarPositionConfig::Top,
+            tab_bar_right: Vec::new(),
+            tab_bar_right_separator: " ".into(),
             agent_panel_sort: AgentPanelSortConfig::Spaces,
+            _legacy_agent_panel_scope: None,
             status_indicators: StatusIndicatorStyle::Dots,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -1205,6 +1296,43 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn b3_server_headless_size_defaults_parses_and_rejects_zero() {
+        let defaults = Config::default();
+        assert_eq!(
+            defaults.headless_size(),
+            (
+                crate::config::DEFAULT_HEADLESS_COLS,
+                crate::config::DEFAULT_HEADLESS_ROWS
+            )
+        );
+
+        let config: Config = toml::from_str(
+            r#"[server]
+headless_cols = 132
+headless_rows = 41
+"#,
+        )
+        .expect("parse server size");
+        assert_eq!(config.headless_size(), (132, 41));
+
+        let invalid: Config = toml::from_str(
+            r#"[server]
+headless_cols = 0
+headless_rows = 41
+"#,
+        )
+        .expect("parse invalid server size for diagnostics");
+        assert!(invalid.invalid_headless_size_diagnostic().is_some());
+        assert_eq!(
+            invalid.headless_size(),
+            (
+                crate::config::DEFAULT_HEADLESS_COLS,
+                crate::config::DEFAULT_HEADLESS_ROWS
+            )
+        );
+    }
 
     #[test]
     fn update_config_defaults_and_parses() {
@@ -1335,6 +1463,8 @@ status_indicators = "symbols"
             default_config.ui.tab_bar_position,
             TabBarPositionConfig::Top
         );
+        assert!(default_config.ui.tab_bar_right.is_empty());
+        assert_eq!(default_config.ui.tab_bar_right_separator, " ");
 
         let toml = r#"
 [ui]
@@ -1345,6 +1475,14 @@ pane_gaps = true
 show_agent_labels_on_pane_borders = true
 hide_tab_bar_when_single_tab = true
 tab_bar_position = "bottom"
+tab_bar_right = [
+  { type = "zoom" },
+  { type = "hostname" },
+  { type = "datetime", format = "%H:%M" },
+  { type = "text", text = "prod" },
+  { type = "command", command = "printf ready", interval_seconds = 10, timeout_seconds = 3 },
+]
+tab_bar_right_separator = " · "
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.pane_borders);
@@ -1354,6 +1492,12 @@ tab_bar_position = "bottom"
         assert!(config.ui.show_agent_labels_on_pane_borders);
         assert!(config.ui.hide_tab_bar_when_single_tab);
         assert_eq!(config.ui.tab_bar_position, TabBarPositionConfig::Bottom);
+        assert_eq!(config.ui.tab_bar_right.len(), 5);
+        assert!(matches!(
+            config.ui.tab_bar_right[1],
+            crate::config::TabBarRightEntryConfig::Hostname
+        ));
+        assert_eq!(config.ui.tab_bar_right_separator, " · ");
     }
 
     #[test]

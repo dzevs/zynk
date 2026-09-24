@@ -369,6 +369,8 @@ impl App {
 
         changed |= self.reconcile_due_managed_agents(now);
 
+        changed |= self.handle_tab_bar_status_tasks(now);
+
         if geometry_dirty || resized {
             self.pending_agent_resume_deadline = None;
         } else {
@@ -617,6 +619,7 @@ impl App {
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
+            self.next_tab_bar_status_deadline(),
             self.copy_feedback_deadline,
             include_git_refresh
                 .then(|| self.git_refresh_deadline())

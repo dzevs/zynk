@@ -1,17 +1,126 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::{
+    collections::HashMap,
     io::{self, Write},
     os::fd::RawFd,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Once, OnceLock},
+    sync::{Mutex, Once, OnceLock},
+    time::{Duration, Instant},
 };
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
-    LimitedRead, Signal,
+    LimitedRead, RemoteSshConfigPaths, Signal,
 };
+
+pub(crate) fn remote_ssh_config_paths() -> RemoteSshConfigPaths {
+    RemoteSshConfigPaths {
+        user_config: std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".ssh").join("config")),
+        system_config: Some(PathBuf::from("/etc/ssh/ssh_config")),
+    }
+}
+
+pub(crate) fn create_remote_ssh_config_dir(control_socket_name: &str) -> io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let short_tmp = PathBuf::from("/tmp");
+    let mut bases = vec![std::env::temp_dir()];
+    if bases.first() != Some(&short_tmp) {
+        bases.push(short_tmp);
+    }
+
+    let mut last_error = None;
+    let mut path_fits = false;
+    for base in bases {
+        for attempt in 0..100 {
+            let dir = base.join(format!("zynk-ssh-{}-{attempt}", std::process::id()));
+            if !remote_socket_path_fits(&dir.join(control_socket_name)) {
+                continue;
+            }
+            path_fits = true;
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => return Ok(dir),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err) => {
+                    last_error = Some(err);
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(err) = last_error {
+        return Err(err);
+    }
+    Err(io::Error::new(
+        if path_fits {
+            io::ErrorKind::AlreadyExists
+        } else {
+            io::ErrorKind::InvalidInput
+        },
+        if path_fits {
+            "failed to create private zynk SSH config directory"
+        } else {
+            "SSH control socket path exceeds the Unix socket length limit"
+        },
+    ))
+}
+
+pub(crate) fn create_remote_ssh_config_file(path: &std::path::Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+pub(crate) fn remote_bridge_endpoint_path(readable_name: &str, short_name: &str) -> PathBuf {
+    let tmp = std::env::temp_dir();
+    let readable = tmp.join(readable_name);
+    if remote_socket_path_fits(&readable) {
+        return readable;
+    }
+    let short = tmp.join(short_name);
+    if remote_socket_path_fits(&short) {
+        return short;
+    }
+    PathBuf::from("/tmp").join(short_name)
+}
+
+pub(crate) fn remote_reattach_program(program: &str) -> String {
+    remote_shell_quote(if program.is_empty() { "zynk" } else { program })
+}
+
+pub(crate) fn remote_reattach_argument(value: &str) -> String {
+    remote_shell_quote(value)
+}
+
+fn remote_shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '@' | '%' | '_' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
+                )
+        })
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn remote_socket_path_fits(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().len() <= 103
+}
 
 /// Raised by the SIGWINCH handler, consumed by the host resize watcher.
 static TERMINAL_RESIZE_SIGNALLED: std::sync::atomic::AtomicBool =
@@ -60,6 +169,37 @@ pub(crate) fn end_cli_output() {
 
 const PROCESS_DETECTION_ENV_VAR: &str = "ZYNK_PROCESS_DETECTION";
 const CHILD_GROUPS_SCAN_LIMIT: usize = 64;
+const FOREGROUND_MEMBERS_CACHE_TTL: Duration = Duration::from_millis(250);
+const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcGroupMember {
+    pid: u32,
+    comm: String,
+}
+
+type ForegroundMembersByGroup = HashMap<u32, Vec<ProcGroupMember>>;
+
+#[derive(Debug, Clone)]
+struct CachedForegroundMembers {
+    built_at: Instant,
+    by_group: ForegroundMembersByGroup,
+}
+
+#[derive(Debug, Default)]
+struct ForegroundMembersCache {
+    cached: Option<CachedForegroundMembers>,
+}
+
+static FOREGROUND_MEMBERS_CACHE: Mutex<ForegroundMembersCache> =
+    Mutex::new(ForegroundMembersCache { cached: None });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcStatEntry {
+    pid: u32,
+    pgrp: i32,
+    comm: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessDetectionMode {
@@ -95,6 +235,144 @@ fn process_detection_mode() -> ProcessDetectionMode {
 }
 
 pub fn raise_server_nofile_limit() {}
+
+pub(crate) fn should_draw_host_cursor_by_default() -> bool {
+    running_inside_wsl()
+}
+
+pub(crate) fn should_query_host_terminal_palette() -> bool {
+    !running_inside_wsl()
+}
+
+fn running_inside_wsl() -> bool {
+    proc_file_indicates_wsl("/proc/sys/kernel/osrelease")
+        || proc_file_indicates_wsl("/proc/version")
+        || WSL_MARKER_ENV_VARS
+            .iter()
+            .any(|key| std::env::var_os(key).is_some())
+        || std::path::Path::new("/run/WSL").exists()
+}
+
+fn proc_file_indicates_wsl(path: &str) -> bool {
+    std::fs::read_to_string(path)
+        .map(|text| text_indicates_wsl(&text))
+        .unwrap_or(false)
+}
+
+fn text_indicates_wsl(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("microsoft") || text.contains("wsl")
+}
+
+fn raw_command_argv(command: &str, flag: &str) -> Vec<std::ffi::OsString> {
+    vec!["/bin/sh".into(), flag.into(), command.into()]
+}
+
+pub(crate) fn detached_custom_command_process(command: &str) -> std::process::Command {
+    let argv = raw_command_argv(command, "-lc");
+    let mut process = std::process::Command::new(&argv[0]);
+    process.args(&argv[1..]);
+    process
+}
+
+pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
+    let mut timestamp: libc::time_t = 0;
+    if unsafe { libc::time(&mut timestamp) } == -1 {
+        return None;
+    }
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&timestamp, &mut local) }.is_null() {
+        return None;
+    }
+    datetime_from_tm(&local)
+}
+
+pub(crate) fn configure_status_command(process: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    process.process_group(0);
+}
+
+pub(crate) const fn status_commands_supported() -> bool {
+    true
+}
+
+pub(crate) struct StatusCommandGuard {
+    process_group_id: Option<i32>,
+}
+
+impl StatusCommandGuard {
+    pub(crate) fn new(child: &tokio::process::Child) -> std::io::Result<Self> {
+        let process_id = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("status command has no process id"))?;
+        let process_group_id = i32::try_from(process_id)
+            .map_err(|_| std::io::Error::other("status command process id exceeds i32"))?;
+        Ok(Self {
+            process_group_id: Some(process_group_id),
+        })
+    }
+
+    pub(crate) fn terminate(&mut self) {
+        if let Some(process_group_id) = self.process_group_id.take() {
+            // The command is the process-group leader, so this also terminates
+            // descendants before the Tokio task can observe cancellation.
+            unsafe {
+                libc::kill(-process_group_id, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+impl Drop for StatusCommandGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+fn datetime_from_tm(value: &libc::tm) -> Option<time::PrimitiveDateTime> {
+    let month = time::Month::try_from(u8::try_from(value.tm_mon + 1).ok()?).ok()?;
+    let date = time::Date::from_calendar_date(
+        value.tm_year + 1900,
+        month,
+        u8::try_from(value.tm_mday).ok()?,
+    )
+    .ok()?;
+    let time = time::Time::from_hms(
+        u8::try_from(value.tm_hour).ok()?,
+        u8::try_from(value.tm_min).ok()?,
+        u8::try_from(value.tm_sec).ok()?,
+    )
+    .ok()?;
+    Some(time::PrimitiveDateTime::new(date, time))
+}
+
+pub(crate) fn pane_custom_command_pty_builder(command: &str) -> portable_pty::CommandBuilder {
+    portable_pty::CommandBuilder::from_argv(raw_command_argv(command, "-c"))
+}
+
+pub(crate) fn scrollback_editor_argv(path: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let quoted_path = shell_quote(&path.display().to_string());
+    let command = format!(
+        r#"scrollback_file={quoted_path}; eval "${{EDITOR:-vi}} \"\$scrollback_file\""; status=$?; rm -f "$scrollback_file"; exit $status"#
+    );
+    Ok(vec!["/bin/sh".to_string(), "-c".to_string(), command])
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '@' | '%' | '_' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
+                )
+        })
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
 
 pub fn detach_server_daemon_command(command: &mut Command) {
     use std::os::unix::process::CommandExt;
@@ -244,50 +522,43 @@ fn foreground_job_with(
 }
 
 fn foreground_job_for_group(tpgid: u32) -> Option<ForegroundJob> {
-    let mut processes = Vec::new();
-
-    for entry in std::fs::read_dir("/proc").ok()? {
-        // Skip a transient bad entry (a pid dir vanishing mid-scan, or a non-UTF8 name) instead of
-        // aborting the whole scan — one error must not collapse foreground detection to None.
-        let Ok(entry) = entry else { continue };
-        let file_name = entry.file_name();
-        let Some(pid_str) = file_name.to_str() else {
-            continue;
-        };
-        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-
-        let pid: u32 = match pid_str.parse() {
-            Ok(pid) => pid,
-            Err(_) => continue,
-        };
-
-        let Some((pgrp, name)) = process_pgrp_and_comm(pid) else {
-            continue;
-        };
-        if pgrp as u32 != tpgid {
-            continue;
-        }
-
-        let argv = process_argv(pid);
-        processes.push(ForegroundProcess {
-            pid,
-            name,
-            argv0: None,
-            cmdline: argv.as_ref().map(|parts| parts.join(" ")),
-            argv,
-        });
-    }
-
-    if processes.is_empty() {
-        return None;
-    }
+    let members = foreground_process_group_members(tpgid)?;
+    let processes = members
+        .into_iter()
+        .map(|member| {
+            let argv = process_argv(member.pid);
+            ForegroundProcess {
+                pid: member.pid,
+                name: member.comm,
+                argv0: None,
+                cmdline: argv.as_ref().map(|parts| parts.join(" ")),
+                argv,
+            }
+        })
+        .collect();
 
     Some(ForegroundJob {
         process_group_id: tpgid,
         processes,
     })
+}
+
+fn foreground_process_group_members(process_group_id: u32) -> Option<Vec<ProcGroupMember>> {
+    let mut cache = FOREGROUND_MEMBERS_CACHE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    cache.members(
+        process_group_id,
+        Instant::now(),
+        FOREGROUND_MEMBERS_CACHE_TTL,
+        build_foreground_members_by_group,
+        live_process_group_member,
+    )
+}
+
+fn live_process_group_member(process_group_id: u32, pid: u32) -> Option<ProcGroupMember> {
+    let (pgrp, comm) = process_pgrp_and_comm(pid)?;
+    (pgrp > 0 && pgrp as u32 == process_group_id).then_some(ProcGroupMember { pid, comm })
 }
 
 /// Best effort only: without the native terminal signal, a background job can
@@ -409,12 +680,97 @@ pub fn foreground_process_group_id_for_tty_fd(fd: RawFd) -> Option<u32> {
 
 fn process_pgrp_and_comm(pid: u32) -> Option<(i32, String)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    process_pgrp_and_comm_from_stat(&stat)
+}
+
+fn process_pgrp_and_comm_from_stat(stat: &str) -> Option<(i32, String)> {
     let close = stat.rfind(')')?;
     let comm = stat.get(1 + stat.find('(')?..close)?.to_string();
     let rest = stat.get(close + 2..)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     let pgrp: i32 = fields.get(2)?.parse().ok()?;
     Some((pgrp, comm))
+}
+
+fn build_foreground_members_by_group() -> ForegroundMembersByGroup {
+    let entries = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let file_name = entry.file_name();
+            let pid_str = file_name.to_str()?;
+            if !pid_str.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let pid = pid_str.parse::<u32>().ok()?;
+            let (pgrp, comm) = process_pgrp_and_comm(pid)?;
+            Some(ProcStatEntry { pid, pgrp, comm })
+        });
+    foreground_members_by_group_from_entries(entries)
+}
+
+fn foreground_members_by_group_from_entries(
+    entries: impl IntoIterator<Item = ProcStatEntry>,
+) -> ForegroundMembersByGroup {
+    let mut by_group = ForegroundMembersByGroup::default();
+    for entry in entries {
+        if entry.pgrp <= 0 {
+            continue;
+        }
+        by_group
+            .entry(entry.pgrp as u32)
+            .or_default()
+            .push(ProcGroupMember {
+                pid: entry.pid,
+                comm: entry.comm,
+            });
+    }
+    by_group
+}
+
+impl ForegroundMembersCache {
+    fn members(
+        &mut self,
+        process_group_id: u32,
+        now: Instant,
+        max_age: Duration,
+        build: impl FnOnce() -> ForegroundMembersByGroup,
+        mut validate: impl FnMut(u32, u32) -> Option<ProcGroupMember>,
+    ) -> Option<Vec<ProcGroupMember>> {
+        if let Some(cached) = &self.cached {
+            if now.duration_since(cached.built_at) < max_age {
+                if let Some(members) = cached.by_group.get(&process_group_id) {
+                    let live = members
+                        .iter()
+                        .filter_map(|member| validate(process_group_id, member.pid))
+                        .collect::<Vec<_>>();
+                    if !live.is_empty() {
+                        return Some(live);
+                    }
+                }
+                return self.refresh_and_get(process_group_id, now, build);
+            }
+        }
+        self.refresh_and_get(process_group_id, now, build)
+    }
+
+    fn refresh_and_get(
+        &mut self,
+        process_group_id: u32,
+        now: Instant,
+        build: impl FnOnce() -> ForegroundMembersByGroup,
+    ) -> Option<Vec<ProcGroupMember>> {
+        self.cached = Some(CachedForegroundMembers {
+            built_at: now,
+            by_group: build(),
+        });
+        self.cached
+            .as_ref()?
+            .by_group
+            .get(&process_group_id)
+            .cloned()
+    }
 }
 
 fn process_argv(pid: u32) -> Option<Vec<String>> {
@@ -1169,7 +1525,148 @@ mod tests {
     }
 
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
+
+    fn b3_proc_entry(pid: u32, pgrp: i32, comm: &str) -> ProcStatEntry {
+        ProcStatEntry {
+            pid,
+            pgrp,
+            comm: comm.to_string(),
+        }
+    }
+
+    fn b3_foreground_members(groups: &[(u32, &str, i32)]) -> ForegroundMembersByGroup {
+        foreground_members_by_group_from_entries(
+            groups
+                .iter()
+                .map(|(pid, comm, pgrp)| b3_proc_entry(*pid, *pgrp, comm)),
+        )
+    }
+
+    fn b3_validate_from<'a>(
+        groups: &'a [(u32, &'a str, i32)],
+    ) -> impl FnMut(u32, u32) -> Option<ProcGroupMember> + 'a {
+        move |process_group_id, pid| {
+            groups.iter().find_map(|(member_pid, comm, pgrp)| {
+                (*member_pid == pid && *pgrp > 0 && *pgrp as u32 == process_group_id).then(|| {
+                    ProcGroupMember {
+                        pid,
+                        comm: (*comm).to_string(),
+                    }
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn b3_linux_command_argv_preserves_shell_contracts() {
+        let detached = crate::platform::detached_custom_command_process("echo hello");
+        assert_eq!(detached.get_program(), std::ffi::OsStr::new("/bin/sh"));
+        assert_eq!(
+            detached.get_args().collect::<Vec<_>>(),
+            [
+                std::ffi::OsStr::new("-lc"),
+                std::ffi::OsStr::new("echo hello")
+            ]
+        );
+
+        let pane: Vec<std::ffi::OsString> =
+            vec!["/bin/sh".into(), "-c".into(), "echo hello".into()];
+        assert_eq!(
+            crate::platform::pane_custom_command_pty_builder("echo hello").get_argv(),
+            &pane
+        );
+
+        let path = std::path::Path::new("/tmp/zynk scrollback.txt");
+        let editor = scrollback_editor_argv(path).expect("Linux editor argv");
+        assert_eq!(&editor[..2], ["/bin/sh", "-c"]);
+        assert!(editor[2].contains("EDITOR:-vi"));
+        assert!(editor[2].contains("/tmp/zynk scrollback.txt"));
+    }
+
+    #[test]
+    fn b3_remote_linux_paths_and_argv_are_bounded_and_quoted() {
+        let error = create_remote_ssh_config_dir(&"x".repeat(200)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(remote_reattach_program(""), "zynk");
+        assert_eq!(remote_reattach_program("/tmp/zynk dev"), "'/tmp/zynk dev'");
+        assert_eq!(remote_reattach_argument("host name"), "'host name'");
+
+        let endpoint =
+            remote_bridge_endpoint_path(&format!("{}.sock", "r".repeat(200)), "zynk-r-short.sock");
+        assert!(endpoint.ends_with("zynk-r-short.sock"));
+    }
+
+    #[test]
+    fn b3_foreground_members_cache_reuses_live_members_inside_ttl() {
+        let mut cache = ForegroundMembersCache::default();
+        let now = std::time::Instant::now();
+        let builds = AtomicUsize::new(0);
+
+        let first = cache.members(
+            10,
+            now,
+            FOREGROUND_MEMBERS_CACHE_TTL,
+            || {
+                builds.fetch_add(1, Ordering::Relaxed);
+                b3_foreground_members(&[(10, "shell", 10)])
+            },
+            b3_validate_from(&[(10, "shell", 10)]),
+        );
+        let second = cache.members(
+            10,
+            now + std::time::Duration::from_millis(100),
+            FOREGROUND_MEMBERS_CACHE_TTL,
+            || {
+                builds.fetch_add(1, Ordering::Relaxed);
+                b3_foreground_members(&[(20, "new", 20)])
+            },
+            b3_validate_from(&[(10, "shell-live", 10)]),
+        );
+
+        assert_eq!(first.expect("first member")[0].comm, "shell");
+        assert_eq!(second.expect("validated member")[0].comm, "shell-live");
+        assert_eq!(builds.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn b3_foreground_members_cache_refreshes_stale_pid_membership() {
+        let mut cache = ForegroundMembersCache::default();
+        let now = std::time::Instant::now();
+        let builds = AtomicUsize::new(0);
+        let _ = cache.members(
+            42,
+            now,
+            FOREGROUND_MEMBERS_CACHE_TTL,
+            || {
+                builds.fetch_add(1, Ordering::Relaxed);
+                b3_foreground_members(&[(10, "old", 42)])
+            },
+            b3_validate_from(&[(10, "old", 42)]),
+        );
+
+        let refreshed = cache.members(
+            42,
+            now + std::time::Duration::from_millis(10),
+            FOREGROUND_MEMBERS_CACHE_TTL,
+            || {
+                builds.fetch_add(1, Ordering::Relaxed);
+                b3_foreground_members(&[(20, "new", 42)])
+            },
+            b3_validate_from(&[(10, "old", 7), (20, "new", 42)]),
+        );
+
+        assert_eq!(refreshed.expect("refreshed member")[0].comm, "new");
+        assert_eq!(builds.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn b3_wsl_markers_drive_linux_host_policy_inputs() {
+        assert!(text_indicates_wsl("5.15.167.4-microsoft-standard-WSL2"));
+        assert!(text_indicates_wsl("4.4.0-19041-Microsoft"));
+        assert!(!text_indicates_wsl("6.8.0-64-generic"));
+    }
 
     struct ImageFileFixture(std::path::PathBuf);
 
