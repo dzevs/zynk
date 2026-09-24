@@ -391,9 +391,14 @@ impl DeferredAltScreenRequests {
     fn restore_terminal_queue(
         &mut self,
         terminal_id: crate::terminal::TerminalId,
-        queue: VecDeque<DeferredAltScreenItem>,
+        mut queue: VecDeque<DeferredAltScreenItem>,
     ) {
-        if !queue.is_empty() {
+        if queue.is_empty() {
+            return;
+        }
+        if let Some(existing) = self.terminal_queues.get_mut(&terminal_id) {
+            existing.append(&mut queue);
+        } else {
             self.terminal_queues.insert(terminal_id, queue);
         }
     }
@@ -499,6 +504,8 @@ pub struct HeadlessServer {
     deferred_alt_screen_reads: DeferredAltScreenRequests,
     #[cfg(test)]
     alt_screen_target_resolution_count: std::cell::Cell<usize>,
+    #[cfg(test)]
+    test_live_handoff_results: VecDeque<Result<(), String>>,
     /// Monotonic activity counter used to pick the most recently active client.
     next_activity_stamp: u64,
     /// Configured virtual terminal size used when no clients are connected.
@@ -645,6 +652,8 @@ impl HeadlessServer {
             deferred_alt_screen_reads: DeferredAltScreenRequests::default(),
             #[cfg(test)]
             alt_screen_target_resolution_count: std::cell::Cell::new(0),
+            #[cfg(test)]
+            test_live_handoff_results: VecDeque::new(),
             next_activity_stamp: 1,
             headless_size,
             effective_size: headless_size,
@@ -1323,6 +1332,10 @@ impl HeadlessServer {
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(result) = self.test_live_handoff_results.pop_front() {
+            return result.map_err(io::Error::other);
+        }
         info!("starting live handoff");
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         let socket_path = crate::server::handoff::handoff_socket_path();
@@ -3721,7 +3734,16 @@ impl HeadlessServer {
             .cloned()
     }
 
+    #[cfg(test)]
     fn alt_screen_read_conflict(&self, request: &api::schema::Request) -> AltScreenReadConflict {
+        self.alt_screen_read_conflict_with_release_context(request, None)
+    }
+
+    fn alt_screen_read_conflict_with_release_context(
+        &self,
+        request: &api::schema::Request,
+        released_terminal_id: Option<&crate::terminal::TerminalId>,
+    ) -> AltScreenReadConflict {
         let input_target = match &request.method {
             api::schema::Method::PaneSendInput(params) => Some(params.pane_id.as_str()),
             api::schema::Method::PaneSendKeys(params) => Some(params.pane_id.as_str()),
@@ -3733,16 +3755,22 @@ impl HeadlessServer {
             _ => None,
         };
         if let Some(input_target) = input_target {
-            let Some(target_terminal_id) = self.resolve_alt_screen_terminal_id(input_target) else {
+            let Some(target_terminal_id) = released_terminal_id
+                .cloned()
+                .or_else(|| self.resolve_alt_screen_terminal_id(input_target))
+            else {
                 return AltScreenReadConflict::None;
             };
-            return if self
+            let traversal_pending = self
                 .pending_alt_screen_reads
                 .iter()
-                .any(|pending| pending.terminal_id == target_terminal_id)
-                || self
-                    .deferred_alt_screen_reads
-                    .terminal_is_blocked_by_handoff(&target_terminal_id)
+                .any(|pending| pending.terminal_id == target_terminal_id);
+            let released_before_barrier = released_terminal_id == Some(&target_terminal_id);
+            return if traversal_pending
+                || (!released_before_barrier
+                    && self
+                        .deferred_alt_screen_reads
+                        .terminal_is_blocked_by_handoff(&target_terminal_id))
             {
                 AltScreenReadConflict::DeferTerminal(target_terminal_id)
             } else {
@@ -3762,13 +3790,17 @@ impl HeadlessServer {
 
         let (target, source, lines, format) = match &request.method {
             api::schema::Method::AgentRead(params) => (
-                self.resolve_alt_screen_terminal_id(&params.target),
+                released_terminal_id
+                    .cloned()
+                    .or_else(|| self.resolve_alt_screen_terminal_id(&params.target)),
                 params.source,
                 params.lines,
                 params.format,
             ),
             api::schema::Method::PaneRead(params) => (
-                self.resolve_alt_screen_terminal_id(&params.pane_id),
+                released_terminal_id
+                    .cloned()
+                    .or_else(|| self.resolve_alt_screen_terminal_id(&params.pane_id)),
                 params.source,
                 params.lines,
                 params.format,
@@ -3778,9 +3810,10 @@ impl HeadlessServer {
         let Some(target) = target else {
             return AltScreenReadConflict::None;
         };
-        if self
-            .deferred_alt_screen_reads
-            .terminal_is_blocked_by_handoff(&target)
+        if released_terminal_id != Some(&target)
+            && self
+                .deferred_alt_screen_reads
+                .terminal_is_blocked_by_handoff(&target)
         {
             return AltScreenReadConflict::DeferTerminal(target);
         }
@@ -3844,15 +3877,30 @@ impl HeadlessServer {
         &mut self,
         terminal_ids: impl IntoIterator<Item = crate::terminal::TerminalId>,
     ) -> bool {
-        self.release_deferred_alt_screen_terminals_with(terminal_ids, |server, message| {
-            server.handle_api_request_with_shutdown_check(message)
-        })
+        self.release_deferred_alt_screen_terminals_with(
+            terminal_ids,
+            |server, released_terminal_id, message| {
+                if let Some(released_terminal_id) = released_terminal_id {
+                    server.handle_api_request_with_shutdown_check_inner_with_release_context(
+                        message,
+                        false,
+                        Some(released_terminal_id),
+                    )
+                } else {
+                    server.handle_api_request_with_shutdown_check(message)
+                }
+            },
+        )
     }
 
     fn release_deferred_alt_screen_terminals_with(
         &mut self,
         terminal_ids: impl IntoIterator<Item = crate::terminal::TerminalId>,
-        mut dispatch: impl FnMut(&mut Self, api::ApiRequestMessage) -> bool,
+        mut dispatch: impl FnMut(
+            &mut Self,
+            Option<&crate::terminal::TerminalId>,
+            api::ApiRequestMessage,
+        ) -> bool,
     ) -> bool {
         let mut pending_terminals = VecDeque::new();
         let mut scheduled_terminals = HashSet::new();
@@ -3877,9 +3925,26 @@ impl HeadlessServer {
                 while let Some(item) = queue.pop_front() {
                     match item {
                         DeferredAltScreenItem::Request(message) => {
-                            changed |= dispatch(self, *message);
+                            if self
+                                .pending_alt_screen_reads
+                                .iter()
+                                .any(|pending| pending.terminal_id == terminal_id)
+                            {
+                                retained.push_back(DeferredAltScreenItem::Request(message));
+                                retained.extend(queue);
+                                break;
+                            }
+                            changed |= dispatch(self, Some(&terminal_id), *message);
                             if self.shutting_down {
                                 return changed;
+                            }
+                            if self
+                                .pending_alt_screen_reads
+                                .iter()
+                                .any(|pending| pending.terminal_id == terminal_id)
+                            {
+                                retained.extend(queue);
+                                break;
                             }
                         }
                         DeferredAltScreenItem::HandoffBarrier(handoff_id) => {
@@ -3900,7 +3965,7 @@ impl HeadlessServer {
                 break;
             };
             let affected_terminals = handoff.terminals;
-            changed |= dispatch(self, handoff.message);
+            changed |= dispatch(self, None, handoff.message);
             if self.shutting_down {
                 return changed;
             }
@@ -3995,6 +4060,19 @@ impl HeadlessServer {
         msg: api::ApiRequestMessage,
         skip_default_workspace_for_request: bool,
     ) -> bool {
+        self.handle_api_request_with_shutdown_check_inner_with_release_context(
+            msg,
+            skip_default_workspace_for_request,
+            None,
+        )
+    }
+
+    fn handle_api_request_with_shutdown_check_inner_with_release_context(
+        &mut self,
+        msg: api::ApiRequestMessage,
+        skip_default_workspace_for_request: bool,
+        released_terminal_id: Option<&crate::terminal::TerminalId>,
+    ) -> bool {
         // Socket-side stop preflights do not cover an item already dequeued by
         // this loop, so the shared atomic is part of this final admission.
         if self.shutting_down || self.should_quit.load(Ordering::Acquire) {
@@ -4002,7 +4080,9 @@ impl HeadlessServer {
             return false;
         }
 
-        let frozen_alt_screen_read = match self.alt_screen_read_conflict(&msg.request) {
+        let frozen_alt_screen_read = match self
+            .alt_screen_read_conflict_with_release_context(&msg.request, released_terminal_id)
+        {
             AltScreenReadConflict::None => None,
             AltScreenReadConflict::Frozen(snapshot) => Some(snapshot),
             AltScreenReadConflict::DeferTerminal(terminal_id) => {
@@ -7215,6 +7295,7 @@ mod tests {
             pending_alt_screen_reads: Vec::new(),
             deferred_alt_screen_reads: DeferredAltScreenRequests::default(),
             alt_screen_target_resolution_count: std::cell::Cell::new(0),
+            test_live_handoff_results: VecDeque::new(),
             next_activity_stamp: 1,
             headless_size,
             effective_size: headless_size,
@@ -9884,7 +9965,7 @@ next_tab = ""
                 let mut dispatched = 0usize;
                 assert!(!server.release_deferred_alt_screen_terminals_with(
                     [terminal_id],
-                    |_, _| {
+                    |_, _, _| {
                         dispatched += 1;
                         false
                     }
@@ -9910,6 +9991,42 @@ next_tab = ""
                 (15, BACKLOG, BACKLOG, 0, BACKLOG, 1, true),
             ]
         );
+    }
+
+    #[test]
+    fn mfinal_deferred_alt_screen_queue_restore_merges_without_overwrite() {
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let mut deferred = DeferredAltScreenRequests::default();
+        let (first, _first_response_rx) = test_api_message(
+            "first",
+            api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                pane_id: "w1:p1".into(),
+                text: "first".into(),
+                keys: Vec::new(),
+            }),
+        );
+        deferred.defer_request(terminal_id.clone(), first);
+        let (second, _second_response_rx) = test_api_message(
+            "second",
+            api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                pane_id: "w1:p1".into(),
+                text: "second".into(),
+                keys: Vec::new(),
+            }),
+        );
+        let mut retained = VecDeque::new();
+        retained.push_back(DeferredAltScreenItem::Request(Box::new(second)));
+
+        deferred.restore_terminal_queue(terminal_id.clone(), retained);
+
+        let ids = deferred.terminal_queues[&terminal_id]
+            .iter()
+            .filter_map(|item| match item {
+                DeferredAltScreenItem::Request(message) => Some(message.request.id.as_str()),
+                DeferredAltScreenItem::HandoffBarrier(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["first", "second"]);
     }
 
     #[test]
@@ -10232,6 +10349,216 @@ next_tab = ""
     }
 
     #[test]
+    fn mfinal_alt_screen_read_real_dispatch_runs_pre_handoff_input_before_shutdown() {
+        with_terminal_session_test_server(|server, terminal_id, _, pane_id| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
+            server
+                .pending_alt_screen_reads
+                .push(test_pending_alt_screen_read(server, terminal_id.clone()));
+
+            let (before, before_response_rx) = test_api_message(
+                "before-handoff",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id: pane_id.clone(),
+                    text: "before".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            let (handoff, handoff_response_rx) = test_api_message(
+                "handoff",
+                api::schema::Method::ServerLiveHandoff(Default::default()),
+            );
+            let (after, after_response_rx) = test_api_message(
+                "after-handoff",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id,
+                    text: "after".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            server.handle_api_request_with_shutdown_check(before);
+            server.handle_api_request_with_shutdown_check(handoff);
+            server.handle_api_request_with_shutdown_check(after);
+
+            server.pending_alt_screen_reads.clear();
+            server.test_live_handoff_results.push_back(Ok(()));
+            assert!(server.release_deferred_alt_screen_terminals([terminal_id]));
+
+            assert_eq!(
+                input_rx.try_recv().expect("pre-handoff input").as_ref(),
+                b"before"
+            );
+            assert!(matches!(
+                input_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            let before_response = before_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("pre-handoff response");
+            assert!(serde_json::from_str::<api::schema::SuccessResponse>(&before_response).is_ok());
+            let handoff_response = handoff_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("handoff response");
+            assert!(
+                serde_json::from_str::<api::schema::SuccessResponse>(&handoff_response).is_ok()
+            );
+            let after_response = after_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("post-handoff response");
+            let error: api::schema::ErrorResponse =
+                serde_json::from_str(&after_response).expect("server stopping response");
+            assert_eq!(error.error.code, "server_unavailable");
+            assert!(server.deferred_alt_screen_reads.is_empty());
+        });
+    }
+
+    #[test]
+    fn mfinal_alt_screen_read_real_dispatch_preserves_pre_handoff_input_without_suffix() {
+        with_terminal_session_test_server(|server, terminal_id, _, pane_id| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
+            server
+                .pending_alt_screen_reads
+                .push(test_pending_alt_screen_read(server, terminal_id.clone()));
+
+            let (before, before_response_rx) = test_api_message(
+                "before-handoff",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id,
+                    text: "before".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            let (handoff, handoff_response_rx) = test_api_message(
+                "handoff",
+                api::schema::Method::ServerLiveHandoff(Default::default()),
+            );
+            server.handle_api_request_with_shutdown_check(before);
+            server.handle_api_request_with_shutdown_check(handoff);
+
+            server.pending_alt_screen_reads.clear();
+            server.test_live_handoff_results.push_back(Ok(()));
+            assert!(server.release_deferred_alt_screen_terminals([terminal_id]));
+
+            assert_eq!(
+                input_rx.try_recv().expect("pre-handoff input").as_ref(),
+                b"before"
+            );
+            let before_response = before_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("pre-handoff response");
+            assert!(serde_json::from_str::<api::schema::SuccessResponse>(&before_response).is_ok());
+            let handoff_response = handoff_response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("handoff response");
+            assert!(
+                serde_json::from_str::<api::schema::SuccessResponse>(&handoff_response).is_ok()
+            );
+            assert!(server.deferred_alt_screen_reads.is_empty());
+        });
+    }
+
+    #[test]
+    fn mfinal_alt_screen_read_real_dispatch_keeps_barrier_behind_new_traversal() {
+        with_terminal_session_test_server(|server, terminal_id, _, pane_id| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 16);
+            runtime.test_process_pty_bytes(b"\x1b[?1049h\x1b[?1000h\x1b[?1006halternate-screen");
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
+            let terminal = server
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal");
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.state = crate::detect::AgentState::Idle;
+            server
+                .pending_alt_screen_reads
+                .push(test_pending_alt_screen_read(server, terminal_id.clone()));
+
+            let (read, read_response_rx) = test_api_message(
+                "read-before-handoff",
+                api::schema::Method::PaneRead(api::schema::PaneReadParams {
+                    pane_id: pane_id.clone(),
+                    source: api::schema::ReadSource::Recent,
+                    lines: Some(120),
+                    format: api::schema::ReadFormat::Text,
+                    strip_ansi: true,
+                    intent: api::schema::ReadIntent::Interactive,
+                }),
+            );
+            let (later, later_response_rx) = test_api_message(
+                "later-before-handoff",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id,
+                    text: "later".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            server
+                .deferred_alt_screen_reads
+                .defer_request(terminal_id.clone(), read);
+            server
+                .deferred_alt_screen_reads
+                .defer_request(terminal_id.clone(), later);
+            let (handoff, handoff_response_rx) = test_api_message(
+                "handoff",
+                api::schema::Method::ServerLiveHandoff(Default::default()),
+            );
+            server.handle_api_request_with_shutdown_check(handoff);
+
+            server.pending_alt_screen_reads.clear();
+            server.test_live_handoff_results.push_back(Ok(()));
+            let _ = server.release_deferred_alt_screen_terminals([terminal_id.clone()]);
+
+            assert_eq!(server.pending_alt_screen_reads.len(), 1);
+            assert!(matches!(
+                read_response_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                later_response_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                handoff_response_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            while let Ok(bytes) = input_rx.try_recv() {
+                assert_ne!(bytes.as_ref(), b"later");
+            }
+            let queue = server
+                .deferred_alt_screen_reads
+                .terminal_queues
+                .get(&terminal_id)
+                .expect("queue retained behind new traversal");
+            assert!(matches!(
+                queue.front(),
+                Some(DeferredAltScreenItem::Request(message))
+                    if message.request.id == "later-before-handoff"
+            ));
+            assert!(matches!(
+                queue.back(),
+                Some(DeferredAltScreenItem::HandoffBarrier(_))
+            ));
+            assert_eq!(server.deferred_alt_screen_reads.handoffs.len(), 1);
+        });
+    }
+
+    #[test]
     fn mfinal_alt_screen_read_keeps_handoff_order_without_blocking_other_terminals() {
         with_terminal_session_test_server(|server, first_terminal_id, _, first_pane_id| {
             let second_pane =
@@ -10312,7 +10639,7 @@ next_tab = ""
             let mut dispatch_order = Vec::new();
             server.release_deferred_alt_screen_terminals_with(
                 [first_terminal_id],
-                |server, msg| {
+                |server, _, msg| {
                     dispatch_order.push(msg.request.id.clone());
                     if matches!(
                         msg.request.method,
@@ -10479,7 +10806,7 @@ next_tab = ""
             let mut order = Vec::new();
             assert!(server.release_deferred_alt_screen_terminals_with(
                 [first_terminal],
-                |_, message| {
+                |_, _, message| {
                     order.push(message.request.id.clone());
                     let response = serde_json::to_string(&api::schema::SuccessResponse {
                         id: message.request.id,
@@ -10502,6 +10829,12 @@ next_tab = ""
     #[test]
     fn mfinal_alt_screen_read_failed_handoffs_resume_fifo_in_barrier_order() {
         with_terminal_session_test_server(|server, terminal_id, _, pane_id| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
             server
                 .pending_alt_screen_reads
                 .push(test_pending_alt_screen_read(server, terminal_id.clone()));
@@ -10531,22 +10864,39 @@ next_tab = ""
                     }),
                 ),
             ];
+            let mut responses = Vec::new();
             for (id, method) in methods {
-                let (message, _response_rx) = test_api_message(id, method);
+                let (message, response_rx) = test_api_message(id, method);
                 server.handle_api_request_with_shutdown_check(message);
+                responses.push((id, response_rx));
             }
 
             server.pending_alt_screen_reads.clear();
-            let mut order = Vec::new();
-            assert!(!server.release_deferred_alt_screen_terminals_with(
-                [terminal_id],
-                |_, message| {
-                    order.push(message.request.id);
-                    false
-                }
-            ));
+            server.test_live_handoff_results.extend([
+                Err("first handoff rejected".into()),
+                Err("second handoff rejected".into()),
+            ]);
+            assert!(server.release_deferred_alt_screen_terminals([terminal_id]));
 
-            assert_eq!(order, ["handoff-one", "between", "handoff-two", "after"]);
+            assert_eq!(
+                input_rx.try_recv().expect("between input").as_ref(),
+                b"between"
+            );
+            assert_eq!(input_rx.try_recv().expect("after input").as_ref(), b"after");
+            for (id, response_rx) in responses {
+                let response = response_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("deferred response");
+                if id.starts_with("handoff") {
+                    let error: api::schema::ErrorResponse =
+                        serde_json::from_str(&response).expect("handoff failure response");
+                    assert_eq!(error.error.code, "handoff_failed");
+                } else {
+                    assert!(
+                        serde_json::from_str::<api::schema::SuccessResponse>(&response).is_ok()
+                    );
+                }
+            }
             assert!(server.deferred_alt_screen_reads.is_empty());
         });
     }

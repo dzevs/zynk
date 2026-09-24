@@ -7742,3 +7742,22 @@ the operator-accepted F4 and `N22B` fixture risks; no approval or evidence trans
 This correction is **IMPLEMENTED / PENDING VERIFICATION** until its four final-byte mutation probes, restored
 focused controls, isolated lint/UI/release/FULL/check/gate chain, fresh exact-SHA packet, successor Gate-2, and
 successor Gate-3 complete.
+
+Successor-2 delta Gate-2 then found `MFINAL-ALT-QUEUE-003`: when a captured terminal's queue contained input
+before a handoff barrier, release sent that input back through ordinary admission while the barrier count was
+still active. The request could be re-enqueued into a fresh bucket that queue restoration then replaced, or it
+could survive only to be rejected after a successful handoff. Release now carries the already-resolved terminal
+identity into admission and bypasses only that terminal's pending handoff barrier for items that precede it.
+A genuinely new traversal still stops the drain before the next item, and queue restoration merges any
+re-deferred item ahead of the untouched suffix instead of overwriting either collection. The barrier is not
+marked reached until every earlier item has dispatched.
+
+Real-handler controls cover a pre-handoff input with and without a post-handoff suffix, a released read that
+starts another traversal before later pre-barrier work, failed handoffs resuming their suffix in FIFO order,
+terminal disappearance, unrelated-terminal and `pane.input.set` immediacy, timeout release, and total shutdown
+rejection. Recording-closure coverage remains only for deterministic work-count accounting and isolated
+ordering observation; every externally visible C2 contract clause also has a real dispatch-path control. The
+fifth final-byte mutation restores ordinary barrier admission for a released pre-barrier item and must stop at
+the three-item handoff control. This follow-up remains **IMPLEMENTED / PENDING VERIFICATION** until those
+controls, all five final-byte mutation probes, a fresh exact chain and packet, successor Gate-2, and successor
+Gate-3 complete.
