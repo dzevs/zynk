@@ -7610,3 +7610,46 @@ whether the listener remained bound. Its single approved focused invocation pass
 does not relabel the unexplained FULL observation. Carry `N22B` therefore remains OPEN beside the M8-39
 persist-lock observations and the fork-owned three-second CLI fixture-bound carry for explicit operator risk
 disposition before Gate-3. No production timeout, readiness rule, selector, or dispatch behavior changed.
+
+#### M-FINAL persistence lifecycle correction and operator risk decisions
+
+The M8-39 prompt-family `delivery_event_persist_failed` carry has a production root cause in the synchronous
+CLI persistence wrappers. SQLx 0.8.6 gives each SQLite connection a background worker: dropping the handle
+signals shutdown but does not wait for that worker to close SQLite. Zynk re-enables checkpoint-on-close after
+every successful database open, so `begin_send_attempt` could return before its worker finished the final
+close while `append_delivery_event` opened the same database and began its immediate transaction. The
+exposure is narrow: SQLite performs that close-time checkpoint only for the last open connection. A normal
+live server keeps its App-owned receipt and embedding worker connections open; the demonstrated exposure is
+a CLI operating without those workers, including the mock-responder controls where the CLI is the only
+database user. The 3.005-second reproduced stop is consistent with the old close-time checkpoint and the new
+`BEGIN IMMEDIATE` mutually waiting until the two-second SQLite busy timeout expires; that mechanism is an
+evidence-consistent reading, not a directly observed lock-owner trace.
+
+`begin_send_attempt`, `resolve_parent_trace_id`, and `append_delivery_event` now await explicit connection
+close before their synchronous wrapper returns. A successful operation surfaces a close error; a failed
+operation waits for closure while preserving its original error. This makes the CLI's own sequence
+deterministic whether or not another connection is attached, including `--trace inherit` followed by a
+write. No busy timeout, transaction boundary, delivery transition, receipt rule, or public response contract
+changes. The accelerated scratch fixture reproduced SQLite code 5 on the old production bytes at invocation
+55; the explicit-close variant completed 200 of 200 invocations. The original staged-check stop and both
+scratch runs remain retained.
+
+The first mutation probe exposed a coverage limit rather than a discrimination. Removing only the awaited
+close after `begin_send_attempt` survived 300 single-CPU nextest invocations, 120 ordinary nextest
+invocations, and 2,400 direct focused invocations. Replacing the shared close helper with drop-and-return
+survived another 200 direct and 120 nextest invocations. Eight simultaneous helper-fault lanes then stopped
+only at the child watchdog before recording any request, so those overload stops were rejected as harness
+effects rather than counted as fault evidence. The retained behavioral proof is the accelerated old-byte
+code-5 stop against the corrected 200-of-200 run. A deterministic `cfg(test)` completion observer now checks
+that each of the three synchronous wrappers completes exactly one awaited close, including an operation-error
+path that preserves its original error; the observer is absent from non-test builds.
+
+On 2026-09-24 the operator accepted two independent test-fixture risks for Gate-3. The fork-owned F4
+three-second CLI child bound is known to stop intermittently under full-check load; a recurrence is reported
+but does not stop the chain on that shape alone. `N22B`, the one pane-run mock connection stop, is likewise an
+accepted risk with its diagnostic adapter retained; any recurrence carrying the new child/mock diagnostics
+becomes a root-cause item. Neither decision changes production code, fixture bounds, selectors, or test
+membership.
+
+This correction is **IMPLEMENTED / PENDING VERIFICATION** until targeted delivery/receipt controls, the
+accelerated diagnostic, fault probe, lint, FULL, exact-tip check and gate, and reviewer Gate-2 complete.

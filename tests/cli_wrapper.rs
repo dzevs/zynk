@@ -8604,7 +8604,8 @@ fn m839c_prompt_unverified_response_never_claims_submitted_or_waits() {
                 "transport_failed"
             } else {
                 "invalid_response"
-            }
+            },
+            "case={case}; value={value}"
         );
         assert_eq!(
             value["error"]["context"]["transport_effect"],
@@ -8705,7 +8706,10 @@ fn m839c_prompt_precondition_refusal_and_unresolved_transport_stay_distinct() {
     assert_eq!(requests.len(), 4);
     assert_eq!(output.status.code(), Some(1));
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["error"]["code"], "agent_target_changed");
+    assert_eq!(
+        value["error"]["code"], "agent_target_changed",
+        "value={value}"
+    );
     assert_eq!(value["to"], m839_original_party(None));
     assert!(value.get("delivery_status").is_none());
     assert!(value.get("wait").is_none());

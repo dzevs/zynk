@@ -1,6 +1,6 @@
 //! zynk fork: message persistence transactions (ADR 0003).
 
-use sqlx::{Executor, Row, SqliteConnection};
+use sqlx::{Connection, Executor, Row, SqliteConnection};
 
 use crate::zynk::db::DbError;
 use crate::zynk::message::{
@@ -84,9 +84,20 @@ pub fn begin_send_attempt(input: SendAttempt<'_>) -> Result<PersistedSend, DbErr
         let runtime_session_id = crate::zynk::runtime::read_runtime_id()
             .map_err(|msg| DbError::new("runtime_identity_missing", msg))?;
         let socket_namespace = crate::zynk::runtime::socket_namespace();
-        let mut conn = crate::zynk::db::open_migrated_for_append().await?;
-        begin_send_attempt_async(&mut conn, input, runtime_session_id, socket_namespace).await
+        let conn = crate::zynk::db::open_migrated_for_append().await?;
+        begin_send_attempt_with_connection(conn, input, runtime_session_id, socket_namespace).await
     })
+}
+
+async fn begin_send_attempt_with_connection(
+    mut conn: SqliteConnection,
+    input: SendAttempt<'_>,
+    runtime_session_id: String,
+    socket_namespace: String,
+) -> Result<PersistedSend, DbError> {
+    let result =
+        begin_send_attempt_async(&mut conn, input, runtime_session_id, socket_namespace).await;
+    close_connection(conn, result).await
 }
 
 pub fn attach_to_outcome(outcome: SendOutcome, record: &PersistedSend) -> SendOutcome {
@@ -119,9 +130,9 @@ pub fn resolve_parent_trace_id(from: &Party, to: &Party) -> Result<Option<String
         let runtime_session_id = crate::zynk::runtime::read_runtime_id()
             .map_err(|msg| DbError::new("runtime_identity_missing", msg))?;
         let socket_namespace = crate::zynk::runtime::socket_namespace();
-        let mut conn = crate::zynk::db::open_query_readonly().await?;
-        parent_trace_id_async(
-            &mut conn,
+        let conn = crate::zynk::db::open_query_readonly().await?;
+        resolve_parent_trace_id_with_connection(
+            conn,
             &runtime_session_id,
             &socket_namespace,
             &workspace_id,
@@ -130,6 +141,26 @@ pub fn resolve_parent_trace_id(from: &Party, to: &Party) -> Result<Option<String
         )
         .await
     })
+}
+
+async fn resolve_parent_trace_id_with_connection(
+    mut conn: SqliteConnection,
+    runtime_session_id: &str,
+    socket_namespace: &str,
+    workspace_id: &str,
+    tab_id: &str,
+    to_label: &str,
+) -> Result<Option<String>, DbError> {
+    let result = parent_trace_id_async(
+        &mut conn,
+        runtime_session_id,
+        socket_namespace,
+        workspace_id,
+        tab_id,
+        to_label,
+    )
+    .await;
+    close_connection(conn, result).await
 }
 
 pub(crate) async fn parent_trace_id_async(
@@ -170,9 +201,42 @@ pub(crate) async fn parent_trace_id_async(
 
 pub fn append_delivery_event(input: DeliveryEventInput<'_>) -> Result<(), DbError> {
     crate::zynk::db::block_on(async move {
-        let mut conn = crate::zynk::db::open_migrated_for_append().await?;
-        append_delivery_event_async(&mut conn, input).await
+        let conn = crate::zynk::db::open_migrated_for_append().await?;
+        append_delivery_event_with_connection(conn, input).await
     })
+}
+
+async fn append_delivery_event_with_connection(
+    mut conn: SqliteConnection,
+    input: DeliveryEventInput<'_>,
+) -> Result<(), DbError> {
+    let result = append_delivery_event_async(&mut conn, input).await;
+    close_connection(conn, result).await
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static COMPLETED_CONNECTION_CLOSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Await SQLx's worker shutdown so its close-time checkpoint cannot overlap the next wrapper call.
+async fn close_connection<T>(
+    conn: SqliteConnection,
+    operation: Result<T, DbError>,
+) -> Result<T, DbError> {
+    let close = conn.close().await.map_err(DbError::from);
+    #[cfg(test)]
+    COMPLETED_CONNECTION_CLOSES.with(|count| count.set(count.get() + 1));
+    match operation {
+        Ok(value) => {
+            close?;
+            Ok(value)
+        }
+        Err(err) => {
+            let _ = close;
+            Err(err)
+        }
+    }
 }
 
 pub(crate) async fn begin_send_attempt_async(
@@ -658,6 +722,104 @@ mod tests {
             std::process::id(),
             new_prefixed_id("test")
         ))
+    }
+
+    fn reset_completed_connection_closes() {
+        COMPLETED_CONNECTION_CLOSES.with(|count| count.set(0));
+    }
+
+    fn completed_connection_closes() -> usize {
+        COMPLETED_CONNECTION_CLOSES.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn synchronous_persistence_wrappers_complete_one_close_per_call() {
+        crate::zynk::db::block_on(async {
+            let path = temp_db_path();
+            let from = Party {
+                agent: Some("alice".into()),
+                workspace: Some("workspace".into()),
+                tab: Some("tab".into()),
+                ..Party::default()
+            };
+            let to = Party {
+                agent: Some("bob".into()),
+                workspace: Some("workspace".into()),
+                tab: Some("tab".into()),
+                ..Party::default()
+            };
+
+            reset_completed_connection_closes();
+            let conn = crate::zynk::db::open_migrated_at_without_recovery(&path).await?;
+            let record = begin_send_attempt_with_connection(
+                conn,
+                SendAttempt {
+                    command: SendCommand::AgentPrompt,
+                    message_id: "msg_close_observer",
+                    target_arg: "bob",
+                    from: &from,
+                    to: &to,
+                    message_type: None,
+                    body: "body",
+                    created_at: "2026-09-24T00:00:00Z",
+                    trace_id: None,
+                },
+                "rt_close_observer".into(),
+                "socket_close_observer".into(),
+            )
+            .await?;
+            assert_eq!(completed_connection_closes(), 1, "begin_send_attempt");
+
+            reset_completed_connection_closes();
+            let conn = crate::zynk::db::open_query_readonly_at(&path).await?;
+            let trace = resolve_parent_trace_id_with_connection(
+                conn,
+                "rt_close_observer",
+                "socket_close_observer",
+                "workspace",
+                "tab",
+                "alice",
+            )
+            .await?;
+            assert_eq!(trace, None);
+            assert_eq!(completed_connection_closes(), 1, "resolve_parent_trace_id");
+
+            reset_completed_connection_closes();
+            let conn = crate::zynk::db::open_migrated_at_without_recovery(&path).await?;
+            append_delivery_event_with_connection(
+                conn,
+                DeliveryEventInput {
+                    message_id: &record.message_id,
+                    event_type: DeliveryEventType::Submitted,
+                    proof_source: "agent.prompt",
+                    timestamp: "2026-09-24T00:00:01Z",
+                    payload: serde_json::json!({}),
+                },
+            )
+            .await?;
+            assert_eq!(completed_connection_closes(), 1, "append_delivery_event");
+
+            reset_completed_connection_closes();
+            let conn = crate::zynk::db::open_migrated_at_without_recovery(&path).await?;
+            let error = append_delivery_event_with_connection(
+                conn,
+                DeliveryEventInput {
+                    message_id: &record.message_id,
+                    event_type: DeliveryEventType::Submitted,
+                    proof_source: "agent.prompt",
+                    timestamp: "2026-09-24T00:00:02Z",
+                    payload: serde_json::json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, "invalid_delivery_transition");
+            assert_eq!(completed_connection_closes(), 1, "error path");
+
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        })
+        .unwrap();
     }
 
     async fn create_test_message_between(
