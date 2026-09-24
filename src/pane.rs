@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::io;
 use std::path::Path;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 
@@ -689,12 +689,18 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
     )
 }
 
+fn screen_detection_permitted(detection_paused: bool, process_exited: bool) -> bool {
+    !detection_paused || process_exited
+}
+
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,
     terminal: Arc<PaneTerminal>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
+    screen_detection_pause_count: Arc<AtomicUsize>,
+    screen_detection_pause_notify: Arc<Notify>,
     state_events: DetectionEventSender,
 ) -> (
     tokio::task::AbortHandle,
@@ -753,6 +759,11 @@ fn spawn_basic_detection_task(
                     last_detection_text.clear();
                     last_screen_scan_detection_content_seq = None;
                     agent_startup_grace_until = None;
+                    pending_idle.clear();
+                }
+                _ = screen_detection_pause_notify.notified() => {
+                    last_detection_text.clear();
+                    last_screen_scan_detection_content_seq = None;
                     pending_idle.clear();
                 }
             }
@@ -919,6 +930,14 @@ fn spawn_basic_detection_task(
                 }
             }
 
+            let detection_paused = screen_detection_pause_count.load(Ordering::Acquire) > 0;
+            if !screen_detection_permitted(detection_paused, process_exited) {
+                last_detection_text.clear();
+                last_screen_scan_detection_content_seq = None;
+                pending_idle.clear();
+                continue;
+            }
+
             let current_detection_content_seq = if agent.is_some() {
                 Some(detection_content_seq.load(Ordering::Relaxed))
             } else {
@@ -937,38 +956,52 @@ fn spawn_basic_detection_task(
                 DetectionScreenReadDecision::Skip => continue,
             }
 
-            let content = terminal.detection_text();
-            last_screen_scan_detection_content_seq = current_detection_content_seq;
-            let content_changed = content != last_detection_text;
-            last_detection_text.clone_from(&content);
-            if !process_exited && crate::detect::should_skip_state_update(agent, &content) {
-                pending_idle.clear();
-                continue;
-            }
-            sync_content_change_acquisition(
-                agent_presence.current_agent(),
-                suppressed_agent,
-                process_group_changed,
-                content_changed,
-                now,
-                &mut acquisition_started_at,
-                &mut last_content_change_at,
-            );
+            let screen_detection = if detection_paused {
+                detection_update_for_publish_with_osc(agent, "", None, "", "", true)
+            } else {
+                let content = terminal.detection_text();
+                last_screen_scan_detection_content_seq = current_detection_content_seq;
+                let content_changed = content != last_detection_text;
+                last_detection_text.clone_from(&content);
+                if !process_exited && crate::detect::should_skip_state_update(agent, &content) {
+                    pending_idle.clear();
+                    continue;
+                }
+                sync_content_change_acquisition(
+                    agent_presence.current_agent(),
+                    suppressed_agent,
+                    process_group_changed,
+                    content_changed,
+                    now,
+                    &mut acquisition_started_at,
+                    &mut last_content_change_at,
+                );
 
-            let osc_title = terminal.agent_osc_title();
-            let osc_progress = terminal.agent_osc_progress();
-            let unwrapped_content = terminal.detection_unwrapped_text();
-            let Some(screen_detection) = detection_update_for_publish_with_osc(
-                agent,
-                &content,
-                Some(&unwrapped_content),
-                &osc_title,
-                &osc_progress,
-                process_exited,
-            ) else {
+                let osc_title = terminal.agent_osc_title();
+                let osc_progress = terminal.agent_osc_progress();
+                let unwrapped_content = terminal.detection_unwrapped_text();
+                detection_update_for_publish_with_osc(
+                    agent,
+                    &content,
+                    Some(&unwrapped_content),
+                    &osc_title,
+                    &osc_progress,
+                    process_exited,
+                )
+            };
+            let Some(screen_detection) = screen_detection else {
                 pending_idle.clear();
                 continue;
             };
+            if !screen_detection_permitted(
+                screen_detection_pause_count.load(Ordering::Acquire) > 0,
+                process_exited,
+            ) {
+                last_detection_text.clear();
+                last_screen_scan_detection_content_seq = None;
+                pending_idle.clear();
+                continue;
+            }
             match decide_screen_detection_publish(
                 ScreenDetectionPublishInput {
                     screen_detection,
@@ -1093,6 +1126,8 @@ pub struct PaneRuntime {
     content_seq: Arc<AtomicU64>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
+    screen_detection_pause_count: Arc<AtomicUsize>,
+    screen_detection_pause_notify: Arc<Notify>,
     // A single detector awaits each send, bounding this to queue capacity + one.
     // Entries retire only after AppState has applied that exact observation.
     pending_process_exits: PendingProcessExits,
@@ -1102,6 +1137,29 @@ pub struct PaneRuntime {
     preserve_processes_on_drop: bool,
     // Task handles for deterministic shutdown
     detect_handle: Option<tokio::task::AbortHandle>,
+}
+
+pub(crate) struct ScreenDetectionPauseGuard {
+    count: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+    active: bool,
+}
+
+impl Drop for ScreenDetectionPauseGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if self
+            .count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            })
+            == Ok(1)
+        {
+            self.notify.notify_one();
+        }
+    }
 }
 
 enum PaneRuntimeIo {
@@ -1943,6 +2001,8 @@ impl PaneRuntime {
         };
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let screen_detection_pause_count = Arc::new(AtomicUsize::new(0));
+        let screen_detection_pause_notify = Arc::new(Notify::new());
         let pending_process_exits = Arc::new(Mutex::new(Vec::new()));
         let process_observation = Arc::new(Mutex::new(None));
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
@@ -1951,6 +2011,8 @@ impl PaneRuntime {
             terminal.clone(),
             detection_content_seq.clone(),
             full_lifecycle_authority_active.clone(),
+            screen_detection_pause_count.clone(),
+            screen_detection_pause_notify.clone(),
             DetectionEventSender {
                 sender: events,
                 pending_exits: pending_process_exits.clone(),
@@ -1971,6 +2033,8 @@ impl PaneRuntime {
             content_seq,
             detection_content_seq,
             full_lifecycle_authority_active,
+            screen_detection_pause_count,
+            screen_detection_pause_notify,
             pending_process_exits,
             process_observation,
             detect_reset_notify,
@@ -2029,6 +2093,8 @@ impl PaneRuntime {
         let content_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let screen_detection_pause_count = Arc::new(AtomicUsize::new(0));
+        let screen_detection_pause_notify = Arc::new(Notify::new());
         let pending_process_exits = Arc::new(Mutex::new(Vec::new()));
         let process_observation = Arc::new(Mutex::new(None));
         {
@@ -2147,6 +2213,8 @@ impl PaneRuntime {
             };
             let detection_content_seq = detection_content_seq.clone();
             let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
+            let screen_detection_pause_count_for_task = screen_detection_pause_count.clone();
+            let screen_detection_pause_notify_for_task = screen_detection_pause_notify.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let detect_reset_notify = Arc::new(Notify::new());
@@ -2213,6 +2281,11 @@ impl PaneRuntime {
                             last_detection_text.clear();
                             last_screen_scan_detection_content_seq = None;
                             agent_startup_grace_until = None;
+                            pending_idle.clear();
+                        }
+                        _ = screen_detection_pause_notify_for_task.notified() => {
+                            last_detection_text.clear();
+                            last_screen_scan_detection_content_seq = None;
                             pending_idle.clear();
                         }
                     }
@@ -2417,6 +2490,15 @@ impl PaneRuntime {
                         }
                     }
 
+                    let detection_paused =
+                        screen_detection_pause_count_for_task.load(Ordering::Acquire) > 0;
+                    if !screen_detection_permitted(detection_paused, process_exited) {
+                        last_detection_text.clear();
+                        last_screen_scan_detection_content_seq = None;
+                        pending_idle.clear();
+                        continue;
+                    }
+
                     let current_detection_content_seq = if agent.is_some() {
                         Some(detection_content_seq.load(Ordering::Relaxed))
                     } else {
@@ -2435,38 +2517,52 @@ impl PaneRuntime {
                         DetectionScreenReadDecision::Skip => continue,
                     }
 
-                    let content = terminal.detection_text();
-                    last_screen_scan_detection_content_seq = current_detection_content_seq;
-                    let content_changed = content != last_detection_text;
-                    last_detection_text.clone_from(&content);
-                    if detect::should_skip_state_update(agent, &content) {
-                        pending_idle.clear();
-                        continue;
-                    }
-                    sync_content_change_acquisition(
-                        agent_presence.current_agent(),
-                        suppressed_agent,
-                        process_group_changed,
-                        content_changed,
-                        now,
-                        &mut acquisition_started_at,
-                        &mut last_content_change_at,
-                    );
+                    let screen_detection = if detection_paused {
+                        detection_update_for_publish_with_osc(agent, "", None, "", "", true)
+                    } else {
+                        let content = terminal.detection_text();
+                        last_screen_scan_detection_content_seq = current_detection_content_seq;
+                        let content_changed = content != last_detection_text;
+                        last_detection_text.clone_from(&content);
+                        if detect::should_skip_state_update(agent, &content) {
+                            pending_idle.clear();
+                            continue;
+                        }
+                        sync_content_change_acquisition(
+                            agent_presence.current_agent(),
+                            suppressed_agent,
+                            process_group_changed,
+                            content_changed,
+                            now,
+                            &mut acquisition_started_at,
+                            &mut last_content_change_at,
+                        );
 
-                    let osc_title = terminal.agent_osc_title();
-                    let osc_progress = terminal.agent_osc_progress();
-                    let unwrapped_content = terminal.detection_unwrapped_text();
-                    let Some(screen_detection) = detection_update_for_publish_with_osc(
-                        agent,
-                        &content,
-                        Some(&unwrapped_content),
-                        &osc_title,
-                        &osc_progress,
-                        process_exited,
-                    ) else {
+                        let osc_title = terminal.agent_osc_title();
+                        let osc_progress = terminal.agent_osc_progress();
+                        let unwrapped_content = terminal.detection_unwrapped_text();
+                        detection_update_for_publish_with_osc(
+                            agent,
+                            &content,
+                            Some(&unwrapped_content),
+                            &osc_title,
+                            &osc_progress,
+                            process_exited,
+                        )
+                    };
+                    let Some(screen_detection) = screen_detection else {
                         pending_idle.clear();
                         continue;
                     };
+                    if !screen_detection_permitted(
+                        screen_detection_pause_count_for_task.load(Ordering::Acquire) > 0,
+                        process_exited,
+                    ) {
+                        last_detection_text.clear();
+                        last_screen_scan_detection_content_seq = None;
+                        pending_idle.clear();
+                        continue;
+                    }
                     match decide_screen_detection_publish(
                         ScreenDetectionPublishInput {
                             screen_detection,
@@ -2535,6 +2631,8 @@ impl PaneRuntime {
             content_seq,
             detection_content_seq,
             full_lifecycle_authority_active,
+            screen_detection_pause_count,
+            screen_detection_pause_notify,
             pending_process_exits,
             process_observation,
             detect_reset_notify,
@@ -2574,6 +2672,33 @@ impl PaneRuntime {
     #[cfg(test)]
     pub(crate) fn agent_detection_reset_notify_for_test(&self) -> Arc<Notify> {
         self.detect_reset_notify.clone()
+    }
+
+    pub(crate) fn begin_screen_detection_pause(&self) -> ScreenDetectionPauseGuard {
+        let previous = self.screen_detection_pause_count.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |count| count.checked_add(1),
+        );
+        let active = previous.is_ok();
+        if previous == Ok(0) {
+            self.screen_detection_pause_notify.notify_one();
+        }
+        ScreenDetectionPauseGuard {
+            count: self.screen_detection_pause_count.clone(),
+            notify: self.screen_detection_pause_notify.clone(),
+            active,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn screen_detection_paused(&self) -> bool {
+        self.screen_detection_pause_count.load(Ordering::Acquire) > 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn screen_detection_pause_notify_for_test(&self) -> Arc<Notify> {
+        self.screen_detection_pause_notify.clone()
     }
 
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {
@@ -3167,6 +3292,8 @@ impl PaneRuntime {
                 content_seq: Arc::new(AtomicU64::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+                screen_detection_pause_count: Arc::new(AtomicUsize::new(0)),
+                screen_detection_pause_notify: Arc::new(Notify::new()),
                 pending_process_exits: Arc::new(Mutex::new(Vec::new())),
                 process_observation: Arc::new(Mutex::new(None)),
                 detect_reset_notify: Arc::new(Notify::new()),
@@ -3696,6 +3823,8 @@ mod tests {
             runtime.terminal.clone(),
             runtime.detection_content_seq.clone(),
             runtime.full_lifecycle_authority_active.clone(),
+            runtime.screen_detection_pause_count.clone(),
+            runtime.screen_detection_pause_notify.clone(),
             DetectionEventSender {
                 sender,
                 pending_exits: runtime.pending_process_exits.clone(),
@@ -4499,6 +4628,8 @@ mod tests {
             content_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            screen_detection_pause_count: Arc::new(AtomicUsize::new(0)),
+            screen_detection_pause_notify: Arc::new(Notify::new()),
             pending_process_exits: Arc::new(Mutex::new(Vec::new())),
             process_observation: Arc::new(Mutex::new(None)),
             detect_reset_notify: Arc::new(Notify::new()),
@@ -4534,6 +4665,8 @@ mod tests {
             content_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            screen_detection_pause_count: Arc::new(AtomicUsize::new(0)),
+            screen_detection_pause_notify: Arc::new(Notify::new()),
             pending_process_exits: Arc::new(Mutex::new(Vec::new())),
             process_observation: Arc::new(Mutex::new(None)),
             detect_reset_notify: Arc::new(Notify::new()),
@@ -5216,6 +5349,70 @@ mod tests {
         )
         .await
         .expect("re-entering active authority should notify detection reset");
+    }
+
+    #[tokio::test]
+    async fn mfinal_screen_detection_pause_is_nested_and_keeps_process_observation() {
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        let pause_notify = runtime.screen_detection_pause_notify_for_test();
+        let observed_at = std::time::Instant::now();
+        runtime.test_record_foreground_probe(Some(41), Some(41), Some(Agent::Codex), observed_at);
+        let process_observation = runtime
+            .foreground_process_observation()
+            .expect("process observation");
+
+        let first = runtime.begin_screen_detection_pause();
+        assert!(runtime.screen_detection_paused());
+        assert_eq!(
+            runtime.foreground_process_observation(),
+            Some(process_observation),
+            "pausing screen reads must not clear the process observation"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            pause_notify.notified(),
+        )
+        .await
+        .expect("pause activation should wake detection");
+
+        let second = runtime.begin_screen_detection_pause();
+        drop(first);
+        assert!(runtime.screen_detection_paused());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                pause_notify.notified()
+            )
+            .await
+            .is_err(),
+            "nested ownership must not publish a false release"
+        );
+
+        drop(second);
+        assert!(!runtime.screen_detection_paused());
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            pause_notify.notified(),
+        )
+        .await
+        .expect("final release should wake detection");
+    }
+
+    #[test]
+    fn mfinal_screen_detection_pause_gates_reads_and_publication_but_not_process_exit() {
+        assert!(!screen_detection_permitted(true, false));
+        assert!(screen_detection_permitted(true, true));
+        assert!(screen_detection_permitted(false, false));
+
+        let production = include_str!("pane.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source");
+        assert_eq!(
+            production.matches("screen_detection_permitted(").count(),
+            5,
+            "both detector loops need a pre-read and pre-publish gate"
+        );
     }
 
     #[tokio::test]

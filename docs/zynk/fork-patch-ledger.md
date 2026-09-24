@@ -7556,3 +7556,57 @@ license audit, `M839-G1-N1`, `M83335-EXACT-PAINT-ABSENCE`, `MPD-FORMAT-APPROVAL-
 approval-order histories, reviewer gaps, M7-20, origins, standing limits, capped instruments, and
 resource/schema/handoff bounds all remain OPEN. This batch authorizes no merge, push, install, tag, publish,
 release, cleanup, or live-runtime action.
+
+### M-FINAL reconciliation
+
+B3 exact-tip Gate-2 approved `92fb739b603859205b30bd55d73280b533c80468` after the exact-tip F04 and F05
+fault re-probes each stopped at their declared control and the restored pair passed together on a clean tree.
+The three end-state batch residue tables reconcile all 69 authority rows with no pending adoption, deferred
+row, or unexplained candidate hunk. This record does not close any inherited carry.
+
+The M-FINAL Apache-2.0 provenance audit found eleven modified files that retain source introduced
+after upstream commit `cd5ea1be` but lacked the repository's section 4(b) notice convention:
+`.github/workflows/ci.yml`, `src/app/api/plugins/runtime.rs`, `src/cli/status.rs`,
+`src/detect/manifest/tests.rs`, `src/persist/snapshot.rs`, `src/plugin_command.rs`,
+`src/terminal/metadata.rs`, `src/update.rs`, `tests/multi_client.rs`, `vendor/libghostty-vt.patches.md`, and
+`vendor/patches/libghostty-vt/0001-default-grapheme-cluster-mode.patch`. Each now carries the standard header
+and appears in `NOTICE`. The same
+conservative exact-line sweep surfaced five weak signals that do not establish post-relicense derivation:
+`Cargo.lock` is generated dependency metadata; `.gitignore` matches only the generic `node_modules/` line;
+`README.md` matches only the generic centered-paragraph tag; `.github/ISSUE_TEMPLATE/bug.yml` matches only
+`required: true`; and `CONTRIBUTING.md` matches only `just install-hooks`. Those files keep their existing
+provenance treatment. The maintenance test still enforces the NOTICE/header index in both directions.
+
+The remaining B3 Gate-2 notes are explicit. Upstream-parity `ControlPersist=yes` can leave the SSH master and
+its private same-uid mode-0700 directory after a crash; this is operator awareness, not a cleanup claim. The
+omitted upstream `headless.rs` config-reload assignment is a SPEC section 7.3 fork deviation: headless rows and
+columns are startup-only and reload changes neither cached headless size nor live pane geometry. CHANGELOG's
+Added section names both bounded `ui.tab_bar_right` status segments and per-token sidebar `fg`, `bold`, and
+`dim` styles. Finally, the M9-21 stale-config controls and the M8-33 popup control were absent from their
+row-targeted selections and were caught by FULL; that evidence limitation remains recorded rather than being
+retroactively described as targeted coverage.
+
+The B2 alternate-history concurrency carry closes through a fork deviation from upstream `v0.8.2`. Upstream
+admits screen detection and terminal input while an idle alternate-screen history read moves the viewport.
+The fork instead holds a nested per-runtime screen-detection pause through restoration, checks that pause
+before screen-text access and again before publication, and wakes detection on acquisition and final release.
+Foreground-process probes and process-exit publication continue without reading the traversed screen.
+Requests targeting the same terminal for `pane.send_input`, `pane.send_keys`, `pane.send_text`, `agent.send`,
+`agent.send_keys`, `agent.prompt`, and pane-targeted `agent.start` wait in one FIFO and replay through their
+unchanged handlers after restoration; other terminals and `pane.input.set` remain immediate. Normal timeout,
+abandonment, drop, shutdown, and handoff paths release the pause. Shutdown and handoff reject queued requests
+with the existing `server_unavailable` response. Delivery stays honest: no deferred send records Submitted
+before actual dispatch. Existing prompt and start timer origins do not move, so the existing 15-second
+traversal plus 5-second restoration bound can be added before those timers begin. No protocol or wire-ID
+change follows.
+
+The first M-FINAL FULL stopped in the fork-owned
+`pane_run_sends_one_send_input_request_with_enter_key` fixture before any N2 path was reached. The private
+mock socket still existed, but the child reported the generic `no zynk server is running` error and the old
+failure path asserted before joining the mock, so the retained run (`75b167aa`) cannot distinguish connect
+refusal from reset or early listener exit. The test-only diagnostic adapter now joins the mock through a
+bounded wait before asserting and reports child status and streams, the mock accept/request transcript, and
+whether the listener remained bound. Its single approved focused invocation passed (`213ae67d`); that pass
+does not relabel the unexplained FULL observation. Carry `N22B` therefore remains OPEN beside the M8-39
+persist-lock observations and the fork-owned three-second CLI fixture-bound carry for explicit operator risk
+disposition before Gate-3. No production timeout, readiness rule, selector, or dispatch behavior changed.

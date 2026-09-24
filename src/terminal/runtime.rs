@@ -263,6 +263,15 @@ impl TerminalRuntime {
         self.0.set_full_lifecycle_authority_active(active);
     }
 
+    pub(crate) fn begin_screen_detection_pause(&self) -> crate::pane::ScreenDetectionPauseGuard {
+        self.0.begin_screen_detection_pause()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn screen_detection_paused(&self) -> bool {
+        self.0.screen_detection_paused()
+    }
+
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         self.0.resize(rows, cols, cell_width_px, cell_height_px);
     }

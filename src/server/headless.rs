@@ -326,7 +326,7 @@ pub struct HeadlessServer {
     terminal_attach_owners: HashMap<String, u64>,
     /// Deferred application-history reads currently driving alternate-screen viewports.
     pending_alt_screen_reads: Vec<crate::server::alt_screen_read::PendingAltScreenRead>,
-    /// Reads waiting for an alternate-screen traversal of the same terminal to finish.
+    /// Requests waiting for an alternate-screen traversal of the same terminal to finish.
     deferred_alt_screen_reads: Vec<api::ApiRequestMessage>,
     /// Monotonic activity counter used to pick the most recently active client.
     next_activity_stamp: u64,
@@ -1381,6 +1381,8 @@ impl HeadlessServer {
 
     fn finish_live_handoff_shutdown(&mut self) {
         self.shutting_down = true;
+        self.pending_alt_screen_reads.clear();
+        self.reject_deferred_alt_screen_requests_for_shutdown();
         self.app.state.should_quit = true;
         self.app.no_session = true;
         info!("live handoff completed; old server exiting");
@@ -3447,7 +3449,7 @@ impl HeadlessServer {
             || self
                 .pending_alt_screen_reads
                 .iter()
-                .any(|pending| pending.terminal_id.as_str() == target.terminal_id)
+                .any(|pending| pending.terminal_id.as_str() == target.terminal_id.as_str())
         {
             return None;
         }
@@ -3504,6 +3506,36 @@ impl HeadlessServer {
     }
 
     fn alt_screen_read_conflict(&self, request: &api::schema::Request) -> AltScreenReadConflict {
+        let input_target = match &request.method {
+            api::schema::Method::PaneSendInput(params) => Some(params.pane_id.as_str()),
+            api::schema::Method::PaneSendKeys(params) => Some(params.pane_id.as_str()),
+            api::schema::Method::PaneSendText(params) => Some(params.pane_id.as_str()),
+            api::schema::Method::AgentSend(params) => Some(params.target.as_str()),
+            api::schema::Method::AgentSendKeys(params) => Some(params.target.as_str()),
+            api::schema::Method::AgentPrompt(params) => Some(params.target.as_str()),
+            api::schema::Method::AgentStart(params) => Some(params.pane_id.as_str()),
+            _ => None,
+        };
+        if let Some(input_target) = input_target {
+            let Some(target) = self.app.resolve_terminal_target(input_target).ok() else {
+                return AltScreenReadConflict::None;
+            };
+            return if self
+                .pending_alt_screen_reads
+                .iter()
+                .any(|pending| pending.terminal_id.as_str() == target.terminal_id)
+            {
+                AltScreenReadConflict::Defer
+            } else {
+                AltScreenReadConflict::None
+            };
+        }
+        if matches!(&request.method, api::schema::Method::ServerLiveHandoff(_))
+            && !self.pending_alt_screen_reads.is_empty()
+        {
+            return AltScreenReadConflict::Defer;
+        }
+
         let (target, source, lines, format) = match &request.method {
             api::schema::Method::AgentRead(params) => (
                 self.app.resolve_terminal_target(&params.target).ok(),
@@ -3539,13 +3571,16 @@ impl HeadlessServer {
     fn process_deferred_alt_screen_reads(&mut self) -> bool {
         let deferred = std::mem::take(&mut self.deferred_alt_screen_reads);
         let mut changed = false;
-        for msg in deferred {
+        let mut deferred = deferred.into_iter();
+        while let Some(msg) = deferred.next() {
             match self.alt_screen_read_conflict(&msg.request) {
                 AltScreenReadConflict::None => {
                     changed |= self.handle_api_request_with_shutdown_check(msg);
                 }
                 AltScreenReadConflict::Frozen(_) | AltScreenReadConflict::Defer => {
                     self.deferred_alt_screen_reads.push(msg);
+                    self.deferred_alt_screen_reads.extend(deferred);
+                    break;
                 }
             }
         }
@@ -3590,6 +3625,13 @@ impl HeadlessServer {
         }
     }
 
+    fn reject_deferred_alt_screen_requests_for_shutdown(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_alt_screen_reads);
+        for msg in deferred {
+            respond_server_unavailable(msg);
+        }
+    }
+
     /// Handles a single API request with shutdown awareness.
     ///
     /// Also forwards any toast/sound notifications that result from the API
@@ -3627,19 +3669,7 @@ impl HeadlessServer {
         // Socket-side stop preflights do not cover an item already dequeued by
         // this loop, so the shared atomic is part of this final admission.
         if self.shutting_down || self.should_quit.load(Ordering::Acquire) {
-            // During shutdown, respond with server_unavailable.
-            let response = serde_json::to_string(&api::schema::ErrorResponse {
-                id: msg.request.id,
-                error: api::schema::ErrorBody {
-                    code: "server_unavailable".into(),
-                    message: "server is shutting down".into(),
-                },
-            })
-            .unwrap_or_else(|_| {
-                r#"{"id":"","error":{"code":"server_unavailable","message":"server is shutting down"}}"#
-                    .to_string()
-            });
-            let _ = msg.respond_to.send(response);
+            respond_server_unavailable(msg);
             return false;
         }
 
@@ -3822,8 +3852,13 @@ impl HeadlessServer {
         if let Some(spec) = alt_screen_read_spec {
             if let Ok(success) = serde_json::from_str::<api::schema::SuccessResponse>(&response) {
                 if let api::schema::ResponseResult::PaneRead { read } = success.result {
+                    let Some(runtime) = self.app.terminal_runtimes.get(&spec.terminal_id) else {
+                        let _ = msg.respond_to.send(response);
+                        return changed;
+                    };
                     let pending = crate::server::alt_screen_read::PendingAltScreenRead::start(
                         spec.terminal_id,
+                        runtime.begin_screen_detection_pause(),
                         success.id,
                         msg.respond_to,
                         response,
@@ -4927,6 +4962,8 @@ impl HeadlessServer {
         }
         info!("server shutdown initiated");
         self.shutting_down = true;
+        self.pending_alt_screen_reads.clear();
+        self.reject_deferred_alt_screen_requests_for_shutdown();
 
         // Clear client-local host graphics, then send ServerShutdown to all connected clients.
         self.send_all_clients_graphics_cleanup();
@@ -5055,6 +5092,9 @@ fn events_for_app_routing(
 
 impl Drop for HeadlessServer {
     fn drop(&mut self) {
+        self.shutting_down = true;
+        self.pending_alt_screen_reads.clear();
+        self.reject_deferred_alt_screen_requests_for_shutdown();
         let staged_files = self
             .clients
             .drain()
@@ -5068,6 +5108,21 @@ impl Drop for HeadlessServer {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn respond_server_unavailable(msg: api::ApiRequestMessage) {
+    let response = serde_json::to_string(&api::schema::ErrorResponse {
+        id: msg.request.id,
+        error: api::schema::ErrorBody {
+            code: "server_unavailable".into(),
+            message: "server is shutting down".into(),
+        },
+    })
+    .unwrap_or_else(|_| {
+        r#"{"id":"","error":{"code":"server_unavailable","message":"server is shutting down"}}"#
+            .to_string()
+    });
+    let _ = msg.respond_to.send(response);
+}
 
 /// Installs a Ctrl+C handler that sets the should_quit flag and wakes up
 /// the event loop by sending a QuitSignal on the server event channel.
@@ -8265,6 +8320,66 @@ next_tab = ""
         rt.shutdown_timeout(Duration::from_millis(100));
     }
 
+    fn test_pending_alt_screen_read(
+        server: &HeadlessServer,
+        terminal_id: crate::terminal::TerminalId,
+    ) -> crate::server::alt_screen_read::PendingAltScreenRead {
+        let (respond_to, _response_rx) = std::sync::mpsc::channel();
+        let screen_detection_pause = server
+            .app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("test terminal runtime")
+            .begin_screen_detection_pause();
+        crate::server::alt_screen_read::PendingAltScreenRead::start(
+            terminal_id,
+            screen_detection_pause,
+            "read".into(),
+            respond_to,
+            "fallback".into(),
+            api::schema::PaneReadResult {
+                pane_id: "w1:p1".into(),
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                source: api::schema::ReadSource::Recent,
+                format: api::schema::ReadFormat::Text,
+                text: String::new(),
+                revision: 0,
+                truncated: false,
+            },
+            120,
+            false,
+            crate::terminal::ScreenSnapshot {
+                cols: 80,
+                rows: Vec::new(),
+            },
+            0,
+            Instant::now(),
+        )
+    }
+
+    fn test_api_message(
+        id: &str,
+        method: api::schema::Method,
+    ) -> (api::ApiRequestMessage, std::sync::mpsc::Receiver<String>) {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        (
+            api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: id.into(),
+                    method,
+                },
+                respond_to,
+                response_write_complete: None,
+                caller: api::ApiCaller {
+                    peer: None,
+                    trusted_as_pane_child: true,
+                },
+            },
+            response_rx,
+        )
+    }
+
     fn connect_pending_terminal_client(server: &mut HeadlessServer, client_id: u64) {
         let _control_rx = connect_pending_terminal_client_with_control_rx(server, client_id);
     }
@@ -9360,33 +9475,8 @@ next_tab = ""
     #[test]
     fn terminal_control_rejects_attach_during_alt_screen_read() {
         with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
-            let (respond_to, _response_rx) = std::sync::mpsc::channel();
-            server.pending_alt_screen_reads.push(
-                crate::server::alt_screen_read::PendingAltScreenRead::start(
-                    terminal_id,
-                    "read".into(),
-                    respond_to,
-                    "fallback".into(),
-                    api::schema::PaneReadResult {
-                        pane_id: "w1:p1".into(),
-                        workspace_id: "w1".into(),
-                        tab_id: "w1:t1".into(),
-                        source: api::schema::ReadSource::Recent,
-                        format: api::schema::ReadFormat::Text,
-                        text: String::new(),
-                        revision: 0,
-                        truncated: false,
-                    },
-                    120,
-                    false,
-                    crate::terminal::ScreenSnapshot {
-                        cols: 80,
-                        rows: Vec::new(),
-                    },
-                    0,
-                    Instant::now(),
-                ),
-            );
+            let pending = test_pending_alt_screen_read(server, terminal_id);
+            server.pending_alt_screen_reads.push(pending);
             let control_rx = connect_pending_terminal_client_with_control_rx(server, 7);
 
             assert!(
@@ -9408,6 +9498,418 @@ next_tab = ""
                 ))
             );
         });
+    }
+
+    #[test]
+    fn mfinal_alt_screen_read_defers_every_input_method_for_only_its_terminal() {
+        with_terminal_session_test_server(|server, terminal_id, _, pane_id| {
+            let second_pane =
+                server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+            server.app.state.ensure_test_terminals();
+            let second_terminal_id = server.app.state.workspaces[0]
+                .terminal_id(second_pane)
+                .expect("second terminal")
+                .clone();
+            let second_pane_number = server.app.state.workspaces[0]
+                .public_pane_number(second_pane)
+                .expect("second public pane number");
+            let second_pane_id = crate::workspace::public_pane_id_for_number(
+                &server.app.state.workspaces[0].id,
+                second_pane_number,
+            );
+            server
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("target terminal")
+                .set_agent_name("reader".into());
+            server
+                .app
+                .state
+                .terminals
+                .get_mut(&second_terminal_id)
+                .expect("second terminal state")
+                .set_agent_name("other".into());
+            let pending = test_pending_alt_screen_read(server, terminal_id);
+            server.pending_alt_screen_reads.push(pending);
+
+            let matching_methods = [
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id: pane_id.clone(),
+                    text: "input".into(),
+                    keys: Vec::new(),
+                }),
+                api::schema::Method::PaneSendText(api::schema::PaneSendTextParams {
+                    pane_id: pane_id.clone(),
+                    text: "text".into(),
+                }),
+                api::schema::Method::PaneSendKeys(api::schema::PaneSendKeysParams {
+                    pane_id: pane_id.clone(),
+                    keys: vec!["enter".into()],
+                }),
+                api::schema::Method::AgentSend(api::schema::AgentSendParams {
+                    target: "reader".into(),
+                    text: "send".into(),
+                }),
+                api::schema::Method::AgentSendKeys(api::schema::AgentSendKeysParams {
+                    target: "reader".into(),
+                    keys: vec!["enter".into()],
+                }),
+                api::schema::Method::AgentPrompt(api::schema::AgentPromptParams {
+                    target: "reader".into(),
+                    text: "prompt".into(),
+                    expected_terminal_id: None,
+                    wait: None,
+                }),
+                api::schema::Method::AgentStart(api::schema::AgentStartParams {
+                    name: "launched".into(),
+                    kind: "codex".into(),
+                    pane_id: pane_id.clone(),
+                    args: Vec::new(),
+                    timeout_ms: None,
+                }),
+            ];
+            for method in matching_methods {
+                assert!(matches!(
+                    server.alt_screen_read_conflict(&api::schema::Request {
+                        id: "matching".into(),
+                        method,
+                    }),
+                    AltScreenReadConflict::Defer
+                ));
+            }
+
+            assert!(matches!(
+                server.alt_screen_read_conflict(&api::schema::Request {
+                    id: "other".into(),
+                    method: api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                        pane_id: second_pane_id,
+                        text: "other".into(),
+                        keys: Vec::new(),
+                    },),
+                }),
+                AltScreenReadConflict::None
+            ));
+            assert!(matches!(
+                server.alt_screen_read_conflict(&api::schema::Request {
+                    id: "settings".into(),
+                    method: api::schema::Method::PaneInputSet(api::schema::PaneInputSetParams {
+                        pane_id,
+                        right_click: Default::default(),
+                    },),
+                }),
+                AltScreenReadConflict::None
+            ));
+            assert!(matches!(
+                server.alt_screen_read_conflict(&api::schema::Request {
+                    id: "handoff".into(),
+                    method: api::schema::Method::ServerLiveHandoff(Default::default()),
+                }),
+                AltScreenReadConflict::Defer
+            ));
+        });
+    }
+
+    #[test]
+    fn mfinal_alt_screen_read_releases_deferred_input_in_arrival_order() {
+        with_terminal_session_test_server(|server, terminal_id, _, pane_id| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
+            let pending = test_pending_alt_screen_read(server, terminal_id);
+            server.pending_alt_screen_reads.push(pending);
+
+            let (first, first_rx) = test_api_message(
+                "first",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id: pane_id.clone(),
+                    text: "first".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            let (second, second_rx) = test_api_message(
+                "second",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id,
+                    text: "second".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            server.handle_api_request_with_shutdown_check(first);
+            server.handle_api_request_with_shutdown_check(second);
+
+            assert!(matches!(
+                input_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                first_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                second_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+
+            server.pending_alt_screen_reads.clear();
+            assert!(!server.process_deferred_alt_screen_reads());
+            assert_eq!(input_rx.try_recv().expect("first input").as_ref(), b"first");
+            assert_eq!(
+                input_rx.try_recv().expect("second input").as_ref(),
+                b"second"
+            );
+            for response_rx in [first_rx, second_rx] {
+                let response = response_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("deferred response");
+                let parsed: api::schema::SuccessResponse =
+                    serde_json::from_str(&response).expect("success response");
+                assert_eq!(parsed.result, api::schema::ResponseResult::Ok {});
+            }
+        });
+    }
+
+    #[test]
+    fn mfinal_alt_screen_read_keeps_global_fifo_while_first_target_is_still_reading() {
+        with_terminal_session_test_server(|server, first_terminal_id, _, first_pane_id| {
+            let second_pane =
+                server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+            server.app.state.ensure_test_terminals();
+            let second_terminal_id = server.app.state.workspaces[0]
+                .terminal_id(second_pane)
+                .expect("second terminal")
+                .clone();
+            let second_pane_number = server.app.state.workspaces[0]
+                .public_pane_number(second_pane)
+                .expect("second public pane number");
+            let second_pane_id = crate::workspace::public_pane_id_for_number(
+                &server.app.state.workspaces[0].id,
+                second_pane_number,
+            );
+            let (first_runtime, mut first_input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+            let (second_runtime, mut second_input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+            server
+                .app
+                .terminal_runtimes
+                .insert(first_terminal_id.clone(), first_runtime);
+            server
+                .app
+                .terminal_runtimes
+                .insert(second_terminal_id.clone(), second_runtime);
+            server
+                .pending_alt_screen_reads
+                .push(test_pending_alt_screen_read(
+                    server,
+                    first_terminal_id.clone(),
+                ));
+            server
+                .pending_alt_screen_reads
+                .push(test_pending_alt_screen_read(
+                    server,
+                    second_terminal_id.clone(),
+                ));
+
+            let (first, first_response_rx) = test_api_message(
+                "first-target",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id: first_pane_id,
+                    text: "first".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            let (second, second_response_rx) = test_api_message(
+                "second-target",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id: second_pane_id,
+                    text: "second".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            server.handle_api_request_with_shutdown_check(first);
+            server.handle_api_request_with_shutdown_check(second);
+
+            server
+                .pending_alt_screen_reads
+                .retain(|pending| pending.terminal_id == first_terminal_id);
+            server.process_deferred_alt_screen_reads();
+            assert!(matches!(
+                second_input_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                second_response_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+
+            server.pending_alt_screen_reads.clear();
+            server.process_deferred_alt_screen_reads();
+            assert_eq!(
+                first_input_rx
+                    .try_recv()
+                    .expect("first target input")
+                    .as_ref(),
+                b"first"
+            );
+            assert_eq!(
+                second_input_rx
+                    .try_recv()
+                    .expect("second target input")
+                    .as_ref(),
+                b"second"
+            );
+            for response_rx in [first_response_rx, second_response_rx] {
+                let response = response_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("deferred response");
+                let parsed: api::schema::SuccessResponse =
+                    serde_json::from_str(&response).expect("success response");
+                assert_eq!(parsed.result, api::schema::ResponseResult::Ok {});
+            }
+        });
+    }
+
+    #[test]
+    fn mfinal_alt_screen_read_dispatches_deferred_prompt_only_after_restoration() {
+        with_terminal_session_test_server(|server, terminal_id, _, _| {
+            server
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("target terminal")
+                .set_agent_name("reader".into());
+            let pending = test_pending_alt_screen_read(server, terminal_id);
+            server.pending_alt_screen_reads.push(pending);
+            let (prompt, response_rx) = test_api_message(
+                "prompt",
+                api::schema::Method::AgentPrompt(api::schema::AgentPromptParams {
+                    target: "reader".into(),
+                    text: "body".into(),
+                    expected_terminal_id: None,
+                    wait: None,
+                }),
+            );
+
+            server.handle_api_request_with_shutdown_check(prompt);
+            assert!(matches!(
+                response_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+
+            server.pending_alt_screen_reads.clear();
+            server.process_deferred_alt_screen_reads();
+            let response = response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("post-restoration prompt response");
+            let parsed: api::schema::ErrorResponse =
+                serde_json::from_str(&response).expect("prompt refusal");
+            assert_eq!(parsed.error.code, "agent_not_ready");
+        });
+    }
+
+    #[test]
+    fn mfinal_alt_screen_read_timeout_releases_deferred_input() {
+        with_terminal_session_test_server(|server, terminal_id, _, pane_id| {
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+            server
+                .app
+                .terminal_runtimes
+                .insert(terminal_id.clone(), runtime);
+            let pending = test_pending_alt_screen_read(server, terminal_id.clone());
+            server.pending_alt_screen_reads.push(pending);
+            let (message, response_rx) = test_api_message(
+                "timeout",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id,
+                    text: "after-timeout".into(),
+                    keys: Vec::new(),
+                }),
+            );
+
+            server.handle_api_request_with_shutdown_check(message);
+            assert!(server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .screen_detection_paused());
+            server.poll_pending_alt_screen_reads(Instant::now() + Duration::from_secs(16));
+            assert!(server.pending_alt_screen_reads.is_empty());
+            assert!(!server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .screen_detection_paused());
+            server.process_deferred_alt_screen_reads();
+
+            assert_eq!(
+                input_rx.try_recv().expect("released input").as_ref(),
+                b"after-timeout"
+            );
+            let response = response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("released response");
+            let parsed: api::schema::SuccessResponse =
+                serde_json::from_str(&response).expect("success response");
+            assert_eq!(parsed.result, api::schema::ResponseResult::Ok {});
+        });
+    }
+
+    #[tokio::test]
+    async fn mfinal_alt_screen_read_releases_deferred_requests_on_stop_and_handoff() {
+        for handoff in [false, true] {
+            let mut server = test_headless_server();
+            let workspace = crate::workspace::Workspace::test_new("stopping read");
+            let terminal_id = workspace
+                .terminal_id(workspace.tabs[0].root_pane)
+                .expect("terminal id")
+                .clone();
+            server.app.state.workspaces = vec![workspace];
+            server.app.state.ensure_test_terminals();
+            server.app.terminal_runtimes.insert(
+                terminal_id.clone(),
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+            );
+            let pending = test_pending_alt_screen_read(&server, terminal_id.clone());
+            server.pending_alt_screen_reads.push(pending);
+            let (message, response_rx) = test_api_message(
+                "deferred",
+                api::schema::Method::PaneSendInput(api::schema::PaneSendInputParams {
+                    pane_id: "w1:p1".into(),
+                    text: "body".into(),
+                    keys: Vec::new(),
+                }),
+            );
+            server.deferred_alt_screen_reads.push(message);
+
+            if handoff {
+                server.finish_live_handoff_shutdown();
+            } else {
+                server.initiate_shutdown();
+            }
+
+            assert!(!server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .screen_detection_paused());
+            assert!(server.deferred_alt_screen_reads.is_empty());
+            let response = response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("stopping response");
+            let parsed: api::schema::ErrorResponse =
+                serde_json::from_str(&response).expect("error response");
+            assert_eq!(parsed.error.code, "server_unavailable");
+        }
     }
 
     #[test]

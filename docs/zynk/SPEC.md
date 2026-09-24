@@ -278,6 +278,18 @@ Worktree `--json` is absent from help and command specification but remains acce
 parsers as a hidden compatibility no-op; worktree output is always JSON. Non-UTF-8 argv is a bounded usage
 error rather than a panic.
 
+An idle alternate-screen history traversal owns a per-terminal screen-detection pause from before its first
+wheel event through viewport restoration. Screen-derived detection reads and publication stop during that
+window, while foreground-process probes and process-exit publication continue. Input requests for the same
+terminal are serialized behind the traversal in arrival order: `pane.send_input`, `pane.send_keys`,
+`pane.send_text`, `agent.send`, `agent.send_keys`, `agent.prompt`, and pane-targeted `agent.start` dispatch
+through their existing paths only after restoration. Other terminals and `pane.input.set` are unaffected.
+No deferred send records Submitted before that dispatch; shutdown or live handoff returns the existing
+`server_unavailable` response instead of dropping queued requests. Deferral changes no timeout start point:
+the prompt and start timers retain their existing semantics, although traversal can add up to the existing
+15-second traversal plus 5-second restoration bound before those timers begin. Protocol 20 and its wire IDs
+are unchanged.
+
 Workspace hierarchy and reorder events preserve fork metadata tokens, agent-view projection, glyph grammar,
 selection, and authority boundaries. Closing a workspace's final tab closes the workspace through the normal
 mutation/event path. Right-click routing is typed per pane as `zynk` or `pane`; API/CLI mutation requires the

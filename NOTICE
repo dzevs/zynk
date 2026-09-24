@@ -46,6 +46,7 @@ here. The maintenance test scripts/test_license_docs.py enforces both
 directions — every listed file carries the notice, and no unlisted file does.
 
 <!-- apache-modified-files: begin -->
+- .github/workflows/ci.yml
 - .agents/skills/zynk-pre-release-audit/SKILL.md
 - .agents/skills/zynk-pre-release-audit/references/pre-release-audit.md
 - AGENTS.md
@@ -82,6 +83,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/app/api/plugins/mod.rs
 - src/app/api/plugins/panes.rs
 - src/app/api/plugins/context.rs
+- src/app/api/plugins/runtime.rs
 - src/app/api/tabs.rs
 - src/app/api/workspaces.rs
 - src/app/api/worktrees.rs
@@ -122,6 +124,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/cli/server.rs
 - src/cli/server_not_running.rs
 - src/cli/spec.rs
+- src/cli/status.rs
 - src/cli/worktree.rs
 - src/client/direct_graphics.rs
 - src/client/input.rs
@@ -136,6 +139,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/config/theme.rs
 - src/config/window_title.rs
 - src/detect/manifest.rs
+- src/detect/manifest/tests.rs
 - src/detect/manifests/claude.toml
 - src/detect/manifests/cursor.toml
 - src/detect/manifests/hermes.toml
@@ -189,8 +193,10 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/pane/xtgettcap.rs
 - src/pane_graphics_files.rs
 - src/persist/restore.rs
+- src/persist/snapshot.rs
 - src/platform/linux.rs
 - src/platform/mod.rs
+- src/plugin_command.rs
 - src/popup_size.rs
 - src/protocol/render_ansi.rs
 - src/protocol/wire.rs
@@ -217,6 +223,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/server/terminal_attach.rs
 - src/sound.rs
 - src/terminal/id.rs
+- src/terminal/metadata.rs
 - src/terminal/runtime.rs
 - src/terminal/state.rs
 - src/terminal/title.rs
@@ -235,6 +242,7 @@ directions — every listed file carries the notice, and no unlisted file does.
 - src/ui/status.rs
 - src/ui/tab_surface.rs
 - src/ui/tabs.rs
+- src/update.rs
 - src/workspace.rs
 - src/workspace/aggregate.rs
 - src/workspace/git/config.rs
@@ -253,8 +261,11 @@ directions — every listed file carries the notice, and no unlisted file does.
 - tests/detach_reattach.rs
 - tests/fixtures/keyboard_protocol_corpus.tsv
 - tests/live_handoff.rs
+- tests/multi_client.rs
 - tests/support/mod.rs
 - tests/zynk_receipt.rs
+- vendor/libghostty-vt.patches.md
+- vendor/patches/libghostty-vt/0001-default-grapheme-cluster-mode.patch
 <!-- apache-modified-files: end -->
 
 The built-in notification sounds (assets/sounds/) are inherited from upstream

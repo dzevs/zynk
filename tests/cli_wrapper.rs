@@ -1514,9 +1514,10 @@ fn run_pane_run_mock_server(
 
         match child_outcome.try_recv() {
             Ok(outcome) => {
+                let listener_bound = listener.local_addr().is_ok();
                 return Err(format!(
-                    "child exited before expected exchange: expected_requests={expected_requests} status={:?} stdout={:?} stderr={:?} transcript={requests:?}",
-                    outcome.status, outcome.stdout, outcome.stderr
+                    "child exited before expected exchange: expected_requests={expected_requests} status={:?} stdout={:?} stderr={:?} pings={pings} accepted_connections={accepted_connections} listener_bound={listener_bound} transcript={requests:?}",
+                    outcome.status, outcome.stdout, outcome.stderr,
                 ));
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -1609,16 +1610,29 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
         stdout: String::from_utf8_lossy(&run.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
     });
+    let (join_tx, join_rx) = std::sync::mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let result = server
+            .join()
+            .map_err(|panic| format!("pane run mock panicked: {panic:?}"))
+            .and_then(|result| result);
+        let _ = join_tx.send(result);
+    });
+    let mock_result = join_rx
+        .recv_timeout(Duration::from_secs(6))
+        .unwrap_or_else(|_| {
+            Err("pane run mock did not stop within its five-second watchdog".to_owned())
+        });
     assert!(
         run.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&run.stderr)
+        "status={:?} stdout={:?} stderr={:?} mock={mock_result:?} socket_path_exists={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr),
+        socket_path.exists(),
     );
 
-    let requests = server
-        .join()
-        .unwrap()
-        .unwrap_or_else(|error| panic!("pane run mock failed: {error}"));
+    let requests = mock_result.unwrap_or_else(|error| panic!("pane run mock failed: {error}"));
     let parsed: Vec<serde_json::Value> = requests
         .iter()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -7919,6 +7933,60 @@ fn m839_message_rows(db: &Path, phase: &str) -> M839SqlitePhaseResult<Vec<serde_
             Ok(result)
         }
     })
+}
+
+#[test]
+fn mfinal_deferred_agent_send_records_submitted_only_after_dispatch_response() {
+    let (fixture, requests, output) = m839_cli_exchange(
+        &["agent", "send", "worker", "deferred body"],
+        |request, base| match request["method"].as_str().unwrap() {
+            "ping" => m839_pong(),
+            "agent.get" => {
+                fs::write(base.join("runtime.id"), "rt_mfinal\n").unwrap();
+                m839_agent_reply(m839_agent_json("idle", "worker", "term_original", 7))
+            }
+            "pane.send_input" => {
+                assert_eq!(request["params"]["pane_id"], "w1:p1");
+                assert_eq!(request["params"]["keys"], serde_json::json!(["Enter"]));
+                let db = base.join("cli-sqlite/zynk.db");
+                assert_eq!(
+                    m839_message_rows(&db, "deferred agent send awaiting dispatch response")
+                        .into_value()
+                        .len(),
+                    1
+                );
+                assert!(
+                    m839_delivery_rows(&db, "deferred agent send awaiting dispatch response",)
+                        .into_value()
+                        .is_empty()
+                );
+                serde_json::json!({"result":{"type":"ok"}})
+            }
+            other => panic!("unexpected method {other}"),
+        },
+    );
+
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ping", "agent.get", "ping", "pane.send_input"]
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["delivery_status"], "submitted");
+    assert_eq!(result["proof"]["proof_source"], "pane.send_input");
+    let events = m839_delivery_rows(
+        &fixture.base.join("cli-sqlite/zynk.db"),
+        "deferred agent send child reaped",
+    )
+    .into_value();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "submitted");
+    assert_eq!(events[0]["proof_source"], "pane.send_input");
+    assert_eq!(events[0]["message_id"], result["message_id"]);
 }
 
 #[test]

@@ -26,6 +26,7 @@ enum Phase {
 
 pub(crate) struct PendingAltScreenRead {
     pub(crate) terminal_id: TerminalId,
+    _screen_detection_pause: crate::pane::ScreenDetectionPauseGuard,
     request_id: String,
     respond_to: mpsc::Sender<String>,
     fallback_response: String,
@@ -52,6 +53,7 @@ pub(crate) struct PendingAltScreenRead {
 impl PendingAltScreenRead {
     pub(crate) fn start(
         terminal_id: TerminalId,
+        screen_detection_pause: crate::pane::ScreenDetectionPauseGuard,
         request_id: String,
         respond_to: mpsc::Sender<String>,
         fallback_response: String,
@@ -64,6 +66,7 @@ impl PendingAltScreenRead {
     ) -> Self {
         Self {
             terminal_id,
+            _screen_detection_pause: screen_detection_pause,
             request_id,
             respond_to,
             fallback_response,
@@ -490,6 +493,7 @@ mod tests {
         let (respond_to, response_rx) = mpsc::channel();
         let pending = PendingAltScreenRead::start(
             TerminalId::alloc(),
+            runtime.begin_screen_detection_pause(),
             "read".into(),
             respond_to,
             "fallback".into(),
@@ -536,6 +540,7 @@ mod tests {
         runtime.test_process_pty_bytes(&draw(&["16", "17", "18", "19", "20"], true));
         let started = Instant::now();
         let (pending, response_rx) = pending_read(&runtime, started, 8);
+        assert!(runtime.screen_detection_paused());
 
         runtime.test_process_pty_bytes(b"\x1b]0;still changing\x07");
         assert!(pending
@@ -653,6 +658,10 @@ mod tests {
                 started + INITIAL_QUIET + STEP_TIMEOUT + Duration::from_millis(11),
             )
             .expect("viewport restore");
+        assert!(
+            runtime.screen_detection_paused(),
+            "screen detection must stay paused throughout restoration"
+        );
         input_rx.try_recv().expect("restore wheel batch");
 
         runtime.test_process_pty_bytes(&draw(&["16", "17", "18", "19", "20"], false));
@@ -662,15 +671,15 @@ mod tests {
                 started + INITIAL_QUIET + STEP_TIMEOUT + Duration::from_millis(12),
             )
             .expect("restore redraw coalescing");
+        let outcome = pending.poll(
+            Some(&runtime),
+            started + INITIAL_QUIET + STEP_TIMEOUT + Duration::from_millis(22),
+        );
         assert!(
-            pending
-                .poll(
-                    Some(&runtime),
-                    started + INITIAL_QUIET + STEP_TIMEOUT + Duration::from_millis(22),
-                )
-                .is_none(),
+            outcome.is_none(),
             "restored redraw should complete after coalescing"
         );
+        assert!(!runtime.screen_detection_paused());
         assert_eq!(
             response_text(&response_rx),
             "13\n14\n15\n16\n17\n18\n19\n20\n"
