@@ -2,6 +2,7 @@
 # See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 from __future__ import annotations
 
+import hashlib
 import re
 import unittest
 from pathlib import Path
@@ -38,22 +39,78 @@ FORBIDDEN_CALLS = (
         "process-tree inspection",
     ),
 )
-HEADLESS_RUN_FORBIDDEN_TOKENS = (
-    "pane_ids(",
-    ".panes.iter",
-    ".panes.values",
-    ".panes.keys",
-    "workspaces.iter",
-    ".tabs.iter",
-    "terminals.iter",
-    "terminals.keys",
-    "terminal_runtimes.iter",
-    "HashSet::new",
+HEADLESS_RUN_FORBIDDEN_IDENTIFIERS = (
+    "workspaces",
+    "tabs",
+    "panes",
+    "pane_ids",
+    "terminals",
+    "terminal_runtimes",
+    "HashSet",
 )
+ALT_SCREEN_BOUNDARY_FORBIDDEN_IDENTIFIERS = (
+    "workspaces",
+    "tabs",
+    "panes",
+    "pane_ids",
+)
+HEADLESS_RUN_SELF_METHODS = frozenset(
+    {
+        "accept_client_connections",
+        "begin_shutdown_if_requested",
+        "complete_shutdown",
+        "drain_api_requests_with_render_impact",
+        "drain_api_requests_with_shutdown_check",
+        "drain_client_config_reload_request",
+        "drain_internal_events_with_forwarding",
+        "drain_server_events",
+        "drain_server_events_with_render_impact",
+        "expire_direct_graphics",
+        "handle_api_request_with_render_impact",
+        "handle_api_request_with_shutdown_check",
+        "handle_deferred_requests_headless",
+        "handle_internal_event_with_forwarding",
+        "handle_scheduled_tasks_headless",
+        "handle_server_event",
+        "handle_server_event_with_render_impact",
+        "has_app_client",
+        "has_pending_presentation_work_with_graphics",
+        "pane_graphics_runtime_active",
+        "process_pending_alt_screen_reads",
+        "pty_sources_visible_to_any_render_target",
+        "render_and_stream",
+        "render_retained_graphics_update_and_stream",
+        "render_retained_pty_update_and_stream",
+        "settle_event_selected_at_stop_boundary",
+        "stream_host_keyboard_enhancement_flags",
+        "stream_host_mouse_capture_mode",
+        "sync_immediate_pty_sources",
+        "sync_terminal_title_sources",
+        "sync_window_title",
+    }
+)
+SELF_METHOD_CALL = re.compile(r"\bself\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 ALT_SCREEN_MAINTENANCE_BODY = (
     "let completed_alt_screen_reads = self.poll_pending_alt_screen_reads(now); "
     "self.release_deferred_alt_screen_terminals(completed_alt_screen_reads)"
 )
+ALT_SCREEN_MAINTENANCE_BODY_FINGERPRINTS = {
+    "process_pending_alt_screen_reads": (
+        "49804d194c43c34ac7019e634789a4cf5993a2afec3eb71130673b363a104a19"
+    ),
+    "poll_pending_alt_screen_reads": (
+        "0ff728fe18aad8d42c19f67676d43cef78abb9dbfdbf881bd6c2fca271818acb"
+    ),
+    "release_deferred_alt_screen_terminals": (
+        "7eb159a7e81c97bd2d3d218765499dea38f0fc84a4623874a7ef955228032360"
+    ),
+    "release_deferred_alt_screen_terminals_with": (
+        "d6f938076db5fbaa43842ea5d375c0676e147c2b313d37febcca48cba3d604e8"
+    ),
+    "take_ready_handoff": (
+        "2e4d6a72054327045cca644728650c08cbcfb664befda5f1cecc03e3e01c5ff4"
+    ),
+}
 
 
 def blank_non_newlines(chars: list[str], start: int, end: int) -> None:
@@ -188,15 +245,35 @@ def rust_function_body(source: str, name: str) -> str:
     raise AssertionError(f"production fn {name} has an unterminated body")
 
 
+def normalized_body_fingerprint(body: str) -> str:
+    normalized = re.sub(r"\s+", "", body)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def identifier_hits(body: str, identifiers) -> list[str]:
+    return [
+        identifier
+        for identifier in identifiers
+        if re.search(rf"\b{re.escape(identifier)}\b", body)
+    ]
+
+
 def headless_alt_screen_maintenance_violations(source: str) -> list[str]:
     run_body = rust_function_body(source, "run")
-    helper_body = rust_function_body(source, "process_pending_alt_screen_reads")
-    compact_run_body = re.sub(r"\s+", "", run_body)
+    boundary_bodies = {
+        name: rust_function_body(source, name)
+        for name in ALT_SCREEN_MAINTENANCE_BODY_FINGERPRINTS
+    }
+    helper_body = boundary_bodies["process_pending_alt_screen_reads"]
     violations = [
-        f"run contains forbidden token {token}"
-        for token in HEADLESS_RUN_FORBIDDEN_TOKENS
-        if token in compact_run_body
+        f"run contains forbidden collection identifier {identifier}"
+        for identifier in identifier_hits(run_body, HEADLESS_RUN_FORBIDDEN_IDENTIFIERS)
     ]
+    run_self_methods = frozenset(SELF_METHOD_CALL.findall(run_body))
+    for method in sorted(run_self_methods - HEADLESS_RUN_SELF_METHODS):
+        violations.append(f"run contains unreviewed self method call {method}")
+    for method in sorted(HEADLESS_RUN_SELF_METHODS - run_self_methods):
+        violations.append(f"run is missing reviewed self method call {method}")
     helper_call = "self.process_pending_alt_screen_reads(now)"
     if run_body.count(helper_call) != 1:
         violations.append("run must call process_pending_alt_screen_reads(now) exactly once")
@@ -206,6 +283,17 @@ def headless_alt_screen_maintenance_violations(source: str) -> list[str]:
         violations.append("run must not call release_deferred_alt_screen_terminals directly")
     if " ".join(helper_body.split()) != ALT_SCREEN_MAINTENANCE_BODY:
         violations.append("process_pending_alt_screen_reads must be exactly poll then release")
+    for name, body in boundary_bodies.items():
+        for identifier in identifier_hits(body, ALT_SCREEN_BOUNDARY_FORBIDDEN_IDENTIFIERS):
+            violations.append(
+                f"{name} contains forbidden collection identifier {identifier}"
+            )
+        expected = ALT_SCREEN_MAINTENANCE_BODY_FINGERPRINTS[name]
+        actual = normalized_body_fingerprint(body)
+        if actual != expected:
+            violations.append(
+                f"{name} body fingerprint changed: expected {expected}, got {actual}"
+            )
     return violations
 
 
@@ -244,45 +332,98 @@ class UiHotPathArchitectureTests(unittest.TestCase):
         )
 
     def test_headless_guard_rejects_uninstrumented_reviewer_scan(self) -> None:
-        source = """
-impl HeadlessServer {
-    pub async fn run(&mut self) {
-        let _live = self.app.state.workspaces.iter()
-            .flat_map(|workspace| workspace.tabs.iter())
-            .flat_map(|tab| tab.layout.pane_ids())
-            .count();
-        self.process_pending_alt_screen_reads(now);
-    }
-
-    fn process_pending_alt_screen_reads(&mut self, now: Instant) -> bool {
-        let completed_alt_screen_reads = self.poll_pending_alt_screen_reads(now);
-        self.release_deferred_alt_screen_terminals(completed_alt_screen_reads)
-    }
-}
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        needle = """            if self.process_pending_alt_screen_reads(now) {
 """
+        replacement = """            let _live = self.app.state.workspaces.iter()
+                .flat_map(|workspace| workspace.tabs.iter())
+                .flat_map(|tab| tab.layout.pane_ids())
+                .count();
+            if self.process_pending_alt_screen_reads(now) {
+"""
+        self.assertEqual(source.count(needle), 1)
+        source = source.replace(needle, replacement, 1)
 
         self.assertTrue(headless_alt_screen_maintenance_violations(source))
 
     def test_headless_guard_rejects_line_broken_direct_pane_iteration(self) -> None:
-        source = """
-impl HeadlessServer {
-    pub async fn run(&mut self) {
-        let _live = self.app.state.workspaces
-            .iter()
-            .flat_map(|workspace| workspace.tabs
-                .iter())
-            .flat_map(|tab| tab.panes
-                .values())
-            .count();
-        self.process_pending_alt_screen_reads(now);
-    }
-
-    fn process_pending_alt_screen_reads(&mut self, now: Instant) -> bool {
-        let completed_alt_screen_reads = self.poll_pending_alt_screen_reads(now);
-        self.release_deferred_alt_screen_terminals(completed_alt_screen_reads)
-    }
-}
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        needle = """            if self.process_pending_alt_screen_reads(now) {
 """
+        replacement = """            let _live = self.app.state.workspaces
+                .iter()
+                .flat_map(|workspace| workspace.tabs
+                    .iter())
+                .flat_map(|tab| tab.panes
+                    .values())
+                .count();
+            if self.process_pending_alt_screen_reads(now) {
+"""
+        self.assertEqual(source.count(needle), 1)
+        source = source.replace(needle, replacement, 1)
+
+        self.assertTrue(headless_alt_screen_maintenance_violations(source))
+
+    def test_headless_guard_rejects_direct_pane_scan_inside_poll(self) -> None:
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        needle = """    fn poll_pending_alt_screen_reads(&mut self, now: Instant) -> Vec<crate::terminal::TerminalId> {
+        let pending = std::mem::take(&mut self.pending_alt_screen_reads);
+"""
+        replacement = """    fn poll_pending_alt_screen_reads(&mut self, now: Instant) -> Vec<crate::terminal::TerminalId> {
+        let _live = self
+            .app
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .count();
+        let pending = std::mem::take(&mut self.pending_alt_screen_reads);
+"""
+        self.assertEqual(source.count(needle), 1)
+        source = source.replace(needle, replacement, 1)
+
+        self.assertTrue(headless_alt_screen_maintenance_violations(source))
+
+    def test_headless_guard_rejects_borrowed_collection_scan_in_run(self) -> None:
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        needle = """            if self.process_pending_alt_screen_reads(now) {
+"""
+        replacement = """            for workspace in &self.app.state.workspaces {
+                for tab in &workspace.tabs {
+                    for _pane in &tab.panes {}
+                }
+            }
+            if self.process_pending_alt_screen_reads(now) {
+"""
+        self.assertEqual(source.count(needle), 1)
+        source = source.replace(needle, replacement, 1)
+
+        self.assertTrue(headless_alt_screen_maintenance_violations(source))
+
+    def test_headless_guard_rejects_new_run_helper_call(self) -> None:
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        needle = """            if self.process_pending_alt_screen_reads(now) {
+"""
+        replacement = """            self.sync_foreground_client_state();
+            if self.process_pending_alt_screen_reads(now) {
+"""
+        self.assertEqual(source.count(needle), 1)
+        source = source.replace(needle, replacement, 1)
+
+        self.assertTrue(headless_alt_screen_maintenance_violations(source))
+
+    def test_headless_guard_rejects_new_poll_helper_call(self) -> None:
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        needle = """    fn poll_pending_alt_screen_reads(&mut self, now: Instant) -> Vec<crate::terminal::TerminalId> {
+        let pending = std::mem::take(&mut self.pending_alt_screen_reads);
+"""
+        replacement = """    fn poll_pending_alt_screen_reads(&mut self, now: Instant) -> Vec<crate::terminal::TerminalId> {
+        self.sync_foreground_client_state();
+        let pending = std::mem::take(&mut self.pending_alt_screen_reads);
+"""
+        self.assertEqual(source.count(needle), 1)
+        source = source.replace(needle, replacement, 1)
 
         self.assertTrue(headless_alt_screen_maintenance_violations(source))
 

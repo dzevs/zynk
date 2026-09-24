@@ -7841,3 +7841,34 @@ fixture migration.
 This correction is **IMPLEMENTED / PENDING VERIFICATION** until both uninstrumented scan faults, the other four
 final-byte mutation probes, restored focused controls, the isolated exact chain, fresh packet, successor Gate-2,
 and successor Gate-3 complete.
+
+#### M-FINAL Gate-3 successor-5 correction
+
+The independent Gate-3 review rejected `083b0afe63d80059ab1a72cd653b2b8db3ece842` because the successor-4
+architecture guard treated the exact two-statement wrapper as a transitive maintenance boundary. An
+uninstrumented workspace, tab, and direct-pane scan inserted in `poll_pending_alt_screen_reads` was outside the
+static guard and did not call the dynamic `Layout::pane_ids` counter, so both controls stayed green. A borrowed
+`for` traversal over workspaces, tabs, and panes in `HeadlessServer::run` also bypassed the method-spelling
+denylist.
+
+Production Rust remains byte-identical. The architecture suite now treats
+`process_pending_alt_screen_reads`, `poll_pending_alt_screen_reads`,
+`release_deferred_alt_screen_terminals`, `release_deferred_alt_screen_terminals_with`, and the idle-reachable
+`take_ready_handoff` as one reviewed change-detection boundary. Their normalized, comment- and literal-masked
+bodies are fingerprinted, so any body or helper-edge change fails until the baseline is reviewed explicitly.
+The complete `run` body must retain its exact set of 31 direct self-method calls. Whole-word collection
+identifiers replace selected method spellings, rejecting borrowed, indexed, values/keys, and line-broken forms
+in the loop and the named maintenance boundary. Real-source in-memory controls reproduce both independent Pi
+escapes and prove that a collection-free helper call in either `run` or `poll` also fails closed.
+
+This is deliberately a change-detection guarantee, not a claim that lexical inspection recognizes every
+possible traversal. The separate one- and fifteen-pane execution control continues to count actual
+`Layout::pane_ids` cardinality on the production poll/release path. Reviewer gap `RG-MF-8` records that the
+`083b0afe` Gate-2 accepted an exact wrapper as if it covered its callees and accepted method-call spellings as
+if they covered borrowed collection iteration. The rejected packet and its evidence remain retained. Every
+inherited carry status is unchanged, including the operator-accepted F4 and `N22B` fixture risks and the closed
+M8-39 persistence-lock carry.
+
+This correction is **IMPLEMENTED / PENDING VERIFICATION** until the five C1 guard mutations, the other four
+final-byte probes, restored focused controls, the isolated exact chain, fresh packet, successor Gate-2, and
+successor Gate-3 complete.
