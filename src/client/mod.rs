@@ -697,6 +697,14 @@ fn exchange_handshake(
             if let Some(error) = error {
                 return Err(ClientError::HandshakeRejected { version, error });
             }
+            if version != PROTOCOL_VERSION {
+                return Err(ClientError::HandshakeRejected {
+                    version,
+                    error: format!(
+                        "incompatible server protocol version {version}; client requires version {PROTOCOL_VERSION}"
+                    ),
+                });
+            }
             if enable_direct_graphics {
                 protocol::write_message(stream, &ClientMessage::EnableDirectGraphics)
                     .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
@@ -2355,6 +2363,55 @@ mod tests {
             RenderEncoding::SemanticFrame
         );
         peer.join().expect("current peer");
+    }
+
+    #[test]
+    fn mismatched_error_free_welcome_is_rejected_before_direct_graphics_capability() {
+        let (mut client, mut server, _path) = local_stream_pair("mismatched-welcome");
+        let peer = std::thread::spawn(move || {
+            let hello: ClientMessage =
+                protocol::read_message(&mut server, MAX_FRAME_SIZE).expect("Hello");
+            assert!(matches!(hello, ClientMessage::Hello { .. }));
+            protocol::write_message(
+                &mut server,
+                &ServerMessage::Welcome {
+                    version: PROTOCOL_VERSION - 1,
+                    encoding: RenderEncoding::SemanticFrame,
+                    error: None,
+                },
+            )
+            .expect("mismatched Welcome");
+            set_handshake_recv_timeout(
+                &server,
+                Some(Duration::from_millis(100)),
+                "test read timeout unavailable",
+            )
+            .expect("set test read timeout");
+            protocol::read_message::<_, ClientMessage>(&mut server, MAX_FRAME_SIZE).ok()
+        });
+
+        let result = exchange_handshake(
+            &mut client,
+            ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                requested_encoding: RenderEncoding::SemanticFrame,
+                keybindings: ClientKeybindings::Server,
+                launch_mode: ClientLaunchMode::App,
+            },
+            true,
+        );
+        let unexpected_frame = peer.join().expect("mismatched peer");
+
+        assert!(matches!(
+            result,
+            Err(ClientError::HandshakeRejected { version, error })
+                if version == PROTOCOL_VERSION - 1 && error.contains("incompatible")
+        ));
+        assert_eq!(unexpected_frame, None);
     }
 
     #[test]

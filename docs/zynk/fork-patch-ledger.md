@@ -7703,3 +7703,42 @@ statuses remain retained; no evidence or approval transfers from `8123aef`.
 
 This correction is **IMPLEMENTED / PENDING VERIFICATION** until the two final-byte mutation probes, isolated
 lint/FULL/check/gate chain, fresh exact-SHA packet, successor Gate-2, and successor Gate-3 complete.
+
+#### M-FINAL Gate-3 successor-2 corrections
+
+The successor Gate-3 review rejected `aabdb44c9562b94a819b25942abbd2a2555a5d05` for three further defects.
+First, `Workspace::test_new` still derived its synthetic identity and cached branch from the process working
+directory. The constructor now gives every synthetic workspace the same fixed `/zynk-test/workspace` identity
+and no branch. Tests that need a branch row opt in explicitly; among the newly exposed population,
+`workspace_scroll_offset_applies_to_group_children` is the only control that required that opt-in. Its adjacent
+scroll-metrics fixture and the earlier M8-28 geometry controls already seeded their branch premise. The
+constructor control pins equal identity, status key, fallback label, and absent branch across synthetic
+workspaces. Against an archive-style non-Git source root the parent population failed only the unseeded scroll
+control, while the corrected 4,291-test binary population passed in full.
+
+Second, the first cross-terminal head-of-line correction still stored every deferred request in one collection
+and re-resolved every target on every headless-loop pass. Deferred alternate-screen state is now indexed by the
+resolved `TerminalId`: each request resolves once at intake and enters a per-terminal FIFO bucket. Completion
+and target-disappearance transitions examine only the affected bucket; idle passes examine no request bucket.
+Disappearance replays the unchanged handler so the method returns its existing target-missing error. Monotonic
+handoff ids and per-terminal barrier markers keep each captured terminal ordered without blocking unrelated
+terminals or `pane.input.set`; a failed handoff releases its suffix, a successful handoff rejects it through the
+existing stopping path, and multiple handoffs remain in arrival order. Shutdown drains every request. Empty
+buckets, barrier counts, and satisfied handoff entries are removed immediately. A deterministic 10,000-request
+control at one and fifteen panes records one target resolution per intake, zero idle-pass bucket examinations,
+one affected-bucket examination at release, and empty terminal/handoff state after the final drain.
+
+Third, the client treated any error-free `Welcome` as compatible and could send protocol-20
+`EnableDirectGraphics` to a peer that advertised another version. Compatibility now requires an error-free
+exact-version `Welcome`; a mismatch returns the typed handshake rejection before tag 13 is written. The socket
+control pins both the rejection and the absence of a capability frame.
+
+Reviewer gaps `RG-MF-3` and `RG-MF-4` record the two P1 misses. The hermeticity correction stopped after fixing
+the two named M8-28 fixtures instead of sweeping all synthetic-workspace geometry users. The queue review
+checked cross-terminal semantics but did not evaluate per-loop work against backlog and pane cardinality. The
+rejected packet and its evidence remain retained. Every inherited carry status remains unchanged, including
+the operator-accepted F4 and `N22B` fixture risks; no approval or evidence transfers from `aabdb44c`.
+
+This correction is **IMPLEMENTED / PENDING VERIFICATION** until its four final-byte mutation probes, restored
+focused controls, isolated lint/UI/release/FULL/check/gate chain, fresh exact-SHA packet, successor Gate-2, and
+successor Gate-3 complete.

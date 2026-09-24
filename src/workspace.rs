@@ -1275,7 +1275,7 @@ impl Workspace {
         let (events, _) = mpsc::channel(64);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(RenderSignal::new());
-        let identity_cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        let identity_cwd = PathBuf::from("/zynk-test/workspace");
         let (layout, root_id) = TileLayout::new();
         let terminal_id = TerminalId::alloc();
         let mut panes = HashMap::new();
@@ -1301,7 +1301,7 @@ impl Workspace {
             cached_identity_cwd: identity_cwd.clone(),
             cached_auto_label: fallback_label_from_cwd(&identity_cwd),
             cached_git_status_key: identity_cwd.clone(),
-            cached_git_branch: git_branch(&identity_cwd),
+            cached_git_branch: None,
             cached_git_ahead_behind: None,
             cached_git_space: None,
             worktree_space: None,
@@ -1531,6 +1531,21 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthetic_workspace_identity_and_branch_do_not_depend_on_process_cwd() {
+        let first = Workspace::test_new("first");
+        let second = Workspace::test_new("second");
+        let expected_identity = PathBuf::from("/zynk-test/workspace");
+
+        for workspace in [&first, &second] {
+            assert_eq!(workspace.identity_cwd, expected_identity);
+            assert_eq!(workspace.cached_identity_cwd, expected_identity);
+            assert_eq!(workspace.cached_git_status_key, expected_identity);
+            assert_eq!(workspace.cached_auto_label, "workspace");
+            assert_eq!(workspace.cached_git_branch, None);
+        }
+    }
 
     #[test]
     fn generated_workspace_ids_are_short_base32_handles() {

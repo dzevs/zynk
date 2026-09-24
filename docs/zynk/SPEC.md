@@ -262,7 +262,8 @@ the incompatible intermediate protocol-19 agent shapes are not installable B2 st
 
 The pre-version `Hello` envelope preserves protocol-19 launch-mode tags (`App = 0`,
 `TerminalAttach = 1`) so either peer can decode far enough to exchange that typed rejection. A compatible
-full-app client enables direct graphics only after `Welcome` with the append-only
+full-app client enables direct graphics only after an error-free `Welcome` whose version exactly equals the
+client protocol version, using the append-only
 `EnableDirectGraphics` client capability; a terminal-attach or unregistered client cannot enable it, a
 duplicate enable is idempotent, and a client that sends no capability remains non-direct.
 
@@ -294,9 +295,14 @@ No deferred send records Submitted before that dispatch; shutdown or live handof
 `server_unavailable` response instead of dropping queued requests. Deferral changes no timeout start point:
 the prompt and start timers retain their existing semantics, although traversal can add up to the existing
 15-second traversal plus 5-second restoration bound before those timers begin. Protocol 20 and its wire IDs
-are unchanged. Processing a deferred snapshot requeues only requests that still conflict with their target;
-ready requests for another terminal do not wait behind them. A deferred live handoff remains ordered after
-the traversal and before later input for that terminal, while input for other terminals remains immediate.
+are unchanged. A deferred request resolves its terminal identity once at intake and enters that terminal's
+FIFO bucket. Ordinary loop passes neither resolve nor scan the request backlog; traversal completion or target
+disappearance examines only the affected bucket, removes it when drained, and dispatches each request through
+its unchanged handler. A disappeared target therefore returns the method's existing target-missing response.
+Deferred live handoffs use monotonic per-terminal barriers: a handoff remains ordered after each captured
+traversal and before later input for those terminals, while input for other terminals remains immediate.
+Failed handoffs release their suffixes, successful handoffs retain the existing stopping response, and drained
+buckets and satisfied handoff state are removed.
 
 Workspace hierarchy and reorder events preserve fork metadata tokens, agent-view projection, glyph grammar,
 selection, and authority boundaries. Closing a workspace's final tab closes the workspace through the normal
