@@ -555,8 +555,6 @@ pub struct HeadlessServer {
     #[cfg(test)]
     alt_screen_target_resolution_count: std::cell::Cell<usize>,
     #[cfg(test)]
-    alt_screen_liveness_visit_count: std::cell::Cell<usize>,
-    #[cfg(test)]
     last_app_api_caller: std::cell::Cell<Option<api::ApiCaller>>,
     #[cfg(test)]
     test_live_handoff_results: VecDeque<Result<(), String>>,
@@ -707,8 +705,6 @@ impl HeadlessServer {
             #[cfg(test)]
             alt_screen_target_resolution_count: std::cell::Cell::new(0),
             #[cfg(test)]
-            alt_screen_liveness_visit_count: std::cell::Cell::new(0),
-            #[cfg(test)]
             last_app_api_caller: std::cell::Cell::new(None),
             #[cfg(test)]
             test_live_handoff_results: VecDeque::new(),
@@ -858,8 +854,7 @@ impl HeadlessServer {
                 needs_full_render = true;
             }
 
-            let completed_alt_screen_reads = self.poll_pending_alt_screen_reads(now);
-            if self.release_deferred_alt_screen_terminals(completed_alt_screen_reads) {
+            if self.process_pending_alt_screen_reads(now) {
                 needs_render = true;
                 needs_full_render = true;
                 needs_graphics_render = false;
@@ -3740,6 +3735,11 @@ impl HeadlessServer {
             initial,
             content_seq,
         })
+    }
+
+    fn process_pending_alt_screen_reads(&mut self, now: Instant) -> bool {
+        let completed_alt_screen_reads = self.poll_pending_alt_screen_reads(now);
+        self.release_deferred_alt_screen_terminals(completed_alt_screen_reads)
     }
 
     fn poll_pending_alt_screen_reads(&mut self, now: Instant) -> Vec<crate::terminal::TerminalId> {
@@ -7337,6 +7337,43 @@ mod tests {
         test_headless_server_with_event_hub_and_api_sender(api::EventHub::default())
     }
 
+    static NEXT_TEST_HEADLESS_SERVER_ID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    fn test_headless_server_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "hh-{}-{}",
+            std::process::id(),
+            NEXT_TEST_HEADLESS_SERVER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn test_headless_server_dirs_are_unique_across_threads() {
+        const THREADS: usize = 32;
+        const PATHS_PER_THREAD: usize = 64;
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..PATHS_PER_THREAD)
+                        .map(|_| test_headless_server_dir())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let paths: Vec<_> = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("path allocation thread"))
+            .collect();
+        let unique: HashSet<_> = paths.iter().collect();
+
+        assert_eq!(paths.len(), THREADS * PATHS_PER_THREAD);
+        assert_eq!(unique.len(), paths.len());
+    }
+
     fn test_headless_server_with_event_hub_and_api_sender(
         event_hub: api::EventHub,
     ) -> (HeadlessServer, api::ApiRequestSender) {
@@ -7346,14 +7383,7 @@ mod tests {
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
 
-        let dir = std::env::temp_dir().join(format!(
-            "hh-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        let dir = test_headless_server_dir();
         let _ = fs::create_dir_all(&dir);
         let socket_path = dir.join("client.sock");
         let _ = fs::remove_file(&socket_path);
@@ -7386,7 +7416,6 @@ mod tests {
             pending_alt_screen_reads: Vec::new(),
             deferred_alt_screen_reads: DeferredAltScreenRequests::default(),
             alt_screen_target_resolution_count: std::cell::Cell::new(0),
-            alt_screen_liveness_visit_count: std::cell::Cell::new(0),
             last_app_api_caller: std::cell::Cell::new(None),
             test_live_handoff_results: VecDeque::new(),
             next_activity_stamp: 1,
@@ -10024,13 +10053,20 @@ next_tab = ""
                 }
                 server.app.state.ensure_test_terminals();
                 server
+                    .app
+                    .state
+                    .terminals
+                    .get_mut(&terminal_id)
+                    .expect("test terminal")
+                    .state = crate::detect::AgentState::Idle;
+                server
                     .pending_alt_screen_reads
                     .push(test_pending_alt_screen_read(server, terminal_id.clone()));
+                let idle_now = Instant::now();
                 assert!(server
                     .deferred_alt_screen_reads
                     .nonempty_buckets_have_release_source(&server.pending_alt_screen_reads, &[]));
                 server.alt_screen_target_resolution_count.set(0);
-                server.alt_screen_liveness_visit_count.set(0);
                 server
                     .deferred_alt_screen_reads
                     .terminal_queue_examination_count = 0;
@@ -10050,13 +10086,10 @@ next_tab = ""
                     .deferred_alt_screen_reads
                     .nonempty_buckets_have_release_source(&server.pending_alt_screen_reads, &[]));
                 let intake_resolutions = server.alt_screen_target_resolution_count.get();
+                crate::layout::reset_pane_ids_visited();
 
                 for _ in 0..4 {
-                    assert!(
-                        !server.release_deferred_alt_screen_terminals(std::iter::empty::<
-                            crate::terminal::TerminalId,
-                        >())
-                    );
+                    assert!(!server.process_pending_alt_screen_reads(idle_now));
                     assert!(server
                         .deferred_alt_screen_reads
                         .nonempty_buckets_have_release_source(
@@ -10065,7 +10098,7 @@ next_tab = ""
                         ));
                 }
                 let idle_pass_resolutions = server.alt_screen_target_resolution_count.get();
-                let idle_liveness_visits = server.alt_screen_liveness_visit_count.get();
+                let idle_layout_pane_visits = crate::layout::pane_ids_visited();
                 let idle_queue_examinations = server
                     .deferred_alt_screen_reads
                     .terminal_queue_examination_count;
@@ -10092,7 +10125,7 @@ next_tab = ""
                     pane_count,
                     intake_resolutions,
                     idle_pass_resolutions,
-                    idle_liveness_visits,
+                    idle_layout_pane_visits,
                     idle_queue_examinations,
                     dispatched,
                     server

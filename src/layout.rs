@@ -15,6 +15,21 @@ pub struct PaneId(u32);
 /// Global atomic counter for unique PaneId generation across all workspaces.
 static NEXT_PANE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
+#[cfg(test)]
+thread_local! {
+    static PANE_IDS_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_pane_ids_visited() {
+    PANE_IDS_VISITED.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn pane_ids_visited() -> usize {
+    PANE_IDS_VISITED.get()
+}
+
 impl PaneId {
     /// Allocate a globally unique PaneId.
     pub fn alloc() -> Self {
@@ -317,6 +332,8 @@ impl TileLayout {
     pub fn pane_ids(&self) -> Vec<PaneId> {
         let mut ids = Vec::new();
         collect_ids(&self.root, &mut ids);
+        #[cfg(test)]
+        PANE_IDS_VISITED.set(PANE_IDS_VISITED.get().saturating_add(ids.len()));
         ids
     }
 
@@ -729,6 +746,15 @@ mod tests {
             },
             pane(2),
         )
+    }
+
+    #[test]
+    fn pane_ids_visit_counter_tracks_returned_cardinality() {
+        let layout = sample_layout();
+        reset_pane_ids_visited();
+
+        assert_eq!(layout.pane_ids().len(), 4);
+        assert_eq!(pane_ids_visited(), 4);
     }
 
     fn pane_rects(layout: &TileLayout) -> Vec<(PaneId, Rect)> {

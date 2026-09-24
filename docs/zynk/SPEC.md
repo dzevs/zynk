@@ -304,6 +304,9 @@ its caller and response channels, reaches the ordinary socket-to-App path only a
 passes neither resolve nor scan deferred keys, panes, tabs, layouts, or the request backlog. A vanished terminal
 with a pending traversal completes through the traversal poll; a terminal held only by a handoff barrier remains
 ordered through that handoff rather than being discovered by a layout-wide liveness scan.
+This event-loop bound is guarded in two independent ways: deterministic one- and fifteen-pane controls drive
+the production poll-and-release boundary while counting the real layout traversal primitive, and a source
+architecture check requires the loop to call that exact boundary once with no direct collection traversal.
 Deferred live handoffs use monotonic per-terminal barriers: a handoff remains ordered after each captured
 traversal and before later input for those terminals, while input for other terminals remains immediate.
 Pre-barrier requests fail closed before the barrier is reached. Failed handoffs release suffixes through the

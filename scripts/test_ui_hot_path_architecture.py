@@ -17,6 +17,7 @@ APP_SERVER_SOURCES = (
     *sorted((PROJECT_ROOT / "src" / "app").rglob("*.rs")),
     *sorted((PROJECT_ROOT / "src" / "server").rglob("*.rs")),
 )
+HEADLESS_SOURCE = PROJECT_ROOT / "src" / "server" / "headless.rs"
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
@@ -36,6 +37,22 @@ FORBIDDEN_CALLS = (
         re.compile(r"\bforeground_job\s*\("),
         "process-tree inspection",
     ),
+)
+HEADLESS_RUN_FORBIDDEN_TOKENS = (
+    "pane_ids(",
+    ".panes.iter",
+    ".panes.values",
+    ".panes.keys",
+    "workspaces.iter",
+    ".tabs.iter",
+    "terminals.iter",
+    "terminals.keys",
+    "terminal_runtimes.iter",
+    "HashSet::new",
+)
+ALT_SCREEN_MAINTENANCE_BODY = (
+    "let completed_alt_screen_reads = self.poll_pending_alt_screen_reads(now); "
+    "self.release_deferred_alt_screen_terminals(completed_alt_screen_reads)"
 )
 
 
@@ -149,6 +166,49 @@ def find_violations(paths, rules) -> list[str]:
     return violations
 
 
+def rust_function_body(source: str, name: str) -> str:
+    code = production_code(source)
+    signature = re.compile(
+        rf"\b(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+{re.escape(name)}\s*\("
+    )
+    matches = list(signature.finditer(code))
+    if len(matches) != 1:
+        raise AssertionError(f"expected one production fn {name}, found {len(matches)}")
+    start = code.find("{", matches[0].end())
+    if start == -1:
+        raise AssertionError(f"production fn {name} has no body")
+    depth = 0
+    for end in range(start, len(code)):
+        if code[end] == "{":
+            depth += 1
+        elif code[end] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[start + 1 : end]
+    raise AssertionError(f"production fn {name} has an unterminated body")
+
+
+def headless_alt_screen_maintenance_violations(source: str) -> list[str]:
+    run_body = rust_function_body(source, "run")
+    helper_body = rust_function_body(source, "process_pending_alt_screen_reads")
+    compact_run_body = re.sub(r"\s+", "", run_body)
+    violations = [
+        f"run contains forbidden token {token}"
+        for token in HEADLESS_RUN_FORBIDDEN_TOKENS
+        if token in compact_run_body
+    ]
+    helper_call = "self.process_pending_alt_screen_reads(now)"
+    if run_body.count(helper_call) != 1:
+        violations.append("run must call process_pending_alt_screen_reads(now) exactly once")
+    if "poll_pending_alt_screen_reads(" in run_body:
+        violations.append("run must not call poll_pending_alt_screen_reads directly")
+    if "release_deferred_alt_screen_terminals(" in run_body:
+        violations.append("run must not call release_deferred_alt_screen_terminals directly")
+    if " ".join(helper_body.split()) != ALT_SCREEN_MAINTENANCE_BODY:
+        violations.append("process_pending_alt_screen_reads must be exactly poll then release")
+    return violations
+
+
 class UiHotPathArchitectureTests(unittest.TestCase):
     def test_render_hot_paths_avoid_known_expensive_runtime_queries(self) -> None:
         violations = find_violations(HOT_PATH_SOURCES, FORBIDDEN_CALLS)
@@ -170,6 +230,61 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             "App/server code must use narrow terminal-state accessors:\n"
             + "\n".join(violations),
         )
+
+    def test_headless_alt_screen_maintenance_avoids_per_loop_layout_scans(self) -> None:
+        violations = headless_alt_screen_maintenance_violations(
+            HEADLESS_SOURCE.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            violations,
+            [],
+            "Headless alternate-screen maintenance must stay transition-only:\n"
+            + "\n".join(violations),
+        )
+
+    def test_headless_guard_rejects_uninstrumented_reviewer_scan(self) -> None:
+        source = """
+impl HeadlessServer {
+    pub async fn run(&mut self) {
+        let _live = self.app.state.workspaces.iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.layout.pane_ids())
+            .count();
+        self.process_pending_alt_screen_reads(now);
+    }
+
+    fn process_pending_alt_screen_reads(&mut self, now: Instant) -> bool {
+        let completed_alt_screen_reads = self.poll_pending_alt_screen_reads(now);
+        self.release_deferred_alt_screen_terminals(completed_alt_screen_reads)
+    }
+}
+"""
+
+        self.assertTrue(headless_alt_screen_maintenance_violations(source))
+
+    def test_headless_guard_rejects_line_broken_direct_pane_iteration(self) -> None:
+        source = """
+impl HeadlessServer {
+    pub async fn run(&mut self) {
+        let _live = self.app.state.workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs
+                .iter())
+            .flat_map(|tab| tab.panes
+                .values())
+            .count();
+        self.process_pending_alt_screen_reads(now);
+    }
+
+    fn process_pending_alt_screen_reads(&mut self, now: Instant) -> bool {
+        let completed_alt_screen_reads = self.poll_pending_alt_screen_reads(now);
+        self.release_deferred_alt_screen_terminals(completed_alt_screen_reads)
+    }
+}
+"""
+
+        self.assertTrue(headless_alt_screen_maintenance_violations(source))
 
     def test_scanner_ignores_non_production_references(self) -> None:
         source = '''

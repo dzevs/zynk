@@ -7804,3 +7804,40 @@ operator-accepted F4 and `N22B` fixture risks and the closed M8-39 persistence-l
 This correction is **IMPLEMENTED / PENDING VERIFICATION** until its five final-byte mutation probes, restored
 focused controls, isolated lint/release/UI/FULL/check/gate chain, fresh exact-SHA packet, successor Gate-2, and
 successor Gate-3 complete.
+
+#### M-FINAL Gate-3 successor-4 correction
+
+The independent Gate-3 review rejected `8a9bbdbaceeebc259340efd5cf69db2bfdaad0cc` because its claimed idle
+work bound did not execute the production maintenance path. The 10,000-request control called only the release
+helper with an empty completed-terminal set, while the production loop polled traversals before release. Its
+`alt_screen_liveness_visit_count` had no production writer, so an uninstrumented workspace, tab, and
+`Layout::pane_ids` traversal at the real loop position survived the named control.
+
+The loop now calls one private `process_pending_alt_screen_reads` boundary exactly once. That boundary contains
+only the existing poll followed by release of the returned terminal ids. The one- and fifteen-pane control
+drives this production boundary for four idle passes while a traversal remains pending. A test-only thread-local
+counter increments at the real `Layout::pane_ids` traversal primitive by the returned cardinality; its sanity
+control proves a four-pane call records exactly four visits. The work-bound control requires zero layout-pane
+visits, zero deferred-queue examinations, and no additional target resolution during those idle passes, while
+the final transition still drains all 10,000 requests and removes the queue and handoff state. A separate
+whole-function architecture check denies pane, tab, workspace, terminal, runtime, and allocation enumeration
+tokens in `HeadlessServer::run`, requires its single maintenance-boundary call, and requires the helper to be
+exactly poll then release.
+
+Reviewer gap `RG-MF-7` records that the `8a9bbdba` Gate-2 accepted a zero-valued counter without checking for a
+production increment site, and that its mutation probe cooperated with the counter instead of reproducing the
+uninstrumented reviewer class. A counter-based multiplicative bound is accepted only when the counter increments
+at the real traversal primitive, the control drives the production call path, and the fault is uninstrumented.
+The rejected packet and its evidence remain retained. Every inherited carry status is unchanged, including the
+operator-accepted F4 and `N22B` fixture risks and the closed M8-39 persistence-lock carry.
+
+The restored multi-threaded Cargo cohort exposed a pre-existing test-helper collision: parallel headless-server
+fixtures shared one process id and could receive the same clock-derived nanosecond suffix before binding their
+socket. This helper now uses a process-local atomic nonce, with a parallel uniqueness control. Other test helpers
+still use the pid-plus-nanoseconds pattern. The gate population runs under nextest's process-per-test isolation,
+so this is recorded as a known limitation of ad hoc multi-threaded Cargo cohorts rather than a repository-wide
+fixture migration.
+
+This correction is **IMPLEMENTED / PENDING VERIFICATION** until both uninstrumented scan faults, the other four
+final-byte mutation probes, restored focused controls, the isolated exact chain, fresh packet, successor Gate-2,
+and successor Gate-3 complete.
