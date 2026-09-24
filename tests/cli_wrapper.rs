@@ -724,6 +724,24 @@ fn spawn_zynk_with_config(
     path_override: Option<&Path>,
     config_toml: &str,
 ) -> SpawnedZynk {
+    spawn_zynk_with_config_and_env(
+        config_home,
+        runtime_dir,
+        socket_path,
+        path_override,
+        config_toml,
+        &[],
+    )
+}
+
+fn spawn_zynk_with_config_and_env(
+    config_home: &Path,
+    runtime_dir: &Path,
+    socket_path: &Path,
+    path_override: Option<&Path>,
+    config_toml: &str,
+    extra_env: &[(&str, &str)],
+) -> SpawnedZynk {
     fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
@@ -761,6 +779,9 @@ fn spawn_zynk_with_config(
     cmd.env_remove("ZYNK_ENV");
     if let Some(path) = path_override {
         cmd.env("PATH", path);
+    }
+    for (key, value) in extra_env {
+        cmd.env(key, value);
     }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
@@ -8812,12 +8833,13 @@ fn m839c_real_agent_reads_with_managed_state_add_no_persistence_rows() {
     let runtime_dir = base.join("runtime");
     let socket = runtime_dir.join("zynk.sock");
     let config = toml::to_string(&serde_json::json!({"onboarding":false, "terminal":{"default_shell":shell, "shell_mode":"non_login"}})).unwrap();
-    let zynk = spawn_zynk_with_config(
+    let zynk = spawn_zynk_with_config_and_env(
         &config_home,
         &runtime_dir,
         &socket,
         Some(&base.join("bin")),
         &config,
+        &[("ZYNK_EMBED_PROVIDER", "disabled-by-m839-read-control")],
     );
     wait_for_socket(&socket, Duration::from_secs(5));
     let created = m837_exchange(
@@ -8850,6 +8872,25 @@ fn m839c_real_agent_reads_with_managed_state_add_no_persistence_rows() {
         .record(&mut database_phases);
     let before = m839_persistence_snapshot(&db, "orphan seed committed; server live")
         .record(&mut database_phases);
+    assert_eq!(
+        before
+            .named_table_counts
+            .iter()
+            .filter(|(table, _)| {
+                matches!(
+                    table.as_str(),
+                    "embedding_models" | "embedding_jobs" | "message_embeddings"
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>(),
+        [
+            ("embedding_models".into(), 0),
+            ("embedding_jobs".into(), 0),
+            ("message_embeddings".into(), 0),
+        ],
+        "the disabled embedding worker must not mutate the control database"
+    );
     assert!(
         before.delivery_rows.is_empty(),
         "fixture orphan must have no delivery event: {:?}",
