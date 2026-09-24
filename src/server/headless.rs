@@ -8373,6 +8373,7 @@ next_tab = ""
                 response_write_complete: None,
                 caller: api::ApiCaller {
                     peer: None,
+                    #[cfg(debug_assertions)]
                     trusted_as_pane_child: true,
                 },
             },
