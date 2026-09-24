@@ -7653,3 +7653,13 @@ membership.
 
 This correction is **IMPLEMENTED / PENDING VERIFICATION** until targeted delivery/receipt controls, the
 accelerated diagnostic, fault probe, lint, FULL, exact-tip check and gate, and reviewer Gate-2 complete.
+
+Exact-tip Gate-2 approved the correction at
+`fbb0673dd00ef8efb1a06853ad3b7f1bf6a2e9c2` (tree
+`2c06446b667c14329a75040c6c95d34cc4cc936a`) and closed the M8-39 prompt-family persistence-lock carry with
+the production root cause above. One conservative error boundary remains explicit: SQLite rows are already
+committed before `Connection::close()` runs. If closure then fails, `begin_send_attempt` reports failure and
+does not dispatch; orphan recovery later marks the durable attempt failed. If `append_delivery_event` closes
+with an error after its successful commit, the delivery event remains durable even though the CLI reports
+the close failure. This favors avoiding an unverified dispatch over claiming success and does not change the
+delivery-transition or receipt invariants.
