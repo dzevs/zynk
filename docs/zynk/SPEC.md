@@ -296,13 +296,19 @@ No deferred send records Submitted before that dispatch; shutdown or live handof
 the prompt and start timers retain their existing semantics, although traversal can add up to the existing
 15-second traversal plus 5-second restoration bound before those timers begin. Protocol 20 and its wire IDs
 are unchanged. A deferred request resolves its terminal identity once at intake and enters that terminal's
-FIFO bucket. Ordinary loop passes neither resolve nor scan the request backlog; traversal completion or target
-disappearance examines only the affected bucket, removes it when drained, and dispatches each request through
-its unchanged handler. A disappeared target therefore returns the method's existing target-missing response.
+FIFO bucket. That identity is immutable through final dispatch: the server re-resolves the raw target exactly
+once when releasing the request and requires equality before entering the App handler. A missing pane or agent
+returns its existing target-missing response, while an agent alias rebound to another terminal returns
+`agent_target_changed`; neither case can write to the replacement terminal. The unchanged request, including
+its caller and response channels, reaches the ordinary socket-to-App path only after that check. Ordinary loop
+passes neither resolve nor scan deferred keys, panes, tabs, layouts, or the request backlog. A vanished terminal
+with a pending traversal completes through the traversal poll; a terminal held only by a handoff barrier remains
+ordered through that handoff rather than being discovered by a layout-wide liveness scan.
 Deferred live handoffs use monotonic per-terminal barriers: a handoff remains ordered after each captured
 traversal and before later input for those terminals, while input for other terminals remains immediate.
-Failed handoffs release their suffixes, successful handoffs retain the existing stopping response, and drained
-buckets and satisfied handoff state are removed.
+Pre-barrier requests fail closed before the barrier is reached. Failed handoffs release suffixes through the
+same identity check, successful handoffs retain the existing stopping response, and drained buckets and
+satisfied handoff state are removed.
 
 Workspace hierarchy and reorder events preserve fork metadata tokens, agent-view projection, glyph grammar,
 selection, and authority boundaries. Closing a workspace's final tab closes the workspace through the normal

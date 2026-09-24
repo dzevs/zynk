@@ -7761,3 +7761,46 @@ fifth final-byte mutation restores ordinary barrier admission for a released pre
 the three-item handoff control. This follow-up remains **IMPLEMENTED / PENDING VERIFICATION** until those
 controls, all five final-byte mutation probes, a fresh exact chain and packet, successor Gate-2, and successor
 Gate-3 complete.
+
+#### M-FINAL Gate-3 successor-3 corrections
+
+The independent Gate-3 review rejected `fe3d71e1ba9d479a9ac1b06212541a984eebd336` for two further
+alternate-screen queue defects and one evidence-custody defect. First, the headless loop rebuilt a live-terminal
+set by walking every workspace, tab, layout, and pane on every pass, even with no deferred work. The correction
+deletes that liveness scan. A vanished terminal already completes an active traversal through
+`poll_pending_alt_screen_reads`; a bucket held only by a handoff barrier remains ordered until handoff success
+or failure releases it. Idle passes therefore visit no deferred key, pane, tab, or layout. The deterministic
+10,000-request control at one and fifteen panes also asserts after each modeled transition that every nonempty
+bucket has a pending traversal, a handoff barrier, or an immediate release trigger, and that the bucket and
+handoff registries are empty after the final drain.
+
+Second, a deferred raw agent request retained only its bucket key while the unchanged App handler later
+re-resolved the mutable alias. If terminal A disappeared and the alias moved to B, release could admit the
+request under A's context and then mutate B even while B had its own alternate-screen traversal. Final dispatch
+now re-resolves every deferred target-bound request once and requires exact equality with the intake terminal
+before entering the App handler. Missing agent targets return `agent_not_found`, agent aliases rebound to a
+different terminal return `agent_target_changed`, and missing or rebound pane targets return `pane_not_found`.
+The matching path preserves the complete request, caller, response channel, and write-completion channel for
+the ordinary socket-to-App boundary. The binding covers pane input/text/keys and reads, agent send/keys/prompt
+and reads, and pane-targeted agent start. A disappeared terminal cannot cross a handoff barrier: pre-barrier
+requests fail closed; the barrier retains its suffix; success gives that suffix the existing stopping response;
+failure resumes it through the same identity check. A delivery control pins that a CLI `agent send` whose
+original pane disappears records only the existing Failed transition for the original party, with no Submitted
+event and no retargeted party row.
+
+Third, the predecessor exact runner selected its source root from inherited
+`ZYNK_SUCCESSOR2_SOURCE_ROOT` before scrubbing the environment. A decoy checkout therefore captured a command
+that the wrapper had attributed to the fixed candidate. The successor runner accepts only the wrapper's literal
+candidate path, canonicalizes it against the bound root, verifies HEAD, tree, and clean status before and after
+the child, and records the inner cwd and Git identity. Inherited `GIT_*` and `ZYNK_*` variables cannot select a
+source root. All predecessor author records remain historical evidence only; none is promoted to the successor.
+
+Reviewer gaps `RG-MF-5` and `RG-MF-6` record the two product misses. The successor-2 Gate-1 instruction to
+release disappeared buckets through unchanged handlers did not account for mutable agent aliases or handoff
+barriers, and the `fe3d71e1` Gate-2 review did not identify the per-pass pane scan introduced by that design.
+The rejected packet and its verdict remain retained. Every inherited carry status is unchanged, including the
+operator-accepted F4 and `N22B` fixture risks and the closed M8-39 persistence-lock carry.
+
+This correction is **IMPLEMENTED / PENDING VERIFICATION** until its five final-byte mutation probes, restored
+focused controls, isolated lint/release/UI/FULL/check/gate chain, fresh exact-SHA packet, successor Gate-2, and
+successor Gate-3 complete.

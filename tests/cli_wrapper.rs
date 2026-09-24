@@ -7990,6 +7990,58 @@ fn mfinal_deferred_agent_send_records_submitted_only_after_dispatch_response() {
 }
 
 #[test]
+fn mfinal_agent_send_rebound_never_records_submission_or_retargets_delivery_party() {
+    let (fixture, requests, output) = m839_cli_exchange(
+        &["agent", "send", "worker", "deferred body"],
+        |request, base| match request["method"].as_str().unwrap() {
+            "ping" => m839_pong(),
+            "agent.get" => {
+                fs::write(base.join("runtime.id"), "rt_mfinal\n").unwrap();
+                m839_agent_reply(m839_agent_json("idle", "worker", "term_original", 7))
+            }
+            "pane.send_input" => {
+                assert_eq!(request["params"]["pane_id"], "w1:p1");
+                serde_json::json!({
+                    "error": {
+                        "code": "pane_not_found",
+                        "message": "pane w1:p1 disappeared after the agent alias changed"
+                    }
+                })
+            }
+            other => panic!("unexpected method {other}"),
+        },
+    );
+
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ping", "agent.get", "ping", "pane.send_input"]
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["result"], "failed");
+    assert_eq!(result["error"]["code"], "transport_failed");
+    assert!(result.get("delivery_status").is_none());
+    assert!(result.get("submitted_at").is_none());
+    assert!(result.get("proof").is_none());
+
+    let db = fixture.base.join("cli-sqlite/zynk.db");
+    let messages = m839_message_rows(&db, "rebound agent send child reaped").into_value();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["terminal_id"], "term_original");
+    assert_ne!(messages[0]["terminal_id"], "term_rebound");
+    let events = m839_delivery_rows(&db, "rebound agent send child reaped").into_value();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "failed");
+    assert_eq!(events[0]["proof_source"], "pane.send_input");
+    assert_eq!(events[0]["message_id"], result["message_id"]);
+    assert!(!events[0].to_string().contains("term_rebound"));
+}
+
+#[test]
 fn m839c_prompt_persists_pure_body_and_resolved_party_before_single_dispatch() {
     use sha2::{Digest, Sha256};
     for (body_args, pure) in [
