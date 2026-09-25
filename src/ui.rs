@@ -79,14 +79,14 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_panel_entries, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
-        agent_panel_toggle_rect, agent_visible_rows, all_agent_panel_entries,
-        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_workspace_card_areas,
-        expanded_sidebar_sections, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        sidebar_section_divider_rect, workspace_drop_slots, workspace_group_chevron_rect,
-        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, AgentVisibleRow, WorkspaceListEntry,
+        agent_panel_entries, agent_panel_scope_toggle_rect, agent_panel_scroll_metrics,
+        agent_panel_scrollbar_rect, agent_panel_sort_toggle_rect, agent_visible_rows,
+        all_agent_panel_entries, collapsed_sidebar_sections, collapsed_sidebar_toggle_rect,
+        compute_workspace_card_areas, expanded_sidebar_sections, expanded_sidebar_toggle_rect,
+        normalized_workspace_scroll, sidebar_section_divider_rect, workspace_drop_slots,
+        workspace_group_chevron_rect, workspace_list_entries, workspace_list_entries_expanded,
+        workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
+        workspace_parent_group_state, AgentPanelEntry, AgentVisibleRow, WorkspaceListEntry,
     },
 };
 pub(crate) use self::{
@@ -218,6 +218,23 @@ fn desktop_tab_bar_and_terminal_area(
     }
 }
 
+fn reconcile_agent_panel_presented_workspace(app: &mut AppState) {
+    let presented_id = match app.agent_panel_scope {
+        crate::app::state::AgentPanelScope::CurrentWorkspace => {
+            crate::app::agent_view::presented_workspace_idx(app)
+                .and_then(|ws_idx| app.workspaces.get(ws_idx))
+                .map(|workspace| workspace.id.as_str())
+        }
+        crate::app::state::AgentPanelScope::AllWorkspaces => None,
+    };
+
+    if app.view.agent_panel_presented_workspace_id.as_deref() != presented_id {
+        let presented_id = presented_id.map(str::to_owned);
+        app.agent_panel_scroll = 0;
+        app.view.agent_panel_presented_workspace_id = presented_id;
+    }
+}
+
 fn compute_view_internal(
     app: &mut AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -225,6 +242,7 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    reconcile_agent_panel_presented_workspace(app);
     let popup_cursor_suppressed = app
         .popup_pane
         .as_ref()
@@ -322,8 +340,10 @@ fn compute_view_internal(
         })
         .unwrap_or_default();
 
+    let agent_panel_presented_workspace_id = app.view.agent_panel_presented_workspace_id.take();
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
+        agent_panel_presented_workspace_id,
         popup_cursor_suppressed,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
@@ -387,8 +407,10 @@ fn compute_mobile_view(
         .map(|_| mobile_toast_banner_rect(area, app.config_diagnostic.is_some()))
         .unwrap_or_default();
 
+    let agent_panel_presented_workspace_id = app.view.agent_panel_presented_workspace_id.take();
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
+        agent_panel_presented_workspace_id,
         popup_cursor_suppressed,
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
@@ -611,6 +633,68 @@ mod tests {
     use crate::{app::state::ViewLayout, layout::PaneInfo, workspace::Workspace};
     use ratatui::style::Color;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn current_scope_scroll_tracks_stable_workspace_identity_not_index() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+
+        reconcile_agent_panel_presented_workspace(&mut app);
+        let first_id = app.workspaces[0].id.clone();
+        assert_eq!(
+            app.view.agent_panel_presented_workspace_id.as_deref(),
+            Some(first_id.as_str())
+        );
+
+        app.agent_panel_scroll = 4;
+        app.workspaces.remove(0);
+        app.active = Some(0);
+        reconcile_agent_panel_presented_workspace(&mut app);
+        assert_eq!(
+            app.agent_panel_scroll, 0,
+            "new identity at the same index resets"
+        );
+        assert_eq!(
+            app.view.agent_panel_presented_workspace_id.as_deref(),
+            Some(app.workspaces[0].id.as_str())
+        );
+
+        let mut reordered = crate::app::state::AppState::test_new();
+        reordered.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        reordered.active = Some(0);
+        reordered.selected = 0;
+        reordered.mode = Mode::Terminal;
+        reordered.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        reconcile_agent_panel_presented_workspace(&mut reordered);
+        let tracked_ptr = reordered
+            .view
+            .agent_panel_presented_workspace_id
+            .as_ref()
+            .unwrap()
+            .as_ptr();
+        reordered.agent_panel_scroll = 7;
+        reordered.workspaces.swap(0, 1);
+        reordered.active = Some(1);
+        reconcile_agent_panel_presented_workspace(&mut reordered);
+        assert_eq!(
+            reordered.agent_panel_scroll, 7,
+            "same identity does not reset"
+        );
+        assert_eq!(
+            reordered
+                .view
+                .agent_panel_presented_workspace_id
+                .as_ref()
+                .unwrap()
+                .as_ptr(),
+            tracked_ptr,
+            "unchanged identity is not cloned"
+        );
+    }
 
     #[test]
     fn workspace_creation_dialog_renders_new_workspace_title() {

@@ -828,6 +828,7 @@ mod tests {
                 assert_eq!(loaded.diagnostics, Vec::<String>::new(), "{panel}");
                 let mut expected = serde_json::json!({"row_gap": gap, "rows": rows});
                 if panel == "agents" {
+                    expected["group_gap"] = serde_json::json!(1);
                     expected["rows_by_agent"] = serde_json::json!({"claude": [["pane"], []]});
                 }
                 assert_eq!(encoded[panel], expected);
@@ -906,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn m93_live_config_accepts_retired_agent_panel_scope_without_warning() {
+    fn live_config_applies_current_agent_panel_scope_without_warning() {
         let loaded = load_live_config_from_str(
             r#"
 [ui]
@@ -918,6 +919,10 @@ agent_panel_sort = "priority"
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         assert!(loaded.invalid_sections.is_empty());
+        assert_eq!(
+            loaded.config.ui.agent_panel_scope,
+            super::super::AgentPanelScopeConfig::Current
+        );
         assert_eq!(
             loaded.config.ui.agent_panel_sort,
             super::super::AgentPanelSortConfig::Priority
@@ -941,6 +946,29 @@ agent_panel_scope = "workspace"
         assert_eq!(loaded.diagnostics.len(), 1, "{:?}", loaded.diagnostics);
         assert!(loaded.diagnostics[0].contains("invalid ui config"));
         assert!(loaded.diagnostics[0].contains("unknown variant `workspace`"));
+        assert_eq!(
+            loaded.config.keys.zoom,
+            super::super::BindingConfig::one("prefix+z")
+        );
+    }
+
+    #[test]
+    fn invalid_agent_panel_header_invalidates_only_ui_and_keeps_valid_sections() {
+        let loaded = load_live_config_from_str(
+            r#"
+[keys]
+zoom = "prefix+z"
+
+[ui]
+agent_panel_header = "everything"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.invalid_sections, vec!["ui"]);
+        assert_eq!(loaded.diagnostics.len(), 1, "{:?}", loaded.diagnostics);
+        assert!(loaded.diagnostics[0].contains("invalid ui config"));
+        assert!(loaded.diagnostics[0].contains("unknown variant `everything`"));
         assert_eq!(
             loaded.config.keys.zoom,
             super::super::BindingConfig::one("prefix+z")
@@ -1164,7 +1192,8 @@ mouse_capture = false
             assert!(invalid.diagnostics[0].contains("invalid ui config"));
             assert!(invalid.config.ui.mouse_capture);
             assert_eq!(invalid.config.ui.sidebar.agents.row_gap, 0);
-            assert_eq!(invalid.config.ui.sidebar.spaces.row_gap, 0);
+            assert_eq!(invalid.config.ui.sidebar.agents.group_gap, 1);
+            assert_eq!(invalid.config.ui.sidebar.spaces.row_gap, 1);
             assert_eq!(
                 invalid.config.keys.zoom,
                 super::super::BindingConfig::one("prefix+z")
@@ -1595,7 +1624,7 @@ mouse_captur = true
     }
 
     #[test]
-    fn load_live_config_accepts_all_retired_agent_panel_scope_without_warning() {
+    fn load_live_config_applies_all_agent_panel_scope_without_warning() {
         let loaded = load_live_config_from_str(
             r#"
 [ui]
@@ -1607,6 +1636,10 @@ agent_panel_sort = "priority"
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         assert!(loaded.invalid_sections.is_empty());
+        assert_eq!(
+            loaded.config.ui.agent_panel_scope,
+            super::super::AgentPanelScopeConfig::All
+        );
         assert_eq!(
             loaded.config.ui.agent_panel_sort,
             super::super::AgentPanelSortConfig::Priority
@@ -1650,7 +1683,7 @@ agent_panel_sort = "spaces"
     }
 
     #[test]
-    fn startup_config_load_accepts_retired_agent_panel_scope_without_warning() {
+    fn startup_config_load_applies_all_agent_panel_scope_without_warning() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let path = std::env::temp_dir().join(format!(
             "zynk-config-removed-key-{}.toml",
@@ -1669,6 +1702,10 @@ agent_panel_scope = "all"
         let loaded = Config::load();
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(
+            loaded.config.ui.agent_panel_scope,
+            super::super::AgentPanelScopeConfig::All
+        );
 
         std::env::remove_var(CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_file(path);
@@ -1907,7 +1944,7 @@ max_width = 72
     }
 
     #[test]
-    fn load_live_config_accepts_retired_scope_and_reports_removed_input_source_key_once() {
+    fn load_live_config_applies_scope_and_reports_removed_input_source_key_once() {
         let loaded = load_live_config_from_str(
             r#"
 [ui]
@@ -1937,6 +1974,10 @@ pane_history = true
             loaded.diagnostics
         );
         assert!(loaded.invalid_sections.is_empty());
+        assert_eq!(
+            loaded.config.ui.agent_panel_scope,
+            super::super::AgentPanelScopeConfig::Current
+        );
         assert_eq!(
             loaded.config.ui.agent_panel_sort,
             super::super::AgentPanelSortConfig::Priority
@@ -1983,7 +2024,7 @@ mouse_captur = false
     }
 
     #[test]
-    fn startup_config_load_never_reports_retired_agent_panel_scope_as_unknown() {
+    fn startup_config_load_applies_scope_without_reporting_it_as_unknown() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let path = std::env::temp_dir().join(format!(
             "zynk-config-removed-key-no-dup-{}.toml",
@@ -2005,6 +2046,10 @@ agent_panel_scope = "all"
         let _ = std::fs::remove_file(&path);
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(
+            loaded.config.ui.agent_panel_scope,
+            super::super::AgentPanelScopeConfig::All
+        );
     }
 
     // The two keys M5-07 registers get the fork's standard new-key pair: the key itself

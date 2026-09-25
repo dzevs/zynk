@@ -23,12 +23,12 @@ pub use self::{
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, HeaderOptions, HostCursorModeConfig, NewTerminalCwdConfig,
-        ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastZynkPosition, UpdateChannelConfig,
-        HEADER_VERBOSE_ENV_VAR, MAX_HEADER_MAX_WIDTH, MAX_TOAST_DELAY_SECONDS,
-        MIN_HEADER_MAX_WIDTH,
+        validated_sidebar_bounds, AgentPanelHeaderConfig, AgentPanelScopeConfig,
+        AgentPanelSortConfig, Config, ConfigReloadReport, ConfigReloadStatus, HeaderOptions,
+        HostCursorModeConfig, NewTerminalCwdConfig, ShellModeConfig, SidebarCollapsedModeConfig,
+        StatusIndicatorStyle, TabBarPositionConfig, ToastClipboardPosition, ToastConfig,
+        ToastDelivery, ToastZynkPosition, UpdateChannelConfig, HEADER_VERBOSE_ENV_VAR,
+        MAX_HEADER_MAX_WIDTH, MAX_TOAST_DELAY_SECONDS, MIN_HEADER_MAX_WIDTH,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,

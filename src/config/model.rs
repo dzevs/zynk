@@ -172,11 +172,30 @@ impl AgentPanelSortConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
-enum LegacyAgentPanelScopeConfig {
+pub enum AgentPanelScopeConfig {
     Current,
+    #[default]
     All,
+}
+
+impl AgentPanelScopeConfig {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentPanelHeaderConfig {
+    #[default]
+    Scope,
+    Sort,
+    Both,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -986,9 +1005,10 @@ pub struct UiConfig {
     pub tab_bar_right_separator: String,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
-    /// Retired setting retained as a compatibility no-op for existing configs.
-    #[serde(rename = "agent_panel_scope")]
-    _legacy_agent_panel_scope: Option<LegacyAgentPanelScopeConfig>,
+    /// Agent sidebar workspace population. Saved values are "current" or "all". Default: "all".
+    pub agent_panel_scope: AgentPanelScopeConfig,
+    /// Agent sidebar row-one controls. Saved values are "scope", "sort", or "both".
+    pub agent_panel_header: AgentPanelHeaderConfig,
     /// Agent status indicator style. Saved values are "dots" or "symbols". Default: "dots".
     pub status_indicators: StatusIndicatorStyle,
     /// Accent color for highlights, borders, and navigation UI.
@@ -1195,7 +1215,8 @@ impl Default for UiConfig {
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             agent_panel_sort: AgentPanelSortConfig::Spaces,
-            _legacy_agent_panel_scope: None,
+            agent_panel_scope: AgentPanelScopeConfig::All,
+            agent_panel_header: AgentPanelHeaderConfig::Scope,
             status_indicators: StatusIndicatorStyle::Dots,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -1431,6 +1452,42 @@ agent_panel_sort = "workspaces"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+    }
+
+    #[test]
+    fn agent_panel_scope_and_header_config_are_typed_effective_settings() {
+        let defaults = Config::default();
+        assert_eq!(defaults.ui.agent_panel_scope, AgentPanelScopeConfig::All);
+        assert_eq!(
+            defaults.ui.agent_panel_header,
+            AgentPanelHeaderConfig::Scope
+        );
+
+        for (scope, expected) in [
+            ("current", AgentPanelScopeConfig::Current),
+            ("all", AgentPanelScopeConfig::All),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\nagent_panel_scope = \"{scope}\"\n")).unwrap();
+            assert_eq!(config.ui.agent_panel_scope, expected);
+        }
+
+        for (header, expected) in [
+            ("scope", AgentPanelHeaderConfig::Scope),
+            ("sort", AgentPanelHeaderConfig::Sort),
+            ("both", AgentPanelHeaderConfig::Both),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\nagent_panel_header = \"{header}\"\n")).unwrap();
+            assert_eq!(config.ui.agent_panel_header, expected);
+        }
+
+        for input in [
+            "[ui]\nagent_panel_scope = \"workspace\"\n",
+            "[ui]\nagent_panel_header = \"everything\"\n",
+        ] {
+            assert!(toml::from_str::<Config>(input).is_err(), "accepted {input}");
+        }
     }
 
     #[test]

@@ -815,6 +815,7 @@ pub enum ViewLayout {
 
 pub struct ViewState {
     pub layout: ViewLayout,
+    pub agent_panel_presented_workspace_id: Option<String>,
     /// Popup cursor suppression sampled before computing and resizing this view.
     pub popup_cursor_suppressed: bool,
     pub sidebar_rect: Rect,
@@ -996,6 +997,13 @@ pub enum AgentPanelSort {
     #[default]
     Spaces,
     Priority,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentPanelScope {
+    CurrentWorkspace,
+    #[default]
+    AllWorkspaces,
 }
 
 // ---------------------------------------------------------------------------
@@ -1517,6 +1525,8 @@ pub struct AppState {
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
+    pub agent_panel_scope: AgentPanelScope,
+    pub agent_panel_header: crate::config::AgentPanelHeaderConfig,
     /// Transient session-wide projection override for the built-in Agents view.
     pub agent_view_override: Option<crate::api::schema::AgentViewSetParams>,
     pub status_indicators: crate::config::StatusIndicatorStyle,
@@ -1880,6 +1890,7 @@ impl AppState {
             mobile_switcher_scroll: 0,
             view: ViewState {
                 layout: ViewLayout::Desktop,
+                agent_panel_presented_workspace_id: None,
                 popup_cursor_suppressed: false,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
@@ -1929,6 +1940,8 @@ impl AppState {
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             sidebar_section_split: 0.5,
             agent_panel_sort: AgentPanelSort::Spaces,
+            agent_panel_scope: AgentPanelScope::AllWorkspaces,
+            agent_panel_header: crate::config::AgentPanelHeaderConfig::Scope,
             agent_view_override: None,
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
             next_agent_state_change_seq: 0,

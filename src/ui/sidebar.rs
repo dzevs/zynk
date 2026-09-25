@@ -92,22 +92,138 @@ fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     }
 }
 
-pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect {
-    agent_panel_header_label_rect(area, agent_panel_sort_label(sort))
+fn agent_panel_scope_label(scope: crate::app::state::AgentPanelScope) -> &'static str {
+    match scope {
+        crate::app::state::AgentPanelScope::CurrentWorkspace => "current",
+        crate::app::state::AgentPanelScope::AllWorkspaces => "all",
+    }
 }
 
-fn agent_panel_header_label_rect(area: Rect, label: &str) -> Rect {
-    if area.width == 0 || area.height < 2 {
-        return Rect::default();
+const AGENT_PANEL_TITLE: &str = " agents";
+const AGENT_PANEL_HEADER_SEPARATOR: &str = " · ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentPanelHeaderLayout {
+    pub(crate) title_rect: Rect,
+    pub(crate) scope_label: Option<String>,
+    pub(crate) scope_rect: Rect,
+    pub(crate) separator_rect: Rect,
+    pub(crate) secondary_label: Option<String>,
+    pub(crate) sort_rect: Rect,
+    pub(crate) view_rect: Rect,
+}
+
+fn minimum_truncated_view_width(label: &str) -> usize {
+    label
+        .chars()
+        .map(|ch| display_width(&ch.to_string()))
+        .find(|width| *width > 0)
+        .map_or(2, |width| width.saturating_add(1))
+}
+
+pub(crate) fn agent_panel_header_layout(
+    area: Rect,
+    mode: crate::config::AgentPanelHeaderConfig,
+    scope: crate::app::state::AgentPanelScope,
+    sort: AgentPanelSort,
+    view_label: Option<&str>,
+) -> AgentPanelHeaderLayout {
+    let title_width = display_width_u16(AGENT_PANEL_TITLE).min(area.width);
+    let title_rect = if area.height >= 2 && title_width > 0 {
+        Rect::new(area.x, area.y.saturating_add(1), title_width, 1)
+    } else {
+        Rect::default()
+    };
+    let mut layout = AgentPanelHeaderLayout {
+        title_rect,
+        scope_label: None,
+        scope_rect: Rect::default(),
+        separator_rect: Rect::default(),
+        secondary_label: None,
+        sort_rect: Rect::default(),
+        view_rect: Rect::default(),
+    };
+    if area.height < 2 || area.width <= title_width {
+        return layout;
     }
 
-    let width = display_width_u16(label).min(area.width);
-    Rect::new(
-        area.x + area.width.saturating_sub(width),
-        area.y + 1,
-        width,
-        1,
-    )
+    let wants_scope = matches!(
+        mode,
+        crate::config::AgentPanelHeaderConfig::Scope | crate::config::AgentPanelHeaderConfig::Both
+    );
+    let wants_secondary = view_label.is_some()
+        || matches!(
+            mode,
+            crate::config::AgentPanelHeaderConfig::Sort
+                | crate::config::AgentPanelHeaderConfig::Both
+        );
+    let scope_label = agent_panel_scope_label(scope);
+    let scope_width = display_width(scope_label);
+    let secondary_source = view_label.unwrap_or_else(|| agent_panel_sort_label(sort));
+    let secondary_width = display_width(secondary_source);
+    let available = usize::from(area.width.saturating_sub(title_width));
+
+    let rendered_scope = wants_scope
+        .then_some(scope_label)
+        .filter(|_| scope_width <= available);
+    let remaining = available.saturating_sub(if rendered_scope.is_some() {
+        scope_width
+    } else {
+        0
+    });
+    let separator_width = if rendered_scope.is_some() {
+        display_width(AGENT_PANEL_HEADER_SEPARATOR)
+    } else {
+        0
+    };
+    let rendered_secondary = if !wants_secondary || (wants_scope && rendered_scope.is_none()) {
+        None
+    } else if separator_width.saturating_add(secondary_width) <= remaining {
+        Some(secondary_source.to_string())
+    } else if view_label.is_some() {
+        let budget = remaining.saturating_sub(separator_width);
+        (budget >= minimum_truncated_view_width(secondary_source))
+            .then(|| truncate_end(secondary_source, budget))
+    } else {
+        None
+    };
+
+    let rendered_secondary_width = rendered_secondary
+        .as_deref()
+        .map(display_width)
+        .unwrap_or(0);
+    let rendered_separator_width = if rendered_scope.is_some() && rendered_secondary.is_some() {
+        separator_width
+    } else {
+        0
+    };
+    let controls_width = scope_width * usize::from(rendered_scope.is_some())
+        + rendered_separator_width
+        + rendered_secondary_width;
+    let mut x = area
+        .right()
+        .saturating_sub(controls_width.min(u16::MAX as usize) as u16);
+    let y = area.y.saturating_add(1);
+
+    if let Some(scope_label) = rendered_scope {
+        layout.scope_label = Some(scope_label.to_string());
+        layout.scope_rect = Rect::new(x, y, scope_width as u16, 1);
+        x = x.saturating_add(scope_width as u16);
+    }
+    if rendered_separator_width > 0 {
+        layout.separator_rect = Rect::new(x, y, rendered_separator_width as u16, 1);
+        x = x.saturating_add(rendered_separator_width as u16);
+    }
+    if let Some(secondary_label) = rendered_secondary {
+        layout.secondary_label = Some(secondary_label);
+        let rect = Rect::new(x, y, rendered_secondary_width as u16, 1);
+        if view_label.is_some() {
+            layout.view_rect = rect;
+        } else {
+            layout.sort_rect = rect;
+        }
+    }
+    layout
 }
 
 fn active_agent_view_label(app: &AppState) -> Option<&str> {
@@ -116,12 +232,34 @@ fn active_agent_view_label(app: &AppState) -> Option<&str> {
         .map(|view| view.label.as_deref().unwrap_or("filtered"))
 }
 
+fn agent_panel_header_layout_for_app(app: &AppState, area: Rect) -> AgentPanelHeaderLayout {
+    agent_panel_header_layout(
+        area,
+        app.agent_panel_header,
+        app.agent_panel_scope,
+        app.agent_panel_sort,
+        active_agent_view_label(app),
+    )
+}
+
+pub(crate) fn agent_panel_scope_toggle_rect(app: &AppState, area: Rect) -> Rect {
+    agent_panel_header_layout_for_app(app, area).scope_rect
+}
+
+pub(crate) fn agent_panel_sort_toggle_rect(app: &AppState, area: Rect) -> Rect {
+    agent_panel_header_layout_for_app(app, area).sort_rect
+}
+
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
 
 pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
-    collect_agent_panel_entries_with_runtimes(app, None)
+    collect_agent_panel_entries_with_runtimes(
+        app,
+        None,
+        crate::app::state::AgentPanelScope::AllWorkspaces,
+    )
 }
 
 pub(crate) fn agent_panel_entries_from(
@@ -135,14 +273,58 @@ fn agent_panel_entries_with_runtimes(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
 ) -> Vec<AgentPanelEntry> {
-    let mut entries = collect_agent_panel_entries_with_runtimes(app, terminal_runtimes);
+    let mut entries =
+        collect_agent_panel_entries_with_runtimes(app, terminal_runtimes, app.agent_panel_scope);
     crate::app::agent_view::apply_agent_view(app, &mut entries);
     entries
+}
+
+#[cfg(test)]
+thread_local! {
+    static AGENT_PANEL_WORKSPACE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_agent_panel_workspace_visit_count() {
+    AGENT_PANEL_WORKSPACE_VISITS.set(0);
+}
+
+#[cfg(test)]
+fn agent_panel_workspace_visit_count() -> usize {
+    AGENT_PANEL_WORKSPACE_VISITS.get()
+}
+
+fn visit_agent_panel_workspaces<'a>(
+    app: &'a AppState,
+    scope: crate::app::state::AgentPanelScope,
+    mut visit: impl FnMut(usize, &'a crate::workspace::Workspace),
+) {
+    let mut visit_workspace = |ws_idx: usize, workspace: &'a crate::workspace::Workspace| {
+        #[cfg(test)]
+        AGENT_PANEL_WORKSPACE_VISITS.set(AGENT_PANEL_WORKSPACE_VISITS.get() + 1);
+        visit(ws_idx, workspace);
+    };
+
+    match scope {
+        crate::app::state::AgentPanelScope::CurrentWorkspace => {
+            if let Some(ws_idx) = crate::app::agent_view::presented_workspace_idx(app) {
+                if let Some(workspace) = app.workspaces.get(ws_idx) {
+                    visit_workspace(ws_idx, workspace);
+                }
+            }
+        }
+        crate::app::state::AgentPanelScope::AllWorkspaces => {
+            for (ws_idx, workspace) in app.workspaces.iter().enumerate() {
+                visit_workspace(ws_idx, workspace);
+            }
+        }
+    }
 }
 
 fn collect_agent_panel_entries_with_runtimes(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+    scope: crate::app::state::AgentPanelScope,
 ) -> Vec<AgentPanelEntry> {
     let empty_runtimes;
     let terminal_runtimes = match terminal_runtimes {
@@ -153,43 +335,38 @@ fn collect_agent_panel_entries_with_runtimes(
         }
     };
 
-    app.workspaces
-        .iter()
-        .enumerate()
-        .flat_map(|(ws_idx, ws)| {
-            let multi_tab = ws.tabs.len() > 1;
-            let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
-            ws.pane_details(&app.terminals)
-                .into_iter()
-                .map(move |detail| {
-                    let show_tab = multi_tab
-                        || ws
-                            .tabs
-                            .get(detail.tab_idx)
-                            .is_some_and(|tab| !tab.is_auto_named());
-                    AgentPanelEntry {
-                        ws_idx,
-                        tab_idx: detail.tab_idx,
-                        pane_id: detail.pane_id,
-                        primary_label: workspace_label.clone(),
-                        tab_label: detail.tab_label.clone(),
-                        primary_tab_label: show_tab.then_some(detail.tab_label),
-                        agent_label: Some(detail.agent_label),
-                        agent_kind_label: detail.agent_kind_label,
-                        agent: detail.agent,
-                        pane_label: detail.pane_label,
-                        terminal_title: detail.terminal_title,
-                        terminal_title_stripped: detail.terminal_title_stripped,
-                        tokens: detail.tokens,
-                        state: detail.state,
-                        seen: detail.seen,
-                        last_agent_state_change_seq: detail.last_agent_state_change_seq,
-
-                        state_labels: detail.state_labels,
-                    }
-                })
-        })
-        .collect()
+    let mut entries = Vec::new();
+    visit_agent_panel_workspaces(app, scope, |ws_idx, ws| {
+        let multi_tab = ws.tabs.len() > 1;
+        let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
+        entries.extend(ws.pane_details(&app.terminals).into_iter().map(|detail| {
+            let show_tab = multi_tab
+                || ws
+                    .tabs
+                    .get(detail.tab_idx)
+                    .is_some_and(|tab| !tab.is_auto_named());
+            AgentPanelEntry {
+                ws_idx,
+                tab_idx: detail.tab_idx,
+                pane_id: detail.pane_id,
+                primary_label: workspace_label.clone(),
+                tab_label: detail.tab_label.clone(),
+                primary_tab_label: show_tab.then_some(detail.tab_label),
+                agent_label: Some(detail.agent_label),
+                agent_kind_label: detail.agent_kind_label,
+                agent: detail.agent,
+                pane_label: detail.pane_label,
+                terminal_title: detail.terminal_title,
+                terminal_title_stripped: detail.terminal_title_stripped,
+                tokens: detail.tokens,
+                state: detail.state,
+                seen: detail.seen,
+                last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                state_labels: detail.state_labels,
+            }
+        }));
+    });
+    entries
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -584,9 +761,10 @@ fn agent_children_placed_from(
     body: Rect,
     scroll: usize,
     row_gap: u16,
+    group_gap: u16,
     heights: &[u16],
 ) -> usize {
-    agent_visible_rows_for_entries(entries, body, scroll, row_gap, heights)
+    agent_visible_rows_for_entries(entries, body, scroll, row_gap, group_gap, heights)
         .iter()
         .filter(|r| matches!(r, AgentVisibleRow::Child { .. }))
         .count()
@@ -599,6 +777,7 @@ fn max_agent_panel_scroll(
     entries: &[AgentPanelEntry],
     body: Rect,
     row_gap: u16,
+    group_gap: u16,
     heights: &[u16],
 ) -> usize {
     let total = entries.len();
@@ -606,7 +785,9 @@ fn max_agent_panel_scroll(
         return 0;
     }
     for scroll in 0..total {
-        if scroll + agent_children_placed_from(entries, body, scroll, row_gap, heights) >= total {
+        if scroll + agent_children_placed_from(entries, body, scroll, row_gap, group_gap, heights)
+            >= total
+        {
             return scroll;
         }
     }
@@ -622,8 +803,13 @@ pub(crate) fn agent_panel_scroll_metrics(app: &AppState, area: Rect) -> crate::p
     let total = entries.len();
     let body = agent_panel_body_rect(area, false);
     let heights = agent_row_heights(app, &entries);
-    let max_offset_from_bottom =
-        max_agent_panel_scroll(&entries, body, app.sidebar_agents.row_gap, &heights);
+    let max_offset_from_bottom = max_agent_panel_scroll(
+        &entries,
+        body,
+        app.sidebar_agents.row_gap,
+        app.sidebar_agents.group_gap,
+        &heights,
+    );
     let viewport_rows = total.saturating_sub(max_offset_from_bottom);
     let scroll = app.agent_panel_scroll.min(max_offset_from_bottom);
 
@@ -643,15 +829,28 @@ pub(crate) fn agent_visible_rows(app: &AppState, area: Rect) -> Vec<AgentVisible
     let entries = agent_panel_entries(app);
     let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
     let heights = agent_row_heights(app, &entries);
-    agent_visible_rows_for_entries(&entries, body, scroll, app.sidebar_agents.row_gap, &heights)
+    agent_visible_rows_for_entries(
+        &entries,
+        body,
+        scroll,
+        app.sidebar_agents.row_gap,
+        app.sidebar_agents.group_gap,
+        &heights,
+    )
 }
 
 pub(crate) fn agent_panel_scroll_for_target(app: &AppState, area: Rect, target: usize) -> usize {
     let entries = agent_panel_entries(app);
-    let gap = app.sidebar_agents.row_gap;
+    let row_gap = app.sidebar_agents.row_gap;
+    let group_gap = app.sidebar_agents.group_gap;
     let heights = agent_row_heights(app, &entries);
-    let max_scroll =
-        max_agent_panel_scroll(&entries, agent_panel_body_rect(area, false), gap, &heights);
+    let max_scroll = max_agent_panel_scroll(
+        &entries,
+        agent_panel_body_rect(area, false),
+        row_gap,
+        group_gap,
+        &heights,
+    );
     let scroll = app.agent_panel_scroll.min(max_scroll);
     if target >= entries.len() {
         return scroll;
@@ -660,7 +859,14 @@ pub(crate) fn agent_panel_scroll_for_target(app: &AppState, area: Rect, target: 
     let body = agent_panel_body_rect(area, max_scroll > 0);
     (scroll.min(target)..=target.min(max_scroll))
         .find(|offset| {
-            agent_visible_rows_for_entries(&entries, body, *offset, gap, &heights)
+            agent_visible_rows_for_entries(
+                &entries,
+                body,
+                *offset,
+                row_gap,
+                group_gap,
+                &heights,
+            )
                 .iter()
                 .any(|row| matches!(row, AgentVisibleRow::Child { entry_idx, .. } if *entry_idx == target))
         })
@@ -1146,7 +1352,8 @@ fn agent_group_key(e: &AgentPanelEntry) -> (usize, usize) {
 /// PURE placement of the grouped agents rows: takes NO `AppState`, computes NO metrics, does NO
 /// clamping. Given the entry slice, the body rect, and a scroll offset (entries skipped from the
 /// top), it lays out the parallel heights from `body.y`, with `row_gap` before every entry except
-/// the first. Heights clip to body-minus-header regardless of the scroll offset.
+/// the first and `group_gap` before each later emitted group header. Heights clip to
+/// body-minus-header regardless of the scroll offset.
 /// A tab-group change emits a `GroupHeader` before the `Child`; the same group emits just the
 /// `Child`. It stops before any row would leave the body and never emits a dangling header whose
 /// child would not fit. This is the one primitive `agent_children_placed_from` /
@@ -1156,6 +1363,7 @@ fn agent_visible_rows_for_entries(
     body: Rect,
     scroll: usize,
     row_gap: u16,
+    group_gap: u16,
     heights: &[u16],
 ) -> Vec<AgentVisibleRow> {
     debug_assert_eq!(entries.len(), heights.len());
@@ -1174,7 +1382,11 @@ fn agent_visible_rows_for_entries(
             Some(next) => agent_group_key(next) != group,
             None => true,
         };
-        let spacer = if placed_any { row_gap } else { 0 };
+        let spacer = if placed_any {
+            row_gap.saturating_add(if group_changed { group_gap } else { 0 })
+        } else {
+            0
+        };
         let header = u16::from(group_changed);
         let height = heights[idx].max(1).min(body.height.saturating_sub(1));
         // Admit the complete child before publishing either it or its group header.
@@ -1732,29 +1944,46 @@ fn render_agent_detail(
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            " agents",
-            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-        )])),
-        Rect::new(area.x, area.y + 1, area.width, 1),
-    );
-    let control_label = active_agent_view_label(app)
-        .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
-    let toggle_rect = agent_panel_header_label_rect(area, control_label);
-    if toggle_rect != Rect::default() {
-        let color = if app.agent_view_override.is_some() {
-            p.accent
+    let header = agent_panel_header_layout_for_app(app, area);
+    if header.title_rect != Rect::default() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                AGENT_PANEL_TITLE,
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            )),
+            header.title_rect,
+        );
+    }
+    if let Some(label) = header.scope_label.as_deref() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                label,
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            )),
+            header.scope_rect,
+        );
+    }
+    if header.separator_rect != Rect::default() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                AGENT_PANEL_HEADER_SEPARATOR,
+                Style::default().fg(p.overlay0),
+            )),
+            header.separator_rect,
+        );
+    }
+    if let Some(label) = header.secondary_label.as_deref() {
+        let (rect, color) = if header.view_rect != Rect::default() {
+            (header.view_rect, p.accent)
         } else {
-            p.overlay0
+            (header.sort_rect, p.overlay0)
         };
         frame.render_widget(
             Paragraph::new(Span::styled(
-                control_label,
+                label,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ))
-            .alignment(Alignment::Right),
-            toggle_rect,
+            )),
+            rect,
         );
     }
 
@@ -2629,7 +2858,7 @@ mod tests {
                                     }
                                 }
                                 let rows = agent_visible_rows_for_entries(
-                                    &entries, body, scroll, gap, &heights,
+                                    &entries, body, scroll, gap, 0, &heights,
                                 );
                                 assert_eq!(
                                     rows, expected,
@@ -2668,7 +2897,9 @@ mod tests {
         }
         assert_eq!(cases, 2016);
         assert!(populated > 0);
-        assert!(agent_visible_rows_for_entries(&[], Rect::new(0, 0, 1, 8), 0, 0, &[]).is_empty());
+        assert!(
+            agent_visible_rows_for_entries(&[], Rect::new(0, 0, 1, 8), 0, 0, 0, &[]).is_empty()
+        );
 
         use crate::config::AgentSidebarToken as A;
         let mut app = AppState::test_new();
@@ -2736,6 +2967,113 @@ mod tests {
             })
             .collect();
         assert_eq!(children, vec![(panes[1], 4, 3), (panes[0], 7, 1)]);
+    }
+
+    #[test]
+    fn agent_group_gap_is_added_only_before_later_emitted_headers() {
+        let mut app = AppState::test_new();
+        let mut first = Workspace::test_new("one");
+        first.test_split(Direction::Horizontal);
+        app.workspaces = vec![first, Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        for workspace in &app.workspaces {
+            for pane in workspace.tabs[0].panes.values() {
+                app.terminals
+                    .get_mut(&pane.attached_terminal_id)
+                    .unwrap()
+                    .detected_agent = Some(Agent::Claude);
+            }
+        }
+        app.sidebar_agents.row_gap = 0;
+        app.sidebar_agents.group_gap = 1;
+
+        let area = Rect::new(0, 0, 30, 20);
+        let rows = agent_visible_rows(&app, area);
+        assert_eq!(
+            rows.iter()
+                .map(|row| match row {
+                    AgentVisibleRow::GroupHeader { y, .. } => ("header", *y),
+                    AgentVisibleRow::Child { y, .. } => ("child", *y),
+                })
+                .collect::<Vec<_>>(),
+            [
+                ("header", 3),
+                ("child", 4),
+                ("child", 5),
+                ("header", 7),
+                ("child", 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_panel_header_layout_owns_modes_width_precedence_and_hit_targets() {
+        let area = |width| Rect::new(4, 10, width, 8);
+        let scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        let sort = AgentPanelSort::Priority;
+
+        let both = agent_panel_header_layout(
+            area(26),
+            crate::config::AgentPanelHeaderConfig::Both,
+            scope,
+            sort,
+            None,
+        );
+        assert_eq!(both.scope_label.as_deref(), Some("current"));
+        assert_eq!(both.secondary_label.as_deref(), Some("priority"));
+        assert!(both.scope_rect.width > 0);
+        assert!(both.sort_rect.width > 0);
+        assert_eq!(both.view_rect, Rect::default());
+        assert!(both.scope_rect.right() <= both.separator_rect.x);
+        assert!(both.separator_rect.right() <= both.sort_rect.x);
+        assert!(both.title_rect.right() <= both.scope_rect.x);
+
+        let scope_only = agent_panel_header_layout(
+            area(14),
+            crate::config::AgentPanelHeaderConfig::Both,
+            scope,
+            sort,
+            None,
+        );
+        assert_eq!(scope_only.scope_label.as_deref(), Some("current"));
+        assert!(scope_only.secondary_label.is_none());
+        assert_eq!(scope_only.separator_rect, Rect::default());
+        assert_eq!(scope_only.sort_rect, Rect::default());
+
+        let title_only = agent_panel_header_layout(
+            area(14),
+            crate::config::AgentPanelHeaderConfig::Sort,
+            scope,
+            sort,
+            None,
+        );
+        assert!(title_only.scope_label.is_none());
+        assert!(title_only.secondary_label.is_none());
+        assert_eq!(title_only.sort_rect, Rect::default());
+
+        let truncated_view = agent_panel_header_layout(
+            area(19),
+            crate::config::AgentPanelHeaderConfig::Scope,
+            scope,
+            sort,
+            Some("long-view"),
+        );
+        assert_eq!(truncated_view.scope_label.as_deref(), Some("current"));
+        assert_eq!(truncated_view.secondary_label.as_deref(), Some("l…"));
+        assert_eq!(truncated_view.sort_rect, Rect::default());
+        assert_eq!(truncated_view.view_rect.width, 2);
+
+        let omitted_view = agent_panel_header_layout(
+            area(18),
+            crate::config::AgentPanelHeaderConfig::Scope,
+            scope,
+            sort,
+            Some("long-view"),
+        );
+        assert_eq!(omitted_view.scope_label.as_deref(), Some("current"));
+        assert!(omitted_view.secondary_label.is_none());
+        assert_eq!(omitted_view.separator_rect, Rect::default());
+        assert_eq!(omitted_view.view_rect, Rect::default());
     }
 
     #[test]
@@ -2839,7 +3177,7 @@ mod tests {
                     let body = agent_panel_body_rect(area, false);
                     for scroll in [0usize, 1] {
                         let rows =
-                            agent_visible_rows_for_entries(&entries, body, scroll, 0, &heights);
+                            agent_visible_rows_for_entries(&entries, body, scroll, 0, 0, &heights);
                         if width == 0 || body_height < 2 {
                             assert!(rows.is_empty());
                             continue;
@@ -2877,7 +3215,7 @@ mod tests {
             if kind == "oversized" {
                 let body = Rect::new(0, 3, 30, 5);
                 assert_eq!(
-                    agent_visible_rows_for_entries(&entries, body, 0, 0, &heights),
+                    agent_visible_rows_for_entries(&entries, body, 0, 0, 0, &heights),
                     vec![
                         AgentVisibleRow::GroupHeader { entry_idx: 0, y: 3 },
                         AgentVisibleRow::Child {
@@ -2889,7 +3227,7 @@ mod tests {
                     ]
                 );
                 assert_eq!(
-                    agent_visible_rows_for_entries(&entries, body, 1, 0, &heights),
+                    agent_visible_rows_for_entries(&entries, body, 1, 0, 0, &heights),
                     vec![
                         AgentVisibleRow::GroupHeader { entry_idx: 1, y: 3 },
                         AgentVisibleRow::Child {
@@ -2946,7 +3284,7 @@ mod tests {
         let body = Rect::new(0, 0, 30, 12);
         assert_eq!(agent_row_heights(&app, &entries), vec![1, 1, 1]);
         assert_eq!(
-            agent_visible_rows_for_entries(&entries, body, 0, 0, &[1, 1, 1]),
+            agent_visible_rows_for_entries(&entries, body, 0, 0, 0, &[1, 1, 1]),
             vec![
                 AgentVisibleRow::GroupHeader { entry_idx: 0, y: 0 },
                 AgentVisibleRow::Child {
@@ -2975,10 +3313,10 @@ mod tests {
             .collect();
         let body = Rect::new(0, 0, 30, 8);
         assert_eq!(agent_row_heights(&app, &many), vec![1; 8]);
-        assert_eq!(max_agent_panel_scroll(&many, body, 0, &[1; 8]), 4);
-        assert_eq!(agent_children_placed_from(&many, body, 4, 0, &[1; 8]), 4);
+        assert_eq!(max_agent_panel_scroll(&many, body, 0, 0, &[1; 8]), 4);
+        assert_eq!(agent_children_placed_from(&many, body, 4, 0, 0, &[1; 8]), 4);
         assert_eq!(
-            agent_visible_rows_for_entries(&many, body, 4, 0, &[1; 8])
+            agent_visible_rows_for_entries(&many, body, 4, 0, 0, &[1; 8])
                 .iter()
                 .filter_map(|r| match r {
                     AgentVisibleRow::Child {
@@ -3044,8 +3382,14 @@ mod tests {
             entries[2].tokens.insert("a".into(), "A".into());
             let heights = agent_row_heights(&app, &entries);
             assert_eq!(heights, vec![3, 1, 2]);
-            let rows =
-                agent_visible_rows_for_entries(&entries, Rect::new(0, 0, 30, 24), 0, gap, &heights);
+            let rows = agent_visible_rows_for_entries(
+                &entries,
+                Rect::new(0, 0, 30, 24),
+                0,
+                gap,
+                0,
+                &heights,
+            );
             let expected = if gap == u16::MAX {
                 vec![(0, 1, 3)]
             } else {
@@ -3609,8 +3953,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
 
     #[test]
     fn m828d2_configured_agent_rows_share_grouped_geometry_and_render() {
-        let source =
-            "[ui.sidebar.agents]\nrow_gap = 2\nrows = [[\"agent\"], [\"pane\"], [\"$mark\"]]\n";
+        let source = "[ui.sidebar.agents]\nrow_gap = 2\ngroup_gap = 0\nrows = [[\"agent\"], [\"pane\"], [\"$mark\"]]\n";
         assert_eq!(
             source.parse::<toml::Value>().unwrap()["ui"]["sidebar"]["agents"]["rows"]
                 .as_array()
@@ -4192,7 +4535,41 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
     }
 
     #[test]
-    fn m828d1_default_gaps_pack_expanded_entries() {
+    fn fork_default_space_gap_keeps_worktree_members_packed_between_plain_spaces() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("before"),
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/zynk"),
+            workspace_with_worktree_space("one", Some("repo-key"), "/repo/zynk-one"),
+            workspace_with_worktree_space("two", Some("repo-key"), "/repo/zynk-two"),
+            Workspace::test_new("after"),
+        ];
+        for workspace in &mut app.workspaces {
+            workspace.cached_git_branch = None;
+        }
+
+        assert_eq!(app.sidebar_spaces.row_gap, 1);
+        let area = Rect::new(0, 0, 30, 30);
+        let body =
+            workspace_list_body_rect(workspace_list_rect(area, app.sidebar_section_split), false);
+        let cards = compute_workspace_card_areas(&app, area);
+        assert_eq!(
+            cards
+                .iter()
+                .map(|card| (card.ws_idx, card.indented))
+                .collect::<Vec<_>>(),
+            [(0, false), (1, false), (2, true), (3, true), (4, false)]
+        );
+        assert_eq!(cards[0].rect.y, body.y);
+        assert_eq!(cards[1].rect.y, cards[0].rect.bottom() + 1);
+        assert_eq!(cards[2].rect.y, cards[1].rect.bottom());
+        assert_eq!(cards[3].rect.y, cards[2].rect.bottom());
+        assert_eq!(cards[4].rect.y, cards[3].rect.bottom() + 1);
+        assert_eq!(cards[4].rect.bottom(), body.y + 7);
+    }
+
+    #[test]
+    fn fork_default_gaps_separate_spaces_and_agent_groups() {
         let config = crate::config::Config::default();
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut owner =
@@ -4216,8 +4593,8 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         assert_eq!(cards[0].rect.height, 1);
         assert_eq!(
             cards[1].rect.y,
-            cards[0].rect.y + 1,
-            "default spaces are adjacent"
+            cards[0].rect.y + 2,
+            "the default spaces row gap separates top-level entries"
         );
         let area = Rect::new(0, 0, 30, 14);
         let y = agent_panel_body_rect(area, false).y;
@@ -4233,18 +4610,18 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                 },
                 AgentVisibleRow::GroupHeader {
                     entry_idx: 1,
-                    y: y + 2
+                    y: y + 3
                 },
                 AgentVisibleRow::Child {
                     entry_idx: 1,
-                    y: y + 3,
+                    y: y + 4,
                     height: 1,
                     last: true
                 },
             ]
         );
         let lines = render_agent_detail_to_lines(app, area.width, area.height);
-        for (idx, header_y, child_y) in [(0, y, y + 1), (1, y + 2, y + 3)] {
+        for (idx, header_y, child_y) in [(0, y, y + 1), (1, y + 3, y + 4)] {
             assert!(lines[header_y as usize].contains(&entries[idx].tab_label));
             assert!(lines[child_y as usize].contains(entries[idx].agent_label.as_deref().unwrap()));
         }
@@ -4252,7 +4629,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
 
     #[test]
     fn m828d1_agent_gaps_match_grouped_rendered_rows() {
-        let source = "[ui.sidebar.agents]\nrow_gap = 2\n";
+        let source = "[ui.sidebar.agents]\nrow_gap = 2\ngroup_gap = 0\n";
         assert!(source.parse::<toml::Value>().is_ok());
         let config: crate::config::Config = toml::from_str(source).unwrap();
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5069,6 +5446,85 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         // blocked > working > done > idle: four (blocked), then the two working spaces in space
         // order (one, three), then two (done). Upstream's ordering put done above working.
         assert_eq!(labels, ["four", "one", "three", "two"]);
+    }
+
+    #[test]
+    fn agent_panel_scope_selects_population_before_view_and_sort() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("one"),
+            Workspace::test_new("two"),
+            Workspace::test_new("three"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        for ws_idx in 0..app.workspaces.len() {
+            let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        }
+
+        assert_eq!(agent_panel_entries(&app).len(), 3);
+        app.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        assert_eq!(
+            agent_panel_entries(&app)
+                .into_iter()
+                .map(|entry| entry.ws_idx)
+                .collect::<Vec<_>>(),
+            [0]
+        );
+        assert_eq!(all_agent_panel_entries(&app).len(), 3);
+
+        app.active = None;
+        app.selected = usize::MAX;
+        assert!(
+            agent_panel_entries(&app).is_empty(),
+            "current scope has no fallback when no workspace is presented"
+        );
+
+        app.mode = Mode::Navigate;
+        app.selected = 2;
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
+        assert_eq!(
+            agent_panel_entries(&app)
+                .into_iter()
+                .map(|entry| entry.ws_idx)
+                .collect::<Vec<_>>(),
+            [2]
+        );
+    }
+
+    #[test]
+    fn agent_panel_scope_visits_only_selected_population_at_one_and_fifteen_workspaces() {
+        for workspace_count in [1, 15] {
+            let mut app = crate::app::state::AppState::test_new();
+            app.workspaces = (0..workspace_count)
+                .map(|idx| Workspace::test_new(&format!("workspace-{idx}")))
+                .collect();
+            app.ensure_test_terminals();
+            app.active = Some(0);
+            app.selected = 0;
+            for ws_idx in 0..app.workspaces.len() {
+                let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+                let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                    .attached_terminal_id
+                    .clone();
+                app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+            }
+
+            app.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+            reset_agent_panel_workspace_visit_count();
+            assert_eq!(agent_panel_entries(&app).len(), 1);
+            assert_eq!(agent_panel_workspace_visit_count(), 1);
+
+            app.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
+            reset_agent_panel_workspace_visit_count();
+            assert_eq!(agent_panel_entries(&app).len(), workspace_count);
+            assert_eq!(agent_panel_workspace_visit_count(), workspace_count);
+        }
     }
 
     #[tokio::test]
@@ -6020,6 +6476,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                             body,
                             scroll,
                             gap,
+                            0,
                             &vec![1; entries.len()],
                         );
                         assert_eq!(rows, expected, "gap={gap} body={body:?} scroll={scroll}");
@@ -6044,7 +6501,8 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                 }
             }
             assert!(
-                agent_visible_rows_for_entries(&[], Rect::new(0, 0, 30, 8), 0, gap, &[]).is_empty()
+                agent_visible_rows_for_entries(&[], Rect::new(0, 0, 30, 8), 0, gap, 0, &[])
+                    .is_empty()
             );
         }
         assert_eq!(cases, 360);
@@ -6092,6 +6550,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                             body,
                             *scroll,
                             gap,
+                            app.sidebar_agents.group_gap,
                             &vec![1; entries.len()],
                         )
                         .iter()
@@ -6120,6 +6579,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                         agent_panel_body_rect(area, true),
                         expected_max,
                         gap,
+                        app.sidebar_agents.group_gap,
                         &vec![1; entries.len()]
                     )
                 );
@@ -6129,6 +6589,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                         body,
                         expected_max,
                         gap,
+                        app.sidebar_agents.group_gap,
                         &vec![1; entries.len()]
                     ),
                     metrics.viewport_rows
@@ -6164,6 +6625,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                     assert_ne!(app.palette.active_row_bg, app.palette.sidebar_bg);
                     app.status_indicators = indicator;
                     app.sidebar_agents.row_gap = gap;
+                    app.sidebar_agents.group_gap = 0;
                     app.sidebar_spaces.row_gap = gap;
                     app.workspaces = ["alpha", "beta"]
                         .into_iter()
@@ -6441,7 +6903,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
             agent_entry(0, 1, "pi", 3),
         ];
         let body = Rect::new(0, 0, 30, 12);
-        let rows = agent_visible_rows_for_entries(&entries, body, 0, 0, &vec![1; entries.len()]);
+        let rows = agent_visible_rows_for_entries(&entries, body, 0, 0, 0, &vec![1; entries.len()]);
 
         let headers: Vec<_> = rows
             .iter()
@@ -6486,6 +6948,40 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
     }
 
     #[test]
+    fn interleaved_priority_and_plugin_orders_gap_every_reemitted_group() {
+        let priority_order = vec![
+            agent_entry(0, 0, "blocked-a", 1),
+            agent_entry(1, 0, "working-b", 2),
+            agent_entry(0, 0, "idle-a", 3),
+        ];
+        let plugin_order = vec![
+            agent_entry(1, 0, "plugin-b", 4),
+            agent_entry(0, 0, "plugin-a", 5),
+            agent_entry(1, 0, "plugin-b-2", 6),
+        ];
+
+        for entries in [priority_order, plugin_order] {
+            let rows = agent_visible_rows_for_entries(
+                &entries,
+                Rect::new(0, 0, 30, 12),
+                0,
+                0,
+                1,
+                &[1, 1, 1],
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter_map(|row| match row {
+                        AgentVisibleRow::GroupHeader { y, .. } => Some(*y),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                [0, 3, 6]
+            );
+        }
+    }
+
+    #[test]
     fn max_agent_panel_scroll_reaches_last_child_when_headers_consume_rows() {
         // 8 single-child tab groups (distinct ws_idx) — headers consume rows in a short body, so the
         // last child is only reachable by scrolling. A header-blind metric would strand it.
@@ -6493,12 +6989,13 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
             .map(|i| agent_entry(i, 0, "claude", i as u32 + 1))
             .collect();
         let body = Rect::new(0, 0, 30, 8);
-        let max = max_agent_panel_scroll(&entries, body, 0, &vec![1; entries.len()]);
+        let max = max_agent_panel_scroll(&entries, body, 0, 0, &vec![1; entries.len()]);
         assert!(
             max > 0,
             "headers consume rows -> last child needs scrolling (max={max})"
         );
-        let rows = agent_visible_rows_for_entries(&entries, body, max, 0, &vec![1; entries.len()]);
+        let rows =
+            agent_visible_rows_for_entries(&entries, body, max, 0, 0, &vec![1; entries.len()]);
         let last = entries.len() - 1;
         assert!(
             rows.iter().any(
@@ -6508,7 +7005,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         );
         // metrics/rows consistency: children placed at the bottom == viewport (total - max).
         assert_eq!(
-            agent_children_placed_from(&entries, body, max, 0, &vec![1; entries.len()]),
+            agent_children_placed_from(&entries, body, max, 0, 0, &vec![1; entries.len()]),
             entries.len() - max
         );
     }
@@ -6593,6 +7090,95 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         let joined = render_agent_detail_to_lines(&mut app, 30, 8).join("\n");
         assert!(joined.contains("blocked only"), "{joined}");
         assert!(joined.contains("no matching agents"), "{joined}");
+    }
+
+    #[test]
+    fn agent_panel_header_modes_render_and_hit_test_from_one_layout() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        app.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        app.agent_panel_sort = AgentPanelSort::Priority;
+        let area = Rect::new(0, 0, 26, 8);
+
+        for (mode, scope_visible, sort_visible, expected, absent) in [
+            (
+                crate::config::AgentPanelHeaderConfig::Scope,
+                true,
+                false,
+                "current",
+                "priority",
+            ),
+            (
+                crate::config::AgentPanelHeaderConfig::Sort,
+                false,
+                true,
+                "priority",
+                "current",
+            ),
+            (
+                crate::config::AgentPanelHeaderConfig::Both,
+                true,
+                true,
+                "current · priority",
+                "missing",
+            ),
+        ] {
+            app.agent_panel_header = mode;
+            let lines = render_agent_detail_to_lines(&mut app, area.width, area.height);
+            assert!(lines[1].contains(" agents"));
+            assert!(lines[1].contains(expected), "mode {mode:?}: {}", lines[1]);
+            assert!(!lines[1].contains(absent), "mode {mode:?}: {}", lines[1]);
+            assert!(lines[2].trim().is_empty(), "row 2 stays blank");
+            assert!(matches!(
+                agent_visible_rows(&app, area).first(),
+                Some(AgentVisibleRow::GroupHeader { y: 3, .. })
+            ));
+            assert_eq!(
+                agent_panel_scope_toggle_rect(&app, area).width > 0,
+                scope_visible
+            );
+            assert_eq!(
+                agent_panel_sort_toggle_rect(&app, area).width > 0,
+                sort_visible
+            );
+        }
+
+        app.agent_panel_header = crate::config::AgentPanelHeaderConfig::Scope;
+        app.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "plugin:status".into(),
+            label: Some("blocked agents".into()),
+            filter: None,
+            sort: Vec::new(),
+        });
+        let layout = agent_panel_header_layout_for_app(&app, area);
+        assert!(layout.scope_rect.width > 0);
+        assert_eq!(layout.sort_rect, Rect::default());
+        assert!(layout.view_rect.width > 0);
+        assert_eq!(agent_panel_sort_toggle_rect(&app, area), Rect::default());
+
+        let runtimes = TerminalRuntimeRegistry::new();
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &runtimes, frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for x in layout.view_rect.x..layout.view_rect.right() {
+            assert_eq!(
+                buffer[(x, layout.view_rect.y)].style().fg,
+                Some(app.palette.accent)
+            );
+        }
     }
 
     #[test]

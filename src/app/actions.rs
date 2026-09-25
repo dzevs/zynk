@@ -5177,6 +5177,40 @@ mod tests {
     }
 
     #[test]
+    fn current_scope_navigation_never_focuses_a_hidden_workspace_agent() {
+        let mut first = Workspace::test_new("one");
+        let first_root = first.tabs[0].root_pane;
+        let first_second = first.test_split(Direction::Horizontal);
+        first.tabs[0].layout.focus_pane(first_root);
+        let second = Workspace::test_new("two");
+        let second_root = second.tabs[0].root_pane;
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![first, second];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        state.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        mark_agent(&mut state, 0, 0, first_root);
+        mark_agent(&mut state, 0, 0, first_second);
+        mark_agent(&mut state, 1, 0, second_root);
+
+        assert_eq!(crate::ui::agent_panel_entries(&state).len(), 2);
+        assert!(!state.focus_agent_entry(2));
+        state.next_agent();
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_second));
+        state.next_agent();
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_root));
+        state.previous_agent();
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_second));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn focus_agent_entry_uses_agent_panel_order() {
         let mut first = Workspace::test_new("one");
         let first_root = first.tabs[0].root_pane;

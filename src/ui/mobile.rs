@@ -1492,6 +1492,40 @@ mod tests {
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
     }
 
+    #[test]
+    fn current_scope_filters_mobile_switcher_but_not_global_status_counts() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            crate::workspace::Workspace::test_new("current"),
+            crate::workspace::Workspace::test_new("hidden"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 18);
+
+        for (ws_idx, state) in [(0, AgentState::Working), (1, AgentState::Blocked)] {
+            let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.state = state;
+        }
+
+        let entries = agent_panel_entries(&app);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].ws_idx, 0);
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).start, 5);
+        let counts = global_agent_counts(&app);
+        assert_eq!(counts.total(), 2);
+        assert_eq!(counts.working, 1);
+        assert_eq!(counts.blocked, 1);
+    }
+
     fn worktree_workspace(name: &str, key: &str, linked: bool) -> crate::workspace::Workspace {
         let mut ws = crate::workspace::Workspace::test_new(name);
         ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {

@@ -508,6 +508,90 @@ mod tests {
     }
 
     #[test]
+    fn scope_precedes_priority_and_plugin_filter_sort_composition() {
+        let mut current = Workspace::test_new("current");
+        let first = current.tabs[0].root_pane;
+        let second = current.test_split(ratatui::layout::Direction::Horizontal);
+        let hidden = Workspace::test_new("hidden");
+        let hidden_id = hidden.id.clone();
+        let hidden_pane = hidden.tabs[0].root_pane;
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![current, hidden];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
+
+        for (ws_idx, pane_id, agent_state) in [
+            (0, first, AgentState::Idle),
+            (0, second, AgentState::Working),
+            (1, hidden_pane, AgentState::Blocked),
+        ] {
+            let terminal_id = state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), agent_state);
+        }
+
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)
+                .iter()
+                .map(|entry| entry.pane_id)
+                .collect::<Vec<_>>(),
+            [second, first],
+            "priority sorts only the selected workspace"
+        );
+
+        state.agent_view_override = Some(AgentViewSetParams {
+            source: "plugin:hidden".into(),
+            label: None,
+            filter: Some(AgentViewFilter::Eq {
+                field: AgentViewField::Builtin(AgentViewBuiltinField::WorkspaceId),
+                value: AgentViewValue::String(hidden_id),
+            }),
+            sort: Vec::new(),
+        });
+        assert!(
+            crate::ui::agent_panel_entries(&state).is_empty(),
+            "a plugin filter cannot reintroduce a workspace removed by scope"
+        );
+
+        state.agent_view_override = Some(AgentViewSetParams {
+            source: "plugin:ordered".into(),
+            label: None,
+            filter: None,
+            sort: vec![AgentViewSort {
+                field: AgentViewSortField::Builtin(AgentViewBuiltinSortField::PaneOrder),
+                order: AgentViewSortOrder::Asc,
+            }],
+        });
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)
+                .iter()
+                .map(|entry| entry.pane_id)
+                .collect::<Vec<_>>(),
+            [first, second],
+            "plugin sort wins inside the selected population"
+        );
+
+        state.agent_view_override.as_mut().unwrap().sort.clear();
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)
+                .iter()
+                .map(|entry| entry.pane_id)
+                .collect::<Vec<_>>(),
+            [second, first],
+            "a view without a sort falls back to panel priority"
+        );
+    }
+
+    #[test]
     fn m844_validation_bounds_recursive_filters_values_and_tokens() {
         let mut nested = AgentViewFilter::Exists {
             field: AgentViewField::Builtin(AgentViewBuiltinField::Status),

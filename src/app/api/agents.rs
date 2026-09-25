@@ -1491,6 +1491,35 @@ mod tests {
     }
 
     #[test]
+    fn agent_list_remains_global_when_the_sidebar_scope_is_current() {
+        let mut app = m823_app_with_agent();
+        app.state
+            .workspaces
+            .push(Workspace::test_new("hidden-agent"));
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[1].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        app.state.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        assert_eq!(crate::ui::agent_panel_entries(&app.state).len(), 1);
+        let current: serde_json::Value =
+            serde_json::from_str(&app.handle_agent_list("current".into())).unwrap();
+
+        app.state.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
+        let all: serde_json::Value =
+            serde_json::from_str(&app.handle_agent_list("all".into())).unwrap();
+        assert_eq!(current["result"]["agents"].as_array().unwrap().len(), 2);
+        assert_eq!(current["result"]["agents"], all["result"]["agents"]);
+    }
+
+    #[test]
     fn agent_focus_marks_already_focused_done_agent_seen() {
         let mut app = m823_app_with_agent();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;

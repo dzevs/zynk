@@ -265,6 +265,15 @@ fn agent_panel_sort_from_config(
     }
 }
 
+fn agent_panel_scope_from_config(
+    scope: crate::config::AgentPanelScopeConfig,
+) -> state::AgentPanelScope {
+    match scope {
+        crate::config::AgentPanelScopeConfig::Current => state::AgentPanelScope::CurrentWorkspace,
+        crate::config::AgentPanelScopeConfig::All => state::AgentPanelScope::AllWorkspaces,
+    }
+}
+
 /// Parse the configured agent name list into a deduplicated set of `Agent`
 /// values. Unknown agent names are silently dropped so a typo cannot disable
 /// other valid entries.
@@ -485,6 +494,7 @@ impl App {
         };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
+        let agent_panel_scope = agent_panel_scope_from_config(config.ui.agent_panel_scope);
 
         // Validate sidebar bounds before they reach any `u16::clamp(min, max)`
         // call: `clamp` panics when `min > max`. On bad config, fall back to
@@ -597,6 +607,7 @@ impl App {
             mobile_switcher_scroll: 0,
             view: state::ViewState {
                 layout: state::ViewLayout::Desktop,
+                agent_panel_presented_workspace_id: None,
                 popup_cursor_suppressed: false,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
@@ -643,6 +654,8 @@ impl App {
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
             sidebar_section_split,
             agent_panel_sort,
+            agent_panel_scope,
+            agent_panel_header: config.ui.agent_panel_header,
             agent_view_override: None,
             status_indicators: config.ui.status_indicators,
             next_agent_state_change_seq: 0,
@@ -1467,6 +1480,9 @@ impl App {
                 );
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                self.state.agent_panel_scope =
+                    agent_panel_scope_from_config(config.ui.agent_panel_scope);
+                self.state.agent_panel_header = config.ui.agent_panel_header;
                 self.state.status_indicators = config.ui.status_indicators;
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
@@ -2654,24 +2670,44 @@ mod tests {
     fn m828d1_gap_state_initialization_and_reload_are_section_atomic() {
         let test_state = state::AppState::test_new();
         assert_eq!(test_state.sidebar_agents.row_gap, 0);
-        assert_eq!(test_state.sidebar_spaces.row_gap, 0);
-        let config: Config =
-            toml::from_str("[ui.sidebar.agents]\nrow_gap = 2\n[ui.sidebar.spaces]\nrow_gap = 5\n")
-                .unwrap();
+        assert_eq!(test_state.sidebar_agents.group_gap, 1);
+        assert_eq!(test_state.sidebar_spaces.row_gap, 1);
+        assert_eq!(
+            test_state.agent_panel_scope,
+            state::AgentPanelScope::AllWorkspaces
+        );
+        assert_eq!(
+            test_state.agent_panel_header,
+            crate::config::AgentPanelHeaderConfig::Scope
+        );
+        let config: Config = toml::from_str(
+            "[ui.sidebar.agents]\nrow_gap = 2\ngroup_gap = 4\n[ui.sidebar.spaces]\nrow_gap = 5\n",
+        )
+        .unwrap();
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(&config, true, None, rx, crate::api::EventHub::default());
         assert_eq!(app.state.sidebar_agents.row_gap, 2);
+        assert_eq!(app.state.sidebar_agents.group_gap, 4);
         assert_eq!(app.state.sidebar_spaces.row_gap, 5);
         app.state.agent_panel_scroll = 7;
         app.state.workspace_scroll = 9;
         let changed: Config = toml::from_str(
-            "[ui]\nmouse_capture = false\n[ui.sidebar.agents]\nrow_gap = 3\n[ui.sidebar.spaces]\nrow_gap = 8\n",
+            "[ui]\nmouse_capture = false\nagent_panel_scope = \"current\"\nagent_panel_header = \"both\"\n[ui.sidebar.agents]\nrow_gap = 3\ngroup_gap = 6\n[ui.sidebar.spaces]\nrow_gap = 8\n",
         )
         .unwrap();
         let applied = app.apply_live_config(&changed, &[], &[], false);
         assert_eq!(applied.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.sidebar_agents.row_gap, 3);
+        assert_eq!(app.state.sidebar_agents.group_gap, 6);
         assert_eq!(app.state.sidebar_spaces.row_gap, 8);
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(
+            app.state.agent_panel_header,
+            crate::config::AgentPanelHeaderConfig::Both
+        );
         assert!(!app.state.mouse_capture);
         assert_eq!(app.state.agent_panel_scroll, 0);
         assert_eq!(app.state.workspace_scroll, 9);
@@ -2689,7 +2725,16 @@ mod tests {
         );
         assert_eq!(partial.status, crate::config::ConfigReloadStatus::Partial);
         assert_eq!(app.state.sidebar_agents.row_gap, 3);
+        assert_eq!(app.state.sidebar_agents.group_gap, 6);
         assert_eq!(app.state.sidebar_spaces.row_gap, 8);
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(
+            app.state.agent_panel_header,
+            crate::config::AgentPanelHeaderConfig::Both
+        );
         assert!(!app.state.mouse_capture);
         assert_eq!(app.state.agent_panel_scroll, 4);
         assert_eq!(app.state.workspace_scroll, 9);
@@ -2703,11 +2748,21 @@ mod tests {
         invalid_bounds.ui.sidebar_min_width = 40;
         invalid_bounds.ui.sidebar_max_width = 20;
         invalid_bounds.ui.sidebar.agents.row_gap = 13;
+        invalid_bounds.ui.sidebar.agents.group_gap = 15;
         invalid_bounds.ui.sidebar.spaces.row_gap = 14;
         let partial = app.apply_live_config(&invalid_bounds, &[], &[], false);
         assert_eq!(partial.status, crate::config::ConfigReloadStatus::Partial);
         assert_eq!(app.state.sidebar_agents.row_gap, 3);
+        assert_eq!(app.state.sidebar_agents.group_gap, 6);
         assert_eq!(app.state.sidebar_spaces.row_gap, 8);
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(
+            app.state.agent_panel_header,
+            crate::config::AgentPanelHeaderConfig::Both
+        );
         assert_eq!(app.state.agent_panel_scroll, 4);
         assert_eq!(app.state.workspace_scroll, 9);
     }
@@ -3647,6 +3702,86 @@ mod tests {
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+    }
+
+    #[test]
+    fn startup_uses_configured_agent_panel_scope_and_header() {
+        let mut config = Config::default();
+        config.ui.agent_panel_scope = crate::config::AgentPanelScopeConfig::Current;
+        config.ui.agent_panel_header = crate::config::AgentPanelHeaderConfig::Both;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(
+            app.state.agent_panel_header,
+            crate::config::AgentPanelHeaderConfig::Both
+        );
+    }
+
+    #[test]
+    fn live_reload_applies_agent_panel_scope_in_both_directions() {
+        let config = Config::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::AllWorkspaces
+        );
+
+        app.state.agent_panel_scroll = 7;
+        let mut current = Config::default();
+        current.ui.agent_panel_scope = crate::config::AgentPanelScopeConfig::Current;
+        let report = app.apply_live_config(&current, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(app.state.agent_panel_scroll, 0);
+
+        app.state.agent_panel_scroll = 9;
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::AllWorkspaces
+        );
+        assert_eq!(app.state.agent_panel_scroll, 0);
+    }
+
+    #[test]
+    fn operator_shaped_config_enables_current_scope_and_fork_spacing_defaults() {
+        let config: Config = toml::from_str(
+            "# operator preferences\nonboarding = false\n\n[ui]\nagent_panel_scope = \"current\"\nagent_panel_sort = \"priority\"\nshow_agent_labels_on_pane_borders = true\n\n[ui.sidebar.spaces]\nrow_gap = 1\n",
+        )
+        .unwrap();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(
+            app.state.agent_panel_header,
+            crate::config::AgentPanelHeaderConfig::Scope
+        );
+        assert_eq!(app.state.sidebar_agents.group_gap, 1);
+        assert_eq!(app.state.sidebar_agents.row_gap, 0);
+        assert_eq!(app.state.sidebar_spaces.row_gap, 1);
+
+        let area = ratatui::layout::Rect::new(0, 0, 26, 12);
+        assert!(crate::ui::agent_panel_scope_toggle_rect(&app.state, area).width > 0);
+        assert_eq!(
+            crate::ui::agent_panel_sort_toggle_rect(&app.state, area),
+            ratatui::layout::Rect::default()
+        );
     }
 
     #[test]
@@ -4601,6 +4736,73 @@ mod tests {
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("agent_panel_sort = \"priority\""));
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_agent_panel_scope_changes_only_the_operator_shaped_ui_value() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("save-agent-panel-scope");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = "# operator preferences\nonboarding = false\n\n[ui]\nagent_panel_scope = \"all\"\nagent_panel_sort = \"priority\"\nshow_agent_labels_on_pane_borders = true\n\n[ui.sidebar.spaces]\nrow_gap = 1\n";
+        let after = "# operator preferences\nonboarding = false\n\n[ui]\nagent_panel_scope = \"current\"\nagent_panel_sort = \"priority\"\nshow_agent_labels_on_pane_borders = true\n\n[ui.sidebar.spaces]\nrow_gap = 1\n";
+        std::fs::write(&path, before).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.save_agent_panel_scope(state::AgentPanelScope::CurrentWorkspace);
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn clicking_agent_panel_scope_persists_through_the_app_mouse_path() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("click-agent-panel-scope");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = "# operator preferences\nonboarding = false\n\n[ui]\nagent_panel_scope = \"all\"\nagent_panel_sort = \"priority\"\nshow_agent_labels_on_pane_borders = true\n\n[ui.sidebar.spaces]\nrow_gap = 1\n";
+        let after = "# operator preferences\nonboarding = false\n\n[ui]\nagent_panel_scope = \"current\"\nagent_panel_sort = \"priority\"\nshow_agent_labels_on_pane_borders = true\n\n[ui.sidebar.spaces]\nrow_gap = 1\n";
+        std::fs::write(&path, before).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("current")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 20);
+        app.state.agent_panel_scope = state::AgentPanelScope::AllWorkspaces;
+        app.state.agent_panel_header = crate::config::AgentPanelHeaderConfig::Scope;
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let toggle = crate::ui::agent_panel_scope_toggle_rect(&app.state, detail_area);
+        assert!(toggle.width > 0);
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: toggle.x,
+            row: toggle.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        });
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
         assert!(app.state.config_diagnostic.is_none());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);

@@ -691,6 +691,19 @@ impl AppState {
                         return None;
                     }
 
+                    if self.on_agent_panel_scope_toggle(mouse.column, mouse.row) {
+                        self.agent_panel_scope = match self.agent_panel_scope {
+                            crate::app::state::AgentPanelScope::CurrentWorkspace => {
+                                crate::app::state::AgentPanelScope::AllWorkspaces
+                            }
+                            crate::app::state::AgentPanelScope::AllWorkspaces => {
+                                crate::app::state::AgentPanelScope::CurrentWorkspace
+                            }
+                        };
+                        self.agent_panel_scroll = 0;
+                        return None;
+                    }
+
                     if self.on_agent_panel_sort_toggle(mouse.column, mouse.row) {
                         self.agent_panel_sort = match self.agent_panel_sort {
                             AgentPanelSort::Spaces => AgentPanelSort::Priority,

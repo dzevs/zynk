@@ -485,7 +485,24 @@ impl AppState {
             self.view.sidebar_rect,
             self.sidebar_section_split,
         );
-        let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
+        let rect = crate::ui::agent_panel_sort_toggle_rect(self, detail_area);
+        rect.width > 0
+            && col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height
+    }
+
+    pub(super) fn on_agent_panel_scope_toggle(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            self.view.sidebar_rect,
+            self.sidebar_section_split,
+        );
+        let rect = crate::ui::agent_panel_scope_toggle_rect(self, detail_area);
         rect.width > 0
             && col >= rect.x
             && col < rect.x + rect.width
@@ -540,7 +557,7 @@ mod tests {
     #[test]
     fn m828d2_every_agent_content_line_is_a_hit_but_headers_and_gaps_are_not() {
         let mut app = app_for_mouse_test();
-        let source = "onboarding = false\n[ui.sidebar.agents]\nrow_gap = 2\nrows = [[\"agent\"], [\"$one\"], [\"$two\"]]\n";
+        let source = "onboarding = false\n[ui.sidebar.agents]\nrow_gap = 2\ngroup_gap = 0\nrows = [[\"agent\"], [\"$one\"], [\"$two\"]]\n";
         assert!(source.parse::<toml::Value>().is_ok());
         let config: crate::config::Config = toml::from_str(source).unwrap();
         app.apply_live_config(&config, &[], &[], false);
@@ -719,7 +736,7 @@ mod tests {
     fn m828d2_variable_height_wheel_and_drag_use_shared_metrics() {
         let fixture = || {
             let mut app = app_for_mouse_test();
-            let source = "onboarding = false\n[ui.sidebar.spaces]\nrow_gap = 1\nrows = [[\"workspace\"], [\"$more\"]]\n[ui.sidebar.agents]\nrow_gap = 1\nrows = [[\"agent\"], [\"$more\"]]\n";
+            let source = "onboarding = false\n[ui.sidebar.spaces]\nrow_gap = 1\nrows = [[\"workspace\"], [\"$more\"]]\n[ui.sidebar.agents]\nrow_gap = 1\ngroup_gap = 0\nrows = [[\"agent\"], [\"$more\"]]\n";
             assert!(source.parse::<toml::Value>().is_ok());
             let config: crate::config::Config = toml::from_str(source).unwrap();
             app.apply_live_config(&config, &[], &[], false);
@@ -930,6 +947,7 @@ mod tests {
                 app.state.sidebar_min_width = 1;
                 app.state.sidebar_width = width + 1;
                 app.state.agent_panel_sort = sort;
+                app.state.agent_panel_header = crate::config::AgentPanelHeaderConfig::Sort;
                 crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
                 let full = app.state.view.sidebar_rect;
                 assert_eq!(full.width, width + 1);
@@ -938,7 +956,7 @@ mod tests {
                 assert_eq!((spaces.width, agents.width), (width, width));
                 let space_track = crate::ui::workspace_list_scrollbar_rect(&app.state, spaces);
                 let agent_track = crate::ui::agent_panel_scrollbar_rect(&app.state, agents);
-                let toggle = crate::ui::agent_panel_toggle_rect(agents, sort);
+                let toggle = crate::ui::agent_panel_sort_toggle_rect(&app.state, agents);
                 if width == 0 {
                     assert!(space_track.is_none() && agent_track.is_none());
                     assert!(app.state.view.workspace_card_areas.is_empty());
@@ -989,39 +1007,11 @@ mod tests {
                     if let Some(track) = agent_track {
                         assert_eq!((track.x, track.width), (1, 1));
                     }
-                    assert_eq!(toggle, Rect::new(agents.x, agents.y + 1, width, 1));
-                    assert!(app.state.on_agent_panel_sort_toggle(toggle.x, toggle.y));
+                    assert_eq!(toggle, Rect::default());
+                    assert!(!app.state.on_agent_panel_sort_toggle(agents.x, agents.y + 1));
                     assert!(!app
                         .state
-                        .on_agent_panel_sort_toggle(toggle.right(), toggle.y));
-                    app.state.agent_panel_scroll = 1;
-                    app.handle_mouse(mouse(
-                        MouseEventKind::Down(MouseButton::Left),
-                        toggle.x,
-                        toggle.y,
-                    ));
-                    app.handle_mouse(mouse(
-                        MouseEventKind::Up(MouseButton::Left),
-                        toggle.x,
-                        toggle.y,
-                    ));
-                    assert_ne!(app.state.agent_panel_sort, sort);
-                    assert_eq!(app.state.agent_panel_scroll, 0);
-                    app.state.agent_panel_sort = sort;
-                    for col in [toggle.right(), full.right()] {
-                        app.handle_mouse(mouse(
-                            MouseEventKind::Down(MouseButton::Left),
-                            col,
-                            toggle.y,
-                        ));
-                        app.handle_mouse(mouse(
-                            MouseEventKind::Up(MouseButton::Left),
-                            col,
-                            toggle.y,
-                        ));
-                        assert_eq!(app.state.agent_panel_sort, sort, "outside toggle dispatch");
-                        app.state.drag = None;
-                    }
+                        .on_agent_panel_scope_toggle(agents.x, agents.y + 1));
                     assert!(app.state.focus_agent_entry(7));
                     assert!(children(&app.state, agents)
                         .iter()
@@ -1052,14 +1042,7 @@ mod tests {
                     }
                 }
                 if width > 0 {
-                    assert_eq!(
-                        screen.backend().buffer()[(0, toggle.y)].symbol(),
-                        if sort == AgentPanelSort::Spaces {
-                            "g"
-                        } else {
-                            "p"
-                        }
-                    );
+                    assert_ne!(screen.backend().buffer()[(0, agents.y + 1)].symbol(), "#");
                     assert_eq!(screen.backend().buffer()[(0, 16)].symbol(), "└");
                     assert_ne!(screen.backend().buffer()[(0, 2)].symbol(), "#");
                 }
@@ -1474,7 +1457,7 @@ mod tests {
     #[test]
     fn m828d1_headers_and_configured_gaps_are_not_click_targets() {
         let mut app = app_for_mouse_test();
-        let source = "[ui.sidebar.agents]\nrow_gap = 2\n";
+        let source = "[ui.sidebar.agents]\nrow_gap = 2\ngroup_gap = 0\n";
         assert!(source.parse::<toml::Value>().is_ok());
         let config: crate::config::Config = toml::from_str(source).unwrap();
         app.apply_live_config(&config, &[], &[], false);
@@ -1586,6 +1569,7 @@ mod tests {
         ];
         app.state.active = Some(1);
         app.state.selected = 3;
+        app.state.sidebar_spaces.row_gap = 0;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
         let cards = app.state.view.workspace_card_areas.clone();
         assert_eq!(
@@ -2040,12 +2024,13 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scroll = 3;
+        app.state.agent_panel_header = crate::config::AgentPanelHeaderConfig::Sort;
 
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
         );
-        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+        let toggle = crate::ui::agent_panel_sort_toggle_rect(&app.state, detail_area);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             toggle.x,
@@ -2053,6 +2038,36 @@ mod tests {
         ));
 
         assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
+        assert_eq!(app.state.agent_panel_scroll, 0);
+    }
+
+    #[test]
+    fn clicking_agent_panel_scope_switches_population_and_resets_scroll() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
+        app.state.agent_panel_header = crate::config::AgentPanelHeaderConfig::Scope;
+        app.state.agent_panel_scroll = 3;
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let toggle = crate::ui::agent_panel_scope_toggle_rect(&app.state, detail_area);
+        assert!(toggle.width > 0);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            crate::app::state::AgentPanelScope::CurrentWorkspace
+        );
         assert_eq!(app.state.agent_panel_scroll, 0);
     }
 
