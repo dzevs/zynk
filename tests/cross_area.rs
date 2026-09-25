@@ -930,7 +930,7 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
         &runtime_dir,
         &api_socket,
         Some(Path::new(&path_override)),
-        Some("onboarding = false\n[ui]\nworking_animation = false\n"),
+        Some("onboarding = false\n"),
     );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(10));
@@ -993,7 +993,9 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
     let saw_working_on_client =
         wait_for_frame_matching(&mut client_b, Duration::from_secs(5), |frame| {
             frame_contains_text(frame, "working")
-                && frame_contains_colored_symbol(frame, "●", (249, 226, 175))
+                && ["◌", "◎", "◉", "●"]
+                    .iter()
+                    .any(|symbol| frame_contains_colored_symbol(frame, symbol, (249, 226, 175)))
         })
         .expect("frame decoding should succeed");
     assert!(

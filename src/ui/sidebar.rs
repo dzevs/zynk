@@ -92,6 +92,13 @@ fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     }
 }
 
+fn agent_panel_sort_short_label(sort: AgentPanelSort) -> &'static str {
+    match sort {
+        AgentPanelSort::Spaces => "group",
+        AgentPanelSort::Priority => "prio",
+    }
+}
+
 fn agent_panel_scope_label(scope: crate::app::state::AgentPanelScope) -> &'static str {
     match scope {
         crate::app::state::AgentPanelScope::CurrentWorkspace => "current",
@@ -129,7 +136,7 @@ pub(crate) fn agent_panel_header_layout(
     view_label: Option<&str>,
 ) -> AgentPanelHeaderLayout {
     let title_width = display_width_u16(AGENT_PANEL_TITLE).min(area.width);
-    let title_rect = if area.height >= 2 && title_width > 0 {
+    let title_rect = if area.height >= AGENT_PANEL_HEADER_ROWS && title_width > 0 {
         Rect::new(area.x, area.y.saturating_add(1), title_width, 1)
     } else {
         Rect::default()
@@ -143,7 +150,7 @@ pub(crate) fn agent_panel_header_layout(
         sort_rect: Rect::default(),
         view_rect: Rect::default(),
     };
-    if area.height < 2 || area.width <= title_width {
+    if area.height < AGENT_PANEL_HEADER_ROWS || area.width <= title_width.saturating_add(1) {
         return layout;
     }
 
@@ -161,7 +168,7 @@ pub(crate) fn agent_panel_header_layout(
     let scope_width = display_width(scope_label);
     let secondary_source = view_label.unwrap_or_else(|| agent_panel_sort_label(sort));
     let secondary_width = display_width(secondary_source);
-    let available = usize::from(area.width.saturating_sub(title_width));
+    let available = usize::from(area.width.saturating_sub(title_width).saturating_sub(1));
 
     let rendered_scope = wants_scope
         .then_some(scope_label)
@@ -185,7 +192,9 @@ pub(crate) fn agent_panel_header_layout(
         (budget >= minimum_truncated_view_width(secondary_source))
             .then(|| truncate_end(secondary_source, budget))
     } else {
-        None
+        let abbreviated = agent_panel_sort_short_label(sort);
+        (separator_width.saturating_add(display_width(abbreviated)) <= remaining)
+            .then(|| abbreviated.to_string())
     };
 
     let rendered_secondary_width = rendered_secondary
@@ -3092,29 +3101,91 @@ mod tests {
     }
 
     #[test]
+    fn agent_row_and_group_gaps_compose_with_saturating_placement() {
+        let entries = [
+            agent_entry(0, 0, "first", 1),
+            agent_entry(1, 0, "second", 2),
+        ];
+        let rows =
+            agent_visible_rows_for_entries(&entries, Rect::new(0, 0, 30, 12), 0, 2, 3, &[1, 1]);
+        assert_eq!(
+            rows,
+            [
+                AgentVisibleRow::GroupHeader { entry_idx: 0, y: 0 },
+                AgentVisibleRow::Child {
+                    entry_idx: 0,
+                    y: 1,
+                    height: 1,
+                    last: true,
+                },
+                AgentVisibleRow::GroupHeader { entry_idx: 1, y: 7 },
+                AgentVisibleRow::Child {
+                    entry_idx: 1,
+                    y: 8,
+                    height: 1,
+                    last: true,
+                },
+            ]
+        );
+
+        assert_eq!(
+            agent_visible_rows_for_entries(
+                &entries,
+                Rect::new(0, 0, 30, 12),
+                0,
+                u16::MAX,
+                u16::MAX,
+                &[1, 1],
+            ),
+            [
+                AgentVisibleRow::GroupHeader { entry_idx: 0, y: 0 },
+                AgentVisibleRow::Child {
+                    entry_idx: 0,
+                    y: 1,
+                    height: 1,
+                    last: true,
+                },
+            ],
+            "saturated gaps must not wrap later groups into the viewport"
+        );
+    }
+
+    #[test]
     fn agent_panel_header_layout_owns_modes_width_precedence_and_hit_targets() {
         let area = |width| Rect::new(4, 10, width, 8);
         let scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
         let sort = AgentPanelSort::Priority;
 
+        let (_, default_agent_area) = expanded_sidebar_sections(Rect::new(0, 0, 26, 20), 0.5);
+        assert_eq!(default_agent_area.width, 25);
         let both = agent_panel_header_layout(
-            area(26),
+            default_agent_area,
             crate::config::AgentPanelHeaderConfig::Both,
             scope,
             sort,
             None,
         );
         assert_eq!(both.scope_label.as_deref(), Some("current"));
-        assert_eq!(both.secondary_label.as_deref(), Some("priority"));
+        assert_eq!(both.secondary_label.as_deref(), Some("prio"));
         assert!(both.scope_rect.width > 0);
         assert!(both.sort_rect.width > 0);
         assert_eq!(both.view_rect, Rect::default());
         assert!(both.scope_rect.right() <= both.separator_rect.x);
         assert!(both.separator_rect.right() <= both.sort_rect.x);
-        assert!(both.title_rect.right() <= both.scope_rect.x);
+        assert!(both.title_rect.right() < both.scope_rect.x);
+
+        let grouped = agent_panel_header_layout(
+            default_agent_area,
+            crate::config::AgentPanelHeaderConfig::Both,
+            scope,
+            AgentPanelSort::Spaces,
+            None,
+        );
+        assert_eq!(grouped.secondary_label.as_deref(), Some("grouped"));
+        assert!(grouped.title_rect.right() < grouped.scope_rect.x);
 
         let scope_only = agent_panel_header_layout(
-            area(14),
+            area(15),
             crate::config::AgentPanelHeaderConfig::Both,
             scope,
             sort,
@@ -3125,8 +3196,18 @@ mod tests {
         assert_eq!(scope_only.separator_rect, Rect::default());
         assert_eq!(scope_only.sort_rect, Rect::default());
 
-        let title_only = agent_panel_header_layout(
+        let abbreviated_sort = agent_panel_header_layout(
             area(14),
+            crate::config::AgentPanelHeaderConfig::Sort,
+            scope,
+            sort,
+            None,
+        );
+        assert_eq!(abbreviated_sort.secondary_label.as_deref(), Some("prio"));
+        assert!(abbreviated_sort.title_rect.right() < abbreviated_sort.sort_rect.x);
+
+        let title_only = agent_panel_header_layout(
+            area(11),
             crate::config::AgentPanelHeaderConfig::Sort,
             scope,
             sort,
@@ -3137,7 +3218,7 @@ mod tests {
         assert_eq!(title_only.sort_rect, Rect::default());
 
         let truncated_view = agent_panel_header_layout(
-            area(19),
+            area(20),
             crate::config::AgentPanelHeaderConfig::Scope,
             scope,
             sort,
@@ -3149,7 +3230,7 @@ mod tests {
         assert_eq!(truncated_view.view_rect.width, 2);
 
         let omitted_view = agent_panel_header_layout(
-            area(18),
+            area(19),
             crate::config::AgentPanelHeaderConfig::Scope,
             scope,
             sort,
@@ -3159,6 +3240,17 @@ mod tests {
         assert!(omitted_view.secondary_label.is_none());
         assert_eq!(omitted_view.separator_rect, Rect::default());
         assert_eq!(omitted_view.view_rect, Rect::default());
+
+        let hidden = agent_panel_header_layout(
+            Rect::new(4, 10, 26, AGENT_PANEL_HEADER_ROWS.saturating_sub(1)),
+            crate::config::AgentPanelHeaderConfig::Both,
+            scope,
+            sort,
+            None,
+        );
+        assert_eq!(hidden.title_rect, Rect::default());
+        assert_eq!(hidden.scope_rect, Rect::default());
+        assert_eq!(hidden.sort_rect, Rect::default());
     }
 
     #[test]

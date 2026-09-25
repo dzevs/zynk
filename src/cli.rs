@@ -1096,13 +1096,17 @@ fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> st
         server_protocol,
         &crate::session::active_restart_after_update_guidance(),
     ) {
-        Some(response) => Err(protocol_guard::mismatch_error(response)),
+        Some(response) => Err(protocol_guard::mismatch_error(response, server_protocol)),
         None => Ok(()),
     }
 }
 
 pub(crate) fn protocol_mismatch_response(err: &std::io::Error) -> Option<&ErrorResponse> {
     protocol_guard::error_response(err)
+}
+
+pub(crate) fn protocol_mismatch_context(err: &std::io::Error) -> Option<serde_json::Value> {
+    protocol_guard::error_context(err)
 }
 
 pub(crate) fn server_not_running_response(err: &std::io::Error) -> Option<&ErrorResponse> {
@@ -1337,7 +1341,9 @@ fn _print_json<T: Serialize>(value: &T) {
 mod tests {
     #[test]
     fn m835_mismatch_response_pins_protocol_not_package_and_keeps_typed_error() {
-        use super::protocol_guard::{error_response, mismatch_error, mismatch_response};
+        use super::protocol_guard::{
+            error_context, error_response, mismatch_error, mismatch_response,
+        };
         let current = crate::protocol::PROTOCOL_VERSION;
         assert_eq!(current, 20);
         assert!(mismatch_response("same", current, "restart-fixture").is_none());
@@ -1359,10 +1365,18 @@ mod tests {
                 "upgrade"
             }));
             let expected = serde_json::to_value(&response).unwrap();
-            let error = mismatch_error(response);
+            let error = mismatch_error(response, server);
             assert_eq!(
                 serde_json::to_value(error_response(&error).unwrap()).unwrap(),
                 expected
+            );
+            assert_eq!(
+                error_context(&error).unwrap(),
+                serde_json::json!({
+                    "request_id": "original-id",
+                    "client_protocol": current,
+                    "server_protocol": server,
+                })
             );
             assert!(error.to_string().contains("protocol"));
             assert!(error_response(&std::io::Error::other(error.to_string())).is_none());

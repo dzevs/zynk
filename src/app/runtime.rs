@@ -454,7 +454,6 @@ impl App {
             .wrapping_add(super::WORKING_ANIMATION_TICK_STEP);
         self.next_animation_tick = Some(now + super::WORKING_ANIMATION_INTERVAL);
         self.render_dirty.request_animation();
-        self.render_notify.notify_one();
         true
     }
 

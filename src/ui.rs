@@ -256,7 +256,7 @@ fn desktop_tab_bar_and_terminal_area(
     }
 }
 
-fn reconcile_agent_panel_presented_workspace(app: &mut AppState) {
+pub(crate) fn reconcile_agent_panel_presented_workspace(app: &mut AppState) {
     let presented_id = match app.agent_panel_scope {
         crate::app::state::AgentPanelScope::CurrentWorkspace => {
             crate::app::agent_view::presented_workspace_idx(app)
@@ -279,7 +279,9 @@ fn computed_working_animation_demand(
 ) -> crate::app::state::WorkingAnimationDemand {
     use crate::app::state::{NavigatorStateFilter, WorkingAnimationDemand};
 
-    if !app.working_animation {
+    if !app.working_animation
+        || !matches!(app.mode, Mode::Terminal | Mode::Navigate | Mode::Navigator)
+    {
         return WorkingAnimationDemand::NONE;
     }
 
@@ -326,7 +328,13 @@ fn computed_working_animation_demand(
                 && sidebar::agent_panel_entries_from(app, terminal_runtimes)
                     .iter()
                     .any(|entry| entry.state == crate::detect::AgentState::Working);
-            if header_working || switcher_working {
+            let navigator_working = app.mode == Mode::Navigator
+                && (app.navigator.state_filter == Some(NavigatorStateFilter::Working)
+                    || app
+                        .navigator_rows_from(terminal_runtimes)
+                        .iter()
+                        .any(|row| row.status == crate::detect::AgentState::Working));
+            if header_working || switcher_working || navigator_working {
                 WorkingAnimationDemand::BRAILLE
             } else {
                 WorkingAnimationDemand::NONE
@@ -622,6 +630,8 @@ pub(crate) fn render_working_animation(
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
         if app.mode == Mode::Navigate {
             render_mobile_panel(app, terminal_runtimes, frame, frame.area());
+        } else if app.mode == Mode::Navigator {
+            render_navigator_overlay(app, terminal_runtimes, frame);
         }
     } else {
         if app.view.sidebar_rect.width > 0 {
@@ -828,6 +838,20 @@ mod tests {
         assert_eq!(
             app.view.working_animation_demand,
             WorkingAnimationDemand::BRAILLE
+        );
+
+        app.mode = Mode::Navigator;
+        compute_view(&mut app, Rect::new(0, 0, 40, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::BRAILLE
+        );
+
+        app.mode = Mode::Prefix;
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::NONE
         );
 
         app.working_animation = false;

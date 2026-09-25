@@ -11,9 +11,10 @@ not change binary protocol 20, the JSON socket surface, persistence schema, sess
   expanded panel, collapsed rail, mobile switcher, navigation, and hit testing before agent-view filters and
   grouped, priority, or plugin sorting. It remains UI-only: `agent.list`, API topology, and global mobile counts
   stay complete. The header toggle persists the setting back to `[ui]`.
-- `ui.agent_panel_header = "scope" | "sort" | "both"` controls the one-line expanded-panel header and defaults
-  to the 3.0.x scope control. Active view labels remain visible status, narrow layouts drop sort/view before
-  scope, and omitted controls have no click target.
+- `ui.agent_panel_header = "scope" | "sort" | "both"` controls the single control row in the fixed three-row
+  expanded-panel header and defaults to the 3.0.x scope control. Active view labels remain visible status,
+  narrow layouts abbreviate then drop sort/view before scope, and omitted controls have no click target. The
+  default no longer shows the sort toggle; set this key to `"sort"` or `"both"` to keep that control visible.
 - `[ui.sidebar.agents].group_gap` is independent of `row_gap` and defaults to 1. With the default agent
   `row_gap = 0`, this restores no gap within groups and one blank row before every later emitted group header.
 - `ui.working_animation` defaults to true and restores the yellow sidebar pulse plus navigator/mobile braille

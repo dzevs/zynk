@@ -245,6 +245,7 @@ enum RetainedRenderPlan {
     Animation,
     Graphics,
     Pty,
+    PtyAnimation,
     HiddenPty,
 }
 
@@ -262,7 +263,7 @@ fn retained_render_plan(input: RetainedRenderInput) -> RetainedRenderPlan {
         RetainedRenderPlan::Full
     } else if input.animation {
         match input.pty {
-            PtyRenderState::Visible => RetainedRenderPlan::Full,
+            PtyRenderState::Visible => RetainedRenderPlan::PtyAnimation,
             PtyRenderState::Clean | PtyRenderState::Hidden => RetainedRenderPlan::Animation,
         }
     } else {
@@ -989,6 +990,9 @@ impl HeadlessServer {
                         RetainedGraphicsOutcome::Sent | RetainedGraphicsOutcome::Deferred
                     ),
                     RetainedRenderPlan::Pty => self.render_retained_pty_update_and_stream(),
+                    RetainedRenderPlan::PtyAnimation => {
+                        self.render_retained_pty_animation_update_and_stream()
+                    }
                     RetainedRenderPlan::HiddenPty => {
                         crate::render_prof::event("render.skipped.hidden_sources");
                         true
@@ -4940,6 +4944,17 @@ impl HeadlessServer {
     }
 
     fn render_retained_pty_update_and_stream(&mut self) -> bool {
+        self.render_retained_pty_update_and_stream_with_animation(false)
+    }
+
+    fn render_retained_pty_animation_update_and_stream(&mut self) -> bool {
+        self.render_retained_pty_update_and_stream_with_animation(true)
+    }
+
+    fn render_retained_pty_update_and_stream_with_animation(
+        &mut self,
+        include_animation: bool,
+    ) -> bool {
         crate::render_prof::event("retained.attempt");
         let retained_started = crate::render_prof::timer();
         macro_rules! retained_fallback {
@@ -4994,6 +5009,13 @@ impl HeadlessServer {
             )
         {
             retained_fallback!("visible_kitty_graphics");
+        }
+        if include_animation
+            && self
+                .retained_animation_preflight(self.app.state.spinner_tick)
+                .is_err()
+        {
+            retained_fallback!("animation_preflight");
         }
         let Some(mut frame) = client.render_state.last_frame().cloned() else {
             retained_fallback!("no_last_frame");
@@ -5050,6 +5072,18 @@ impl HeadlessServer {
             &self.app.terminal_runtimes,
         );
         let cursor_changed = frame.cursor != previous_cursor;
+
+        if include_animation {
+            let animation_cells = &self.clients[client_id].working_animation_cells;
+            if !crate::server::render_stream::apply_working_animation_cells(
+                &mut frame,
+                animation_cells,
+                self.app.state.spinner_tick,
+            ) {
+                retained_fallback!("animation_patch");
+            }
+            touched |= !animation_cells.is_empty();
+        }
 
         if !touched && !cursor_changed {
             retained_success!("clean_no_cursor_change");
@@ -5193,21 +5227,28 @@ impl HeadlessServer {
             return;
         }
 
+        crate::ui::reconcile_agent_panel_presented_workspace(&mut self.app.state);
+
         let mut broken_clients: Vec<u64> = Vec::new();
         let mut deferred_frame = false;
+        let mut committed_animation_demand = crate::app::state::WorkingAnimationDemand::NONE;
         for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut working_animation_cells = if is_app_client {
                 self.clients
                     .get_mut(&client_id)
-                    .map(|client| std::mem::take(&mut client.working_animation_cells))
+                    .map(|client| {
+                        client.working_animation_cache_valid = false;
+                        std::mem::take(&mut client.working_animation_cells)
+                    })
                     .unwrap_or_default()
             } else {
                 Vec::new()
             };
             working_animation_cells.clear();
             let mut working_animation_cache_valid = false;
+            let mut working_animation_demand = crate::app::state::WorkingAnimationDemand::NONE;
             let mut frame = match mode {
                 ClientConnectionMode::TerminalPending => continue,
                 ClientConnectionMode::App => {
@@ -5236,18 +5277,11 @@ impl HeadlessServer {
                                 crate::kitty_graphics::HostCellSize::default(),
                             )
                         };
-                    if let Some((workspace, agent_panel, tab, mobile_switcher)) = preserved_scroll {
-                        self.app.state.workspace_scroll = workspace;
-                        self.app.state.agent_panel_scroll = agent_panel;
-                        self.app.state.tab_scroll = tab;
-                        self.app.state.mobile_switcher_scroll = mobile_switcher;
-                    }
                     crate::render_prof::duration_since(
                         "full_render.render_virtual",
                         render_started,
                     );
-                    self.app.rendered_animation_demand |=
-                        self.app.state.view.working_animation_demand;
+                    working_animation_demand = self.app.state.view.working_animation_demand;
                     working_animation_cache_valid =
                         crate::server::render_stream::collect_working_animation_cells(
                             &mut self.app.state,
@@ -5255,6 +5289,12 @@ impl HeadlessServer {
                             &buffer,
                             &mut working_animation_cells,
                         );
+                    if let Some((workspace, agent_panel, tab, mobile_switcher)) = preserved_scroll {
+                        self.app.state.workspace_scroll = workspace;
+                        self.app.state.agent_panel_scroll = agent_panel;
+                        self.app.state.tab_scroll = tab;
+                        self.app.state.mobile_switcher_scroll = mobile_switcher;
+                    }
                     let hyperlinks_started = crate::render_prof::timer();
                     let hyperlinks = crate::server::render_stream::visible_hyperlinks(
                         &self.app.state,
@@ -5314,8 +5354,10 @@ impl HeadlessServer {
             let Some(client) = self.clients.get_mut(&client_id) else {
                 continue;
             };
-            client.working_animation_cells = working_animation_cells;
-            client.working_animation_cache_valid = working_animation_cache_valid;
+            if !is_app_client {
+                client.working_animation_cells.clear();
+                client.working_animation_cache_valid = false;
+            }
             let mut next_graphics_cache = client.graphics_cache.clone();
             let mut reset_graphics = Vec::new();
             let mut encoded = if is_app_client
@@ -5383,6 +5425,13 @@ impl HeadlessServer {
             let has_graphics = !frame.graphics.is_empty();
             let prepare_started = crate::render_prof::timer();
             let Some(mut prepared) = client.render_state.prepare_frame(frame) else {
+                if is_app_client {
+                    if working_animation_cache_valid && !working_animation_cells.is_empty() {
+                        committed_animation_demand |= working_animation_demand;
+                    }
+                    client.working_animation_cells = working_animation_cells;
+                    client.working_animation_cache_valid = working_animation_cache_valid;
+                }
                 if commit_graphics_cache {
                     client.graphics_cache = next_graphics_cache;
                     client.graphics_surface_reset_pending = false;
@@ -5425,6 +5474,14 @@ impl HeadlessServer {
                     let Some(text_only_prepared) =
                         client.render_state.prepare_frame(text_only_frame)
                     else {
+                        if is_app_client {
+                            if working_animation_cache_valid && !working_animation_cells.is_empty()
+                            {
+                                committed_animation_demand |= working_animation_demand;
+                            }
+                            client.working_animation_cells = working_animation_cells;
+                            client.working_animation_cache_valid = working_animation_cache_valid;
+                        }
                         client.clear_deferred_render();
                         crate::render_prof::event("full_render.skip_identical_text_only");
                         crate::render_prof::duration_since(
@@ -5474,6 +5531,13 @@ impl HeadlessServer {
             let send_started = crate::render_prof::timer();
             match writer.render.try_send(serialized) {
                 Ok(()) => {
+                    if is_app_client {
+                        if working_animation_cache_valid && !working_animation_cells.is_empty() {
+                            committed_animation_demand |= working_animation_demand;
+                        }
+                        client.working_animation_cells = working_animation_cells;
+                        client.working_animation_cache_valid = working_animation_cache_valid;
+                    }
                     if commit_graphics_cache {
                         client.graphics_cache = next_graphics_cache;
                         client.graphics_surface_reset_pending = false;
@@ -5511,6 +5575,8 @@ impl HeadlessServer {
                 self.remove_client_and_resize_if_needed(client_id);
             }
         }
+
+        self.app.rendered_animation_demand = committed_animation_demand;
 
         let (cols, rows) = self.effective_size;
         if !deferred_frame {
@@ -6261,7 +6327,7 @@ fn init_logging() {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     fn m839a_managed_headless_fixture(
         now: Instant,
         observed: bool,
@@ -7115,7 +7181,7 @@ pub(crate) mod tests {
                 animation: true,
                 pty: PtyRenderState::Visible,
             }),
-            RetainedRenderPlan::Full
+            RetainedRenderPlan::PtyAnimation
         );
         assert_eq!(
             retained_render_plan_with_graphics(
@@ -8507,6 +8573,61 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn agent_panel_workspace_change_resets_scroll_with_two_app_clients() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = ["first", "second"]
+            .into_iter()
+            .map(|label| {
+                let mut workspace = crate::workspace::Workspace::test_new(label);
+                for index in 1..20 {
+                    workspace.test_add_tab(Some(&format!("agent-{index:02}")));
+                }
+                workspace
+            })
+            .collect();
+        server.app.state.ensure_test_terminals();
+        for terminal in server.app.state.terminals.values_mut() {
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        }
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+
+        let desktop_rx =
+            add_animation_test_client(&mut server, 1, (120, 40), RenderEncoding::SemanticFrame);
+        let mobile_rx =
+            add_animation_test_client(&mut server, 2, (44, 20), RenderEncoding::SemanticFrame);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.render_and_stream();
+        for receiver in [&desktop_rx, &mobile_rx] {
+            receiver
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial client frame");
+        }
+
+        server.app.state.agent_panel_scroll = 7;
+        server.app.state.active = Some(1);
+        server.app.state.selected = 1;
+        let expected_id = server.app.state.workspaces[1].id.clone();
+        server.render_and_stream();
+
+        assert_eq!(server.app.state.agent_panel_scroll, 0);
+        assert_eq!(
+            server
+                .app
+                .state
+                .view
+                .agent_panel_presented_workspace_id
+                .as_ref(),
+            Some(&expected_id)
+        );
+    }
+
     fn retained_test_server(
         initial_screen: &[u8],
     ) -> (
@@ -8679,12 +8800,16 @@ pub(crate) mod tests {
         (server, render_rx)
     }
 
-    pub(crate) fn assert_working_animation_boundary_zero_allocations(
+    fn assert_working_animation_boundary_allocation_shape(
         begin_count: fn(),
         end_count: fn() -> usize,
     ) {
+        let mut expected_frame_ownership_allocations = None;
         for agent_count in [1, 15] {
             let (mut server, render_rx) = working_animation_allocation_server(agent_count);
+            server.app.git_refresh_in_flight = true;
+            server.app.next_auto_update_check = None;
+            server.app.next_agent_manifest_update_check = None;
 
             server.render_and_stream();
             render_rx
@@ -8694,7 +8819,10 @@ pub(crate) mod tests {
                 .app
                 .next_animation_tick
                 .expect("full render arms animation");
-            assert!(server.app.tick_working_animation(first_deadline));
+            assert_eq!(
+                server.handle_scheduled_tasks_headless_with_impact(first_deadline, false),
+                ScheduledRenderImpact::Animation
+            );
             let first_request = server.app.render_dirty.take();
             assert!(first_request.animation);
             assert_eq!(
@@ -8710,39 +8838,43 @@ pub(crate) mod tests {
                 .recv_timeout(Duration::from_millis(100))
                 .expect("allocation-probe first animation warm-up");
 
-            let client = server.clients.get(&1).expect("allocation-probe client");
-            let target_count = client.working_animation_cells.len();
+            let target_count = server.clients[&1].working_animation_cells.len();
             assert!(target_count > 0, "{agent_count} agents need animated cells");
-            let mut patch_frame = client
-                .render_state
-                .last_frame()
-                .expect("allocation-probe frame")
-                .clone();
 
             for tick_index in 0..16 {
                 let deadline = server
                     .app
                     .next_animation_tick
                     .expect("animation remains armed");
+                let before_deadline = deadline
+                    .checked_sub(Duration::from_nanos(1))
+                    .expect("animation deadline has a predecessor");
                 begin_count();
-                let changed = server.app.tick_working_animation(deadline);
+                let baseline_impact =
+                    server.handle_scheduled_tasks_headless_with_impact(before_deadline, false);
+                let baseline_scheduler_allocations = end_count();
+                begin_count();
+                let impact = server.handle_scheduled_tasks_headless_with_impact(deadline, false);
+                let scheduler_allocations = end_count();
                 let request = server.app.render_dirty.take();
                 let plan = retained_render_plan(RetainedRenderInput {
                     needs_full_render: false,
                     animation: request.animation,
                     pty: PtyRenderState::Clean,
                 });
-                let preflight = server
-                    .retained_animation_preflight(server.app.state.spinner_tick)
-                    .is_ok();
-                let patched = crate::server::render_stream::apply_working_animation_cells(
-                    &mut patch_frame,
-                    &server.clients[&1].working_animation_cells,
-                    server.app.state.spinner_tick,
-                );
-                let allocations = end_count();
+                begin_count();
+                let rendered = server.render_retained_animation_update_and_stream();
+                let frame_ownership_allocations = end_count();
+                render_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("allocation-probe retained frame");
 
-                assert!(changed, "tick {tick_index} should advance");
+                assert_eq!(impact, ScheduledRenderImpact::Animation);
+                assert_eq!(baseline_impact, ScheduledRenderImpact::None);
+                assert_eq!(
+                    scheduler_allocations, baseline_scheduler_allocations,
+                    "{agent_count} agents animation scheduling added allocations at tick {tick_index}"
+                );
                 assert!(
                     request.animation,
                     "tick {tick_index} keeps animation origin"
@@ -8752,19 +8884,27 @@ pub(crate) mod tests {
                     "tick {tick_index} must not become generic"
                 );
                 assert_eq!(plan, RetainedRenderPlan::Animation);
-                assert!(preflight, "tick {tick_index} target preflight");
-                assert!(patched, "tick {tick_index} chrome patch");
-                assert_eq!(
-                    allocations, 0,
-                    "{agent_count} agents tick {tick_index} allocated"
+                assert!(rendered, "tick {tick_index} retained render");
+                assert!(
+                    frame_ownership_allocations > 0,
+                    "the per-client frame clone and send must be measured"
                 );
+                match expected_frame_ownership_allocations {
+                    Some(expected) => assert_eq!(
+                        frame_ownership_allocations, expected,
+                        "retained frame ownership allocations scaled with {agent_count} agents"
+                    ),
+                    None => {
+                        expected_frame_ownership_allocations = Some(frame_ownership_allocations)
+                    }
+                }
             }
         }
     }
 
     #[test]
-    fn working_animation_boundary_allocates_nothing_after_warm_up() {
-        assert_working_animation_boundary_zero_allocations(
+    fn working_animation_boundary_only_allocates_for_per_client_frame_ownership() {
+        assert_working_animation_boundary_allocation_shape(
             crate::test_alloc::begin,
             crate::test_alloc::end,
         );
@@ -8805,6 +8945,49 @@ pub(crate) mod tests {
         );
         assert_frame_data_eq(&retained, &full);
         assert!(!retained.hyperlinks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn animation_cell_collection_requires_the_working_style() {
+        let (mut server, _client_rx, _) = retained_test_server(b"idle");
+        set_first_test_pane_working(&mut server);
+        let area = Rect::new(0, 0, 120, 40);
+        let (mut buffer, _) = crate::server::render_stream::render_virtual_with_runtime_registry(
+            &mut server.app.state,
+            &server.app.terminal_runtimes,
+            area,
+            true,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        let mut cells = Vec::new();
+        assert!(
+            crate::server::render_stream::collect_working_animation_cells(
+                &mut server.app.state,
+                &server.app.terminal_runtimes,
+                &buffer,
+                &mut cells,
+            )
+        );
+        let target = *cells.first().expect("working animation cell");
+        assert_eq!(
+            buffer.content[target.index].fg,
+            server.app.state.palette.yellow
+        );
+
+        buffer.content[target.index].set_fg(ratatui::style::Color::Red);
+        cells.clear();
+        assert!(
+            crate::server::render_stream::collect_working_animation_cells(
+                &mut server.app.state,
+                &server.app.terminal_runtimes,
+                &buffer,
+                &mut cells,
+            )
+        );
+        assert!(
+            cells.iter().all(|cell| cell.index != target.index),
+            "a pulse-shaped non-working cell entered the animation cache"
+        );
     }
 
     fn add_animation_test_client(
@@ -8882,6 +9065,113 @@ pub(crate) mod tests {
         }
     }
 
+    fn configure_mobile_clamped_animation_surface(server: &mut HeadlessServer) {
+        for index in 1..24 {
+            server.app.state.workspaces[0].test_add_tab(Some(&format!("agent-{index:02}")));
+        }
+        server.app.state.ensure_test_terminals();
+        for terminal in server.app.state.terminals.values_mut() {
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Working,
+            );
+        }
+        server.app.state.mode = crate::app::Mode::Navigate;
+        server.app.state.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        server.app.state.mobile_switcher_scroll = usize::MAX;
+    }
+
+    #[tokio::test]
+    async fn nonforeground_mobile_animation_uses_its_clamped_scroll_frame() {
+        let (mut retained_server, retained_desktop_rx, _) = retained_test_server(b"desktop");
+        let (mut full_server, full_desktop_rx, _) = retained_test_server(b"desktop");
+        let retained_mobile_rx = add_animation_test_client(
+            &mut retained_server,
+            2,
+            (44, 60),
+            RenderEncoding::SemanticFrame,
+        );
+        let full_mobile_rx =
+            add_animation_test_client(&mut full_server, 2, (44, 60), RenderEncoding::SemanticFrame);
+        configure_mobile_clamped_animation_surface(&mut retained_server);
+        configure_mobile_clamped_animation_surface(&mut full_server);
+
+        retained_server.render_and_stream();
+        full_server.render_and_stream();
+        for receiver in [
+            &retained_desktop_rx,
+            &retained_mobile_rx,
+            &full_desktop_rx,
+            &full_mobile_rx,
+        ] {
+            receiver
+                .recv_timeout(Duration::from_millis(100))
+                .expect("mixed-client baseline");
+        }
+        assert!(
+            !retained_server.clients[&2]
+                .working_animation_cells
+                .is_empty(),
+            "the clamped mobile frame must cache visible working cells"
+        );
+
+        retained_server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        full_server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        assert!(retained_server.render_retained_animation_update_and_stream());
+        full_server.render_and_stream();
+        assert_frame_data_eq(
+            retained_server.clients[&2]
+                .render_state
+                .last_frame()
+                .expect("retained mobile frame"),
+            full_server.clients[&2]
+                .render_state
+                .last_frame()
+                .expect("full mobile frame"),
+        );
+    }
+
+    #[tokio::test]
+    async fn popup_cells_are_never_reclassified_as_working_animation() {
+        let (mut retained_server, retained_rx, _) = retained_test_server(b"pane");
+        let (mut full_server, full_rx, _) = retained_test_server(b"pane");
+        set_first_test_pane_working(&mut retained_server);
+        set_first_test_pane_working(&mut full_server);
+        let popup_text = "◌".repeat(40 * 12);
+        for server in [&mut retained_server, &mut full_server] {
+            let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                40,
+                12,
+                popup_text.as_bytes(),
+            );
+            server.app.install_test_popup_runtime(runtime);
+            server.app.state.mode = crate::app::Mode::Navigator;
+        }
+
+        retained_server.render_and_stream();
+        full_server.render_and_stream();
+        retained_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("popup retained baseline");
+        full_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("popup full baseline");
+        retained_server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        full_server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        assert!(retained_server.render_retained_animation_update_and_stream());
+        full_server.render_and_stream();
+        assert_frame_data_eq(
+            retained_server.clients[&1]
+                .render_state
+                .last_frame()
+                .expect("retained popup frame"),
+            full_server.clients[&1]
+                .render_state
+                .last_frame()
+                .expect("full popup frame"),
+        );
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum RetainedAnimationSurfaceCase {
         ExpandedDesktop,
@@ -8889,6 +9179,7 @@ pub(crate) mod tests {
         Navigator,
         MobileHeader,
         MobileSwitcher,
+        MobileNavigator,
     }
 
     fn configure_retained_animation_surface(
@@ -8910,6 +9201,10 @@ pub(crate) mod tests {
                 server.clients.get_mut(&1).unwrap().terminal_size = (44, 20);
                 server.app.state.mode = crate::app::Mode::Navigate;
             }
+            RetainedAnimationSurfaceCase::MobileNavigator => {
+                server.clients.get_mut(&1).unwrap().terminal_size = (44, 20);
+                server.app.state.mode = crate::app::Mode::Navigator;
+            }
         }
     }
 
@@ -8921,6 +9216,7 @@ pub(crate) mod tests {
             RetainedAnimationSurfaceCase::Navigator,
             RetainedAnimationSurfaceCase::MobileHeader,
             RetainedAnimationSurfaceCase::MobileSwitcher,
+            RetainedAnimationSurfaceCase::MobileNavigator,
         ] {
             let (mut retained_server, retained_rx, _) = retained_test_server(b"linked");
             let (mut full_server, full_rx, _) = retained_test_server(b"linked");
@@ -8996,14 +9292,22 @@ pub(crate) mod tests {
         let _ = client_rx
             .recv_timeout(Duration::from_millis(100))
             .expect("baseline frame");
-        assert!(
-            server.app.state.view.working_animation_demand
-                != crate::app::state::WorkingAnimationDemand::NONE
+        assert_eq!(
+            server.app.rendered_animation_demand,
+            crate::app::state::WorkingAnimationDemand::NONE
         );
         assert!(server.clients[&1].working_animation_cells.is_empty());
+        assert_eq!(server.app.next_animation_tick, None);
 
-        server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
-        assert!(server.render_retained_animation_update_and_stream());
+        let tick = server.app.state.spinner_tick;
+        assert_eq!(
+            server.handle_scheduled_tasks_headless_with_impact(
+                Instant::now() + crate::app::WORKING_ANIMATION_INTERVAL,
+                false,
+            ),
+            ScheduledRenderImpact::None
+        );
+        assert_eq!(server.app.state.spinner_tick, tick);
         assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
     }
 
@@ -9033,6 +9337,26 @@ pub(crate) mod tests {
             server.clients[&1].render_state.last_frame(),
             Some(&baseline)
         );
+        assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_full_frame_does_not_publish_uncommitted_animation_cells() {
+        let (mut server, client_rx, _) = retained_test_server(b"baseline");
+        set_first_test_pane_working(&mut server);
+        server.render_and_stream();
+        assert!(server.clients[&1].working_animation_cache_valid);
+        assert!(!server.clients[&1].working_animation_cells.is_empty());
+
+        server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        server.render_and_stream();
+        assert!(server.clients[&1].render_pending);
+        assert!(!server.clients[&1].working_animation_cache_valid);
+        assert!(server.clients[&1].working_animation_cells.is_empty());
+
+        client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("only the committed baseline frame is queued");
         assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
     }
 
@@ -15891,6 +16215,50 @@ next_tab = ""
             full_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("full frame"),
+        );
+        assert_frame_data_eq(&retained_frame, &full_frame);
+    }
+
+    #[tokio::test]
+    async fn retained_pty_and_animation_update_matches_same_tick_full_render() {
+        let (mut retained_server, retained_rx, retained_pane_id) = retained_test_server(b"working");
+        let (mut full_server, full_rx, full_pane_id) = retained_test_server(b"working");
+        set_first_test_pane_working(&mut retained_server);
+        set_first_test_pane_working(&mut full_server);
+
+        retained_server.render_and_stream();
+        full_server.render_and_stream();
+        let _ = retained_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial retained baseline");
+        let _ = full_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial full baseline");
+
+        for (server, pane_id) in [
+            (&mut retained_server, retained_pane_id),
+            (&mut full_server, full_pane_id),
+        ] {
+            server
+                .app
+                .state
+                .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+                .expect("runtime")
+                .test_process_pty_bytes(b"\rZ");
+            server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        }
+
+        assert!(retained_server.render_retained_pty_animation_update_and_stream());
+        full_server.render_and_stream();
+        let retained_frame = read_server_frame(
+            retained_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("combined retained frame"),
+        );
+        let full_frame = read_server_frame(
+            full_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("combined full frame"),
         );
         assert_frame_data_eq(&retained_frame, &full_frame);
     }

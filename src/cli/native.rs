@@ -127,8 +127,11 @@ fn native_send(
         }
         let result = super::send_request(&request);
         if let Err(err) = &result {
-            if let Some(response) = super::protocol_mismatch_response(err) {
-                *protocol_mismatch.borrow_mut() = Some(response.clone());
+            if let (Some(response), Some(context)) = (
+                super::protocol_mismatch_response(err),
+                super::protocol_mismatch_context(err),
+            ) {
+                *protocol_mismatch.borrow_mut() = Some((response.clone(), context));
             }
         }
         result
@@ -137,7 +140,7 @@ fn native_send(
     let (to, resolution) = resolve_target(target, send);
     let message_id = new_message_id();
 
-    if let Some(response) = protocol_mismatch.into_inner() {
+    if let Some((response, context)) = protocol_mismatch.into_inner() {
         let outcome = SendOutcome::failed(
             command,
             message_id,
@@ -148,7 +151,7 @@ fn native_send(
             SendError {
                 code: response.error.code,
                 message: response.error.message,
-                context: None,
+                context: Some(context),
             },
         );
         println!("{}", outcome.to_json());
@@ -347,7 +350,7 @@ fn native_send(
                                 SendError {
                                     code: response.error.code.clone(),
                                     message: response.error.message.clone(),
-                                    context: None,
+                                    context: super::protocol_mismatch_context(&err),
                                 },
                             ),
                             None => {
@@ -588,9 +591,14 @@ pub(super) fn run_inbox_command(args: &[String]) -> std::io::Result<i32> {
             }
             Err(err) => {
                 let resp = match super::protocol_mismatch_response(&err) {
-                    Some(response) => {
-                        crate::zynk::inbox::InboxResponse::protocol_mismatch(response)
-                    }
+                    Some(response) => match super::protocol_mismatch_context(&err) {
+                        Some(context) => crate::zynk::inbox::InboxResponse::protocol_mismatch(
+                            response, context,
+                        ),
+                        None => crate::zynk::inbox::InboxResponse::unidentified_caller(
+                            "the caller lookup returned an incomplete protocol mismatch",
+                        ),
+                    },
                     None => crate::zynk::inbox::InboxResponse::unidentified_caller(format!(
                         "no --agent given and the caller's pane identity could not be resolved: {err}"
                     )),

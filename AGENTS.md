@@ -61,7 +61,7 @@ submission only). Read and verify every cited `file:line` before accepting a ver
 ## Upstream port policy
 
 - FORK-OWNED user-visible behavior wins by default in any upstream port. This includes UI, glyphs, animation,
-  layout, interaction, config effect, and CLI/agent surfaces.
+  layout, interaction, config effect, integration behavior, and CLI/agent surfaces.
 - Every user-visible removal, replacement, or behavior change, whether fork-owned or upstream-origin, requires
   an explicit operator decision at Gate-1.
 - A ledger entry alone is never sufficient evidence or approval for a user-visible change.

@@ -524,7 +524,10 @@ fn render_pane_borders(
         add_pane_border_cells(&mut cells, info);
     }
     add_split_border_cells(app.pane_gaps, split_borders, &mut cells);
-    if app.mode == Mode::Terminal && (ws.layout.pane_count() > 1 || pane_infos.len() > 1) {
+    if app.mode == Mode::Terminal
+        && app.popup_pane.is_none()
+        && (ws.layout.pane_count() > 1 || pane_infos.len() > 1)
+    {
         if let Some(focused) = pane_infos.iter().find(|info| info.is_focused) {
             apply_focused_pane_border_weight(&mut cells, focused, app.pane_gaps);
         }
@@ -1583,6 +1586,25 @@ mod tests {
         assert_eq!(buffer[(2, 2)].style().fg, Some(app.palette.accent));
         assert_eq!(buffer[(2, 1)].symbol(), "┃");
         assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.accent));
+
+        app.popup_pane = Some(crate::app::state::PopupPaneState {
+            pane_id: PaneId::from_raw(99),
+            terminal_id: crate::terminal::TerminalId::alloc(),
+            width: None,
+            height: None,
+        });
+        terminal
+            .draw(|frame| render_view_pane_borders(&app, &ws, frame))
+            .unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .all(|cell| !is_heavy_border_symbol(cell.symbol())),
+            "an open popup must suppress focused-pane heavy borders"
+        );
     }
 
     #[derive(Clone, Copy, Debug)]

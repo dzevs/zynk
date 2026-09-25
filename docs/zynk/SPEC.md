@@ -350,27 +350,37 @@ TerminalAttach, TerminalObserve, and TerminalPending targets contribute nothing.
 animation deadline, tick, render, or frame, including when the server computes its no-client virtual frame;
 detaching the last App client cancels the deadline and reattaching arms it after the first full render. An
 explicit animation origin shares `RenderSignal` without becoming generic work. Headless animation uses the
-retained chrome path only when equivalence is proven; generic work, geometry/config changes, unsafe retained
-state, or preparation failure selects or falls back once to a full render. The steady path performs no
-filesystem/process inspection or new heap allocation after one full render and first animation frame per App
-client; protocol-output ownership retains its existing send allocation. The allocation counter is a
-thread-scoped, opt-in `cfg(test)` global allocator in the unit-test crate, so the release binary has no allocator
-or counting seam and the proof does not duplicate the crate's unit tests in an integration binary. Demand may
-remain live for a working list entry that is scrolled out of view, but a tick sends no frame when no visible
-cell changes.
+retained chrome path only when equivalence is proven, and composes that chrome patch with a retained visible-PTY
+update when both are due; generic work, geometry/config changes, unsafe retained state, or preparation failure
+selects or falls back once to a full render. Animation demand is suppressed outside Terminal, Navigate, and
+Navigator modes, and the server arms its timer only when at least one App client's committed frame contains an
+animated cell. The measured steady path performs no filesystem/process inspection. Scheduling, demand lookup,
+planning, target lookup, and in-place chrome patching add no heap allocation after one full render and first
+animation frame per App client. Protocol 20 frame ownership still requires one `FrameData` clone and send
+preparation per client, which is O(frame cells) and is explicitly allowlisted and counted; its allocation count
+is independent of whether one or fifteen agent/pane cells animate. The allocation counter is a thread-scoped,
+opt-in `cfg(test)` global allocator in the unit-test crate, so the release binary has no allocator or counting
+seam and the proof does not duplicate the crate's unit tests in an integration binary. A working list entry may
+be scrolled out of view, but without a committed animated cell it arms no timer and sends no frame.
+Switching the last App client to Observe can permit one already-scheduled harmless tick before the next demand
+commit cancels the timer. Demand is deliberately recomputed from each client's rendered list rather than reused
+from renderer internals; that is a bounded performance note, not an additional topology or process scan.
 
-Multi-pane border rendering represents every junction arm as none, light, or heavy and maps the complete mixed
-straight/corner/tee/cross Unicode table. The focused pane's four edges are heavy only while its terminal is
-active; all other edges remain light. Pane gaps, outer-border policy, drag hit boxes, inner rectangles, and
-border/agent-label placement retain their geometry, a single pane is unchanged, and `pane_borders = false`
-draws no border. Wheel events over pane content or its scrollbar, scrollbar clicks, and configured modifier
-right-click passthrough first focus an unfocused pane through runtime authority in Terminal or Resize mode
-only. Wheel and modifier-right events over the already-focused pane skip the focus API, preserving mode and
-seen state; intentional left/middle presses keep their existing pre-focus behavior. Focus failure cannot mutate
-state or forward to the stale pane. Navigate owns its overlays and mouse input, so pane mouse hit testing never
+Multi-pane border rendering represents every junction arm as none, light, or heavy and maps every mixed-weight
+corner, tee, and cross combination; light and heavy straight arms collapse to their single Unicode straight
+glyphs. The focused pane's four edges are heavy only while its terminal is active and no popup is open; all
+other edges remain light. Pane gaps, outer-border policy, drag hit boxes, inner rectangles, and border/agent-label
+placement retain their geometry, a single pane is unchanged, and `pane_borders = false` draws no border. Wheel
+events over pane content or its scrollbar, left-button scrollbar clicks, and configured modifier-right-click
+passthrough first focus an unfocused pane through runtime authority in Terminal or Resize mode only. Horizontal
+wheel focus follows the same Terminal-only forwarding gate as horizontal mouse reporting. Wheel and
+modifier-right events over the already-focused pane skip the focus API, preserving mode and seen state;
+intentional left/middle presses keep their existing pre-focus behavior. A wheel over an unfocused pane in Resize
+mode deliberately focuses that pane and settles the mode to Terminal. Focus failure cannot mutate state or
+forward to the stale pane. Navigate owns its overlays and mouse input, so pane mouse hit testing never
 pre-focuses through an active Navigate view. A wheel during an in-progress selection whose pane lost focus is
-consumed without stale scrolling or bytes. Navigate-mode Tab and Shift-Tab cycle panes without leaving
-Navigate; the existing Enter, numeric, and Escape exit paths remain.
+consumed without stale scrolling or bytes. Navigate-mode Tab and Shift-Tab cycle panes without leaving Navigate;
+the existing Enter, numeric, and Escape exit paths remain.
 
 `ui.window_title` defaults to empty, leaving the host terminal title untouched. A template such as
 `{hostname}: {workspace}` opts in and may also use `{tab}`, `{pane}`, and `{terminal_title}`. Malformed
@@ -414,16 +424,24 @@ All attached App clients share the server-rendered scope. `agent.list` and API/h
 protocol 20, persistence, session snapshots, handoff manifests, and schema remain unchanged.
 
 `ui.agent_panel_header = "scope" | "sort" | "both"` is reloadable and defaults to `scope`. The expanded
-panel keeps three header rows: title/controls on row one, row two blank, body at row three. A hidden control
-still affects filtering or ordering but has no invisible hit target. An active agent-view label occupies the
-sort slot as non-clickable accent status. Narrow layout precedence is title, then scope, then sort/view; the
-separator belongs to the second slot, and `both` omits sort before scope. A view label truncates with
-`truncate_end` only when at least one display column plus its ellipsis fits; below that it and its separator
-are omitted. At width 26, ` agents` and `current · priority` both fit.
+panel keeps three header rows: title/controls on row one, row two blank, body at row three. A blank column must
+separate ` agents` from any rendered control. A hidden control still affects filtering or ordering but has no
+invisible hit target. An active agent-view label occupies the sort slot as non-clickable accent status. Narrow
+layout precedence is title, then scope, then sort/view; the separator belongs to the second slot, and `both`
+abbreviates `priority` to `prio` or `grouped` to `group` before omitting sort ahead of scope. A view label
+truncates with `truncate_end` only when at least one display column plus its ellipsis fits; below that it and its
+separator are omitted. A 26-column sidebar supplies a real 25-column agent area: ` agents` plus the blank column
+and `current · grouped` fit exactly, while priority renders as `current · prio`.
 
-Expanded agent spacing separates same-group `row_gap` from `group_gap`, which is added before every emitted
-group header except the first. Defaults are `row_gap = 0` and `group_gap = 1`. This grammar also applies to
-priority and plugin sorts, so interleaved groups can gain a blank row before nearly every re-emitted header.
+Expanded agent spacing separates `row_gap`, inserted before every entry after the first, from `group_gap`, which
+is additionally inserted before every emitted group header except the first. Defaults are `row_gap = 0` and
+`group_gap = 1`; nonzero values compose at a transition with saturating height arithmetic. This grammar also
+applies to priority and plugin sorts, so interleaved groups can gain a blank row before nearly every re-emitted
+header.
+Scope and sort persistence share the existing config upsert limitations: a spaced `[ ui ]` header, an inline
+comment on `[ui]`, quoted keys, or an inline comment on the replaced value are not preserved as structured TOML.
+These pre-existing edge cases are a follow-up candidate; ordinary `[ui]` files, including the operator-shaped
+fixture with a trailing `[ui.sidebar.spaces]` table, retain comments and unrelated bytes.
 Spaces default to `row_gap = 1` while retaining 3.1.0 packing: linked-worktree parent and indented members are
 adjacent, one gap follows the group's last member before another top-level space, and no trailing gap is
 reserved. Pane-resize and move-tab actions have typed keybinding fields and contextual admission. Sidebar
@@ -789,14 +807,18 @@ assumed compatibility. Ordinary mismatch output is one JSON `protocol_mismatch`
 error with the request ID and restart/upgrade guidance. The transport returns a
 typed error and prints nothing itself, including during plugin rollback.
 
-Native `send` and `reply` preserve a checked protocol refusal as an F4
-`protocol_mismatch` with client/server versions and request ID. They do not collapse it into
-`transport_failed` or create a message, attempt, event, receipt, or input side effect. Caller-bound `inbox`
-preserves the same typed refusal without losing its caller label. Explicit `inbox --agent NAME` remains a
-database-only read and does not perform the live protocol check. Missing callers and unrelated connection
-failures retain their existing classifications. A refusal after a recorded attempt reaches the existing
-Failed append and F4 error; healthy-database controls observe Failed and no Submitted/Received. The attempt
-itself creates no Submitted event. Existing append failures are not made durably successful by this guard.
+Fork-native `zynk send` and `zynk reply` preserve a checked protocol refusal as an F4 `protocol_mismatch` with
+structured context containing the request ID plus client and server protocol versions. They do not collapse it
+into `transport_failed` or create a message, attempt, event, receipt, or input side effect. The separate
+`agent send` and `pane send` compatibility routes retain their existing pre-resolution `transport_failed`,
+unknown-target contract. Implicit-caller `inbox` uses the caller identity only to choose its live lookup; on a
+mismatch it returns the same structured refusal instead of relabeling it `caller_unidentified`, but the error
+response does not expose a caller label. Explicit `inbox --agent NAME` remains a database-only read and does not
+perform the live protocol check. A genuinely missing caller remains `caller_unidentified`, and malformed ping,
+dead socket, and other unrelated connection failures retain their transport classifications. A refusal after a
+recorded attempt reaches the existing Failed append and F4 error; healthy-database controls observe Failed and
+no Submitted/Received. The attempt itself creates no Submitted event. Existing append failures are not made
+durably successful by this guard.
 
 Direct status, explicit live handoff and direct server stop bypass the guard for
 recovery; they are not invoked automatically. Low-level API and direct binary

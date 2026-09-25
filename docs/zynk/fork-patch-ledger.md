@@ -8081,3 +8081,84 @@ The exact-object packet must retain the approved panel and restoration reds/gree
 the allocation and cardinality controls, the observational CPU report, docs/residue mapping, provenance checks,
 and the isolated full/check/gate chain. A passing author run does not close this entry; closure requires Claude
 Gate-2 and independent Pi Gate-3 on the same SHA/tree, followed by the separately gated dogfood sequence.
+
+### 3.2.0 Gate-2 correction batch (IMPLEMENTED / PENDING VERIFICATION)
+
+The consolidated Gate-2 review of `ed3726ca` found eight product defects and related evidence/documentation
+gaps. This append supersedes only the inaccurate statements named below; it does not rewrite the historical
+records or transfer approval to the successor.
+
+- The fixed three-row agent-panel header has one title/control row, one blank row, then its body. It now reserves
+  a strict blank column between ` agents` and right-aligned controls. Sort labels abbreviate to `group` and
+  `prio` before omission. A 26-column sidebar yields a real 25-column agents area, where
+  `current · grouped` fits exactly and priority renders as `current · prio`; areas below the three-row height
+  expose no invisible hit targets. The earlier “one-line header” wording meant its control row, not total height.
+- Presented-workspace reconciliation happens before client-specific rendering, so a background App client cannot
+  consume the stable-workspace-id change while its scroll offsets are restored. A two-App-client control pins
+  the foreground reset.
+- Per-client animation cells are collected against that client's rendered and clamped state before shared scroll
+  offsets are restored. A cell qualifies only when both frames use the working yellow foreground and preserve
+  their background, preventing blocked, done, or popup glyphs that happen to equal pulse frames from entering
+  the cache. Cache state commits only with a sent or unchanged frame, never after an oversized or failed send.
+- A scheduled animation tick now composes with retained visible-PTY damage instead of forcing a full render.
+  Same-tick full-frame oracles cover the combined path. Modes whose overlays cannot use the retained chrome path
+  suppress animation demand; a server arms the timer only when some committed App-client frame has an animated
+  cell. Mobile Navigator contributes braille demand.
+- The allocation proof drives the real scheduled-impact function and the real retained frame-send path for one
+  and fifteen agents over sixteen ticks. Scheduler, demand, planning, lookup, and in-place patch work add zero
+  allocations relative to an idle scheduling pass. Protocol 20 frame ownership still clones one `FrameData`
+  and prepares one send per App client, O(frame cells); that measured allocation count is identical for one and
+  fifteen animated agents. The architecture guard fingerprints scheduling, tick, demand, cell collection,
+  patching, and both retained paths; it rejects aggregate scans, filesystem/process work, `vec!`, `format!`,
+  untyped `collect()`, `to_vec()`, `with_capacity`, and `cloned()`, except for the single exact frame-ownership
+  clone. The headless test module remains private.
+- Horizontal wheel forwarding now applies the same runtime-authoritative pre-focus as vertical forwarding. A
+  configured or per-pane right-click passthrough pre-focuses only when the target runtime can encode and will
+  receive the event and the target is not in copy mode. Otherwise focus stays put and the ordinary pane menu,
+  including “Swap with focused pane”, opens. Scrollbar fallback pre-focuses only a left click, not middle click;
+  focus failure stops dispatch; focus is complete before any forwarded mouse bytes. A wheel over an unfocused
+  pane in Resize deliberately settles to Terminal; Navigate owns desktop and mobile mouse input.
+- Native `send`, `reply`, and implicit-caller `inbox` protocol refusals now carry structured
+  `{request_id, client_protocol, server_protocol}` context. Agent/pane compatibility commands keep their existing
+  pre-resolution transport contract. Implicit inbox uses the caller only for lookup and does not publish a caller
+  label in the error; missing callers remain `caller_unidentified`, and malformed or unreachable transports do
+  not become protocol mismatches.
+
+Documentation corrections in this batch also pin the actual spacing grammar: agent `row_gap` precedes every
+entry after the first and `group_gap` is additionally charged before every later emitted header, with saturating
+composition. The mixed-border table is exhaustive for corners, tees, and crosses; straight light/heavy arms
+collapse to their one Unicode straight glyph. The default scope header hides the sort toggle, so users who want
+the 3.1.0 control set `agent_panel_header = "sort"` or `"both"`.
+
+The N22B neutral constructors remove five ambient pane-child variables:
+`ZYNK_WORKSPACE_ID`, `ZYNK_TAB_ID`, `ZYNK_PANE_ID`, `ZYNK_ENV`, and `ZYNK_BIN_PATH`. They do not merely scrub an
+ambient `ZYNK_SOCKET_PATH`; each constructor deliberately binds its isolated fixture socket after the neutral
+scrub. The isolated top-level runner separately clears every inherited `ZYNK_*` and `GIT_*` before binding its
+own roots. Scope/sort persistence retains the shared pre-existing upsert limitations for spaced or inline-comment
+table headers, quoted keys, and inline comments on a replaced value; those are recorded follow-up candidates.
+
+One already-scheduled animation tick after an App-to-Observe transition is harmless and accepted; the next
+demand commit cancels the timer. Demand currently recomputes rendered lists instead of borrowing renderer-owned
+lists, a bounded performance note. Deterministic counters and full-render oracles remain the behavioral gate;
+CPU measurements are observational.
+
+The corrected CPU experiment uses the final production bytes in release binary sha256
+`474b14bf3d3197125a3b76bebff484e05ba125ac82b27925445b5e97c8a2b293`. The five static 15-second pairs
+measured median animation-on/off server CPU of 0.516712%/0.132810% for one agent and
+1.226536%/0.860039% for fifteen. The added approximately-10-Hz PTY rows make every configured pane stream,
+with the active workspace's pane visible: N=1 measured 2.102812% on and 1.774533% off; N=15 measured
+6.618033% on and 5.718409% off. Each streaming row completed 150 retained PTY updates. Animation-on composed
+those with the animation cache; animation-off used retained PTY alone. Both sizes recorded zero full renders
+and zero retained fallbacks. Mixed desktop/mobile still emitted two frames per tick, while detached N=15
+emitted no animation tick or frame. The retained report is `WORKING-ANIMATION-CPU-EVIDENCE-V2.md`; timings
+remain observational, while retained/full counters, same-tick frame oracles, and allocation controls are the
+gate.
+
+The required collect-after-scroll-restore fault exposed a vacuous first version of the non-foreground mobile
+oracle: at 44x12 the clamped switcher had no visible working cell, so both correct and mutated code held an
+empty cache. The final test uses a 44x60 mobile target and asserts a non-empty client cache before comparing a
+retained tick with the same-tick full frame. Correct bytes pass; the exact M3 mutation stops at that
+precondition. The first mutation record and the 4915-pass FULL that preceded this test-only tightening remain
+retained but excluded from final-byte claims. Other animation equality oracles likewise establish their
+non-vacuous preconditions first: a non-empty cell cache, an emitted frame, PTY damage, or an observed focus
+transition as appropriate.

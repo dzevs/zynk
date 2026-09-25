@@ -6,10 +6,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 GUIDANCE = ("AGENTS.md", "CLAUDE.md", "WORKFLOW.md")
-MARKERS = (
-    "FORK-OWNED user-visible behavior wins by default",
-    "Every user-visible removal, replacement, or behavior change",
-    "A ledger entry alone is never sufficient",
+CLAUSES = (
+    "FORK-OWNED user-visible behavior wins by default in any upstream port. This includes UI, glyphs, "
+    "animation, layout, interaction, config effect, integration behavior, and CLI/agent surfaces.",
+    "Every user-visible removal, replacement, or behavior change, whether fork-owned or upstream-origin, "
+    "requires an explicit operator decision at Gate-1.",
+    "A ledger entry alone is never sufficient evidence or approval for a user-visible change.",
 )
 AUDIT_HEADING = "#### operator-accepted 2026-09-25, post-release audit"
 AUDIT_MARKERS = (
@@ -58,10 +60,11 @@ RESTORATION_MARKERS = (
 class PortPolicyDocsTest(unittest.TestCase):
     def test_every_guidance_file_carries_the_three_clause_port_policy(self) -> None:
         for relative in GUIDANCE:
-            text = (ROOT / relative).read_text()
+            text = " ".join((ROOT / relative).read_text().split())
             with self.subTest(path=relative):
-                for marker in MARKERS:
-                    self.assertIn(marker, text)
+                for clause in CLAUSES:
+                    normalized_clause = " ".join(clause.split())
+                    self.assertEqual(text.count(normalized_clause), 1)
 
     def test_ledger_retains_the_dated_audit_and_restoration_provenance(self) -> None:
         ledger = (ROOT / "docs/zynk/fork-patch-ledger.md").read_text()

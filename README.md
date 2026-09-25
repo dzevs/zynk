@@ -582,7 +582,7 @@ tab_bar_right = []                # ordered zoom/hostname/datetime/text/command 
 tab_bar_right_separator = " "    # separator between visible right-side entries
 
 [ui.sidebar.agents]
-row_gap = 0                     # blank rows between entries within one emitted group
+row_gap = 0                     # blank rows before every agent entry after the first
 group_gap = 1                   # additional blank rows before each later emitted group header
 rows = [["state_icon", "agent", "state_text"]]
 rows_by_agent = {}
@@ -619,11 +619,12 @@ with their process group when cancelled, and never run during rendering. Invalid
 config diagnostic. Headless dimensions are startup-only; reload does not resize existing panes.
 
 Expanded sidebar gaps accept integers from 0 through 65535 and can be reloaded.
-Agent `row_gap` applies within an emitted group; `group_gap` is added before every
-later emitted group header. The defaults therefore leave no gap inside a group and
-one blank row between groups, with no leading or trailing gap. Priority ordering and
-plugin sorts can re-emit a group header for interleaved entries, so the default adds
-a blank row at every such transition.
+Agent `row_gap` is inserted before every entry after the first, including the first
+entry after a group transition; `group_gap` is added before every later emitted
+group header. The defaults therefore leave no gap inside a group and one blank row
+between groups, with no leading or trailing gap. Nonzero values compose at a group
+transition. Priority ordering and plugin sorts can re-emit a group header for
+interleaved entries, so the default adds a blank row at every such transition.
 
 Spaces keep the 3.1.0 packing rule with a new default `row_gap = 1`: a linked-worktree
 parent and its first indented member are adjacent, consecutive members are adjacent,
@@ -676,13 +677,15 @@ heights and gaps. Oversized workspace entries clip to their body; agent entries
 clip to body height minus one for the group header. If a header and one content
 line cannot fit, neither is admitted. The same child-height bound applies mid-group.
 At one content column the sidebar keeps content and suppresses its scrollbar.
-The expanded agent header always keeps ` agents` at the left, leaves its second
-row blank, and starts the body on row three. `scope` mode shows only `current` or
-`all`; `sort` shows only `grouped` or `priority`; `both` shows both controls. An
-active agent-view label occupies the sort slot as non-clickable status. Narrow
-layouts preserve title, then scope, then sort/view; a view label truncates before
-it is omitted, and an omitted control has no hit target. A full sidebar two columns
-wide puts its collapse toggle on the divider, leaving the content cell available.
+The expanded agent header always keeps ` agents` at the left, reserves one blank
+column before any right-side controls, leaves its second row blank, and starts the
+body on row three. `scope` mode shows only `current` or `all`; `sort` shows only
+`grouped` or `priority`; `both` shows both controls. Sort labels first abbreviate to
+`group` or `prio` before they are omitted. An active agent-view label occupies the
+sort slot as non-clickable status. Narrow layouts preserve title, then scope, then
+sort/view; a view label truncates before it is omitted, and an omitted control has
+no hit target. A full sidebar two columns wide puts its collapse toggle on the
+divider, leaving the content cell available.
 
 Title capture continues regardless of configuration. Configured title builtins in
 global or override rows request redraw in both desktop execution loops; a custom

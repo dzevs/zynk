@@ -546,10 +546,23 @@ impl App {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) {
-        let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
-            return;
+        let _ = self.try_focus_pane_internal_via_api(ws_idx, pane_id);
+    }
+
+    pub(crate) fn try_focus_pane_internal_via_api(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> bool {
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return false;
         };
-        self.runtime_pane_focus("tui.pane.focus", pane_id);
+        self.runtime_pane_focus("tui.pane.focus", public_pane_id);
+        self.state
+            .workspaces
+            .get(ws_idx)
+            .and_then(crate::workspace::Workspace::focused_pane_id)
+            == Some(pane_id)
     }
 
     pub(crate) fn focus_pane_direction_via_api(&mut self, direction: NavDirection) {
@@ -1851,11 +1864,9 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::CyclePaneNext => {
             state.cycle_pane(false);
-            leave_navigate_mode(state);
         }
         NavigateAction::CyclePanePrevious => {
             state.cycle_pane(true);
-            leave_navigate_mode(state);
         }
         NavigateAction::LastPane => {
             state.last_pane();
@@ -2658,10 +2669,20 @@ mod tests {
     }
 
     #[test]
-    fn tab_and_backtab_cycle_panes_without_leaving_navigate_mode() {
+    fn tab_and_backtab_cycle_three_panes_without_leaving_navigate_mode() {
         let mut app = app_with_test_workspaces(&["test"]);
         let root = app.state.workspaces[0].tabs[0].root_pane;
-        let next = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].test_split(Direction::Vertical);
+        app.state.ensure_test_terminals();
+        let pane_ids = app.state.workspaces[0].tabs[0].layout.pane_ids();
+        assert_eq!(pane_ids.len(), 3);
+        let root_idx = pane_ids
+            .iter()
+            .position(|pane_id| *pane_id == root)
+            .unwrap();
+        let next = pane_ids[(root_idx + 1) % pane_ids.len()];
+        let previous = pane_ids[(root_idx + pane_ids.len() - 1) % pane_ids.len()];
         app.state.workspaces[0].tabs[0].layout.focus_pane(root);
         app.state.mode = Mode::Navigate;
 
@@ -2669,9 +2690,89 @@ mod tests {
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(next));
         assert_eq!(app.state.mode, Mode::Navigate);
 
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
         app.handle_navigate_key(TerminalKey::new(KeyCode::BackTab, KeyModifiers::empty()));
-        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(previous));
         assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn configured_cycle_keys_move_both_directions_and_stay_in_navigate() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].test_split(Direction::Vertical);
+        app.state.ensure_test_terminals();
+        let pane_ids = app.state.workspaces[0].tabs[0].layout.pane_ids();
+        let root_idx = pane_ids
+            .iter()
+            .position(|pane_id| *pane_id == root)
+            .unwrap();
+        let next = pane_ids[(root_idx + 1) % pane_ids.len()];
+        let previous = pane_ids[(root_idx + pane_ids.len() - 1) % pane_ids.len()];
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+cycle_pane_next = "prefix+alt+n"
+cycle_pane_previous = "prefix+alt+p"
+"#,
+        )
+        .unwrap();
+        app.state.keybinds = config.keybinds();
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.mode = Mode::Navigate;
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::ALT));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(next));
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('p'), KeyModifiers::ALT));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(previous));
+        assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn production_agent_targets_and_relative_navigation_respect_current_scope() {
+        let mut app = app_with_test_workspaces(&["current", "hidden"]);
+        let current_root = app.state.workspaces[0].tabs[0].root_pane;
+        let current_second = app.state.workspaces[0].test_split(Direction::Horizontal);
+        let hidden = app.state.workspaces[1].tabs[0].root_pane;
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        for (ws_idx, pane_id) in [(0, current_root), (0, current_second), (1, hidden)] {
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(
+                    Some(crate::detect::Agent::Claude),
+                    crate::detect::AgentState::Working,
+                );
+        }
+
+        let visible = crate::ui::agent_panel_entries(&app.state);
+        assert_eq!(visible.len(), 2);
+        assert_eq!(app.agent_entry_target(0), Some((0, visible[0].pane_id)));
+        assert_eq!(app.agent_entry_target(1), Some((0, visible[1].pane_id)));
+        assert_eq!(app.agent_entry_target(2), None);
+
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .focus_pane(visible[0].pane_id);
+        assert_eq!(
+            app.relative_agent_entry(true),
+            Some((1, 0, visible[1].pane_id))
+        );
+        assert_eq!(
+            app.relative_agent_entry(false),
+            Some((1, 0, visible[1].pane_id))
+        );
     }
 
     #[test]

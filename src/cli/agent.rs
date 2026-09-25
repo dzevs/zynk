@@ -689,7 +689,7 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
                 match super::parse_agent_status(value) {
                     Ok(status) => until.push(status),
                     Err(err) => {
-                        eprintln!("{err}");
+                        eprintln!("{option}: {err}");
                         return Ok(2);
                     }
                 }

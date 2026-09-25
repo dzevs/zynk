@@ -1288,6 +1288,30 @@ mouse_capture = false
                 );
             }
         }
+
+        for invalid in [
+            "-1",
+            "65536",
+            "\"two\"",
+            "1.5",
+            "true",
+            "[1]",
+            "{ value = 1 }",
+        ] {
+            let source = format!(
+                "[keys]\nzoom = \"prefix+z\"\n[ui]\nmouse_capture = false\n[ui.sidebar.agents]\ngroup_gap = {invalid}\n"
+            );
+            assert!(source.parse::<toml::Value>().is_ok(), "{source}");
+            assert!(toml::from_str::<Config>(&source).is_err());
+            let live = load_live_config_from_str(&source).unwrap();
+            assert_eq!(live.invalid_sections, vec!["ui"], "{invalid}");
+            assert_eq!(live.diagnostics.len(), 1, "{invalid}");
+            assert!(live.diagnostics[0].contains("invalid ui config"));
+            assert_eq!(
+                live.config.keys.zoom,
+                super::super::BindingConfig::one("prefix+z")
+            );
+        }
     }
 
     #[test]

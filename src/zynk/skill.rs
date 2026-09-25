@@ -652,9 +652,10 @@ mod tests {
             "The wire protocol is version {}.",
             crate::protocol::PROTOCOL_VERSION
         );
-        assert!(
-            SKILL_ASSET.contains(&expected),
-            "embedded skill must contain `{expected}`"
+        assert_eq!(
+            SKILL_ASSET.matches(&expected).count(),
+            1,
+            "embedded skill must contain exactly one `{expected}` sentence"
         );
     }
 

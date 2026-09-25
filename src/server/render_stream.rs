@@ -49,10 +49,15 @@ pub(crate) fn collect_working_animation_cells(
         return false;
     }
     for (index, (current, next)) in rendered.content.iter().zip(&next.content).enumerate() {
-        if let Some(glyph) =
-            crate::ui::working_animation_glyph_transition(current.symbol(), next.symbol())
+        if current.fg == app_state.palette.yellow
+            && next.fg == app_state.palette.yellow
+            && current.bg == next.bg
         {
-            cells.push(WorkingAnimationCell { index, glyph });
+            if let Some(glyph) =
+                crate::ui::working_animation_glyph_transition(current.symbol(), next.symbol())
+            {
+                cells.push(WorkingAnimationCell { index, glyph });
+            }
         }
     }
     true

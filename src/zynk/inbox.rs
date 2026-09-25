@@ -262,11 +262,14 @@ impl InboxResponse {
     }
 
     /// The live caller lookup reached a server with an incompatible wire protocol.
-    pub fn protocol_mismatch(response: &crate::api::schema::ErrorResponse) -> Self {
+    pub fn protocol_mismatch(
+        response: &crate::api::schema::ErrorResponse,
+        context: serde_json::Value,
+    ) -> Self {
         Self::failed(
             &response.error.code,
             &response.error.message,
-            serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({})),
+            context,
             "restart or upgrade zynk as directed by the protocol mismatch",
         )
     }
@@ -693,13 +696,20 @@ mod tests {
                 message: "client protocol 20 is newer than server protocol 19".into(),
             },
         };
-        let resp = InboxResponse::protocol_mismatch(&response);
+        let resp = InboxResponse::protocol_mismatch(
+            &response,
+            serde_json::json!({
+                "request_id": "cli:inbox:whoami",
+                "client_protocol": 20,
+                "server_protocol": 19,
+            }),
+        );
         assert!(resp.is_failed());
         assert_eq!(resp.code.as_deref(), Some("protocol_mismatch"));
         assert_eq!(
             resp.message.as_deref(),
             Some(response.error.message.as_str())
         );
-        assert_eq!(resp.context.unwrap()["id"], "cli:inbox:whoami");
+        assert_eq!(resp.context.unwrap()["request_id"], "cli:inbox:whoami");
     }
 }

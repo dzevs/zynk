@@ -27,6 +27,23 @@ use super::{
     ScrollbarClickTarget, TAB_DRAG_THRESHOLD, WORKSPACE_DRAG_THRESHOLD,
 };
 
+#[cfg(test)]
+thread_local! {
+    static LAST_MOUSE_FORWARD_WAS_FOCUSED: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn reset_mouse_forward_focus_observation() {
+    LAST_MOUSE_FORWARD_WAS_FOCUSED.with(|focused| focused.set(None));
+}
+
+#[cfg(test)]
+fn last_mouse_forward_was_focused() -> Option<bool> {
+    LAST_MOUSE_FORWARD_WAS_FOCUSED.with(std::cell::Cell::get)
+}
+
 pub(super) enum MouseAction {
     NewWorkspace,
     Settings(SettingsAction),
@@ -1573,16 +1590,27 @@ impl AppState {
         }
 
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left | MouseButton::Middle) => self
+            MouseEventKind::Down(MouseButton::Left) => self
                 .pane_at(mouse.column, mouse.row)
                 .map(|info| info.id)
                 .or_else(|| {
                     self.scrollbar_target_at(terminal_runtimes, mouse.column, mouse.row)
                         .map(|(pane_id, _)| pane_id)
                 }),
+            MouseEventKind::Down(MouseButton::Middle) => {
+                self.pane_at(mouse.column, mouse.row).map(|info| info.id)
+            }
             MouseEventKind::Down(MouseButton::Right) => {
                 let in_sidebar = rect_contains(self.view.sidebar_rect, mouse.column, mouse.row);
                 self.right_click_passthrough_target(mouse, in_sidebar)
+                    .filter(|(info, modifiers)| {
+                        self.pane_mouse_button_will_forward(
+                            terminal_runtimes,
+                            info,
+                            mouse,
+                            *modifiers,
+                        )
+                    })
                     .map(|(info, _)| info.id)
                     .filter(|pane_id| self.mouse_pane_focus_action(*pane_id).is_some())
             }
@@ -1596,6 +1624,16 @@ impl AppState {
                 }
                 self.pane_at(mouse.column, mouse.row)
                     .or_else(|| self.pane_frame_at(mouse.column, mouse.row))
+                    .map(|info| info.id)
+                    .filter(|pane_id| self.mouse_pane_focus_action(*pane_id).is_some())
+            }
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                if self.mode == Mode::Terminal =>
+            {
+                self.pane_at(mouse.column, mouse.row)
+                    .filter(|info| {
+                        self.pane_reported_wheel_will_forward(terminal_runtimes, info, mouse)
+                    })
                     .map(|info| info.id)
                     .filter(|pane_id| self.mouse_pane_focus_action(*pane_id).is_some())
             }
@@ -1741,6 +1779,62 @@ impl AppState {
             .map(|modifiers| (info, modifiers))
     }
 
+    fn pane_mouse_button_will_forward(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        info: &PaneInfo,
+        mouse: MouseEvent,
+        modifiers_to_strip: crossterm::event::KeyModifiers,
+    ) -> bool {
+        if self
+            .copy_mode
+            .as_ref()
+            .is_some_and(|copy_mode| copy_mode.pane_id == info.id)
+        {
+            return false;
+        }
+        let Some(ws_idx) = self.active else {
+            return false;
+        };
+        let Some(runtime) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
+        else {
+            return false;
+        };
+        let position = self.pane_mouse_position(runtime, info.inner_rect, mouse);
+        runtime
+            .encode_mouse_button(
+                mouse.kind,
+                position,
+                mouse.modifiers.difference(modifiers_to_strip),
+            )
+            .is_some()
+    }
+
+    fn pane_reported_wheel_will_forward(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        info: &PaneInfo,
+        mouse: MouseEvent,
+    ) -> bool {
+        let Some(ws_idx) = self.active else {
+            return false;
+        };
+        let Some(runtime) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
+        else {
+            return false;
+        };
+        if runtime.wheel_routing() != Some(crate::pane::WheelRouting::MouseReport) {
+            return false;
+        }
+        runtime
+            .encode_mouse_wheel(
+                mouse.kind,
+                self.pane_mouse_position(runtime, info.inner_rect, mouse),
+                mouse.modifiers,
+            )
+            .is_some()
+    }
+
     pub(super) fn handle_terminal_wheel(
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1830,6 +1924,15 @@ impl AppState {
         let Some(bytes) = rt.encode_mouse_button(mouse.kind, position, modifiers) else {
             return PaneMouseForwardResult::Unhandled;
         };
+        #[cfg(test)]
+        LAST_MOUSE_FORWARD_WAS_FOCUSED.with(|focused| {
+            focused.set(Some(
+                self.workspaces
+                    .get(ws_idx)
+                    .and_then(crate::workspace::Workspace::focused_pane_id)
+                    == Some(info.id),
+            ));
+        });
         rt.scroll_reset();
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(pane = info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward mouse button event");
@@ -1958,6 +2061,15 @@ impl AppState {
             warn!(pane = info.id.raw(), kind = ?mouse.kind, "failed to encode mouse wheel event");
             return true;
         };
+        #[cfg(test)]
+        LAST_MOUSE_FORWARD_WAS_FOCUSED.with(|focused| {
+            focused.set(Some(
+                self.workspaces
+                    .get(ws_idx)
+                    .and_then(crate::workspace::Workspace::focused_pane_id)
+                    == Some(info.id),
+            ));
+        });
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(pane = info.id.raw(), err = %err, "failed to forward mouse wheel event");
         }
@@ -2470,6 +2582,7 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
+        reset_mouse_forward_focus_observation();
 
         app.handle_mouse(mouse(
             MouseEventKind::ScrollDown,
@@ -2478,6 +2591,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
+        assert_eq!(last_mouse_forward_was_focused(), Some(true));
         assert!(input_rx.try_recv().is_ok(), "wheel was not forwarded");
     }
 
@@ -2686,6 +2800,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scrollbar_gutter_wheel_focuses_before_scrolling() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("scrollbar-wheel-focus");
+        let source = ws.tabs[0].root_pane;
+        let target = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(source);
+        ws.tabs[0].runtimes.insert(
+            target,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                40,
+                18,
+                16 * 1024,
+                &numbered_lines_bytes(96),
+            ),
+        );
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 106, 20),
+        );
+        let target_info = app
+            .state
+            .pane_info_by_id(target)
+            .expect("target pane info")
+            .clone();
+        let track = crate::ui::pane_scrollbar_rect(&target_info).expect("scrollbar track");
+        let before = app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, target)
+            .unwrap()
+            .offset_from_bottom;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, track.x, track.y));
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
+        assert!(app
+            .state
+            .pane_scroll_metrics(&app.terminal_runtimes, target)
+            .is_some_and(|metrics| metrics.offset_from_bottom > before));
+    }
+
+    #[tokio::test]
+    async fn scrollbar_thumb_left_click_focuses_and_middle_click_does_not() {
+        for button in [MouseButton::Left, MouseButton::Middle] {
+            let mut app = app_for_mouse_test();
+            let mut ws = Workspace::test_new("scrollbar-thumb-focus");
+            let source = ws.tabs[0].root_pane;
+            let target = ws.test_split(Direction::Horizontal);
+            ws.tabs[0].layout.focus_pane(source);
+            ws.tabs[0].runtimes.insert(
+                target,
+                crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                    40,
+                    18,
+                    16 * 1024,
+                    &numbered_lines_bytes(96),
+                ),
+            );
+            app.state.workspaces = vec![ws];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            crate::ui::compute_view_with_runtime_registry(
+                &mut app.state,
+                &app.terminal_runtimes,
+                Rect::new(0, 0, 106, 20),
+            );
+            let target_info = app
+                .state
+                .pane_info_by_id(target)
+                .expect("target pane info")
+                .clone();
+            let track = crate::ui::pane_scrollbar_rect(&target_info).expect("scrollbar track");
+            let metrics = app
+                .state
+                .pane_scroll_metrics(&app.terminal_runtimes, target)
+                .unwrap();
+            let thumb_row = (track.y..track.y + track.height)
+                .find(|row| crate::ui::scrollbar_thumb_grab_offset(metrics, track, *row).is_some())
+                .expect("scrollbar thumb row");
+
+            app.handle_mouse(mouse(MouseEventKind::Down(button), track.x, thumb_row));
+
+            if button == MouseButton::Left {
+                assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
+                assert!(matches!(
+                    app.state.drag.as_ref().map(|drag| &drag.target),
+                    Some(DragTarget::PaneScrollbar { pane_id, .. }) if *pane_id == target
+                ));
+            } else {
+                assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(source));
+                assert!(app.state.drag.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn stale_drag_selection_wheel_is_consumed_without_terminal_io() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("stale-selection");
@@ -2723,11 +2938,11 @@ mod tests {
         selection.drag(2, 2, stale_info.inner_rect, None);
         app.state.selection = Some(selection);
 
-        app.focus_pane_internal_via_api(0, focused);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(focused);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(focused));
         assert!(
-            app.state.selection.is_none(),
-            "the runtime-authoritative API focus must retire the old selection"
+            app.state.selection.is_some(),
+            "the fixture must preserve a stale in-progress selection until the wheel guard"
         );
         let stale_before = app
             .state
@@ -2755,12 +2970,57 @@ mod tests {
                 .offset_from_bottom,
             stale_before
         );
-        assert!(
+        assert_eq!(
             app.state
                 .pane_scroll_metrics(&app.terminal_runtimes, focused)
                 .unwrap()
-                .offset_from_bottom
-                > focused_before
+                .offset_from_bottom,
+            focused_before,
+            "the stale-selection guard must consume the wheel before terminal scrolling"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_runtime_focus_does_not_mutate_or_forward_to_a_stale_pane() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("failed-focus");
+        let focused = workspace.tabs[0].root_pane;
+        let stale = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(focused);
+        let pane_infos = workspace.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let stale_info = pane_infos
+            .iter()
+            .find(|info| info.id == stale)
+            .expect("stale pane geometry")
+            .clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                stale_info.inner_rect.width,
+                stale_info.inner_rect.height,
+                0,
+                b"\x1b[?1000h\x1b[?1006h",
+                4,
+            );
+        workspace.insert_test_runtime(stale, runtime);
+        workspace.public_pane_numbers.remove(&stale);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        reset_mouse_forward_focus_observation();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            stale_info.inner_rect.x + 1,
+            stale_info.inner_rect.y + 1,
+        ));
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(focused));
+        assert_eq!(last_mouse_forward_was_focused(), None);
+        assert!(
+            input_rx.try_recv().is_err(),
+            "stale pane received wheel bytes"
         );
     }
 
@@ -2824,6 +3084,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn horizontal_wheel_over_unfocused_mouse_reporting_pane_focuses_before_forwarding() {
+        let (mut app, focused, target_info) = two_pane_mouse_app(Mode::Terminal);
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                target_info.inner_rect.width,
+                target_info.inner_rect.height,
+                0,
+                b"\x1b[?1000h\x1b[?1006h",
+                2,
+            );
+        app.terminal_runtimes.insert(
+            app.state.workspaces[0].tabs[0].panes[&target_info.id]
+                .attached_terminal_id
+                .clone(),
+            runtime,
+        );
+        reset_mouse_forward_focus_observation();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollLeft,
+            target_info.inner_rect.x + 1,
+            target_info.inner_rect.y + 1,
+        ));
+
+        assert_ne!(app.state.workspaces[0].focused_pane_id(), Some(focused));
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(target_info.id)
+        );
+        assert_eq!(last_mouse_forward_was_focused(), Some(true));
+        assert!(
+            input_rx.try_recv().is_ok(),
+            "horizontal wheel was not forwarded"
+        );
+    }
+
+    #[tokio::test]
     async fn horizontal_wheel_stays_inert_for_non_mouse_reporting_pane() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
@@ -2845,6 +3142,7 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
+        reset_mouse_forward_focus_observation();
 
         let input = format!(
             "\x1b[<66;{};{}M",
@@ -2904,9 +3202,15 @@ mod tests {
 
         let col = passthrough_info.inner_rect.x + 2;
         let row = passthrough_info.inner_rect.y + 3;
+        reset_mouse_forward_focus_observation();
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
 
         assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(passthrough_pane)
+        );
+        assert_eq!(last_mouse_forward_was_focused(), Some(true));
         assert!(app.state.context_menu.is_none());
         assert_eq!(
             passthrough_input.try_recv().unwrap(),
@@ -2961,6 +3265,33 @@ mod tests {
 
         assert_eq!(app.state.mode, Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
+    }
+
+    #[test]
+    fn right_click_passthrough_fallback_keeps_focus_and_swap_menu() {
+        let (mut app, focused, target_info) = two_pane_mouse_app(Mode::Terminal);
+        app.state.workspaces[0]
+            .pane_state_mut(target_info.id)
+            .expect("target pane")
+            .right_click_passthrough = true;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            target_info.inner_rect.x + 1,
+            target_info.inner_rect.y + 1,
+        ));
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(focused));
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::Pane {
+                pane_id,
+                source_pane_id: Some(source),
+                ..
+            } if pane_id == target_info.id && source == focused
+        ));
+        assert!(menu.items().contains(&"Swap with focused pane"));
     }
 
     #[tokio::test]
@@ -3252,6 +3583,7 @@ mod tests {
                 4,
             );
         app.state.insert_test_runtime(target, runtime);
+        reset_mouse_forward_focus_observation();
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -3260,6 +3592,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
+        assert_eq!(last_mouse_forward_was_focused(), Some(true));
         assert_eq!(
             input_rx.try_recv().expect("forwarded captured left press"),
             Bytes::from_static(b"\x1b[<0;2;2M")

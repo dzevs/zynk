@@ -6714,6 +6714,24 @@ mod tests {
         assert_eq!(app.next_animation_tick, None);
     }
 
+    #[tokio::test]
+    async fn working_animation_tick_does_not_schedule_an_empty_extra_loop_pass() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        app.rendered_animation_demand = crate::app::state::WorkingAnimationDemand::SIDEBAR;
+        app.sync_animation_timer(now);
+
+        assert!(app.tick_working_animation(now + Duration::from_millis(128)));
+        assert!(app.render_dirty.take().animation);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), app.render_notify.notified())
+                .await
+                .is_err(),
+            "the tick caller already owns the render pass"
+        );
+    }
+
     #[test]
     fn workspace_info_agent_status_prefers_working_over_done() {
         // API regression for the aggregate semantic change: a workspace mixing a done/unseen pane

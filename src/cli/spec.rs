@@ -1305,11 +1305,15 @@ mod tests {
     }
 
     #[test]
-    fn m839c_spec_wait_has_no_status_and_names_completion_states() {
+    fn agent_wait_spec_exposes_status_as_the_only_visible_until_alias() {
         let cmd = super::command();
         let wait = command_path(&cmd, &["agent", "wait"]);
-        assert!(!has_option(wait, "status"));
         assert!(has_option(wait, "timeout"));
+        let until = wait
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("until"))
+            .expect("agent wait --until");
+        assert_eq!(until.get_visible_aliases(), Some(vec!["status"]));
         assert_eq!(
             option_values(wait, "until"),
             ["idle", "working", "blocked", "done", "unknown"]

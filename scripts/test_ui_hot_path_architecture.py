@@ -20,6 +20,8 @@ APP_SERVER_SOURCES = (
 )
 HEADLESS_SOURCE = PROJECT_ROOT / "src" / "server" / "headless.rs"
 RENDER_STREAM_SOURCE = PROJECT_ROOT / "src" / "server" / "render_stream.rs"
+APP_RUNTIME_SOURCE = PROJECT_ROOT / "src" / "app" / "runtime.rs"
+UI_SOURCE = PROJECT_ROOT / "src" / "ui.rs"
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
@@ -82,6 +84,7 @@ HEADLESS_RUN_SELF_METHODS = frozenset(
         "render_and_stream",
         "render_retained_animation_update_and_stream",
         "render_retained_graphics_update_and_stream",
+        "render_retained_pty_animation_update_and_stream",
         "render_retained_pty_update_and_stream",
         "settle_event_selected_at_stop_boundary",
         "stream_host_keyboard_enhancement_flags",
@@ -92,7 +95,7 @@ HEADLESS_RUN_SELF_METHODS = frozenset(
     }
 )
 HEADLESS_RUN_BODY_FINGERPRINT = (
-    "c43b9184314ccd8329105cae7691464f0058bb899913c6ecc165aae9c947c843"
+    "e9584bc8edb0f7ff9c2c881b5a8c845a92bd3d47fcaf40cb69e64f06ae9d3a19"
 )
 SELF_METHOD_CALL = re.compile(r"\bself\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 ALT_SCREEN_MAINTENANCE_BODY = (
@@ -126,13 +129,26 @@ WORKING_ANIMATION_BODY_FINGERPRINTS = {
     "retained_animation_preflight": (
         "7317980fae831e89c947cdf9ba580a0e2b24e9a4644ef58956e1c6049ce32ae0"
     ),
+    "render_retained_pty_update_and_stream_with_animation": (
+        "a4d61bb2e6c3fdb40836bd22db09f44bb331507918c04867a2b1626804bd15ea"
+    ),
 }
 WORKING_ANIMATION_RENDER_STREAM_FINGERPRINTS = {
     "collect_working_animation_cells": (
-        "13213517d1b51f48d3ca8676a5a7773778399ff9d89d77c7b6325dd3cb008c7e"
+        "ee7153aae245abb6a1c999b7f9676c3306efc1339411e09f4cbb4dc41cdc8a5f"
     ),
     "apply_working_animation_cells": (
         "066e8f771b5e94546e8a8bb1e3d2df434a95a6c7f22a0ef66b7a4a11234b6df4"
+    ),
+}
+WORKING_ANIMATION_APP_RUNTIME_FINGERPRINTS = {
+    "tick_working_animation": (
+        "d534d6ad22e146eb582b37beac6cc2cfa5f00e2813d66bf519de23e3efd70628"
+    ),
+}
+WORKING_ANIMATION_UI_FINGERPRINTS = {
+    "computed_working_animation_demand": (
+        "403111405902de5b99a5c5539cadb594295abdd529651427a9286a4222c7423b"
     ),
 }
 WORKING_ANIMATION_RETAINED_FORBIDDEN = (
@@ -143,6 +159,15 @@ WORKING_ANIMATION_RETAINED_FORBIDDEN = (
     (re.compile(r"\bforeground_job\s*\("), "process-tree inspection"),
     (re.compile(r"\b(?:Vec|HashMap|HashSet|BTreeMap|BTreeSet)\s*::\s*new\s*\("), "fresh aggregate collection"),
     (re.compile(r"\.collect\s*::\s*<\s*(?:Vec|HashMap|HashSet|BTreeMap|BTreeSet)"), "fresh aggregate collection"),
+    (re.compile(r"\bvec\s*!"), "vec! allocation"),
+    (re.compile(r"\bformat\s*!"), "format! allocation"),
+    (re.compile(r"\.collect\s*\(\s*\)"), "untyped collect allocation"),
+    (re.compile(r"\.to_vec\s*\(\s*\)"), "to_vec allocation"),
+    (re.compile(r"\bwith_capacity\s*\("), "with_capacity allocation"),
+    (re.compile(r"\.cloned\s*\(\s*\)"), "cloned allocation"),
+)
+FRAME_OWNERSHIP_CLONE = re.compile(
+    r"client\s*\.\s*render_state\s*\.\s*last_frame\s*\(\s*\)\s*\.\s*cloned\s*\(\s*\)"
 )
 
 
@@ -337,7 +362,10 @@ def headless_alt_screen_maintenance_violations(source: str) -> list[str]:
 
 
 def headless_working_animation_violations(
-    headless_source: str, render_stream_source: str
+    headless_source: str,
+    render_stream_source: str,
+    app_runtime_source: str | None = None,
+    ui_source: str | None = None,
 ) -> list[str]:
     violations: list[str] = []
     headless_bodies = {
@@ -348,6 +376,20 @@ def headless_working_animation_violations(
         name: rust_function_body(render_stream_source, name)
         for name in WORKING_ANIMATION_RENDER_STREAM_FINGERPRINTS
     }
+    app_runtime_source = (
+        APP_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        if app_runtime_source is None
+        else app_runtime_source
+    )
+    ui_source = UI_SOURCE.read_text(encoding="utf-8") if ui_source is None else ui_source
+    app_runtime_bodies = {
+        name: rust_function_body(app_runtime_source, name)
+        for name in WORKING_ANIMATION_APP_RUNTIME_FINGERPRINTS
+    }
+    ui_bodies = {
+        name: rust_function_body(ui_source, name)
+        for name in WORKING_ANIMATION_UI_FINGERPRINTS
+    }
 
     for name, expected in WORKING_ANIMATION_BODY_FINGERPRINTS.items():
         actual = normalized_body_fingerprint(headless_bodies[name])
@@ -357,6 +399,18 @@ def headless_working_animation_violations(
             )
     for name, expected in WORKING_ANIMATION_RENDER_STREAM_FINGERPRINTS.items():
         actual = normalized_body_fingerprint(render_stream_bodies[name])
+        if actual != expected:
+            violations.append(
+                f"{name} body fingerprint changed: expected {expected}, got {actual}"
+            )
+    for name, expected in WORKING_ANIMATION_APP_RUNTIME_FINGERPRINTS.items():
+        actual = normalized_body_fingerprint(app_runtime_bodies[name])
+        if actual != expected:
+            violations.append(
+                f"{name} body fingerprint changed: expected {expected}, got {actual}"
+            )
+    for name, expected in WORKING_ANIMATION_UI_FINGERPRINTS.items():
+        actual = normalized_body_fingerprint(ui_bodies[name])
         if actual != expected:
             violations.append(
                 f"{name} body fingerprint changed: expected {expected}, got {actual}"
@@ -373,6 +427,20 @@ def headless_working_animation_violations(
             "apply_working_animation_cells"
         ],
     }
+    frame_clone_body = retained_bodies["render_retained_animation_update_and_stream"]
+    frame_clone_matches = list(FRAME_OWNERSHIP_CLONE.finditer(frame_clone_body))
+    if len(frame_clone_matches) != 1:
+        violations.append(
+            "render_retained_animation_update_and_stream must contain exactly one "
+            "reviewed protocol-frame ownership clone"
+        )
+    elif len(re.findall(r"\.cloned\s*\(\s*\)", frame_clone_body)) != 1:
+        violations.append(
+            "render_retained_animation_update_and_stream contains an unreviewed cloned allocation"
+        )
+    retained_bodies["render_retained_animation_update_and_stream"] = (
+        FRAME_OWNERSHIP_CLONE.sub("reviewed_frame_ownership_clone", frame_clone_body, count=1)
+    )
     for name, body in retained_bodies.items():
         for pattern, description in WORKING_ANIMATION_RETAINED_FORBIDDEN:
             if pattern.search(body):
@@ -659,6 +727,34 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             any("filesystem access" in violation for violation in violations), violations
         )
 
+    def test_animation_guard_rejects_every_unreviewed_allocation_form(self) -> None:
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        needle = """    fn render_retained_animation_update_and_stream(&mut self) -> bool {
+        crate::render_prof::event("retained_animation.attempt");
+"""
+        cases = (
+            ("let _ = vec![1_u8];", "vec! allocation"),
+            ("let _ = format!(\"{}\", 1);", "format! allocation"),
+            ("let _: Vec<_> = [1_u8].into_iter().collect();", "untyped collect allocation"),
+            ("let _ = [1_u8].to_vec();", "to_vec allocation"),
+            ("let _ = Vec::<u8>::with_capacity(1);", "with_capacity allocation"),
+            ("let _ = Some(String::new()).as_ref().cloned();", "cloned allocation"),
+        )
+        self.assertEqual(source.count(needle), 1)
+        for statement, expected in cases:
+            with self.subTest(statement=statement):
+                changed = source.replace(
+                    needle,
+                    needle + f"        {statement}\n",
+                    1,
+                )
+                violations = headless_working_animation_violations(
+                    changed, RENDER_STREAM_SOURCE.read_text(encoding="utf-8")
+                )
+                self.assertTrue(
+                    any(expected in violation for violation in violations), violations
+                )
+
     def test_animation_guard_fingerprints_scheduler_and_patch_helpers(self) -> None:
         headless = HEADLESS_SOURCE.read_text(encoding="utf-8")
         scheduler_needle = "let animation_changed = self.app.tick_working_animation(now);"
@@ -675,6 +771,42 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             any(
                 violation.startswith(
                     "handle_scheduled_tasks_headless_with_impact body fingerprint changed:"
+                )
+                for violation in violations
+            ),
+            violations,
+        )
+
+        runtime = APP_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        tick_needle = ".wrapping_add(super::WORKING_ANIMATION_TICK_STEP);"
+        self.assertEqual(runtime.count(tick_needle), 1)
+        changed_runtime = runtime.replace(tick_needle, ".wrapping_add(0);", 1)
+        violations = headless_working_animation_violations(
+            headless,
+            RENDER_STREAM_SOURCE.read_text(encoding="utf-8"),
+            app_runtime_source=changed_runtime,
+        )
+        self.assertTrue(
+            any(
+                violation.startswith("tick_working_animation body fingerprint changed:")
+                for violation in violations
+            ),
+            violations,
+        )
+
+        ui_source = UI_SOURCE.read_text(encoding="utf-8")
+        demand_needle = "if !app.working_animation"
+        self.assertEqual(ui_source.count(demand_needle), 1)
+        changed_ui = ui_source.replace(demand_needle, "if false && !app.working_animation", 1)
+        violations = headless_working_animation_violations(
+            headless,
+            RENDER_STREAM_SOURCE.read_text(encoding="utf-8"),
+            ui_source=changed_ui,
+        )
+        self.assertTrue(
+            any(
+                violation.startswith(
+                    "computed_working_animation_demand body fingerprint changed:"
                 )
                 for violation in violations
             ),

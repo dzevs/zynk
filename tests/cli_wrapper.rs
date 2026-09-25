@@ -6813,14 +6813,24 @@ fn m835_f4_refusal(verb: &[&str], late: bool, wrong_protocol: u32) {
             "transport_failed"
         }
     );
-    assert!(value["error"].get("context").is_none());
     if native_fork_command {
+        assert_eq!(
+            value["error"]["context"],
+            serde_json::json!({
+                "request_id": if late { "cli:send" } else { "zynk:resolve:target" },
+                "client_protocol": support::CURRENT_PROTOCOL,
+                "server_protocol": wrong_protocol,
+            }),
+            "{value}"
+        );
         let message = value["error"]["message"].as_str().unwrap();
         assert!(message.contains("client protocol 20"), "{value}");
         assert!(
             message.contains(&format!("server protocol {wrong_protocol}")),
             "{value}"
         );
+    } else {
+        assert!(value["error"].get("context").is_none());
     }
     for field in ["delivery_status", "proof", "submitted_at"] {
         assert!(value.get(field).is_none(), "{value}");
@@ -6875,6 +6885,15 @@ fn m835_implicit_inbox_preserves_protocol_mismatch_instead_of_losing_caller() {
             message.contains(&format!("server protocol {protocol}")),
             "{value}"
         );
+        assert_eq!(
+            value["context"],
+            serde_json::json!({
+                "request_id": "cli:inbox:whoami",
+                "client_protocol": support::CURRENT_PROTOCOL,
+                "server_protocol": protocol,
+            }),
+            "{value}"
+        );
     }
 }
 
@@ -6895,6 +6914,112 @@ fn m835_explicit_inbox_agent_remains_database_only_on_a_mismatched_socket() {
     assert_eq!(value["result"], "ok");
     assert_eq!(value["agent"], "codex");
     assert_eq!(value["messages"], serde_json::json!([]));
+}
+
+#[test]
+fn native_message_commands_keep_non_mismatch_transport_classifications() {
+    let malformed_pong = serde_json::json!({
+        "result": {"type": "pong", "version": "fixture"}
+    });
+    for verb in ["send", "reply"] {
+        let (requests, output) = m835_scripted_cli(
+            &[verb, "worker", "--", "body"],
+            vec![malformed_pong.clone()],
+            false,
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["ping"],
+            "{verb}: {requests:?}"
+        );
+        assert_eq!(output.status.code(), Some(1), "{verb}: {output:?}");
+        assert!(output.stderr.is_empty(), "{verb}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["error"]["code"], "transport_failed",
+            "{verb}: {value}"
+        );
+        assert!(value["error"].get("context").is_none(), "{verb}: {value}");
+    }
+
+    let (requests, output) = m835_scripted_cli_with_env(
+        &["inbox", "--json"],
+        vec![malformed_pong],
+        false,
+        &[("ZYNK_PANE_ID", "w1:p1")],
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ping"]
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["code"], "caller_unidentified", "{value}");
+
+    for (args, env, expected_path) in [
+        (
+            vec!["send", "worker", "--", "body"],
+            Vec::<(&str, &str)>::new(),
+            vec!["error", "code"],
+        ),
+        (
+            vec!["reply", "worker", "--", "body"],
+            Vec::<(&str, &str)>::new(),
+            vec!["error", "code"],
+        ),
+        (
+            vec!["inbox", "--json"],
+            vec![("ZYNK_PANE_ID", "w1:p1")],
+            vec!["code"],
+        ),
+    ] {
+        let fixture = SnapshotCliFixture::new();
+        let socket = fixture.base.join("missing.sock");
+        let output = run_snapshot_cli_with_timeout_and_env(
+            &fixture.base,
+            &socket,
+            &args,
+            Duration::from_secs(3),
+            &env,
+        );
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let code = expected_path.iter().fold(&value, |value, key| &value[*key]);
+        let expected = if args[0] == "inbox" {
+            "caller_unidentified"
+        } else {
+            "transport_failed"
+        };
+        assert_eq!(code, expected, "{args:?}: {value}");
+        fixture.assert_no_runtime_created();
+    }
+
+    let fixture = SnapshotCliFixture::new();
+    let socket = fixture.base.join("missing.sock");
+    let output = run_snapshot_cli_with_timeout_and_env(
+        &fixture.base,
+        &socket,
+        &["inbox", "--json"],
+        Duration::from_secs(3),
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["code"], "caller_unidentified", "{value}");
+    assert!(
+        value["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no --agent given")),
+        "{value}"
+    );
+    fixture.assert_no_runtime_created();
 }
 
 #[test]
@@ -7344,6 +7469,8 @@ fn m839c_agent_grammar_refuses_before_resolution_or_persistence() {
         ],
         vec!["agent", "wait", "worker", "--until"],
         vec!["agent", "wait", "worker", "--until", "invalid"],
+        vec!["agent", "wait", "worker", "--status"],
+        vec!["agent", "wait", "worker", "--status", "invalid"],
         vec!["agent", "wait", "worker", "--timeout"],
         vec!["agent", "wait", "worker", "--timeout", "-1"],
         vec![
@@ -7366,6 +7493,78 @@ fn m839c_agent_grammar_refuses_before_resolution_or_persistence() {
     assert!(help.contains("agent prompt <name>"));
     assert!(help.contains("idle, done or blocked"));
     assert!(help.contains("agent wait <name> [--until|--status STATUS]"));
+}
+
+#[test]
+fn agent_wait_aliases_share_any_of_semantics_and_request_identity() {
+    for args in [
+        vec![
+            "agent",
+            "wait",
+            "worker",
+            "--until",
+            "idle",
+            "--status",
+            "blocked",
+            "--timeout",
+            "500",
+        ],
+        vec![
+            "agent",
+            "wait",
+            "worker",
+            "--status",
+            "idle",
+            "--until",
+            "blocked",
+            "--timeout",
+            "500",
+        ],
+    ] {
+        let mut agent_gets = 0;
+        let (fixture, requests, output) = m839_cli_exchange(&args, |request, _| {
+            match request["method"].as_str().unwrap() {
+                "ping" => m839_pong(),
+                "agent.get" => {
+                    let response = if agent_gets == 0 {
+                        assert_eq!(request["id"], "cli:agent:wait:resolve");
+                        assert_eq!(request["params"]["target"], "worker");
+                        m839_agent_json("working", "worker", "term_original", 7)
+                    } else {
+                        assert_eq!(request["id"], "cli:agent:wait");
+                        assert_eq!(request["params"]["target"], "term_original");
+                        m839_agent_json("blocked", "worker", "term_original", 8)
+                    };
+                    agent_gets += 1;
+                    m839_agent_reply(response)
+                }
+                other => panic!("unexpected {other}"),
+            }
+        });
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        assert_eq!(agent_gets, 2, "{args:?}");
+        assert_eq!(requests.len(), 4, "{args:?}");
+        fixture.assert_no_runtime_created();
+    }
+}
+
+#[test]
+fn agent_wait_status_alias_syntax_errors_name_the_alias() {
+    for args in [
+        vec!["agent", "wait", "worker", "--status"],
+        vec!["agent", "wait", "worker", "--status", "invalid"],
+    ] {
+        let (fixture, requests, output) =
+            m839_cli_exchange(&args, |_, _| panic!("syntax dispatched"));
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(requests.is_empty(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("--status"),
+            "{args:?}: {output:?}"
+        );
+        fixture.assert_no_runtime_created();
+    }
 }
 
 #[test]

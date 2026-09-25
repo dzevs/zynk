@@ -394,8 +394,8 @@ impl App {
         }
 
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
-        if !handled_pane_double_click {
-            self.focus_pane_before_mouse_dispatch(mouse);
+        if !handled_pane_double_click && !self.focus_pane_before_mouse_dispatch(mouse) {
+            return;
         }
 
         let previous_agent_panel_sort = self.state.agent_panel_sort;
@@ -498,19 +498,19 @@ impl App {
         }
     }
 
-    fn focus_pane_before_mouse_dispatch(&mut self, mouse: MouseEvent) {
+    fn focus_pane_before_mouse_dispatch(&mut self, mouse: MouseEvent) -> bool {
         let Some(pane_id) = self
             .state
             .pane_focus_target_before_mouse_dispatch(&self.terminal_runtimes, mouse)
         else {
-            return;
+            return true;
         };
         let Some(ws_idx) = self.state.active else {
-            return;
+            return false;
         };
 
         // Focus through the runtime API before an application can consume its press.
-        self.focus_pane_internal_via_api(ws_idx, pane_id);
+        self.try_focus_pane_internal_via_api(ws_idx, pane_id)
     }
 
     fn handle_popup_mouse(&mut self, source_id: crate::app::InputSourceId, mouse: MouseEvent) {

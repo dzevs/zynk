@@ -1457,7 +1457,7 @@ mod tests {
     #[test]
     fn m828d1_headers_and_configured_gaps_are_not_click_targets() {
         let mut app = app_for_mouse_test();
-        let source = "[ui.sidebar.agents]\nrow_gap = 2\ngroup_gap = 0\n";
+        let source = "[ui.sidebar.agents]\nrow_gap = 2\ngroup_gap = 1\n";
         assert!(source.parse::<toml::Value>().is_ok());
         let config: crate::config::Config = toml::from_str(source).unwrap();
         app.apply_live_config(&config, &[], &[], false);
@@ -1501,8 +1501,8 @@ mod tests {
             first_y + 3,
             "configured gap precedes second child"
         );
-        assert_eq!(children[2].1, first_y + 7);
-        assert_eq!(children[3].1, first_y + 11);
+        assert_eq!(children[2].1, first_y + 8);
+        assert_eq!(children[3].1, first_y + 13);
         for y in first_y - 1..=children[3].1 {
             if children.iter().any(|(_, child_y)| *child_y == y) {
                 continue;

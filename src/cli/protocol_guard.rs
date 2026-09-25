@@ -5,11 +5,15 @@ use std::fmt;
 use crate::api::schema::{ErrorBody, ErrorResponse};
 
 #[derive(Debug)]
-struct ProtocolMismatch(ErrorResponse);
+struct ProtocolMismatch {
+    response: ErrorResponse,
+    client_protocol: u32,
+    server_protocol: u32,
+}
 
 impl fmt::Display for ProtocolMismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0.error.message)
+        f.write_str(&self.response.error.message)
     }
 }
 
@@ -44,12 +48,28 @@ pub(super) fn mismatch_response(
     })
 }
 
-pub(super) fn mismatch_error(response: ErrorResponse) -> std::io::Error {
-    std::io::Error::other(ProtocolMismatch(response))
+pub(super) fn mismatch_error(response: ErrorResponse, server_protocol: u32) -> std::io::Error {
+    std::io::Error::other(ProtocolMismatch {
+        response,
+        client_protocol: crate::protocol::PROTOCOL_VERSION,
+        server_protocol,
+    })
 }
 
 pub(super) fn error_response(err: &std::io::Error) -> Option<&ErrorResponse> {
     err.get_ref()
         .and_then(|source| source.downcast_ref::<ProtocolMismatch>())
-        .map(|mismatch| &mismatch.0)
+        .map(|mismatch| &mismatch.response)
+}
+
+pub(super) fn error_context(err: &std::io::Error) -> Option<serde_json::Value> {
+    err.get_ref()
+        .and_then(|source| source.downcast_ref::<ProtocolMismatch>())
+        .map(|mismatch| {
+            serde_json::json!({
+                "request_id": mismatch.response.id,
+                "client_protocol": mismatch.client_protocol,
+                "server_protocol": mismatch.server_protocol,
+            })
+        })
 }

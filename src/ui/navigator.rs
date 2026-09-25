@@ -218,13 +218,16 @@ fn render_row(
         app.spinner_tick,
         p,
     );
-    let status_style = if selected {
-        base_style.add_modifier(Modifier::BOLD)
-    } else if context_only {
-        Style::default().fg(p.overlay0).bg(p.panel_bg)
-    } else {
-        status_style.bg(p.panel_bg)
-    };
+    let status_style =
+        if selected && row.status == crate::detect::AgentState::Working && app.working_animation {
+            status_style.bg(p.accent).add_modifier(Modifier::BOLD)
+        } else if selected {
+            base_style.add_modifier(Modifier::BOLD)
+        } else if context_only {
+            Style::default().fg(p.overlay0).bg(p.panel_bg)
+        } else {
+            status_style.bg(p.panel_bg)
+        };
 
     let prefix = tree_prefix(rows, idx);
     let current = if row.is_current { "◆" } else { " " };
