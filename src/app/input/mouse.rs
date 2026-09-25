@@ -1722,6 +1722,7 @@ impl AppState {
         in_sidebar: bool,
     ) -> Option<MouseAction> {
         let (info, modifiers) = self.right_click_passthrough_target(mouse, in_sidebar)?;
+        let ws_idx = self.active?;
 
         if self.send_pane_mouse_button(terminal_runtimes, &info, mouse, modifiers)
             != PaneMouseForwardResult::Accepted
@@ -1729,9 +1730,7 @@ impl AppState {
             return None;
         }
         Some(MouseAction::CompleteRightClickPassthrough {
-            ws_idx: self
-                .active
-                .expect("accepted pane mouse send has a workspace"),
+            ws_idx,
             source_id,
             pane_info: info,
             modifiers_to_strip: modifiers,
