@@ -670,7 +670,7 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
         .first()
         .filter(|name| !name.is_empty() && !name.starts_with('-'))
     else {
-        eprintln!("usage: zynk agent wait <name> [--until STATUS]... [--timeout MS]");
+        eprintln!("usage: zynk agent wait <name> [--until|--status STATUS]... [--timeout MS]");
         return Ok(2);
     };
     let mut until = Vec::new();
@@ -678,12 +678,12 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
-            "--until" => {
+            option @ ("--until" | "--status") => {
                 let Some(value) = args
                     .get(index + 1)
                     .filter(|value| !value.is_empty() && !value.starts_with('-'))
                 else {
-                    eprintln!("--until requires at least one status");
+                    eprintln!("{option} requires at least one status");
                     return Ok(2);
                 };
                 match super::parse_agent_status(value) {
@@ -712,7 +712,9 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
                 index += 2;
             }
             "help" | "--help" | "-h" => {
-                eprintln!("usage: zynk agent wait <name> [--until STATUS]... [--timeout MS]");
+                eprintln!(
+                    "usage: zynk agent wait <name> [--until|--status STATUS]... [--timeout MS]"
+                );
                 return Ok(0);
             }
             other => {
@@ -1738,7 +1740,7 @@ fn print_agent_help() {
     eprintln!("    Submit only when ready; --wait observes later idle/done/blocked. Exit 3 means submitted but waiting failed: do not resubmit.");
     eprintln!("  zynk agent rename <target> <name>|--clear");
     eprintln!("  zynk agent focus <target>");
-    eprintln!("  zynk agent wait <name> [--until STATUS]... [--timeout MS]");
+    eprintln!("  zynk agent wait <name> [--until|--status STATUS]... [--timeout MS]");
     eprintln!("    Completes on idle, done or blocked, including Pending idle; use agent start for launch readiness.");
     eprintln!("  zynk agent attach <target> [--takeover]");
     eprintln!("  zynk agent start <name> --kind KIND --pane ID [--timeout MS] [-- <args...>]");

@@ -1730,7 +1730,9 @@ fn run_zynk_cli(
     api_socket: &Path,
     args: &[&str],
 ) -> String {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zynk"))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
+    let output = command
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
@@ -1739,7 +1741,6 @@ fn run_zynk_cli(
         .env_remove("ZYNK_HOME")
         .env_remove("ZYNK_CLIENT_SOCKET_PATH")
         .env_remove("ZYNK_ENV")
-        .env_remove("ZYNK_PANE_ID")
         .output()
         .unwrap();
     assert!(

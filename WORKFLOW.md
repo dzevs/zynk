@@ -38,6 +38,14 @@ Transferring implementation ownership does not approve inherited commits.
 9. Unreviewed fixes are **IMPLEMENTED / PENDING VERIFICATION**, never closed merely because a
    commit landed or the author's tests passed. Record approval only for the exact reviewed range.
 
+## Upstream port policy
+
+- FORK-OWNED user-visible behavior wins by default in any upstream port. This includes UI, glyphs, animation,
+  layout, interaction, config effect, and CLI/agent surfaces.
+- Every user-visible removal, replacement, or behavior change, whether fork-owned or upstream-origin, requires
+  an explicit operator decision at Gate-1.
+- A ledger entry alone is never sufficient evidence or approval for a user-visible change.
+
 ## Gate overview
 
 ```text

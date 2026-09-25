@@ -428,12 +428,10 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::CyclePaneNext => {
-                self.cycle_pane_via_api(false);
-                leave_navigate_mode(&mut self.state);
+                self.cycle_pane_in_context(false, context);
             }
             NavigateAction::CyclePanePrevious => {
-                self.cycle_pane_via_api(true);
-                leave_navigate_mode(&mut self.state);
+                self.cycle_pane_in_context(true, context);
             }
             NavigateAction::LastPane => {
                 self.last_pane_via_api();
@@ -684,6 +682,15 @@ impl App {
             ids[(pos + 1) % ids.len()]
         };
         self.focus_pane_internal_via_api(ws_idx, target);
+    }
+
+    fn cycle_pane_in_context(&mut self, reverse: bool, context: ActionContext) {
+        let preserve_navigate_mode =
+            context == ActionContext::Navigate && self.state.mode == Mode::Navigate;
+        self.cycle_pane_via_api(reverse);
+        if preserve_navigate_mode {
+            self.state.mode = Mode::Navigate;
+        }
     }
 
     pub(crate) fn last_pane_via_api(&mut self) {
@@ -2648,6 +2655,23 @@ mod tests {
 
         assert_eq!(state.selected, 1);
         assert_eq!(state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn tab_and_backtab_cycle_panes_without_leaving_navigate_mode() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let next = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.mode = Mode::Navigate;
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(next));
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::BackTab, KeyModifiers::empty()));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+        assert_eq!(app.state.mode, Mode::Navigate);
     }
 
     #[test]

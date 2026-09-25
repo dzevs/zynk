@@ -1,5 +1,49 @@
 # Changelog
 
+## [3.2.0] — Unreleased
+
+This release restores operator-selected 3.0.x presentation and interaction behavior on top of 3.1.0. It does
+not change binary protocol 20, the JSON socket surface, persistence schema, session snapshots, or handoff data.
+
+**Added**
+
+- `ui.agent_panel_scope = "current" | "all"` is effective again, with `all` as the default. Scope filters the
+  expanded panel, collapsed rail, mobile switcher, navigation, and hit testing before agent-view filters and
+  grouped, priority, or plugin sorting. It remains UI-only: `agent.list`, API topology, and global mobile counts
+  stay complete. The header toggle persists the setting back to `[ui]`.
+- `ui.agent_panel_header = "scope" | "sort" | "both"` controls the one-line expanded-panel header and defaults
+  to the 3.0.x scope control. Active view labels remain visible status, narrow layouts drop sort/view before
+  scope, and omitted controls have no click target.
+- `[ui.sidebar.agents].group_gap` is independent of `row_gap` and defaults to 1. With the default agent
+  `row_gap = 0`, this restores no gap within groups and one blank row before every later emitted group header.
+- `ui.working_animation` defaults to true and restores the yellow sidebar pulse plus navigator/mobile braille
+  spinner. The server advances one visible frame per 128 ms only while App clients demand animation and uses a
+  retained chrome path; detached and terminal-attach-only servers schedule none. Animation is active render
+  work and can raise idle CPU, so set the key to false to use the static 3.1.0 marks.
+- `zynk agent wait --status S` is an alias of `--until S`. Either form can repeat with the same any-of status
+  semantics; `agent prompt` does not gain the alias.
+
+**Changed**
+
+- `[ui.sidebar.spaces].row_gap` now defaults to 1. Linked-worktree parents and indented members remain packed
+  together under the 3.1.0 rule; one blank row follows the group's last member before the next top-level space,
+  with no trailing gap. Users who did not set this key will see the new spacing.
+- Group gaps follow every emitted header under every ordering. Priority-sort and plugin-sort users can therefore
+  see a blank row before each re-emitted group header when an ordering interleaves groups.
+- `ui.window_title` now defaults to empty, so zynk leaves the host terminal title alone. Set a template such as
+  `{hostname}: {workspace}` to opt in; explicit API title overrides keep their existing behavior.
+- A focused, terminal-active pane in a multi-pane layout uses heavy merged-border edges. Split geometry, labels,
+  drag hit boxes, single-pane rendering, pane-gap behavior, and disabled borders remain unchanged.
+- Wheel, scrollbar, and modifier-right-click passthrough over an unfocused pane now focus it through runtime
+  authority before acting. Navigate-mode Tab and Shift-Tab cycle panes without leaving Navigate.
+
+**Fixed**
+
+- Protocol-version refusals from native `send`, `reply`, and caller-bound `inbox` now retain the typed F4
+  `protocol_mismatch` with both versions instead of becoming a generic transport failure. Explicit
+  `inbox --agent` remains database-only.
+- The bundled root skill now stays numerically pinned to binary protocol 20.
+
 ## [3.1.0] — 2026-09-25
 
 The **herdr v0.7.1 port** (36 upstream changes re-applied on top of the Zynk identity — see

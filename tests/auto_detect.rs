@@ -516,6 +516,7 @@ fn wait_for_log_contains(path: &Path, needle: &str, timeout: Duration) {
 
 fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
     command.args(args);
     command.env("ZYNK_SOCKET_PATH", socket_path);
     command.output().unwrap()

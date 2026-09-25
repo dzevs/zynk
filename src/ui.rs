@@ -105,6 +105,44 @@ use crate::terminal::TerminalRuntimeRegistry;
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkingAnimationGlyph {
+    SidebarPulse,
+    Braille,
+}
+
+impl WorkingAnimationGlyph {
+    pub(crate) fn symbol(self, tick: u32) -> &'static str {
+        match self {
+            Self::SidebarPulse => sidebar::agents_working_frame(tick),
+            Self::Braille => status::spinner_frame(tick),
+        }
+    }
+
+    fn from_transition(current: &str, next: &str) -> Option<Self> {
+        if sidebar::is_agents_working_frame(current)
+            && sidebar::is_agents_working_frame(next)
+            && current != next
+        {
+            Some(Self::SidebarPulse)
+        } else if status::is_spinner_frame(current)
+            && status::is_spinner_frame(next)
+            && current != next
+        {
+            Some(Self::Braille)
+        } else {
+            None
+        }
+    }
+}
+
+pub(crate) fn working_animation_glyph_transition(
+    current: &str,
+    next: &str,
+) -> Option<WorkingAnimationGlyph> {
+    WorkingAnimationGlyph::from_transition(current, next)
+}
+
 /// Compute view geometry and reconcile pane sizes.
 /// Called before render to separate mutation from drawing.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -235,6 +273,68 @@ fn reconcile_agent_panel_presented_workspace(app: &mut AppState) {
     }
 }
 
+fn computed_working_animation_demand(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> crate::app::state::WorkingAnimationDemand {
+    use crate::app::state::{NavigatorStateFilter, WorkingAnimationDemand};
+
+    if !app.working_animation {
+        return WorkingAnimationDemand::NONE;
+    }
+
+    match app.view.layout {
+        ViewLayout::Desktop => {
+            let mut demand = WorkingAnimationDemand::NONE;
+            if app.view.sidebar_rect.width > 0
+                && app.status_indicators == crate::config::StatusIndicatorStyle::Dots
+            {
+                let spaces_working = app.workspaces.iter().any(|workspace| {
+                    workspace.aggregate_state(&app.terminals).0
+                        == crate::detect::AgentState::Working
+                });
+                let agents_working = sidebar::agent_panel_entries_from(app, terminal_runtimes)
+                    .iter()
+                    .any(|entry| entry.state == crate::detect::AgentState::Working);
+                if spaces_working || agents_working {
+                    demand |= WorkingAnimationDemand::SIDEBAR;
+                }
+            }
+
+            if app.mode == Mode::Navigator {
+                let chip_working =
+                    app.navigator.state_filter == Some(NavigatorStateFilter::Working);
+                let rows_working = app
+                    .navigator_rows_from(terminal_runtimes)
+                    .iter()
+                    .any(|row| row.status == crate::detect::AgentState::Working);
+                if chip_working || rows_working {
+                    demand |= WorkingAnimationDemand::BRAILLE;
+                }
+            }
+            demand
+        }
+        ViewLayout::Mobile => {
+            let header_working = app
+                .active
+                .and_then(|ws_idx| app.workspaces.get(ws_idx))
+                .is_some_and(|workspace| {
+                    workspace.aggregate_state(&app.terminals).0
+                        == crate::detect::AgentState::Working
+                });
+            let switcher_working = app.mode == Mode::Navigate
+                && sidebar::agent_panel_entries_from(app, terminal_runtimes)
+                    .iter()
+                    .any(|entry| entry.state == crate::detect::AgentState::Working);
+            if header_working || switcher_working {
+                WorkingAnimationDemand::BRAILLE
+            } else {
+                WorkingAnimationDemand::NONE
+            }
+        }
+    }
+}
+
 fn compute_view_internal(
     app: &mut AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -343,6 +443,7 @@ fn compute_view_internal(
     let agent_panel_presented_workspace_id = app.view.agent_panel_presented_workspace_id.take();
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
+        working_animation_demand: crate::app::state::WorkingAnimationDemand::NONE,
         agent_panel_presented_workspace_id,
         popup_cursor_suppressed,
         sidebar_rect: sidebar_area,
@@ -359,6 +460,7 @@ fn compute_view_internal(
         pane_infos,
         split_borders,
     };
+    app.view.working_animation_demand = computed_working_animation_demand(app, terminal_runtimes);
     app.sync_copy_mode_search_geometry();
 }
 
@@ -410,6 +512,7 @@ fn compute_mobile_view(
     let agent_panel_presented_workspace_id = app.view.agent_panel_presented_workspace_id.take();
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
+        working_animation_demand: crate::app::state::WorkingAnimationDemand::NONE,
         agent_panel_presented_workspace_id,
         popup_cursor_suppressed,
         sidebar_rect: Rect::default(),
@@ -426,6 +529,7 @@ fn compute_mobile_view(
         pane_infos,
         split_borders,
     };
+    app.view.working_animation_demand = computed_working_animation_demand(app, terminal_runtimes);
     app.sync_copy_mode_search_geometry();
 }
 
@@ -507,6 +611,30 @@ pub fn render_with_runtime_registry(
         Mode::Terminal => {}
     }
     render_popup_pane(app, terminal_runtimes, frame, terminal_area);
+}
+
+pub(crate) fn render_working_animation(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+) {
+    if app.view.layout == ViewLayout::Mobile {
+        render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
+        if app.mode == Mode::Navigate {
+            render_mobile_panel(app, terminal_runtimes, frame, frame.area());
+        }
+    } else {
+        if app.view.sidebar_rect.width > 0 {
+            if app.sidebar_collapsed {
+                render_sidebar_collapsed(app, frame, app.view.sidebar_rect);
+            } else {
+                render_sidebar(app, terminal_runtimes, frame, app.view.sidebar_rect);
+            }
+        }
+        if app.mode == Mode::Navigator {
+            render_navigator_overlay(app, terminal_runtimes, frame);
+        }
+    }
 }
 
 fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) {
@@ -633,6 +761,82 @@ mod tests {
     use crate::{app::state::ViewLayout, layout::PaneInfo, workspace::Workspace};
     use ratatui::style::Color;
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn set_workspace_working(app: &mut crate::app::state::AppState, ws_idx: usize) {
+        let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Working,
+            );
+    }
+
+    #[test]
+    fn computed_view_records_only_rendered_working_animation_surfaces() {
+        use crate::app::state::WorkingAnimationDemand;
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("idle"), Workspace::test_new("working")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        set_workspace_working(&mut app, 1);
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::SIDEBAR
+        );
+
+        app.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::NONE
+        );
+
+        app.mode = Mode::Navigator;
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::BRAILLE
+        );
+
+        app.mode = Mode::Terminal;
+        app.agent_panel_scope = crate::app::state::AgentPanelScope::CurrentWorkspace;
+        compute_view(&mut app, Rect::new(0, 0, 40, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::NONE
+        );
+
+        app.mode = Mode::Navigate;
+        compute_view(&mut app, Rect::new(0, 0, 40, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::NONE
+        );
+
+        app.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
+        compute_view(&mut app, Rect::new(0, 0, 40, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::BRAILLE
+        );
+
+        app.working_animation = false;
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::NONE
+        );
+    }
 
     #[test]
     fn current_scope_scroll_tracks_stable_workspace_identity_not_index() {

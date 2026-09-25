@@ -11,6 +11,7 @@ fn m832c_planner_and_presentation_cadence_preserve_hidden_pty_policy() {
             ] {
                 let input = RetainedRenderInput {
                     needs_full_render: full,
+                    animation: false,
                     pty,
                 };
                 let expected = if full || (graphics && pty == PtyRenderState::Visible) {

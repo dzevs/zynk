@@ -49,7 +49,9 @@ fn migrate_isolated_db() -> (PathBuf, PathBuf) {
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&sqlite_home).unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_zynk"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
+    let out = command
         .arg("zynk")
         .arg("query")
         .arg("zzz_migration_probe")
@@ -86,7 +88,9 @@ fn migrate_isolated_db() -> (PathBuf, PathBuf) {
 fn reopen_migrated_db(base: &Path) -> std::process::ExitStatus {
     let config_home = base.join("config");
     let sqlite_home = base.join("sqlite");
-    Command::new(env!("CARGO_BIN_EXE_zynk"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
+    command
         .arg("zynk")
         .arg("query")
         .arg("zzz_reopen_probe")

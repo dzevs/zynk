@@ -355,6 +355,7 @@ fn agent_command() -> Command {
                 .arg(required("name", "NAME"))
                 .arg(
                     option("until", "STATUS")
+                        .visible_alias("status")
                         .action(ArgAction::Append)
                         .value_parser(["idle", "working", "blocked", "done", "unknown"])
                         .help("State to match; repeat for more than one state"),

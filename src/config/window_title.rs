@@ -4,7 +4,7 @@
 pub(crate) const MAX_WINDOW_TITLE_CHARS: usize = 200;
 
 pub(crate) fn default_window_title() -> String {
-    "{hostname}: {workspace}".to_string()
+    String::new()
 }
 
 pub(crate) fn sanitize_window_title_text(value: &str) -> Option<String> {

@@ -19,6 +19,7 @@ APP_SERVER_SOURCES = (
     *sorted((PROJECT_ROOT / "src" / "server").rglob("*.rs")),
 )
 HEADLESS_SOURCE = PROJECT_ROOT / "src" / "server" / "headless.rs"
+RENDER_STREAM_SOURCE = PROJECT_ROOT / "src" / "server" / "render_stream.rs"
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
@@ -70,7 +71,7 @@ HEADLESS_RUN_SELF_METHODS = frozenset(
         "handle_api_request_with_shutdown_check",
         "handle_deferred_requests_headless",
         "handle_internal_event_with_forwarding",
-        "handle_scheduled_tasks_headless",
+        "handle_scheduled_tasks_headless_with_impact",
         "handle_server_event",
         "handle_server_event_with_render_impact",
         "has_app_client",
@@ -79,6 +80,7 @@ HEADLESS_RUN_SELF_METHODS = frozenset(
         "process_pending_alt_screen_reads",
         "pty_sources_visible_to_any_render_target",
         "render_and_stream",
+        "render_retained_animation_update_and_stream",
         "render_retained_graphics_update_and_stream",
         "render_retained_pty_update_and_stream",
         "settle_event_selected_at_stop_boundary",
@@ -90,7 +92,7 @@ HEADLESS_RUN_SELF_METHODS = frozenset(
     }
 )
 HEADLESS_RUN_BODY_FINGERPRINT = (
-    "d416d7b021315ca14942a0a27926e158defa859b54b89e6c9e61bd4589d405cb"
+    "c43b9184314ccd8329105cae7691464f0058bb899913c6ecc165aae9c947c843"
 )
 SELF_METHOD_CALL = re.compile(r"\bself\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 ALT_SCREEN_MAINTENANCE_BODY = (
@@ -114,6 +116,34 @@ ALT_SCREEN_MAINTENANCE_BODY_FINGERPRINTS = {
         "2e4d6a72054327045cca644728650c08cbcfb664befda5f1cecc03e3e01c5ff4"
     ),
 }
+WORKING_ANIMATION_BODY_FINGERPRINTS = {
+    "handle_scheduled_tasks_headless_with_impact": (
+        "997e33d12d945f4cb83daec6fff1751cb4397291c09eb6a2beb8ffab57ab0668"
+    ),
+    "render_retained_animation_update_and_stream": (
+        "b82a678c41498c5ab3030286522883d6a9b094b27e8ec74f8049b2986966dbc4"
+    ),
+    "retained_animation_preflight": (
+        "7317980fae831e89c947cdf9ba580a0e2b24e9a4644ef58956e1c6049ce32ae0"
+    ),
+}
+WORKING_ANIMATION_RENDER_STREAM_FINGERPRINTS = {
+    "collect_working_animation_cells": (
+        "13213517d1b51f48d3ca8676a5a7773778399ff9d89d77c7b6325dd3cb008c7e"
+    ),
+    "apply_working_animation_cells": (
+        "066e8f771b5e94546e8a8bb1e3d2df434a95a6c7f22a0ef66b7a4a11234b6df4"
+    ),
+}
+WORKING_ANIMATION_RETAINED_FORBIDDEN = (
+    (re.compile(r"\b(?:workspaces|tabs|panes|pane_ids|terminals|terminal_runtimes)\b"), "layout or terminal collection scan"),
+    (re.compile(r"\brender_and_stream\s*\("), "generic full render"),
+    (re.compile(r"\b(?:std::)?fs\s*::"), "filesystem access"),
+    (re.compile(r"\b(?:std::process::)?Command\s*::"), "process launch or inspection"),
+    (re.compile(r"\bforeground_job\s*\("), "process-tree inspection"),
+    (re.compile(r"\b(?:Vec|HashMap|HashSet|BTreeMap|BTreeSet)\s*::\s*new\s*\("), "fresh aggregate collection"),
+    (re.compile(r"\.collect\s*::\s*<\s*(?:Vec|HashMap|HashSet|BTreeMap|BTreeSet)"), "fresh aggregate collection"),
+)
 
 
 def blank_non_newlines(chars: list[str], start: int, end: int) -> None:
@@ -306,6 +336,50 @@ def headless_alt_screen_maintenance_violations(source: str) -> list[str]:
     return violations
 
 
+def headless_working_animation_violations(
+    headless_source: str, render_stream_source: str
+) -> list[str]:
+    violations: list[str] = []
+    headless_bodies = {
+        name: rust_function_body(headless_source, name)
+        for name in WORKING_ANIMATION_BODY_FINGERPRINTS
+    }
+    render_stream_bodies = {
+        name: rust_function_body(render_stream_source, name)
+        for name in WORKING_ANIMATION_RENDER_STREAM_FINGERPRINTS
+    }
+
+    for name, expected in WORKING_ANIMATION_BODY_FINGERPRINTS.items():
+        actual = normalized_body_fingerprint(headless_bodies[name])
+        if actual != expected:
+            violations.append(
+                f"{name} body fingerprint changed: expected {expected}, got {actual}"
+            )
+    for name, expected in WORKING_ANIMATION_RENDER_STREAM_FINGERPRINTS.items():
+        actual = normalized_body_fingerprint(render_stream_bodies[name])
+        if actual != expected:
+            violations.append(
+                f"{name} body fingerprint changed: expected {expected}, got {actual}"
+            )
+
+    retained_bodies = {
+        "render_retained_animation_update_and_stream": headless_bodies[
+            "render_retained_animation_update_and_stream"
+        ],
+        "retained_animation_preflight": headless_bodies[
+            "retained_animation_preflight"
+        ],
+        "apply_working_animation_cells": render_stream_bodies[
+            "apply_working_animation_cells"
+        ],
+    }
+    for name, body in retained_bodies.items():
+        for pattern, description in WORKING_ANIMATION_RETAINED_FORBIDDEN:
+            if pattern.search(body):
+                violations.append(f"{name} contains {description}")
+    return violations
+
+
 class UiHotPathArchitectureTests(unittest.TestCase):
     def test_render_hot_paths_avoid_known_expensive_runtime_queries(self) -> None:
         violations = find_violations(HOT_PATH_SOURCES, FORBIDDEN_CALLS)
@@ -337,6 +411,19 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             violations,
             [],
             "Headless alternate-screen maintenance must stay transition-only:\n"
+            + "\n".join(violations),
+        )
+
+    def test_headless_working_animation_boundary_is_reviewed_and_narrow(self) -> None:
+        violations = headless_working_animation_violations(
+            HEADLESS_SOURCE.read_text(encoding="utf-8"),
+            RENDER_STREAM_SOURCE.read_text(encoding="utf-8"),
+        )
+
+        self.assertEqual(
+            violations,
+            [],
+            "Headless working animation must stay allocation-free and chrome-only:\n"
             + "\n".join(violations),
         )
 
@@ -523,6 +610,97 @@ class UiHotPathArchitectureTests(unittest.TestCase):
         source = source.replace(needle, replacement, 1)
 
         self.assertTrue(headless_alt_screen_maintenance_violations(source))
+
+    def test_animation_guard_rejects_full_render_and_layout_scan(self) -> None:
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        needle = """    fn render_retained_animation_update_and_stream(&mut self) -> bool {
+        crate::render_prof::event("retained_animation.attempt");
+"""
+        replacement = """    fn render_retained_animation_update_and_stream(&mut self) -> bool {
+        self.render_and_stream();
+        let _ = self.app.state.workspaces.iter().flat_map(|workspace| &workspace.tabs).count();
+        crate::render_prof::event("retained_animation.attempt");
+"""
+        self.assertEqual(source.count(needle), 1)
+        source = source.replace(needle, replacement, 1)
+
+        violations = headless_working_animation_violations(
+            source, RENDER_STREAM_SOURCE.read_text(encoding="utf-8")
+        )
+        self.assertTrue(
+            any("generic full render" in violation for violation in violations), violations
+        )
+        self.assertTrue(
+            any("layout or terminal collection scan" in violation for violation in violations),
+            violations,
+        )
+
+    def test_animation_guard_rejects_io_and_fresh_collections(self) -> None:
+        source = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        needle = """    fn render_retained_animation_update_and_stream(&mut self) -> bool {
+        crate::render_prof::event("retained_animation.attempt");
+"""
+        replacement = """    fn render_retained_animation_update_and_stream(&mut self) -> bool {
+        let _scratch = Vec::new();
+        let _ = std::fs::read("/proc/self/stat");
+        crate::render_prof::event("retained_animation.attempt");
+"""
+        self.assertEqual(source.count(needle), 1)
+        source = source.replace(needle, replacement, 1)
+
+        violations = headless_working_animation_violations(
+            source, RENDER_STREAM_SOURCE.read_text(encoding="utf-8")
+        )
+        self.assertTrue(
+            any("fresh aggregate collection" in violation for violation in violations),
+            violations,
+        )
+        self.assertTrue(
+            any("filesystem access" in violation for violation in violations), violations
+        )
+
+    def test_animation_guard_fingerprints_scheduler_and_patch_helpers(self) -> None:
+        headless = HEADLESS_SOURCE.read_text(encoding="utf-8")
+        scheduler_needle = "let animation_changed = self.app.tick_working_animation(now);"
+        self.assertEqual(headless.count(scheduler_needle), 1)
+        changed_headless = headless.replace(
+            scheduler_needle,
+            "let animation_changed = false;",
+            1,
+        )
+        violations = headless_working_animation_violations(
+            changed_headless, RENDER_STREAM_SOURCE.read_text(encoding="utf-8")
+        )
+        self.assertTrue(
+            any(
+                violation.startswith(
+                    "handle_scheduled_tasks_headless_with_impact body fingerprint changed:"
+                )
+                for violation in violations
+            ),
+            violations,
+        )
+
+        render_stream = RENDER_STREAM_SOURCE.read_text(encoding="utf-8")
+        patch_needle = "cell.symbol.push_str(symbol);"
+        self.assertEqual(render_stream.count(patch_needle), 1)
+        changed_render_stream = render_stream.replace(
+            patch_needle,
+            "cell.symbol.push_str(\"?\");",
+            1,
+        )
+        violations = headless_working_animation_violations(
+            headless, changed_render_stream
+        )
+        self.assertTrue(
+            any(
+                violation.startswith(
+                    "apply_working_animation_cells body fingerprint changed:"
+                )
+                for violation in violations
+            ),
+            violations,
+        )
 
     def test_scanner_ignores_non_production_references(self) -> None:
         source = '''

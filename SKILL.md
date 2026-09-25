@@ -18,7 +18,7 @@ Input rules (reading is always safe; sending input is what needs care):
 
 You are running inside zynk, a terminal-native workspace manager for AI coding agents. zynk gives you workspaces, tabs, and panes — each pane is a real terminal with its own shell, agent, server, or log stream — plus a native conversation layer for audited messages between agents. Drive all of it from the `zynk` binary, which is on your PATH and talks to the running instance over a local unix socket (`ZYNK_SOCKET_PATH`).
 
-Run `zynk <command> --help` for exact flags. The public socket-API reference at https://zynk.dev/docs/socket-api/ covers released commands; net-new conversation commands are best confirmed with `--help` on this build. The wire protocol is version 19.
+Run `zynk <command> --help` for exact flags. The public socket-API reference at https://zynk.dev/docs/socket-api/ covers released commands; net-new conversation commands are best confirmed with `--help` on this build. The wire protocol is version 20.
 
 ## Concepts
 
@@ -90,9 +90,13 @@ Exit code is `1` on timeout.
 
 ```bash
 zynk wait agent-status "$PANE" --status done --timeout 60000
+zynk agent wait codex --until idle --status done --timeout 60000
 ```
 
-Uses the same `done` / `idle` distinction the UI shows. Replace `$PANE` with the actual id you were assigned or captured.
+`wait agent-status` targets a pane id. `agent wait` targets a named agent, resolves and pins its terminal once,
+and accepts repeated `--until STATUS` or `--status STATUS` options with identical any-of semantics. The
+`--status` alias belongs to `agent wait` only. Both commands use the same `done` / `idle` distinction the UI
+shows. Replace `$PANE` with the actual id you were assigned or captured.
 
 ## Send text, keys, or a command to a pane
 

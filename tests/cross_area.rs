@@ -220,7 +220,7 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
 }
 
 fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket_path: &Path) -> SpawnedZynk {
-    spawn_server_with_path(config_home, runtime_dir, api_socket_path, None)
+    spawn_server_with_path(config_home, runtime_dir, api_socket_path, None, None)
 }
 
 fn spawn_server_with_path(
@@ -228,13 +228,14 @@ fn spawn_server_with_path(
     runtime_dir: &Path,
     api_socket_path: &Path,
     path_override: Option<&Path>,
+    config_override: Option<&str>,
 ) -> SpawnedZynk {
     fs::create_dir_all(config_home.join("zynk-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
     fs::write(
         config_home.join("zynk-dev/config.toml"),
-        "onboarding = false\n",
+        config_override.unwrap_or("onboarding = false\n"),
     )
     .unwrap();
 
@@ -929,6 +930,7 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
         &runtime_dir,
         &api_socket,
         Some(Path::new(&path_override)),
+        Some("onboarding = false\n[ui]\nworking_animation = false\n"),
     );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(10));

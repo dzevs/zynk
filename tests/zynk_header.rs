@@ -376,6 +376,7 @@ fn run_cli_env(
     extra_env: &[(&str, &str)],
 ) -> CliOutput {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
     command.args(args);
     command.env("XDG_CONFIG_HOME", &fixture.config_home);
     command.env("XDG_RUNTIME_DIR", &fixture.runtime_dir);

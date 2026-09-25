@@ -673,6 +673,7 @@ fn run_named_cli_with_socket_override(
     socket_override: Option<&Path>,
 ) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
     command
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
@@ -794,6 +795,7 @@ fn spawn_zynk_with_config_and_env(
 
 fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
     command.args(args);
     command.env("ZYNK_SOCKET_PATH", socket_path);
     if let Some(parent) = socket_path.parent() {
@@ -805,6 +807,7 @@ fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
 
 fn run_cli_in_dir(socket_path: &Path, args: &[&str], current_dir: &Path) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
     command.args(args);
     command.current_dir(current_dir);
     command.env("ZYNK_SOCKET_PATH", socket_path);
@@ -2748,7 +2751,9 @@ fn run_cli_json_with_env(
     socket: &Path,
     args: &[&str],
 ) -> serde_json::Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_zynk"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
+    let output = command
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
@@ -2757,7 +2762,6 @@ fn run_cli_json_with_env(
         .env_remove("ZYNK_HOME")
         .env_remove("ZYNK_CLIENT_SOCKET_PATH")
         .env_remove("ZYNK_ENV")
-        .env_remove("ZYNK_PANE_ID")
         .output()
         .unwrap();
     assert!(
@@ -6304,7 +6308,9 @@ fn wait_agent_status_exits_when_done_status_matches() {
 /// the socket is pointed at a nonexistent path so a help path never touches a
 /// live runtime (every asserted command returns before dispatch).
 fn run_zynk_help(args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_zynk"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
+    let output = command
         .args(args)
         .env(
             "ZYNK_SOCKET_PATH",
@@ -6396,7 +6402,9 @@ fn m875_missing_and_stale_sockets_report_one_typed_error() {
 }
 
 fn run_zynk_help_status(args: &[&str]) -> (i32, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_zynk"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
+    let output = command
         .args(args)
         .env(
             "ZYNK_SOCKET_PATH",
@@ -6456,6 +6464,15 @@ fn m835_scripted_cli(
     responses: Vec<serde_json::Value>,
     replace_after_first_accept: bool,
 ) -> (Vec<serde_json::Value>, std::process::Output) {
+    m835_scripted_cli_with_env(args, responses, replace_after_first_accept, &[])
+}
+
+fn m835_scripted_cli_with_env(
+    args: &[&str],
+    responses: Vec<serde_json::Value>,
+    replace_after_first_accept: bool,
+    extra_env: &[(&str, &str)],
+) -> (Vec<serde_json::Value>, std::process::Output) {
     use std::sync::atomic::{AtomicBool, Ordering};
     let fixture = SnapshotCliFixture::new();
     let socket = fixture.base.join("compat.sock");
@@ -6498,7 +6515,13 @@ fn m835_scripted_cli(
             }
             requests
         });
-        let output = run_snapshot_cli_bounded(&fixture.base, &socket, args);
+        let output = run_snapshot_cli_with_timeout_and_env(
+            &fixture.base,
+            &socket,
+            args,
+            Duration::from_secs(3),
+            extra_env,
+        );
         done.store(true, Ordering::Release);
         (worker.join().unwrap(), output)
     })
@@ -6781,8 +6804,24 @@ fn m835_f4_refusal(verb: &[&str], late: bool, wrong_protocol: u32) {
         value["target_resolution"],
         if late { "resolved" } else { "unknown" }
     );
-    assert_eq!(value["error"]["code"], "transport_failed");
+    let native_fork_command = verb.len() == 1;
+    assert_eq!(
+        value["error"]["code"],
+        if native_fork_command {
+            "protocol_mismatch"
+        } else {
+            "transport_failed"
+        }
+    );
     assert!(value["error"].get("context").is_none());
+    if native_fork_command {
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("client protocol 20"), "{value}");
+        assert!(
+            message.contains(&format!("server protocol {wrong_protocol}")),
+            "{value}"
+        );
+    }
     for field in ["delivery_status", "proof", "submitted_at"] {
         assert!(value.get(field).is_none(), "{value}");
     }
@@ -6792,16 +6831,70 @@ fn m835_f4_refusal(verb: &[&str], late: bool, wrong_protocol: u32) {
         assert_eq!(delivery_events_of(&db, id), vec!["failed".to_owned()]);
     } else {
         assert!(value.get("conversation_id").is_none());
-        assert_eq!(
-            value["error"]["message"],
-            if verb[0] == "pane" {
-                "could not reach zynk to resolve pane 'w1:p1'"
-            } else {
-                "could not reach zynk to resolve the target 'w1:p1'"
-            }
-        );
+        if !native_fork_command {
+            assert_eq!(
+                value["error"]["message"],
+                if verb[0] == "pane" {
+                    "could not reach zynk to resolve pane 'w1:p1'"
+                } else {
+                    "could not reach zynk to resolve the target 'w1:p1'"
+                }
+            );
+        }
         fixture.assert_no_runtime_created();
     }
+}
+
+#[test]
+fn m835_implicit_inbox_preserves_protocol_mismatch_instead_of_losing_caller() {
+    for protocol in [19, 21] {
+        let (requests, output) = m835_scripted_cli_with_env(
+            &["inbox", "--json"],
+            vec![
+                serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":protocol}}),
+            ],
+            false,
+            &[("ZYNK_PANE_ID", "w1:p1")],
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["ping"]
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["result"], "failed");
+        assert_eq!(value["command"], "zynk inbox");
+        assert_eq!(value["code"], "protocol_mismatch");
+        let message = value["message"].as_str().unwrap();
+        assert!(message.contains("client protocol 20"), "{value}");
+        assert!(
+            message.contains(&format!("server protocol {protocol}")),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn m835_explicit_inbox_agent_remains_database_only_on_a_mismatched_socket() {
+    let (requests, output) = m835_scripted_cli(
+        &["inbox", "--agent", "codex", "--json"],
+        vec![serde_json::json!({"result":{"type":"pong", "version":"fixture", "protocol":19}})],
+        false,
+    );
+    assert!(
+        requests.is_empty(),
+        "explicit inbox must not open the socket"
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["result"], "ok");
+    assert_eq!(value["agent"], "codex");
+    assert_eq!(value["messages"], serde_json::json!([]));
 }
 
 #[test]
@@ -7246,7 +7339,9 @@ fn m839c_agent_grammar_refuses_before_resolution_or_persistence() {
             "body",
         ],
         vec!["agent", "wait"],
-        vec!["agent", "wait", "worker", "--status", "idle"],
+        vec![
+            "agent", "prompt", "worker", "--wait", "--status", "idle", "body",
+        ],
         vec!["agent", "wait", "worker", "--until"],
         vec!["agent", "wait", "worker", "--until", "invalid"],
         vec!["agent", "wait", "worker", "--timeout"],
@@ -7270,7 +7365,7 @@ fn m839c_agent_grammar_refuses_before_resolution_or_persistence() {
     let help = run_zynk_help(&["agent", "--help"]);
     assert!(help.contains("agent prompt <name>"));
     assert!(help.contains("idle, done or blocked"));
-    assert!(!help.contains("agent wait <target> --status"));
+    assert!(help.contains("agent wait <name> [--until|--status STATUS]"));
 }
 
 #[test]
@@ -7307,26 +7402,23 @@ fn m839c_wait_current_completes_without_relabeling_blocked_or_receipts() {
 
 #[test]
 fn m840_wait_accepts_working_and_unknown_only_when_explicitly_requested() {
-    for status in ["working", "unknown"] {
+    for (flag, status) in [
+        ("--until", "working"),
+        ("--until", "unknown"),
+        ("--status", "working"),
+        ("--status", "unknown"),
+    ] {
         let agent = m839_agent_json(status, "worker", "term_original", 7);
         let (fixture, requests, output) = m839_cli_exchange(
-            &[
-                "agent",
-                "wait",
-                "worker",
-                "--until",
-                status,
-                "--timeout",
-                "500",
-            ],
+            &["agent", "wait", "worker", flag, status, "--timeout", "500"],
             |request, _| match request["method"].as_str().unwrap() {
                 "ping" => m839_pong(),
                 "agent.get" => m839_agent_reply(agent.clone()),
                 other => panic!("unexpected {other}"),
             },
         );
-        assert_eq!(output.status.code(), Some(0), "{status}: {output:?}");
-        assert!(output.stderr.is_empty(), "{status}: {output:?}");
+        assert_eq!(output.status.code(), Some(0), "{flag} {status}: {output:?}");
+        assert!(output.stderr.is_empty(), "{flag} {status}: {output:?}");
         assert_eq!(requests.len(), 2);
         let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["result"]["agent"]["agent_status"], status);

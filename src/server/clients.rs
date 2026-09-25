@@ -64,6 +64,10 @@ pub(crate) struct ClientConnection {
     pub(crate) last_activity: u64,
     /// Render baseline for the negotiated client encoding.
     pub(crate) render_state: ClientRenderState,
+    /// Animated chrome cells discovered during this client's last full render.
+    pub(crate) working_animation_cells: Vec<crate::server::render_stream::WorkingAnimationCell>,
+    /// False when animated chrome discovery failed and retained animation must fall back.
+    pub(crate) working_animation_cache_valid: bool,
     /// Client-local host Kitty graphics cache.
     pub(crate) graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Passive eligibility for audited local Kitty regular-file graphics.
@@ -137,6 +141,8 @@ impl ClientConnection {
             raw_input: crate::raw_input::RawInputFramer::default(),
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
+            working_animation_cells: Vec::new(),
+            working_animation_cache_valid: false,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             direct_graphics: false,
             pixel_mouse: false,

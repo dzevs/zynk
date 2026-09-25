@@ -135,10 +135,11 @@ with Kitty press/repeat/release identity, report-all state, pixel mouse input, p
 and outer-title updates. Compatibility is equality-only: a version-19 peer receives a typed upgrade error
 before any version-20 operation executes.
 
-`ui.window_title` defaults to `{hostname}: {workspace}`. It can also use `{tab}`, `{pane}`, and
-`{terminal_title}`; doubled braces render literals, and an empty value leaves the outer title alone. The
-server strips terminal control characters, sends changes only to the foreground client, and retains an
-explicit API title override across live handoff until it is cleared.
+`ui.window_title` defaults to an empty string, so zynk leaves the host terminal title alone. Set it to a
+template such as `{hostname}: {workspace}` to opt in; `{tab}`, `{pane}`, and `{terminal_title}` are also
+available, and doubled braces render literals. The server strips terminal control characters, sends changes
+only to the foreground client, and retains an explicit API title override across live handoff until it is
+cleared.
 
 Remote attach reuses one managed SSH connection by default, preserves the underlying SSH authentication
 diagnostic, discovers package-manager and canonical mise installs, and installs helpers with an atomic
@@ -169,7 +170,7 @@ zynk inbox                                             # read-only: messages add
 zynk who                                               # live agents / panes in the session
 zynk query <text> [--workspace|--conversation|--agent|--since|--limit]   # hybrid retrieval
 zynk agent send-keys <target> <key> [key ...]                           # raw keys; no message row
-zynk agent wait <name> [--until STATUS]... [--timeout MS]               # pin target; wait for state
+zynk agent wait <name> [--until|--status STATUS]... [--timeout MS]      # pin target; wait for state
 zynk agent prompt <name> [--wait] [--timeout MS] -- <text>              # readiness-gated submit
 ```
 
@@ -188,6 +189,9 @@ Design guarantees (binding):
 - **Read-only retrieval.** `query` / `thread` / `inbox` open the DB read-only (`PRAGMA query_only=1`) and write
   **zero** delivery events. `query` is hybrid: FTS5 keyword (BM25) + on-device embeddings via sqlite-vec, fused
   with RRF.
+- **Typed protocol refusal.** A client/server protocol mismatch on `send`, `reply`, or caller-bound `inbox`
+  remains an F4 `protocol_mismatch` error with both versions instead of becoming a generic transport failure.
+  An explicit `inbox --agent NAME` remains a database-only read and does not contact the server.
 
 Agents can drive zynk over the same local Unix socket — create workspaces, split panes, spawn helpers, read
 output, wait for state changes, and message each other. Start with [`SKILL.md`](SKILL.md).
@@ -198,7 +202,8 @@ An already matching status wins even at timeout zero. Timeouts include setup and
 between bounded requests/polls, not as a hard wall-clock deadline. Status fields are observations,
 not authenticated identity or receipt evidence. `agent wait` completes on Idle, Done, or Blocked,
 including an already-idle Pending managed agent; use `agent start` when interactive launch readiness
-is required.
+is required. On `agent wait` only, `--status S` is an alias of `--until S`; either option can be repeated
+with the same any-of semantics.
 
 `agent send-keys` is raw terminal automation and does not create a message or delivery event. `agent prompt`
 submits only when the named agent is on the same terminal, in the foreground, interactive-ready when managed,
@@ -562,23 +567,28 @@ Commonly tuned options (values shown are the defaults):
 ```toml
 [ui]
 agent_panel_sort = "spaces"      # or "priority": blocked > working > done, most recent change first
+agent_panel_scope = "all"        # or "current": show only the active workspace in agent UI surfaces
+agent_panel_header = "scope"     # "scope", "sort", or "both" on the expanded panel header
 pane_borders = true              # draw borders around split panes
 pane_outer_borders = true        # false: keep internal splitters without an outside frame
 pane_scrollbars = true           # false: hide pane scrollbars and reclaim their column
 pane_gaps = true                 # keep split panes visually separated
 tab_bar_position = "top"         # or "bottom"; desktop only
 status_indicators = "dots"       # preserve existing marks, or use distinct "symbols"
+working_animation = true         # animate working marks; false restores static 3.1.0 marks
+window_title = ""                # opt in with a template such as "{hostname}: {workspace}"
 host_cursor = "auto"             # native on ordinary Linux, drawn under WSL; or "native" / "drawn"
 tab_bar_right = []                # ordered zoom/hostname/datetime/text/command status entries
 tab_bar_right_separator = " "    # separator between visible right-side entries
 
 [ui.sidebar.agents]
-row_gap = 0                     # blank rows before each later agent entry
+row_gap = 0                     # blank rows between entries within one emitted group
+group_gap = 1                   # additional blank rows before each later emitted group header
 rows = [["state_icon", "agent", "state_text"]]
 rows_by_agent = {}
 
 [ui.sidebar.spaces]
-row_gap = 0                     # blank rows except before indented workspace children
+row_gap = 1                     # blank rows between top-level space groups
 rows = [["state_icon", "workspace"], ["branch", "git_status"]]
 
 [theme]
@@ -609,15 +619,17 @@ with their process group when cancelled, and never run during rendering. Invalid
 config diagnostic. Headless dimensions are startup-only; reload does not resize existing panes.
 
 Expanded sidebar gaps accept integers from 0 through 65535 and can be reloaded.
-Both default to zero, packing entries more tightly. Spaces keep a parent and its
-indented children together; agents apply the same gap within and between groups,
-with no leading gap and no orphan group header. A final content row can fit without
-room for a trailing gap. Collapsed and mobile layouts are unchanged.
+Agent `row_gap` applies within an emitted group; `group_gap` is added before every
+later emitted group header. The defaults therefore leave no gap inside a group and
+one blank row between groups, with no leading or trailing gap. Priority ordering and
+plugin sorts can re-emit a group header for interleaved entries, so the default adds
+a blank row at every such transition.
 
-No single `row_gap` value reproduces both pre-D1 agents rules: zero within a group
-and one between groups. Setting the spaces gap to one retains inter-entry spacing,
-but does not restore the old content-plus-trailing-gap admission rule at the bottom
-boundary. These are rule changes, not a claim that every individual layout changes.
+Spaces keep the 3.1.0 packing rule with a new default `row_gap = 1`: a linked-worktree
+parent and its first indented member are adjacent, consecutive members are adjacent,
+and one blank row follows the group's last member before the next top-level space.
+No trailing gap is reserved. Collapsed and mobile geometry is unchanged by these
+expanded-layout gap settings.
 
 Expanded sidebar `rows` are arrays of arrays of plain string tokens, with at most
 16 rows and 16 tokens per row. Agent rows support `state_icon`, `state_text`,
@@ -663,9 +675,14 @@ Rendering, content-line clicks, scroll metrics and target follow share resolved
 heights and gaps. Oversized workspace entries clip to their body; agent entries
 clip to body height minus one for the group header. If a header and one content
 line cannot fit, neither is admitted. The same child-height bound applies mid-group.
-At one content column the sidebar keeps content and suppresses its scrollbar;
-the agent sort toggle clips to the panel. A full sidebar two columns wide puts
-its collapse toggle on the divider, leaving the content cell available.
+At one content column the sidebar keeps content and suppresses its scrollbar.
+The expanded agent header always keeps ` agents` at the left, leaves its second
+row blank, and starts the body on row three. `scope` mode shows only `current` or
+`all`; `sort` shows only `grouped` or `priority`; `both` shows both controls. An
+active agent-view label occupies the sort slot as non-clickable status. Narrow
+layouts preserve title, then scope, then sort/view; a view label truncates before
+it is omitted, and an omitted control has no hit target. A full sidebar two columns
+wide puts its collapse toggle on the divider, leaving the content cell available.
 
 Title capture continues regardless of configuration. Configured title builtins in
 global or override rows request redraw in both desktop execution loops; a custom
@@ -694,9 +711,23 @@ drag-intent detection. Local clients and JSON terminal controllers do not use
 this interpretation. Signature checks are not full image decoding, and slow
 filesystems can still delay reads.
 
-`ui.agent_panel_scope` (3.0.x) no longer controls filtering: the agent panel shows all workspaces, and
-`ui.agent_panel_sort` controls ordering only. Historical `current` and `all` values remain accepted and ignored
-as compatibility no-ops. Custom keys and prefixes displace conflicting defaults.
+`ui.agent_panel_scope` is effective again. `all` (the default) keeps the 3.1.0 population, while `current`
+shows agents from the active workspace on the expanded panel, collapsed rail, and mobile switcher. Filtering
+happens before `agent.view` filters and before grouped, priority, or plugin ordering, so every sort operates
+only on the selected population. A mouse click on a visible scope label toggles and saves the setting; startup
+and reload use the config file. Attached app clients share the server-rendered scope. `agent.list`, other API
+topology projections, and global mobile status counts remain complete and unchanged.
+
+With `working_animation = true`, dots-mode sidebar working marks use the yellow `◌ ◎ ◉ ● ◉ ◎` pulse and
+navigator/mobile working marks use the braille spinner. Symbols-mode sidebar marks remain static while the
+braille surfaces still animate. Setting the key to false makes every affected surface use its static 3.1.0
+mark. Animation advances once per 128 ms only while an App client renders eligible working UI; a detached
+server or terminal-attach-only server does not schedule animation.
+
+In a multi-pane layout, the focused pane uses heavy borders while its terminal is active; single-pane layouts
+and border geometry remain unchanged. Wheel, scrollbar, and modifier-right-click passthrough over an unfocused
+pane first focus it through the runtime-authoritative path. Navigate-mode Tab and Shift-Tab cycle panes without
+leaving Navigate. Custom keys and prefixes continue to displace conflicting defaults.
 
 For environments without native terminal foreground-group information, start a new server with
 `ZYNK_PROCESS_DETECTION=child-groups` to opt into best-effort process detection from direct child

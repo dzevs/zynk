@@ -11,6 +11,72 @@ use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
 use crate::protocol::{CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame};
 use crate::terminal::TerminalRuntimeRegistry;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WorkingAnimationCell {
+    pub(crate) index: usize,
+    pub(crate) glyph: crate::ui::WorkingAnimationGlyph,
+}
+
+pub(crate) fn collect_working_animation_cells(
+    app_state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    rendered: &ratatui::buffer::Buffer,
+    cells: &mut Vec<WorkingAnimationCell>,
+) -> bool {
+    cells.clear();
+    if app_state.view.working_animation_demand.is_empty() {
+        return true;
+    }
+
+    let area = rendered.area;
+    let backend = CursorTrackingBackend::new(area.width, area.height);
+    let mut terminal = match ratatui::Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(error) => match error {},
+    };
+    let current_tick = app_state.spinner_tick;
+    app_state.spinner_tick = current_tick.wrapping_add(crate::app::WORKING_ANIMATION_TICK_STEP);
+    let draw_result = terminal.draw(|frame| {
+        crate::ui::render_working_animation(app_state, terminal_runtimes, frame);
+    });
+    app_state.spinner_tick = current_tick;
+    if draw_result.is_err() {
+        return false;
+    }
+
+    let next = terminal.backend().buffer();
+    if next.area != rendered.area || next.content.len() != rendered.content.len() {
+        return false;
+    }
+    for (index, (current, next)) in rendered.content.iter().zip(&next.content).enumerate() {
+        if let Some(glyph) =
+            crate::ui::working_animation_glyph_transition(current.symbol(), next.symbol())
+        {
+            cells.push(WorkingAnimationCell { index, glyph });
+        }
+    }
+    true
+}
+
+pub(crate) fn apply_working_animation_cells(
+    frame: &mut FrameData,
+    cells: &[WorkingAnimationCell],
+    tick: u32,
+) -> bool {
+    for target in cells {
+        let Some(cell) = frame.cells.get_mut(target.index) else {
+            return false;
+        };
+        let symbol = target.glyph.symbol(tick);
+        if cell.symbol.capacity() < symbol.len() {
+            return false;
+        }
+        cell.symbol.clear();
+        cell.symbol.push_str(symbol);
+    }
+    true
+}
+
 /// Per-client render baseline for the negotiated render encoding.
 pub(crate) enum ClientRenderState {
     /// Semantic clients compare full frame data and skip identical frames.
@@ -117,6 +183,17 @@ impl ClientRenderState {
         match self {
             Self::Semantic { last_frame } => last_frame.as_ref(),
             Self::TerminalAnsi { blit_encoder, .. } => blit_encoder.last_frame(),
+        }
+    }
+
+    pub(crate) fn retained_update_ready(&self) -> bool {
+        match self {
+            Self::Semantic { last_frame } => last_frame.is_some(),
+            Self::TerminalAnsi {
+                blit_encoder,
+                repaint_pending,
+                ..
+            } => blit_encoder.last_frame().is_some() && !*repaint_pending,
         }
     }
 

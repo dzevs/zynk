@@ -647,6 +647,18 @@ mod tests {
     }
 
     #[test]
+    fn embedded_skill_wire_protocol_matches_the_current_protocol() {
+        let expected = format!(
+            "The wire protocol is version {}.",
+            crate::protocol::PROTOCOL_VERSION
+        );
+        assert!(
+            SKILL_ASSET.contains(&expected),
+            "embedded skill must contain `{expected}`"
+        );
+    }
+
+    #[test]
     fn parse_skill_version_reads_the_marker() {
         assert_eq!(
             parse_skill_version("<!-- zynk-skill-version: 2 -->"),

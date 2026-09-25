@@ -10,6 +10,21 @@ use crate::api::schema::{
 
 use super::App;
 
+#[cfg(test)]
+thread_local! {
+    static RUNTIME_PANE_FOCUS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_runtime_pane_focus_calls() {
+    RUNTIME_PANE_FOCUS_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_pane_focus_calls() -> usize {
+    RUNTIME_PANE_FOCUS_CALLS.with(std::cell::Cell::get)
+}
+
 impl App {
     pub(crate) fn dispatch_runtime_mutation(&mut self, id: &'static str, method: Method) -> String {
         self.dispatch_api_request(id, method)
@@ -104,6 +119,8 @@ impl App {
     }
 
     pub(crate) fn runtime_pane_focus(&mut self, id: &'static str, pane_id: String) -> String {
+        #[cfg(test)]
+        RUNTIME_PANE_FOCUS_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         self.dispatch_runtime_mutation(id, Method::PaneFocus(PaneTarget { pane_id }))
     }
 

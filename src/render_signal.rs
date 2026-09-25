@@ -9,6 +9,7 @@ use crate::layout::PaneId;
 #[derive(Debug, Default)]
 pub(crate) struct RenderRequest {
     pub(crate) generic: bool,
+    pub(crate) animation: bool,
     pub(crate) pty_sources: HashSet<PaneId>,
     pub(crate) terminal_title_sources: HashSet<PaneId>,
 }
@@ -43,6 +44,18 @@ impl RenderSignal {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.request.generic = true;
         self.pending.store(true, Ordering::Release);
+    }
+
+    /// Coalesces a UI animation repaint without losing its narrower origin.
+    pub(crate) fn request_animation(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let animation_added = !state.request.animation;
+        state.request.animation = true;
+        let became_pending = !self.pending.swap(true, Ordering::AcqRel);
+        became_pending || animation_added
     }
 
     /// Returns true when the signal becomes pending or visible PTY work joins it.
@@ -92,6 +105,7 @@ impl RenderSignal {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.request.generic
+            || state.request.animation
             || !state.request.terminal_title_sources.is_empty()
             || state
                 .request
@@ -224,5 +238,22 @@ mod tests {
         let request = signal.take();
         assert!(request.generic);
         assert_eq!(request.pty_sources, HashSet::from([pane_id]));
+    }
+
+    #[test]
+    fn animation_origin_coalesces_without_becoming_generic() {
+        let signal = RenderSignal::new();
+        let pane_id = PaneId::from_raw(10);
+
+        assert!(signal.request_animation());
+        assert!(!signal.request_animation());
+        assert!(!signal.request_pty(pane_id));
+        assert!(signal.has_immediate_work());
+
+        let request = signal.take();
+        assert!(request.animation);
+        assert!(!request.generic);
+        assert_eq!(request.pty_sources, HashSet::from([pane_id]));
+        assert!(!signal.has_immediate_work());
     }
 }

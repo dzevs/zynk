@@ -7907,3 +7907,177 @@ residual above, and the M8-39 persistence-lock carry is closed.
 This correction is **IMPLEMENTED / PENDING VERIFICATION** until the exact associated and qualified helper
 faults, the restored C1 mutation set, unchanged C2/C3 controls, fresh custody probe, isolated exact chain,
 fresh packet, successor Gate-2, and successor Gate-3 complete.
+
+### 3.2.0 agent-panel and post-release restoration batch
+
+This append records the 3.2.0 candidate built from released 3.1.0 commit `9869b28a`. It is governed by the
+approved agent-panel proposal `f3ab83b5` and restoration addendum `0b33ce94`. The code does not bump package
+metadata, protocol 20, database/session/handoff schema, or any JSON or binary wire ID. Merge, push, dogfood,
+version, tag, publish, and release remain separate operator gates. Until exact-object Gate-2 and Gate-3 approve,
+the batch is **IMPLEMENTED / PENDING VERIFICATION**.
+
+**FORK_DEVIATION: effective agent-panel scope, header, and spacing.** Upstream v0.8.2 and M9-21
+(`1f1e4342`) accept historical `ui.agent_panel_scope = "current" | "all"` values as ignored compatibility
+input. Zynk makes the setting effective UI state again: current selects the active workspace before collection,
+view filtering, and ordering; all remains the default. Expanded/collapsed agents, the mobile switcher,
+navigation, hit testing, and scroll geometry share that population, while global mobile counts, `agent.list`,
+and API topology remain all-workspace. The config file is authoritative and the visible header toggle saves
+back to `[ui]`. The operator's current-scope preference was recorded on 2026-09-09 but was omitted from the
+combined M8/M9 end-state design; this append supersedes that no-op outcome without rewriting its ledger row.
+
+The fork adds reloadable `ui.agent_panel_header = "scope" | "sort" | "both"`, defaulting to the one-line
+3.0.x scope header. It also adds `agents.group_gap`, default 1, independently of agents `row_gap`, default 0.
+The group gap precedes every later emitted header under grouped, priority, and plugin sorts. Upstream v0.8.2
+has only `row_gap`. Spaces `row_gap` changes from 0 to 1 by default but deliberately retains 3.1.0 packing:
+a linked-worktree parent and members remain adjacent, one gap follows the last member before another top-level
+space, and no trailing gap is reserved. These choices restore the operator's tidy default without recreating
+the exact 3.0.1 parent-to-child or trailing-gap admission rules.
+
+**FORK_DEVIATION: working animation.** M5-21 (`0b659af`, upstream `81f355fa`) replaced both animated working
+grammars with static marks without an operator decision. Zynk restores the fork-owned yellow
+`◌ ◎ ◉ ● ◉ ◎` sidebar pulse on agent rows, group aggregates, spaces dots, and the collapsed rail, plus the
+upstream-origin `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏` spinner on navigator and mobile surfaces. Reloadable
+`ui.working_animation` defaults on; false restores static 3.1.0 marks. Sidebar symbols mode remains static
+while braille surfaces animate. Both app loops use one 128 ms interval and tick step 8.
+
+Headless animation is origin-aware and follows the existing `RenderSignal` and retained-render scheduler. Demand
+is reset per full pass and unioned across App render targets; terminal-only or zero-App-client servers neither
+arm nor advance it. A retained chrome update is allowed only when it is equivalent to a same-tick full render,
+otherwise the planner selects or falls back to full. The implementation adopts the semantic purpose of excluded
+upstream optimization `b01fc37e` without copying its pre-retained, temporary-allocation renderer. After warm-up,
+the scheduling, target discovery, planning, and chrome-patch boundary allocates nothing and performs no filesystem
+or process inspection; protocol frame-output ownership remains unchanged.
+
+The first R5 harness put the thread-scoped counting allocator in `tests/working_animation_alloc.rs` and included
+`src/main.rs`. That integration binary compiled every `#[cfg(test)]` unit a second time: the retained post-N22B
+FULL started 9237 tests across 25 binaries instead of the expected roughly 4.8k population, and fail-fast met a
+duplicate mobile control first. Per the reviewer's binding amendment, the counter is now an opt-in `cfg(test)`
+global allocator in the ordinary unit-test crate and the integration binary is deleted. It remains thread-local,
+nextest process isolation remains the outer boundary, and release builds contain no allocator/counting seam.
+The final-byte nextest enumeration is 4897 tests across 24 binaries, with the allocation control listed once.
+
+The reviewed architecture baseline changes only because `HeadlessServer::run` schedules the animation deadline
+and calls the retained animation path. Its whole-body fingerprint and self-call set are updated with that reason,
+and dedicated fingerprints cover retained-animation scheduling, preflight, cell collection, and patching. The
+five alternate-screen maintenance-body fingerprints and the operator-accepted
+`ARCH-C1-EXISTING-CALLEE-RESIDUAL` remain unchanged. A baseline change without this rationale fails the
+architecture suite.
+
+Observational CPU evidence uses one isolated release binary (`sha256
+84684be33226f41b46cd72e433693722ae24fe18cc3f77b5b77f71a10a1c1a7e`), fixed 120x40 geometry, two-second
+warm-up, and five alternating 15-second samples. Median server CPU was 0.452159% on versus 0.132823% off for
+one working agent (3.404x), and 1.098337% on versus 0.796817% off for fifteen (1.378x). Every one-client on
+sample produced 120 retained animation frames and no full/fallback render; every off sample produced zero
+animation ticks/frames. Mixed desktop/mobile produced 240 frames over 120 ticks; detached N=15 produced zero
+animation ticks/frames. The retained report is `WORKING-ANIMATION-CPU-EVIDENCE-V1.md`, sha256
+`4bbddf9bf812b83054401751f202c37f7233e17f05eb31815faec32b16423067`. CPU timings are observational;
+deterministic counters and allocation controls are the gate.
+
+**Operator-selected upstream-origin restorations.** The operator chose these 3.0.x behaviors on 2026-09-25:
+
+- Restore a heavy focused border only for a terminal-active pane in a multi-pane layout. The merged renderer
+  carries none/light/heavy per arm and the complete mixed Unicode junction table; geometry, gaps, labels,
+  scrollbar/drag hit boxes, disabled borders, and single-pane rendering stay unchanged. This reverses the
+  visible portion removed by M2 `2b0838f` / upstream `4421c0f` while retaining later renderer features.
+- Make `ui.window_title = ""` the default off value. The former `{hostname}: {workspace}` default from
+  `005b5ce` / upstream `350f0013` remains an opt-in template, and API set/clear plus handoff retention remain.
+- Restore runtime-authoritative focus before wheel, scrollbar, and configured modifier-right passthrough over
+  an unfocused pane in Terminal and Resize only. Wheel and modifier-right events over the focused pane skip the
+  focus API, while the pre-existing left/middle press behavior stays unchanged. Navigate owns its overlay mouse
+  path and never pre-focuses the pane beneath it. This is a deliberate narrowing from 3.0.1's state-level focus,
+  which could focus while retaining Navigate. The no-op state shim introduced by M5-01 `f79434b` / upstream
+  `1a4e94e5` is removed; focus failure and stale in-progress selection cannot forward bytes or scroll to the old
+  pane.
+- Restore Navigate Tab and Shift-Tab pane cycling without leaving Navigate, while preserving all other exits.
+- Restore `agent wait --status S` as an alias of `--until S` on `agent wait` only. Current named-agent
+  resolution, terminal pinning, repeated any-of semantics, timeout/output, and exit behavior remain.
+- Preserve checked protocol mismatch errors from native `send`, `reply`, and implicit-caller `inbox` as F4
+  `protocol_mismatch` responses with both versions. No message/attempt/event/receipt/input side effect occurs;
+  explicit `inbox --agent` remains database-only and unrelated transport errors keep their classifications.
+- Pin the root `SKILL.md` protocol sentence to Rust `PROTOCOL_VERSION` (20) through a maintenance control.
+
+**Port-process correction.** Effective panel scope, between-group spacing, and working animations crossed prior
+ports without the explicit operator decision now required. The canonical policy in `AGENTS.md`, `CLAUDE.md`,
+and `WORKFLOW.md` has three clauses: FORK-OWNED user-visible behavior wins by default; every user-visible
+removal, replacement, or behavior change, whether fork-owned or upstream-origin, requires an explicit Gate-1
+operator decision; and a ledger entry alone is never sufficient approval. A maintenance control keeps all
+three guidance files synchronized. This policy is prospective and does not rewrite earlier review history.
+
+**N22B ROOT-CAUSED / FIXED: inherited pane environment in a neutral CLI fixture.** The 2026-09-24
+operator-accepted pane-run fixture risk recurred during the 3.2.0 pre-fault FULL and the retained diagnostics
+made its cause deterministic. The test process inherited `ZYNK_PANE_ID=w6:p2`; its neutral `run_cli` helper
+passed that identity to `pane run`, which correctly added a caller `pane.get`. The mock's fixed two-request
+budget was therefore consumed by caller and target reads, it closed before `pane.send_input`, and the client
+reported the resulting connection refusal while the socket pathname remained. On unchanged bytes an explicit
+`ZYNK_PANE_ID=w9:p9` reproduced the exact two-read transcript (`68ea7bf3`), while unsetting it passed
+(`7975617a`). Production caller resolution, request budgets, readiness, timeouts, and protocol behavior are
+unchanged.
+
+Neutral test CLI constructors now remove the full pane-injected environment before applying fixture-specific
+overrides: the identity triple from `apply_pane_launch_env` (`ZYNK_WORKSPACE_ID`, `ZYNK_TAB_ID`, and
+`ZYNK_PANE_ID`), its `ZYNK_ENV` host-protocol flag, and the `ZYNK_BIN_PATH` installed by
+`apply_pane_base_env`. Tests that model a caller add their explicit identity only after that scrub. A child
+process control proves all five values absent, and the final runner independently removes every inherited
+`ZYNK_*` and `GIT_*` variable before binding isolated roots. With that root cause fixed, N22B is closed rather
+than carried as accepted risk; its original records and operator disposition remain historical evidence.
+
+**Post-N22B FULL correction: Navigate mouse ownership and focused-pane focus guard.** The first fresh FULL after
+the fixture correction stopped with seven mobile-switcher failures in the duplicated allocation-test binary
+(`7765953`: 1216 of 9237 run, 1209 passed, 7 failed, 7 skipped). The restoration's generalized mouse pre-focus
+classifier had admitted Navigate, so a click or wheel over the switcher first focused the pane underneath via
+`pane.focus`; that handler settles the mode to Terminal before the switcher can consume the event. The same path
+made desktop Navigate wheels exit Navigate, and called the focus API on every wheel notch over an already-focused
+pane, marking siblings seen and leaving Resize. The retained focused RED (`edec4db4`) gives three failures and
+one positive Resize-unfocused control. The correction applies the Terminal/Resize and already-focused rules
+above without changing focus authority, pane input, geometry, or mobile action dispatch.
+
+The next final-byte FULL (`4205cc44`) stopped at four inherited semantic-frame fixtures whose 3.1.0 static
+working-dot oracle still expected `●`. The approved default animation renders the literal 3.0.x frame-zero
+`◌` in yellow. Those fixtures now pin tick zero and assert both the literal and yellow foreground; a static
+sweep covers rows, group headers, spaces, the collapsed rail, navigator, mobile, and status surfaces. The
+14-test sweep passed (`d75022dd`). A one-time no-fail-fast diagnostic (`a68f390b`, diagnostic only) ran all
+4897 tests and found only the desktop full-app semantic digest stale.
+
+That desktop digest is rebaselined from
+`f318104f8ecf67ff19947cf62be5bc44444cd0d4dcce17a9238a98a0562f84af` to
+`9078fb261dfc142126e4c01cc40bf5c62ca346ebbdab27cb00f20420c7cebb52` only after a complete cell-level
+comparison against released 3.1.0 bytes. The fixture is in Terminal mode and its newly split right pane is
+focused. Of 2,120 cells, exactly 121 differ: seven header cells at `y=11`, `x=18..24` replace right-aligned
+`grouped` with `all`, and 114 cells convert only that focused pane's border to heavy glyphs, including the two
+mixed-weight junctions where it meets the unfocused pane. Every border style is byte-identical, every
+unfocused edge is unchanged, and there is no difference in spacing, sidebar body, tab bar, pane content,
+cursor, hyperlinks, or graphics. The authoritative 121-row table is `frame-cell-diff-v1.tsv` (sha256
+`1fff7c26a787d644ea120ef0e98e4ad363ff1fa624a55c107dd7bf8c12721e4d`); its rationale record is
+`SEMANTIC-FRAME-REBASELINE-CELL-DIFF-V1.md` (sha256
+`4fb2d5e6e83ce2af214ef8724173e963779e0fb403e2a945d5d60c4484dfcc2f`). The mobile digest and every
+structural assertion remain unchanged.
+
+The following fail-fast FULL (`f9ad70c2`) passed all 4897 nextest identities and all 19 UI architecture
+controls, then stopped at the Linux-only maintenance scanner. The ADR-0013 compile-error gate was unchanged,
+but placing the new cfg(test)-only allocation module above it had shifted the gate from its exact allowlisted
+`src/main.rs:12` position to line 71. The scanner correctly rejected that positional drift. The allocation
+module now follows the gate, restoring lines 12-13 byte-for-byte to released 3.1.0. No allowlist, scanner,
+allocator, test, platform branch, release shape, or runtime behavior changes in this placement-only correction.
+
+#### operator-accepted 2026-09-25, post-release audit
+
+The operator explicitly retained these 3.1.0 outcomes after auditing the released UI, config, input,
+integration, reliability, CLI, and API surfaces:
+
+- **Look:** M5-22 theme highlight colors; linked-worktree `├─`/`└─` connectors and the right-edge chevron;
+  centered tab labels; mobile-header roll-up; and navigator selection style.
+- **Input:** Navigator Escape behavior; copy-mode word motions and prefix handling; the PageUp/PageDown pager
+  rule; focus returning to the previous pane on close; the Ctrl+/ byte; keybinding-conflict precedence; the
+  lone-Escape 150 ms hold under mouse capture; and the remote-only clipboard-image bridge. Dogfood must verify
+  that local Ctrl+V image paste into Claude Code remains local terminal input.
+- **Settings and config:** removal of the Settings Experiments tab while retaining its config key, and the
+  shortened config banner.
+- **Reliability and security:** fail-closed database open; the 1 MiB fragmented-paste cap; SSH ControlMaster;
+  remote attach limited to Linux x86_64; deferred new-tab rejection; and removed Pi debounce environment vars.
+- **CLI and API:** the ADR 0015 agent-start form; retirement of `custom_status`; sibling panes marked seen on
+  API focus; and upstream hook-release changes.
+
+The exact-object packet must retain the approved panel and restoration reds/greens, twenty final-byte faults,
+the allocation and cardinality controls, the observational CPU report, docs/residue mapping, provenance checks,
+and the isolated full/check/gate chain. A passing author run does not close this entry; closure requires Claude
+Gate-2 and independent Pi Gate-3 on the same SHA/tree, followed by the separately gated dogfood sequence.

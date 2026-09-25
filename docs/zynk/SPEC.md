@@ -209,8 +209,10 @@ Neither read method creates conversation DB rows or delivery events. Both intera
 schedulers reconcile due managed transitions; the headless call is a fork-owned correction absent
 from upstream `e0758c32` and upstream `v0.8.2`.
 
-`zynk agent wait <name> [--timeout <ms>]` resolves once, pins the terminal, and completes on observed
-Idle, Done, or Blocked. It does not require launch readiness or a sequence advance, so a Pending
+`zynk agent wait <name> [--until|--status <state>]... [--timeout <ms>]` resolves once, pins the terminal,
+and completes on observed Idle, Done, or Blocked. `--status` is an alias of `--until` on `agent wait` only;
+either spelling can repeat and the requested states use any-of semantics. `agent prompt` does not accept the
+alias. Wait does not require launch readiness or a sequence advance, so a Pending
 managed agent whose detector already reports Idle can satisfy it; use `agent start` when interactive
 launch readiness is required. Prompt `--wait` is stricter: completion must be later than the prompt
 baseline sequence. Timeouts are checked between requests and do not bound a blocked in-flight IPC
@@ -334,11 +336,47 @@ Contiguous ANSI diff runs may share one write only when cursor, style, and flush
 Transient resize requests repaint. Pane BEL counts route only to the active client. Local or remote terminal
 hangup, server EOF, and broken output pipes restore terminal state or exit quietly on Linux.
 
-`ui.window_title` defaults to `{hostname}: {workspace}` and supports `{tab}`, `{pane}`, and
-`{terminal_title}`. Empty disables ownership; malformed templates diagnose without taking the title. The
-server sanitizes rendered and API titles, deduplicates unchanged sends, targets only the foreground client,
-and retains an explicit API override across live handoff until clear. Its render wake joins
-`RenderSignalState` without removing generic or immediate PTY wake sources.
+Working-agent animation is a fork-owned presentation feature controlled by reloadable
+`ui.working_animation`, which defaults to true. Dots-mode sidebar surfaces use the yellow
+`◌ ◎ ◉ ● ◉ ◎` pulse for working agent rows, group aggregates, workspace dots, and the collapsed rail.
+Navigator rows/chips and mobile header/switcher surfaces use `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`.
+Symbols-mode sidebar marks remain static while those braille surfaces animate. Turning the key off restores
+the static 3.1.0 marks everywhere. Both execution loops advance by eight tick units every 128 ms, producing
+the same one-frame-per-128-ms visual cadence without intermediate wakeups.
+
+View computation exposes a scalar `WorkingAnimationDemand`; schedulers never recollect UI topology merely to
+check a deadline. A headless full-render pass resets demand and ORs it across every full App render target.
+TerminalAttach, TerminalObserve, and TerminalPending targets contribute nothing. Zero App clients means no
+animation deadline, tick, render, or frame, including when the server computes its no-client virtual frame;
+detaching the last App client cancels the deadline and reattaching arms it after the first full render. An
+explicit animation origin shares `RenderSignal` without becoming generic work. Headless animation uses the
+retained chrome path only when equivalence is proven; generic work, geometry/config changes, unsafe retained
+state, or preparation failure selects or falls back once to a full render. The steady path performs no
+filesystem/process inspection or new heap allocation after one full render and first animation frame per App
+client; protocol-output ownership retains its existing send allocation. The allocation counter is a
+thread-scoped, opt-in `cfg(test)` global allocator in the unit-test crate, so the release binary has no allocator
+or counting seam and the proof does not duplicate the crate's unit tests in an integration binary. Demand may
+remain live for a working list entry that is scrolled out of view, but a tick sends no frame when no visible
+cell changes.
+
+Multi-pane border rendering represents every junction arm as none, light, or heavy and maps the complete mixed
+straight/corner/tee/cross Unicode table. The focused pane's four edges are heavy only while its terminal is
+active; all other edges remain light. Pane gaps, outer-border policy, drag hit boxes, inner rectangles, and
+border/agent-label placement retain their geometry, a single pane is unchanged, and `pane_borders = false`
+draws no border. Wheel events over pane content or its scrollbar, scrollbar clicks, and configured modifier
+right-click passthrough first focus an unfocused pane through runtime authority in Terminal or Resize mode
+only. Wheel and modifier-right events over the already-focused pane skip the focus API, preserving mode and
+seen state; intentional left/middle presses keep their existing pre-focus behavior. Focus failure cannot mutate
+state or forward to the stale pane. Navigate owns its overlays and mouse input, so pane mouse hit testing never
+pre-focuses through an active Navigate view. A wheel during an in-progress selection whose pane lost focus is
+consumed without stale scrolling or bytes. Navigate-mode Tab and Shift-Tab cycle panes without leaving
+Navigate; the existing Enter, numeric, and Escape exit paths remain.
+
+`ui.window_title` defaults to empty, leaving the host terminal title untouched. A template such as
+`{hostname}: {workspace}` opts in and may also use `{tab}`, `{pane}`, and `{terminal_title}`. Malformed
+templates diagnose without taking the title. The server sanitizes rendered and API titles, deduplicates
+unchanged sends, targets only the foreground client, and retains an explicit API override across live handoff
+until clear. Its render wake joins `RenderSignalState` without removing generic or immediate PTY wake sources.
 
 Direct pane-frame delivery is an internal optimization behind the existing default-off
 `experimental.kitty_graphics` gate. It admits only an eligible local app owner, one current transfer, bounded
@@ -366,10 +404,31 @@ private paths, same-source custody, peer checks, cleanup, and no implicit local 
 fixtures bind HOME, XDG, and inherited `ZYNK_*` variables to sentinel roots and prove that no helper path
 escapes them.
 
-Unknown theme names produce diagnostics and retain the prior live palette on reload. Retired
-`ui.agent_panel_scope` remains accepted and ignored for compatibility. Pane-resize and move-tab actions have
-typed keybinding fields and contextual admission. Sidebar token occurrences accept optional `fg`, `bold`, and
-`dim` styling while preserving plain-token demand, occurrence, selection, metadata, and B1 view semantics.
+Unknown theme names produce diagnostics and retain the prior live palette on reload. Reloadable
+`ui.agent_panel_scope = "all" | "current"` is effective UI state, with `all` as the default. Current means the
+active/presented workspace. Scope selects the workspace population before collection, optional `agent.view`
+filtering, and grouped, priority, or plugin ordering. Expanded and collapsed sidebar agents, the mobile
+switcher, navigation, hit testing, and scroll metrics use the same filtered list; global mobile counts remain
+all-workspace. The config file is authoritative and a visible scope-header click saves the canonical value.
+All attached App clients share the server-rendered scope. `agent.list` and API/headless topology projections,
+protocol 20, persistence, session snapshots, handoff manifests, and schema remain unchanged.
+
+`ui.agent_panel_header = "scope" | "sort" | "both"` is reloadable and defaults to `scope`. The expanded
+panel keeps three header rows: title/controls on row one, row two blank, body at row three. A hidden control
+still affects filtering or ordering but has no invisible hit target. An active agent-view label occupies the
+sort slot as non-clickable accent status. Narrow layout precedence is title, then scope, then sort/view; the
+separator belongs to the second slot, and `both` omits sort before scope. A view label truncates with
+`truncate_end` only when at least one display column plus its ellipsis fits; below that it and its separator
+are omitted. At width 26, ` agents` and `current · priority` both fit.
+
+Expanded agent spacing separates same-group `row_gap` from `group_gap`, which is added before every emitted
+group header except the first. Defaults are `row_gap = 0` and `group_gap = 1`. This grammar also applies to
+priority and plugin sorts, so interleaved groups can gain a blank row before nearly every re-emitted header.
+Spaces default to `row_gap = 1` while retaining 3.1.0 packing: linked-worktree parent and indented members are
+adjacent, one gap follows the group's last member before another top-level space, and no trailing gap is
+reserved. Pane-resize and move-tab actions have typed keybinding fields and contextual admission. Sidebar
+token occurrences accept optional `fg`, `bold`, and `dim` styling while preserving plain-token demand,
+occurrence, selection, metadata, and B1 view semantics.
 
 `ui.tab_bar_right` is an ordered list of at most 16 typed `zoom`, `hostname`, `datetime`, `text`, and `command`
 entries. Commands execute outside render through `/bin/sh -lc`, with bounded output, interval, timeout, and
@@ -724,19 +783,20 @@ in the graphics section remain in force.
 ### CLI protocol compatibility
 
 Operational CLI `send_request` and agent subscription paths obtain server status
-on a separate connection and require protocol equality (currently 19), independent
+on a separate connection and require protocol equality (currently 20), independent
 of package version. Missing/malformed/unreachable ping is a transport error, not
 assumed compatibility. Ordinary mismatch output is one JSON `protocol_mismatch`
 error with the request ID and restart/upgrade guidance. The transport returns a
 typed error and prints nothing itself, including during plugin rollback.
 
-Native/agent/pane delivery routes retain F4: pre-resolution refusal yields
-`transport_failed`, unknown target resolution, the existing generic message and
-no structured mismatch context or recorded send attempt. Direct status provides
-the detailed diagnostic route. A refusal after a recorded attempt reaches the
-existing Failed append and F4 error; healthy-database controls observe Failed
-and no Submitted/Received. The attempt itself creates no Submitted event.
-Existing append failures are not made durably successful by this guard.
+Native `send` and `reply` preserve a checked protocol refusal as an F4
+`protocol_mismatch` with client/server versions and request ID. They do not collapse it into
+`transport_failed` or create a message, attempt, event, receipt, or input side effect. Caller-bound `inbox`
+preserves the same typed refusal without losing its caller label. Explicit `inbox --agent NAME` remains a
+database-only read and does not perform the live protocol check. Missing callers and unrelated connection
+failures retain their existing classifications. A refusal after a recorded attempt reaches the existing
+Failed append and F4 error; healthy-database controls observe Failed and no Submitted/Received. The attempt
+itself creates no Submitted event. Existing append failures are not made durably successful by this guard.
 
 Direct status, explicit live handoff and direct server stop bypass the guard for
 recovery; they are not invoked automatically. Low-level API and direct binary

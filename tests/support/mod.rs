@@ -7,6 +7,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,6 +19,23 @@ static CLEANUP_GUARD: OnceLock<CleanupGuard> = OnceLock::new();
 const WATCHDOG_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const RUNTIME_OWNER_MARKER: &str = ".zynk-test-owner-pid";
 pub const CURRENT_PROTOCOL: u32 = 20;
+
+const PANE_INJECTED_ENV_VARS: [&str; 5] = [
+    "ZYNK_WORKSPACE_ID",
+    "ZYNK_TAB_ID",
+    "ZYNK_PANE_ID",
+    "ZYNK_ENV",
+    "ZYNK_BIN_PATH",
+];
+
+/// Remove the environment injected when an integration test itself runs inside zynk.
+/// Tests that exercise pane context must set the intended values after this scrub.
+pub fn scrub_pane_injected_env(command: &mut Command) -> &mut Command {
+    for name in PANE_INJECTED_ENV_VARS {
+        command.env_remove(name);
+    }
+    command
+}
 
 pub fn register_spawned_zynk_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
@@ -743,6 +761,28 @@ fn process_exists(pid: libc::pid_t) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_env_scrub_removes_every_injected_value_from_the_child() {
+        let mut command = Command::new("/usr/bin/env");
+        for name in PANE_INJECTED_ENV_VARS {
+            command.env(name, "ambient");
+        }
+
+        scrub_pane_injected_env(&mut command);
+
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let child_env = String::from_utf8(output.stdout).unwrap();
+        for name in PANE_INJECTED_ENV_VARS {
+            assert!(
+                !child_env
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{name}="))),
+                "{name} leaked into child environment: {child_env}"
+            );
+        }
+    }
 
     fn unique_missing_runtime_dir(label: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()

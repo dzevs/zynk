@@ -12,6 +12,65 @@ use crossterm::execute;
 #[cfg(not(target_os = "linux"))]
 compile_error!("zynk supports Linux only (docs/zynk/decisions/0013-linux-only-platform-scope.md)");
 
+#[cfg(test)]
+pub(crate) mod test_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub(crate) struct ThreadCountingAllocator;
+
+    thread_local! {
+        static COUNT_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+        static ALLOCATION_COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    unsafe impl GlobalAlloc for ThreadCountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            COUNT_ALLOCATIONS.with(|enabled| {
+                if enabled.get() {
+                    ALLOCATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+                }
+            });
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            COUNT_ALLOCATIONS.with(|enabled| {
+                if enabled.get() {
+                    ALLOCATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+                }
+            });
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            COUNT_ALLOCATIONS.with(|enabled| {
+                if enabled.get() {
+                    ALLOCATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+                }
+            });
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: ThreadCountingAllocator = ThreadCountingAllocator;
+
+    pub(crate) fn begin() {
+        ALLOCATION_COUNT.with(|count| count.set(0));
+        COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    }
+
+    pub(crate) fn end() -> usize {
+        COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+        ALLOCATION_COUNT.with(Cell::get)
+    }
+}
+
 /// Zynk host-protocol env var (ADR 0010 — full rebrand): the env var the binary
 /// sets for its hooks to mark "running inside zynk".
 pub(crate) const ZYNK_ENV_VAR: &str = "ZYNK_ENV";

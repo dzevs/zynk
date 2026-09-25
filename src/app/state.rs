@@ -813,8 +813,36 @@ pub enum ViewLayout {
     Mobile,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WorkingAnimationDemand(u8);
+
+impl WorkingAnimationDemand {
+    pub(crate) const NONE: Self = Self(0);
+    pub(crate) const SIDEBAR: Self = Self(1 << 0);
+    pub(crate) const BRAILLE: Self = Self(1 << 1);
+
+    pub(crate) fn is_empty(self) -> bool {
+        self == Self::NONE
+    }
+}
+
+impl std::ops::BitOr for WorkingAnimationDemand {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for WorkingAnimationDemand {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
 pub struct ViewState {
     pub layout: ViewLayout,
+    pub(crate) working_animation_demand: WorkingAnimationDemand,
     pub agent_panel_presented_workspace_id: Option<String>,
     /// Popup cursor suppression sampled before computing and resizing this view.
     pub popup_cursor_suppressed: bool,
@@ -1530,6 +1558,8 @@ pub struct AppState {
     /// Transient session-wide projection override for the built-in Agents view.
     pub agent_view_override: Option<crate::api::schema::AgentViewSetParams>,
     pub status_indicators: crate::config::StatusIndicatorStyle,
+    pub working_animation: bool,
+    pub spinner_tick: u32,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Zynk's own mouse UI. When false, Zynk only
     /// captures mouse while the focused pane app requests mouse reporting.
@@ -1890,6 +1920,7 @@ impl AppState {
             mobile_switcher_scroll: 0,
             view: ViewState {
                 layout: ViewLayout::Desktop,
+                working_animation_demand: WorkingAnimationDemand::NONE,
                 agent_panel_presented_workspace_id: None,
                 popup_cursor_suppressed: false,
                 sidebar_rect: Rect::default(),
@@ -1944,6 +1975,8 @@ impl AppState {
             agent_panel_header: crate::config::AgentPanelHeaderConfig::Scope,
             agent_view_override: None,
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
+            working_animation: true,
+            spinner_tick: 0,
             next_agent_state_change_seq: 0,
             mouse_capture: true,
             copy_on_select: true,

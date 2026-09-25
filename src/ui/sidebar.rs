@@ -1022,8 +1022,14 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         }
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
         // Same workspace-scoped glyph as the expanded spaces list (Unknown -> ◌, not the global ·).
-        let (icon, icon_style) =
-            workspace_state_icon(agg_state, agg_seen, app.status_indicators, p);
+        let (icon, icon_style) = workspace_state_icon(
+            agg_state,
+            agg_seen,
+            app.status_indicators,
+            app.working_animation,
+            app.spinner_tick,
+            p,
+        );
         let is_selected = visible_idx == app.selected && is_navigating;
         let is_active = Some(visible_idx) == app.active;
         let selection_bg = workspace_selection_background(p, is_active);
@@ -1091,8 +1097,14 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 Style::default().fg(p.overlay0)
             };
             // Collapsed rail uses the expanded panel's sidebar-agent icon grammar.
-            let (icon, icon_style) =
-                sidebar_agent_icon(detail.state, detail.seen, app.status_indicators, p);
+            let (icon, icon_style) = sidebar_agent_icon(
+                detail.state,
+                detail.seen,
+                app.status_indicators,
+                app.working_animation,
+                app.spinner_tick,
+                p,
+            );
             if is_active {
                 let buf = frame.buffer_mut();
                 for x in detail_content_area.x..detail_content_area.x + detail_content_area.width {
@@ -1276,6 +1288,8 @@ fn sidebar_agent_icon(
     state: AgentState,
     seen: bool,
     indicator_style: StatusIndicatorStyle,
+    working_animation: bool,
+    tick: u32,
     p: &Palette,
 ) -> (&'static str, Style) {
     if indicator_style == StatusIndicatorStyle::Symbols {
@@ -1283,6 +1297,9 @@ fn sidebar_agent_icon(
     }
     match (state, seen) {
         (AgentState::Blocked, _) => ("◉", Style::default().fg(p.red)),
+        (AgentState::Working, _) if working_animation => {
+            (agents_working_frame(tick), Style::default().fg(p.yellow))
+        }
         (AgentState::Working, _) => ("●", Style::default().fg(p.yellow)),
         (AgentState::Idle, false) => ("○", Style::default().fg(p.teal)), // done / unseen
         (AgentState::Idle, true) => ("○", Style::default().fg(p.green)), // idle / seen
@@ -1290,31 +1307,78 @@ fn sidebar_agent_icon(
     }
 }
 
+const AGENTS_WORKING_FRAMES: &[&str] = &["◌", "◎", "◉", "●", "◉", "◎"];
+
+pub(super) fn agents_working_frame(tick: u32) -> &'static str {
+    AGENTS_WORKING_FRAMES[(tick as usize / 8) % AGENTS_WORKING_FRAMES.len()]
+}
+
+pub(super) fn is_agents_working_frame(symbol: &str) -> bool {
+    AGENTS_WORKING_FRAMES.contains(&symbol)
+}
+
 /// Group priority: blocked, working, done/unseen, idle, then unknown.
 fn agents_group_aggregate(
     states: &[(AgentState, bool)],
     indicator_style: StatusIndicatorStyle,
+    working_animation: bool,
+    tick: u32,
     p: &Palette,
 ) -> (&'static str, Style) {
     if states.iter().any(|&(s, _)| s == AgentState::Blocked) {
-        return sidebar_agent_icon(AgentState::Blocked, false, indicator_style, p);
+        return sidebar_agent_icon(
+            AgentState::Blocked,
+            false,
+            indicator_style,
+            working_animation,
+            tick,
+            p,
+        );
     }
     if states.iter().any(|&(s, _)| s == AgentState::Working) {
-        return sidebar_agent_icon(AgentState::Working, false, indicator_style, p);
+        return sidebar_agent_icon(
+            AgentState::Working,
+            false,
+            indicator_style,
+            working_animation,
+            tick,
+            p,
+        );
     }
     if states
         .iter()
         .any(|&(s, seen)| s == AgentState::Idle && !seen)
     {
-        return sidebar_agent_icon(AgentState::Idle, false, indicator_style, p);
+        return sidebar_agent_icon(
+            AgentState::Idle,
+            false,
+            indicator_style,
+            working_animation,
+            tick,
+            p,
+        );
     }
     if states
         .iter()
         .any(|&(s, seen)| s == AgentState::Idle && seen)
     {
-        return sidebar_agent_icon(AgentState::Idle, true, indicator_style, p);
+        return sidebar_agent_icon(
+            AgentState::Idle,
+            true,
+            indicator_style,
+            working_animation,
+            tick,
+            p,
+        );
     }
-    sidebar_agent_icon(AgentState::Unknown, false, indicator_style, p)
+    sidebar_agent_icon(
+        AgentState::Unknown,
+        false,
+        indicator_style,
+        working_animation,
+        tick,
+        p,
+    )
 }
 
 /// Spaces and agents use the same static state marks.
@@ -1322,9 +1386,11 @@ fn workspace_state_icon(
     state: AgentState,
     seen: bool,
     indicator_style: StatusIndicatorStyle,
+    working_animation: bool,
+    tick: u32,
     p: &Palette,
 ) -> (&'static str, Style) {
-    sidebar_agent_icon(state, seen, indicator_style, p)
+    sidebar_agent_icon(state, seen, indicator_style, working_animation, tick, p)
 }
 
 /// One placed row in the grouped agents panel — the single layout primitive that render, hit-test,
@@ -1765,8 +1831,14 @@ fn render_workspace_list(
             .filter(|(_, collapsed)| *collapsed)
             .map(|(key, _)| space_aggregate_state(app, key))
             .unwrap_or((agg_state, agg_seen));
-        let state_icon =
-            workspace_state_icon(display_state, display_seen, app.status_indicators, p);
+        let state_icon = workspace_state_icon(
+            display_state,
+            display_seen,
+            app.status_indicators,
+            app.working_animation,
+            app.spinner_tick,
+            p,
+        );
         let branch_style = Style::default().fg(if selected || is_active {
             p.mauve
         } else {
@@ -2019,7 +2091,13 @@ fn render_agent_detail(
                     .filter(|d| (d.ws_idx, d.tab_idx) == key)
                     .map(|d| (d.state, d.seen))
                     .collect();
-                let (icon, icon_style) = agents_group_aggregate(&states, app.status_indicators, p);
+                let (icon, icon_style) = agents_group_aggregate(
+                    &states,
+                    app.status_indicators,
+                    app.working_animation,
+                    app.spinner_tick,
+                    p,
+                );
                 let tab = truncate_end(&detail.tab_label, body_width.saturating_sub(2));
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
@@ -2043,8 +2121,14 @@ fn render_agent_detail(
                     continue;
                 };
                 let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-                let (icon, icon_style) =
-                    sidebar_agent_icon(detail.state, detail.seen, app.status_indicators, p);
+                let (icon, icon_style) = sidebar_agent_icon(
+                    detail.state,
+                    detail.seen,
+                    app.status_indicators,
+                    app.working_animation,
+                    app.spinner_tick,
+                    p,
+                );
                 let label_color = state_label_color(detail.state, detail.seen, p);
                 let connector = if last { "└─" } else { "├─" };
 
@@ -2478,7 +2562,7 @@ mod tests {
                 true,
                 None,
                 "working",
-                "\u{25cf}",
+                "\u{25cc}",
                 "\u{25d0}",
             ),
             (
@@ -2503,7 +2587,7 @@ mod tests {
                 true,
                 Some("waiting"),
                 "working",
-                "\u{25cf}",
+                "\u{25cc}",
                 "\u{25d0}",
             ),
             (
@@ -2527,6 +2611,7 @@ mod tests {
                     "selected-reset",
                 ] {
                     let mut app = AppState::test_new();
+                    app.spinner_tick = 0;
                     app.palette.sidebar_bg = Color::Rgb(11, 22, 33);
                     app.palette.active_row_bg = Color::Rgb(44, 55, 66);
                     app.palette.selection_bg = if context == "selected-reset" {
@@ -4259,6 +4344,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         app.selected = 0;
         app.mode = Mode::Navigate;
         app.status_indicators = StatusIndicatorStyle::Dots;
+        app.spinner_tick = 0;
         let entries = agent_panel_entries(app);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].agent_label.as_deref(), Some("claude"));
@@ -4324,13 +4410,14 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
             (2..7).map(|x| buffer[(x, 3)].symbol()).collect::<String>(),
             "alpha"
         );
-        for (y, connector, icon, name, status) in [
-            (4, "├", "◉", "claude", "blocked"),
-            (5, "└", "●", "pi", "working"),
+        for (y, connector, icon, icon_color, name, status) in [
+            (4, "├", "◉", app.palette.red, "claude", "blocked"),
+            (5, "└", "◌", app.palette.yellow, "pi", "working"),
         ] {
             assert_eq!(buffer[(0, y)].symbol(), connector);
             assert_eq!(buffer[(1, y)].symbol(), "─");
             assert_eq!(buffer[(3, y)].symbol(), icon);
+            assert_eq!(buffer[(3, y)].fg, icon_color);
             assert_eq!(
                 (5..5 + name.len() as u16)
                     .map(|x| buffer[(x, y)].symbol())
@@ -4375,6 +4462,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
             app.active = Some(0);
             app.selected = 0;
             app.mode = Mode::Terminal;
+            app.spinner_tick = 0;
             app.update_available = None;
             assert_eq!(agent_panel_entries(app).len(), 2);
             app.sidebar_collapsed = true;
@@ -4399,7 +4487,11 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
             for section in [spaces, agents] {
                 assert_eq!(buffer[(section.x, section.y)].symbol(), "1");
                 assert_eq!(buffer[(section.x, section.y + 1)].symbol(), "2");
-                assert_eq!(buffer[(section.x + 2, section.y)].symbol(), "●");
+                assert_eq!(buffer[(section.x + 2, section.y)].symbol(), "◌");
+                assert_eq!(
+                    buffer[(section.x + 2, section.y)].fg,
+                    app.palette.yellow
+                );
             }
             let collapsed_buffer = buffer.clone();
 
@@ -6200,21 +6292,29 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
     }
 
     #[test]
-    fn working_marks_match_across_sidebar_and_mobile() {
+    fn working_animation_uses_surface_specific_marks() {
         let p = crate::app::state::Palette::tokyo_night();
-        let expected = ("●", Style::default().fg(p.yellow));
         assert_eq!(
-            sidebar_agent_icon(AgentState::Working, false, StatusIndicatorStyle::Dots, &p),
-            expected
+            sidebar_agent_icon(
+                AgentState::Working,
+                false,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            ),
+            ("◎", Style::default().fg(p.yellow))
         );
         assert_eq!(
             crate::ui::status::agent_icon(
                 AgentState::Working,
                 false,
                 StatusIndicatorStyle::Dots,
+                true,
+                8,
                 &p
             ),
-            expected
+            ("⠙", Style::default().fg(p.yellow))
         );
         assert_eq!(
             crate::ui::status::state_icon(
@@ -6223,33 +6323,99 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                 StatusIndicatorStyle::Dots,
                 &p
             ),
-            expected
+            ("●", Style::default().fg(p.yellow))
         );
+    }
+
+    #[test]
+    fn working_pulse_uses_the_exact_v301_sequence() {
+        let expected = ["◌", "◎", "◉", "●", "◉", "◎"];
+        for (index, glyph) in expected.into_iter().enumerate() {
+            assert_eq!(agents_working_frame((index as u32) * 8), glyph);
+        }
+        assert_eq!(agents_working_frame(48), "◌");
     }
 
     #[test]
     fn sidebar_agent_icon_grammar() {
         let p = crate::app::state::Palette::tokyo_night();
         for seen in [false, true] {
-            let (g, s) =
-                sidebar_agent_icon(AgentState::Working, seen, StatusIndicatorStyle::Dots, &p);
-            assert_eq!(g, "●");
+            let (g, s) = sidebar_agent_icon(
+                AgentState::Working,
+                seen,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            );
+            assert_eq!(g, "◎");
             assert_eq!(s.fg, Some(p.yellow));
         }
         assert_eq!(
-            sidebar_agent_icon(AgentState::Idle, true, StatusIndicatorStyle::Dots, &p),
+            sidebar_agent_icon(
+                AgentState::Working,
+                false,
+                StatusIndicatorStyle::Symbols,
+                true,
+                8,
+                &p,
+            ),
+            ("◐", Style::default().fg(p.yellow))
+        );
+        assert_eq!(
+            sidebar_agent_icon(
+                AgentState::Working,
+                false,
+                StatusIndicatorStyle::Dots,
+                false,
+                8,
+                &p,
+            ),
+            ("●", Style::default().fg(p.yellow))
+        );
+        assert_eq!(
+            sidebar_agent_icon(
+                AgentState::Idle,
+                true,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            ),
             ("○", Style::default().fg(p.green))
         );
         assert_eq!(
-            sidebar_agent_icon(AgentState::Idle, false, StatusIndicatorStyle::Dots, &p),
+            sidebar_agent_icon(
+                AgentState::Idle,
+                false,
+                StatusIndicatorStyle::Dots,
+                false,
+                8,
+                &p,
+            ),
             ("○", Style::default().fg(p.teal))
         );
         assert_eq!(
-            sidebar_agent_icon(AgentState::Blocked, false, StatusIndicatorStyle::Dots, &p),
+            sidebar_agent_icon(
+                AgentState::Blocked,
+                false,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            ),
             ("◉", Style::default().fg(p.red))
         );
         assert_eq!(
-            sidebar_agent_icon(AgentState::Unknown, false, StatusIndicatorStyle::Dots, &p).0,
+            sidebar_agent_icon(
+                AgentState::Unknown,
+                false,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            )
+            .0,
             "◌"
         );
     }
@@ -6263,42 +6429,48 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
             agents_group_aggregate(
                 &[(Idle, true), (Blocked, false)],
                 StatusIndicatorStyle::Dots,
+                true,
+                8,
                 &p
             )
             .0,
             "◉"
         );
-        // else working wins with a static mark
+        // Else working wins with the animated mark.
         assert_eq!(
             agents_group_aggregate(
                 &[(Idle, true), (Working, false)],
                 StatusIndicatorStyle::Dots,
+                true,
+                8,
                 &p
             )
             .0,
-            "●"
+            "◎"
         );
         // else done/unseen (teal)
         assert_eq!(
             agents_group_aggregate(
                 &[(Idle, true), (Idle, false)],
                 StatusIndicatorStyle::Dots,
+                true,
+                8,
                 &p
             ),
             ("○", Style::default().fg(p.teal))
         );
         // else idle (green)
         assert_eq!(
-            agents_group_aggregate(&[(Idle, true)], StatusIndicatorStyle::Dots, &p),
+            agents_group_aggregate(&[(Idle, true)], StatusIndicatorStyle::Dots, true, 8, &p,),
             ("○", Style::default().fg(p.green))
         );
         // else unknown / empty
         assert_eq!(
-            agents_group_aggregate(&[(Unknown, false)], StatusIndicatorStyle::Dots, &p).0,
+            agents_group_aggregate(&[(Unknown, false)], StatusIndicatorStyle::Dots, true, 8, &p,).0,
             "◌"
         );
         assert_eq!(
-            agents_group_aggregate(&[], StatusIndicatorStyle::Dots, &p).0,
+            agents_group_aggregate(&[], StatusIndicatorStyle::Dots, true, 8, &p).0,
             "◌"
         );
     }
@@ -6370,25 +6542,60 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         // Spaces retain the sidebar-specific non-working marks.
         let p = crate::app::state::Palette::tokyo_night();
         for seen in [false, true] {
-            let (g, s) =
-                workspace_state_icon(AgentState::Working, seen, StatusIndicatorStyle::Dots, &p);
-            assert_eq!(g, "●");
+            let (g, s) = workspace_state_icon(
+                AgentState::Working,
+                seen,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            );
+            assert_eq!(g, "◎");
             assert_eq!(s.fg, Some(p.yellow));
         }
         assert_eq!(
-            workspace_state_icon(AgentState::Blocked, false, StatusIndicatorStyle::Dots, &p),
+            workspace_state_icon(
+                AgentState::Blocked,
+                false,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            ),
             ("◉", Style::default().fg(p.red))
         );
         assert_eq!(
-            workspace_state_icon(AgentState::Idle, false, StatusIndicatorStyle::Dots, &p),
+            workspace_state_icon(
+                AgentState::Idle,
+                false,
+                StatusIndicatorStyle::Dots,
+                false,
+                8,
+                &p,
+            ),
             ("○", Style::default().fg(p.teal))
         );
         assert_eq!(
-            workspace_state_icon(AgentState::Idle, true, StatusIndicatorStyle::Dots, &p),
+            workspace_state_icon(
+                AgentState::Idle,
+                true,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            ),
             ("○", Style::default().fg(p.green))
         );
         assert_eq!(
-            workspace_state_icon(AgentState::Unknown, false, StatusIndicatorStyle::Dots, &p).0,
+            workspace_state_icon(
+                AgentState::Unknown,
+                false,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            )
+            .0,
             "◌"
         );
     }
@@ -6644,6 +6851,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                     app.active = Some(0);
                     app.selected = 0;
                     app.mode = Mode::Terminal;
+                    app.spinner_tick = 0;
                     let entries = agent_panel_entries(&app);
                     assert_eq!(entries.len(), 4);
                     let states = [
@@ -6690,7 +6898,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                         .unwrap();
                     let buffer = terminal.backend().buffer();
                     let glyphs = if indicator == StatusIndicatorStyle::Dots {
-                        ["●", "◉", "○", "○"]
+                        ["◌", "◉", "○", "○"]
                     } else {
                         ["◐", "×", "○", "✓"]
                     };
@@ -7099,6 +7307,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         app.ensure_test_terminals();
         app.active = Some(0);
         app.selected = 0;
+        app.spinner_tick = 0;
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
             .attached_terminal_id
@@ -7203,7 +7412,16 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                 .set_detected_state(Some(Agent::Claude), AgentState::Working);
         }
 
-        let lines = render_agent_detail_to_lines(&mut app, 30, 16);
+        let area = Rect::new(0, 0, 30, 16);
+        let runtimes = TerminalRuntimeRegistry::new();
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &runtimes, frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
         let joined = lines.join("\n");
         assert!(
             lines.iter().any(|l| l.contains("├─")),
@@ -7213,10 +7431,15 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
             lines.iter().any(|l| l.contains("└─")),
             "last child uses └─:\n{joined}"
         );
-        assert!(
-            joined.contains("●"),
-            "a static working mark renders:\n{joined}"
-        );
+        let body = agent_panel_body_rect(area, false);
+        for row in agent_visible_rows(&app, area) {
+            let (x, y) = match row {
+                AgentVisibleRow::GroupHeader { y, .. } => (body.x, y),
+                AgentVisibleRow::Child { y, .. } => (body.x + 3, y),
+            };
+            assert_eq!(buffer[(x, y)].symbol(), "◌");
+            assert_eq!(buffer[(x, y)].fg, app.palette.yellow);
+        }
         // the state label is present.
         assert!(joined.contains("working"), "state label present:\n{joined}");
     }

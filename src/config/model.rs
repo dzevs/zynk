@@ -1011,6 +1011,8 @@ pub struct UiConfig {
     pub agent_panel_header: AgentPanelHeaderConfig,
     /// Agent status indicator style. Saved values are "dots" or "symbols". Default: "dots".
     pub status_indicators: StatusIndicatorStyle,
+    /// Animate working-agent marks in UI chrome. Default: true.
+    pub working_animation: bool,
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
@@ -1218,6 +1220,7 @@ impl Default for UiConfig {
             agent_panel_scope: AgentPanelScopeConfig::All,
             agent_panel_header: AgentPanelHeaderConfig::Scope,
             status_indicators: StatusIndicatorStyle::Dots,
+            working_animation: true,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
@@ -1508,6 +1511,21 @@ status_indicators = "symbols"
     }
 
     #[test]
+    fn working_animation_defaults_on_and_parses_false() {
+        assert!(Config::default().ui.working_animation);
+
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+working_animation = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.ui.working_animation);
+        assert!(toml::from_str::<Config>("[ui]\nworking_animation = \"yes\"\n").is_err());
+    }
+
+    #[test]
     fn pane_appearance_defaults_and_parse() {
         let default_config = Config::default();
         assert!(default_config.ui.pane_borders);
@@ -1670,12 +1688,13 @@ mobile_width_threshold = 96
     }
 
     #[test]
-    fn window_title_defaults_to_host_and_workspace_and_can_be_disabled() {
+    fn window_title_defaults_off_and_can_be_enabled_with_a_template() {
         let default_config = Config::default();
-        assert_eq!(default_config.ui.window_title, "{hostname}: {workspace}");
+        assert!(default_config.ui.window_title.is_empty());
 
-        let disabled: Config = toml::from_str("[ui]\nwindow_title = \"\"\n").unwrap();
-        assert!(disabled.ui.window_title.is_empty());
+        let enabled: Config =
+            toml::from_str("[ui]\nwindow_title = \"{hostname}: {workspace}\"\n").unwrap();
+        assert_eq!(enabled.ui.window_title, "{hostname}: {workspace}");
     }
 
     #[test]

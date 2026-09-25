@@ -261,6 +261,16 @@ impl InboxResponse {
         )
     }
 
+    /// The live caller lookup reached a server with an incompatible wire protocol.
+    pub fn protocol_mismatch(response: &crate::api::schema::ErrorResponse) -> Self {
+        Self::failed(
+            &response.error.code,
+            &response.error.message,
+            serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({})),
+            "restart or upgrade zynk as directed by the protocol mismatch",
+        )
+    }
+
     pub fn is_failed(&self) -> bool {
         matches!(self.result, ReadStatus::Failed)
     }
@@ -672,5 +682,24 @@ mod tests {
         let resp = InboxResponse::unidentified_caller("no pane");
         assert!(resp.is_failed());
         assert_eq!(resp.code.as_deref(), Some("caller_unidentified"));
+    }
+
+    #[test]
+    fn inbox_protocol_mismatch_preserves_the_typed_error() {
+        let response = crate::api::schema::ErrorResponse {
+            id: "cli:inbox:whoami".into(),
+            error: crate::api::schema::ErrorBody {
+                code: "protocol_mismatch".into(),
+                message: "client protocol 20 is newer than server protocol 19".into(),
+            },
+        };
+        let resp = InboxResponse::protocol_mismatch(&response);
+        assert!(resp.is_failed());
+        assert_eq!(resp.code.as_deref(), Some("protocol_mismatch"));
+        assert_eq!(
+            resp.message.as_deref(),
+            Some(response.error.message.as_str())
+        );
+        assert_eq!(resp.context.unwrap()["id"], "cli:inbox:whoami");
     }
 }

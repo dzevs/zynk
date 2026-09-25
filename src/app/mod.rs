@@ -39,6 +39,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
+pub(crate) const WORKING_ANIMATION_INTERVAL: Duration = Duration::from_millis(128);
+pub(crate) const WORKING_ANIMATION_TICK_STEP: u32 = 8;
 pub(crate) const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(30);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
@@ -144,6 +146,8 @@ pub struct App {
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
+    pub(crate) next_animation_tick: Option<Instant>,
+    pub(crate) rendered_animation_demand: state::WorkingAnimationDemand,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -607,6 +611,7 @@ impl App {
             mobile_switcher_scroll: 0,
             view: state::ViewState {
                 layout: state::ViewLayout::Desktop,
+                working_animation_demand: state::WorkingAnimationDemand::NONE,
                 agent_panel_presented_workspace_id: None,
                 popup_cursor_suppressed: false,
                 sidebar_rect: Rect::default(),
@@ -658,6 +663,8 @@ impl App {
             agent_panel_header: config.ui.agent_panel_header,
             agent_view_override: None,
             status_indicators: config.ui.status_indicators,
+            working_animation: config.ui.working_animation,
+            spinner_tick: 0,
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -795,6 +802,8 @@ impl App {
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
+            next_animation_tick: None,
+            rendered_animation_demand: state::WorkingAnimationDemand::NONE,
             session_save_deadline: None,
             session_save_thread: None,
             detached_process_children: Vec::new(),
@@ -1106,6 +1115,8 @@ impl App {
                         frame,
                     );
                 })?;
+                self.rendered_animation_demand = self.state.view.working_animation_demand;
+                self.sync_animation_timer(now);
                 self.state.host_cell_size = observed_cell_size;
                 if kitty_graphics_enabled {
                     crate::kitty_graphics::paint_local_pane_graphics(
@@ -1484,6 +1495,10 @@ impl App {
                     agent_panel_scope_from_config(config.ui.agent_panel_scope);
                 self.state.agent_panel_header = config.ui.agent_panel_header;
                 self.state.status_indicators = config.ui.status_indicators;
+                self.state.working_animation = config.ui.working_animation;
+                if !self.state.working_animation {
+                    self.next_animation_tick = None;
+                }
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
@@ -4318,6 +4333,45 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_toggles_working_animation_and_cancels_a_live_deadline() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-working-animation");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+        assert!(app.state.working_animation);
+        app.rendered_animation_demand = state::WorkingAnimationDemand::SIDEBAR;
+        app.sync_animation_timer(Instant::now());
+        assert!(app.next_animation_tick.is_some());
+
+        std::fs::write(
+            &path,
+            "[ui]\nworking_animation = false\nstatus_indicators = \"symbols\"\n",
+        )
+        .unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(!app.state.working_animation);
+        assert_eq!(app.next_animation_tick, None);
+        assert_eq!(
+            app.state.status_indicators,
+            crate::config::StatusIndicatorStyle::Symbols
+        );
+
+        std::fs::write(&path, "[ui]\nworking_animation = true\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(app.state.working_animation);
+        assert_eq!(
+            app.next_animation_tick, None,
+            "enabling waits for the next computed full frame"
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn b3_tab_bar_command_events_render_only_for_visible_changes() {
         let mut app = test_app();
         app.configure_tab_bar_status(
@@ -6630,34 +6684,34 @@ mod tests {
     }
 
     #[test]
-    fn working_nonactive_workspace_does_not_schedule_animation_redraw() {
+    fn working_animation_uses_one_128ms_step8_cadence_and_explicit_origin() {
+        use crate::app::state::WorkingAnimationDemand;
+
         let mut app = test_app();
         let now = Instant::now();
-        app.state.workspaces = vec![
-            Workspace::test_new("active-idle"),
-            Workspace::test_new("other-working"),
-        ];
-        app.state.ensure_test_terminals();
-        app.state.active = Some(0);
+        app.rendered_animation_demand = WorkingAnimationDemand::SIDEBAR;
 
-        // Active workspace 0 stays idle/unknown; workspace 1 has a Working pane.
-        let pane = app.state.workspaces[1].tabs[0].root_pane;
-        let tid = app.state.workspaces[1].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        app.state.terminals.get_mut(&tid).unwrap().state = AgentState::Working;
+        app.sync_animation_timer(now);
+        assert_eq!(
+            app.next_animation_tick,
+            Some(now + Duration::from_millis(128))
+        );
+        assert!(!app.tick_working_animation(now + Duration::from_millis(127)));
+        assert_eq!(app.state.spinner_tick, 0);
+        assert!(app.tick_working_animation(now + Duration::from_millis(128)));
+        assert_eq!(app.state.spinner_tick, 8);
 
-        app.next_resize_poll = now + Duration::from_secs(10);
-        app.git_refresh_in_flight = true;
-        app.next_auto_update_check = None;
-        app.next_agent_manifest_update_check = None;
-        assert!(!app.handle_scheduled_tasks(now, false));
-        assert!(!app.handle_scheduled_tasks(now + Duration::from_millis(200), false));
-        let later = now + Duration::from_millis(300);
-        app.state.config_diagnostic = Some("expired".into());
-        app.config_diagnostic_deadline = Some(later);
-        assert!(app.handle_scheduled_tasks(later, false));
-        assert!(app.state.config_diagnostic.is_none());
+        let request = app.render_dirty.take();
+        assert!(request.animation);
+        assert!(!request.generic);
+        assert_eq!(
+            app.next_animation_tick,
+            Some(now + Duration::from_millis(256))
+        );
+
+        app.rendered_animation_demand = WorkingAnimationDemand::NONE;
+        app.sync_animation_timer(now + Duration::from_millis(129));
+        assert_eq!(app.next_animation_tick, None);
     }
 
     #[test]

@@ -332,6 +332,8 @@ impl App {
             changed = true;
         }
 
+        changed |= self.tick_working_animation(now);
+
         if self
             .selection_autoscroll_deadline
             .is_some_and(|deadline| now >= deadline)
@@ -423,6 +425,37 @@ impl App {
 
     pub(crate) fn sync_agent_metadata_deadline(&mut self) {
         self.agent_metadata_deadline = self.state.next_agent_metadata_expiry();
+    }
+
+    pub(crate) fn sync_animation_timer(&mut self, now: Instant) {
+        if self.state.working_animation && !self.rendered_animation_demand.is_empty() {
+            self.next_animation_tick
+                .get_or_insert(now + super::WORKING_ANIMATION_INTERVAL);
+        } else {
+            self.next_animation_tick = None;
+        }
+    }
+
+    pub(crate) fn tick_working_animation(&mut self, now: Instant) -> bool {
+        if !self.state.working_animation || self.rendered_animation_demand.is_empty() {
+            self.next_animation_tick = None;
+            return false;
+        }
+        if self
+            .next_animation_tick
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+
+        self.state.spinner_tick = self
+            .state
+            .spinner_tick
+            .wrapping_add(super::WORKING_ANIMATION_TICK_STEP);
+        self.next_animation_tick = Some(now + super::WORKING_ANIMATION_INTERVAL);
+        self.render_dirty.request_animation();
+        self.render_notify.notify_one();
+        true
     }
 
     pub(crate) fn expire_due_metadata(&mut self, now: Instant) -> bool {
@@ -628,6 +661,7 @@ impl App {
             self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,
             self.pending_agent_resume_deadline,
+            self.next_animation_tick,
             self.session_save_deadline,
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,

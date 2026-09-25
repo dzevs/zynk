@@ -1,6 +1,8 @@
 // Modified by the zynk project: this file differs from the upstream version it was derived from.
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 
+mod support;
+
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output, Stdio};
@@ -17,7 +19,9 @@ fn closed_pipe_writer() -> Stdio {
 }
 
 fn run_with_closed_stdout(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_zynk"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
+    command
         .args(args)
         .stdout(closed_pipe_writer())
         .stderr(Stdio::piped())

@@ -118,10 +118,42 @@ fn native_send(
 
     let (message_type, trace_spec, text) = parse_type_trace_and_text(rest);
 
-    let send = |request: Request| super::send_request(&request);
+    let protocol_mismatch = std::cell::RefCell::new(None);
+    let send = |request: Request| {
+        if protocol_mismatch.borrow().is_some() {
+            return Err(std::io::Error::other(
+                "protocol mismatch already observed while resolving the send",
+            ));
+        }
+        let result = super::send_request(&request);
+        if let Err(err) = &result {
+            if let Some(response) = super::protocol_mismatch_response(err) {
+                *protocol_mismatch.borrow_mut() = Some(response.clone());
+            }
+        }
+        result
+    };
     let from = resolve_source(caller_pane_id_env(), send);
     let (to, resolution) = resolve_target(target, send);
     let message_id = new_message_id();
+
+    if let Some(response) = protocol_mismatch.into_inner() {
+        let outcome = SendOutcome::failed(
+            command,
+            message_id,
+            from,
+            to,
+            resolution,
+            message_type,
+            SendError {
+                code: response.error.code,
+                message: response.error.message,
+                context: None,
+            },
+        );
+        println!("{}", outcome.to_json());
+        return Ok(1);
+    }
 
     // Feature #107 (IM1): resolve the per-message trace_id. `--trace <id>` is validated
     // up front (explicit error on bad input, never a silent strip); `--trace inherit`
@@ -297,9 +329,39 @@ fn native_send(
                     }
                 }
                 other => {
-                    let detail = match other {
-                        Ok(response) => serde_json::to_string(&response).unwrap_or_default(),
-                        Err(err) => err.to_string(),
+                    let (detail, error) = match other {
+                        Ok(response) => {
+                            let detail = serde_json::to_string(&response).unwrap_or_default();
+                            (
+                                detail.clone(),
+                                SendError {
+                                    code: "transport_failed".into(),
+                                    message: format!("pane.send_input failed: {detail}"),
+                                    context: None,
+                                },
+                            )
+                        }
+                        Err(err) => match super::protocol_mismatch_response(&err) {
+                            Some(response) => (
+                                err.to_string(),
+                                SendError {
+                                    code: response.error.code.clone(),
+                                    message: response.error.message.clone(),
+                                    context: None,
+                                },
+                            ),
+                            None => {
+                                let detail = err.to_string();
+                                (
+                                    detail.clone(),
+                                    SendError {
+                                        code: "transport_failed".into(),
+                                        message: format!("pane.send_input failed: {detail}"),
+                                        context: None,
+                                    },
+                                )
+                            }
+                        },
                     };
                     let _ = append_delivery_event(DeliveryEventInput {
                         message_id: &record.message_id,
@@ -315,11 +377,7 @@ fn native_send(
                         to,
                         TargetResolution::Resolved,
                         message_type,
-                        SendError {
-                            code: "transport_failed".into(),
-                            message: format!("pane.send_input failed: {detail}"),
-                            context: None,
-                        },
+                        error,
                     );
                     println!("{}", attach_to_outcome(outcome, &record).to_json());
                     Ok(1)
@@ -521,11 +579,22 @@ pub(super) fn run_inbox_command(args: &[String]) -> std::io::Result<i32> {
     let agent = match agent {
         Some(a) => a,
         None => match caller_agent_label() {
-            Some(a) => a,
-            None => {
+            Ok(Some(a)) => a,
+            Ok(None) => {
                 let resp = crate::zynk::inbox::InboxResponse::unidentified_caller(
                     "no --agent given and the caller's pane identity could not be resolved",
                 );
+                return emit_inbox(&resp, json);
+            }
+            Err(err) => {
+                let resp = match super::protocol_mismatch_response(&err) {
+                    Some(response) => {
+                        crate::zynk::inbox::InboxResponse::protocol_mismatch(response)
+                    }
+                    None => crate::zynk::inbox::InboxResponse::unidentified_caller(format!(
+                        "no --agent given and the caller's pane identity could not be resolved: {err}"
+                    )),
+                };
                 return emit_inbox(&resp, json);
             }
         },
@@ -547,24 +616,26 @@ fn emit_inbox(resp: &crate::zynk::inbox::InboxResponse, json: bool) -> std::io::
 /// Resolve the caller's agent label from the live pane (`ZYNK_PANE_ID` → `pane.get`),
 /// preferring the HOOK-AUTHORITATIVE `agent_session.agent`, then the pane's
 /// authoritative `agent` label. Returns `None` when no pane/identity resolves.
-fn caller_agent_label() -> Option<String> {
-    let pane_id = caller_pane_id_env()?;
+fn caller_agent_label() -> std::io::Result<Option<String>> {
+    let Some(pane_id) = caller_pane_id_env() else {
+        return Ok(None);
+    };
     let value = super::send_request(&Request {
         id: "cli:inbox:whoami".into(),
         method: Method::PaneGet(PaneTarget {
             pane_id: pane_id.clone(),
         }),
-    })
-    .ok()?;
+    })?;
     if value.get("error").is_some() {
-        return None;
+        return Ok(None);
     }
     let pane = &value["result"]["pane"];
-    pane.get("agent_session")
+    Ok(pane
+        .get("agent_session")
         .and_then(|s| s.get("agent"))
         .and_then(|a| a.as_str())
         .or_else(|| pane.get("agent").and_then(|a| a.as_str()))
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
 /// `zynk whoami [--json]` — the caller's live identity, hook-authoritative.

@@ -153,7 +153,14 @@ impl AppState {
             return false;
         }
         let pane_id = selection.pane_id;
-        self.focus_pane(pane_id);
+        let focused_pane = self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .and_then(crate::workspace::Workspace::focused_pane_id);
+        if focused_pane != Some(pane_id) {
+            self.clear_selection();
+            return true;
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.scroll_pane_up(terminal_runtimes, pane_id, lines_per_notch)

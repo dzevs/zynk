@@ -482,12 +482,30 @@ pub(super) fn render_panes(
     render_pane_borders(app, ws, pane_infos, split_borders, frame);
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum LineWeight {
+    #[default]
+    None,
+    Light,
+    Heavy,
+}
+
+impl LineWeight {
+    fn is_drawn(self) -> bool {
+        self != Self::None
+    }
+
+    fn is_heavy(self) -> usize {
+        usize::from(self == Self::Heavy)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct LineCell {
-    up: bool,
-    down: bool,
-    left: bool,
-    right: bool,
+    up: LineWeight,
+    down: LineWeight,
+    left: LineWeight,
+    right: LineWeight,
 }
 
 fn render_pane_borders(
@@ -506,6 +524,11 @@ fn render_pane_borders(
         add_pane_border_cells(&mut cells, info);
     }
     add_split_border_cells(app.pane_gaps, split_borders, &mut cells);
+    if app.mode == Mode::Terminal && (ws.layout.pane_count() > 1 || pane_infos.len() > 1) {
+        if let Some(focused) = pane_infos.iter().find(|info| info.is_focused) {
+            apply_focused_pane_border_weight(&mut cells, focused, app.pane_gaps);
+        }
+    }
 
     let buf = frame.buffer_mut();
     let area = buf.area;
@@ -558,15 +581,23 @@ fn add_split_border_cells(
                     let left = x
                         .checked_sub(1)
                         .and_then(|left_x| cells.get(&(left_x, y)))
-                        .is_some_and(|cell| cell.left || cell.right);
+                        .is_some_and(|cell| cell.left.is_drawn() || cell.right.is_drawn());
                     let right = cells
                         .get(&(x.saturating_add(1), y))
-                        .is_some_and(|cell| cell.left || cell.right);
+                        .is_some_and(|cell| cell.left.is_drawn() || cell.right.is_drawn());
                     let cell = cells.entry((x, y)).or_default();
-                    cell.up |= y > split.area.y;
-                    cell.down |= y + 1 < end;
-                    cell.left |= left;
-                    cell.right |= right;
+                    if y > split.area.y {
+                        cell.up = cell.up.max(LineWeight::Light);
+                    }
+                    if y + 1 < end {
+                        cell.down = cell.down.max(LineWeight::Light);
+                    }
+                    if left {
+                        cell.left = cell.left.max(LineWeight::Light);
+                    }
+                    if right {
+                        cell.right = cell.right.max(LineWeight::Light);
+                    }
                 }
             }
             ratatui::layout::Direction::Vertical => {
@@ -579,15 +610,23 @@ fn add_split_border_cells(
                     let up = y
                         .checked_sub(1)
                         .and_then(|up_y| cells.get(&(x, up_y)))
-                        .is_some_and(|cell| cell.up || cell.down);
+                        .is_some_and(|cell| cell.up.is_drawn() || cell.down.is_drawn());
                     let down = cells
                         .get(&(x, y.saturating_add(1)))
-                        .is_some_and(|cell| cell.up || cell.down);
+                        .is_some_and(|cell| cell.up.is_drawn() || cell.down.is_drawn());
                     let cell = cells.entry((x, y)).or_default();
-                    cell.left |= x > split.area.x;
-                    cell.right |= x + 1 < end;
-                    cell.up |= up;
-                    cell.down |= down;
+                    if x > split.area.x {
+                        cell.left = cell.left.max(LineWeight::Light);
+                    }
+                    if x + 1 < end {
+                        cell.right = cell.right.max(LineWeight::Light);
+                    }
+                    if up {
+                        cell.up = cell.up.max(LineWeight::Light);
+                    }
+                    if down {
+                        cell.down = cell.down.max(LineWeight::Light);
+                    }
                 }
             }
         }
@@ -608,29 +647,75 @@ fn add_pane_border_cells(
     if info.borders.contains(Borders::TOP) {
         for x in rect.x..=right {
             let cell = cells.entry((x, rect.y)).or_default();
-            cell.left |= x > rect.x;
-            cell.right |= x < right;
+            if x > rect.x {
+                cell.left = cell.left.max(LineWeight::Light);
+            }
+            if x < right {
+                cell.right = cell.right.max(LineWeight::Light);
+            }
         }
     }
     if info.borders.contains(Borders::BOTTOM) {
         for x in rect.x..=right {
             let cell = cells.entry((x, bottom)).or_default();
-            cell.left |= x > rect.x;
-            cell.right |= x < right;
+            if x > rect.x {
+                cell.left = cell.left.max(LineWeight::Light);
+            }
+            if x < right {
+                cell.right = cell.right.max(LineWeight::Light);
+            }
         }
     }
     if info.borders.contains(Borders::LEFT) {
         for y in rect.y..=bottom {
             let cell = cells.entry((rect.x, y)).or_default();
-            cell.up |= y > rect.y;
-            cell.down |= y < bottom;
+            if y > rect.y {
+                cell.up = cell.up.max(LineWeight::Light);
+            }
+            if y < bottom {
+                cell.down = cell.down.max(LineWeight::Light);
+            }
         }
     }
     if info.borders.contains(Borders::RIGHT) {
         for y in rect.y..=bottom {
             let cell = cells.entry((right, y)).or_default();
-            cell.up |= y > rect.y;
-            cell.down |= y < bottom;
+            if y > rect.y {
+                cell.up = cell.up.max(LineWeight::Light);
+            }
+            if y < bottom {
+                cell.down = cell.down.max(LineWeight::Light);
+            }
+        }
+    }
+}
+
+fn apply_focused_pane_border_weight(
+    cells: &mut std::collections::HashMap<(u16, u16), LineCell>,
+    focused: &PaneInfo,
+    pane_gaps: bool,
+) {
+    for (&(x, y), line) in cells {
+        if !line_touches_pane(x, y, focused, pane_gaps) {
+            continue;
+        }
+        if line.up.is_drawn()
+            && y.checked_sub(1)
+                .is_some_and(|next_y| line_touches_pane(x, next_y, focused, pane_gaps))
+        {
+            line.up = LineWeight::Heavy;
+        }
+        if line.down.is_drawn() && line_touches_pane(x, y.saturating_add(1), focused, pane_gaps) {
+            line.down = LineWeight::Heavy;
+        }
+        if line.left.is_drawn()
+            && x.checked_sub(1)
+                .is_some_and(|next_x| line_touches_pane(next_x, y, focused, pane_gaps))
+        {
+            line.left = LineWeight::Heavy;
+        }
+        if line.right.is_drawn() && line_touches_pane(x.saturating_add(1), y, focused, pane_gaps) {
+            line.right = LineWeight::Heavy;
         }
     }
 }
@@ -713,22 +798,68 @@ fn render_pane_border_titles(
 }
 
 fn line_cell_symbol(line: LineCell) -> &'static str {
-    match (line.up, line.down, line.left, line.right) {
-        (true, true, true, true) => "┼",
-        (true, true, true, false) => "┤",
-        (true, true, false, true) => "├",
-        (true, false, true, true) => "┴",
-        (false, true, true, true) => "┬",
+    let topology = (
+        line.up.is_drawn(),
+        line.down.is_drawn(),
+        line.left.is_drawn(),
+        line.right.is_drawn(),
+    );
+    match topology {
+        (true, true, true, true) => {
+            const GLYPHS: [&str; 16] = [
+                "┼", "┾", "┽", "┿", "╁", "╆", "╅", "╈", "╀", "╄", "╃", "╇", "╂", "╊", "╉", "╋",
+            ];
+            GLYPHS[line.up.is_heavy() * 8
+                + line.down.is_heavy() * 4
+                + line.left.is_heavy() * 2
+                + line.right.is_heavy()]
+        }
+        (true, true, true, false) => {
+            const GLYPHS: [&str; 8] = ["┤", "┥", "┧", "┪", "┦", "┩", "┨", "┫"];
+            GLYPHS[line.up.is_heavy() * 4 + line.down.is_heavy() * 2 + line.left.is_heavy()]
+        }
+        (true, true, false, true) => {
+            const GLYPHS: [&str; 8] = ["├", "┝", "┟", "┢", "┞", "┡", "┠", "┣"];
+            GLYPHS[line.up.is_heavy() * 4 + line.down.is_heavy() * 2 + line.right.is_heavy()]
+        }
+        (true, false, true, true) => {
+            const GLYPHS: [&str; 8] = ["┴", "┶", "┵", "┷", "┸", "┺", "┹", "┻"];
+            GLYPHS[line.up.is_heavy() * 4 + line.left.is_heavy() * 2 + line.right.is_heavy()]
+        }
+        (false, true, true, true) => {
+            const GLYPHS: [&str; 8] = ["┬", "┮", "┭", "┯", "┰", "┲", "┱", "┳"];
+            GLYPHS[line.down.is_heavy() * 4 + line.left.is_heavy() * 2 + line.right.is_heavy()]
+        }
         (true, true, false, false) | (true, false, false, false) | (false, true, false, false) => {
-            "│"
+            if line.up == LineWeight::Heavy || line.down == LineWeight::Heavy {
+                "┃"
+            } else {
+                "│"
+            }
         }
         (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => {
-            "─"
+            if line.left == LineWeight::Heavy || line.right == LineWeight::Heavy {
+                "━"
+            } else {
+                "─"
+            }
         }
-        (false, true, false, true) => "┌",
-        (false, true, true, false) => "┐",
-        (true, false, false, true) => "└",
-        (true, false, true, false) => "┘",
+        (false, true, false, true) => {
+            const GLYPHS: [&str; 4] = ["┌", "┍", "┎", "┏"];
+            GLYPHS[line.down.is_heavy() * 2 + line.right.is_heavy()]
+        }
+        (false, true, true, false) => {
+            const GLYPHS: [&str; 4] = ["┐", "┑", "┒", "┓"];
+            GLYPHS[line.down.is_heavy() * 2 + line.left.is_heavy()]
+        }
+        (true, false, false, true) => {
+            const GLYPHS: [&str; 4] = ["└", "┕", "┖", "┗"];
+            GLYPHS[line.up.is_heavy() * 2 + line.right.is_heavy()]
+        }
+        (true, false, true, false) => {
+            const GLYPHS: [&str; 4] = ["┘", "┙", "┚", "┛"];
+            GLYPHS[line.up.is_heavy() * 2 + line.left.is_heavy()]
+        }
         _ => "",
     }
 }
@@ -1026,6 +1157,82 @@ mod tests {
             &app.view.split_borders,
             frame,
         );
+    }
+
+    fn weighted_line(topology: u8, heavy: u8) -> LineCell {
+        fn arm(topology: u8, heavy: u8, bit: u8) -> LineWeight {
+            if topology & bit == 0 {
+                LineWeight::None
+            } else if heavy & bit != 0 {
+                LineWeight::Heavy
+            } else {
+                LineWeight::Light
+            }
+        }
+
+        const UP: u8 = 1 << 3;
+        const DOWN: u8 = 1 << 2;
+        const LEFT: u8 = 1 << 1;
+        const RIGHT: u8 = 1;
+        LineCell {
+            up: arm(topology, heavy, UP),
+            down: arm(topology, heavy, DOWN),
+            left: arm(topology, heavy, LEFT),
+            right: arm(topology, heavy, RIGHT),
+        }
+    }
+
+    fn assert_weighted_line_table(topology: u8, masks: &[u8], expected: &[&str]) {
+        assert_eq!(masks.len(), expected.len());
+        for (&heavy, &symbol) in masks.iter().zip(expected) {
+            assert_eq!(
+                line_cell_symbol(weighted_line(topology, heavy)),
+                symbol,
+                "unexpected glyph for topology {topology:04b}, heavy arms {heavy:04b}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_weight_border_glyph_table_is_exhaustive() {
+        const U: u8 = 1 << 3;
+        const D: u8 = 1 << 2;
+        const L: u8 = 1 << 1;
+        const R: u8 = 1;
+
+        assert_weighted_line_table(
+            U | D | L | R,
+            &(0..16).collect::<Vec<_>>(),
+            &[
+                "┼", "┾", "┽", "┿", "╁", "╆", "╅", "╈", "╀", "╄", "╃", "╇", "╂", "╊", "╉", "╋",
+            ],
+        );
+        assert_weighted_line_table(
+            U | D | L,
+            &[0, L, D, D | L, U, U | L, U | D, U | D | L],
+            &["┤", "┥", "┧", "┪", "┦", "┩", "┨", "┫"],
+        );
+        assert_weighted_line_table(
+            U | D | R,
+            &[0, R, D, D | R, U, U | R, U | D, U | D | R],
+            &["├", "┝", "┟", "┢", "┞", "┡", "┠", "┣"],
+        );
+        assert_weighted_line_table(
+            U | L | R,
+            &[0, R, L, L | R, U, U | R, U | L, U | L | R],
+            &["┴", "┶", "┵", "┷", "┸", "┺", "┹", "┻"],
+        );
+        assert_weighted_line_table(
+            D | L | R,
+            &[0, R, L, L | R, D, D | R, D | L, D | L | R],
+            &["┬", "┮", "┭", "┯", "┰", "┲", "┱", "┳"],
+        );
+        assert_weighted_line_table(D | R, &[0, R, D, D | R], &["┌", "┍", "┎", "┏"]);
+        assert_weighted_line_table(D | L, &[0, L, D, D | L], &["┐", "┑", "┒", "┓"]);
+        assert_weighted_line_table(U | R, &[0, R, U, U | R], &["└", "┕", "┖", "┗"]);
+        assert_weighted_line_table(U | L, &[0, L, U, U | L], &["┘", "┙", "┚", "┛"]);
+        assert_weighted_line_table(U | D, &[0, U, D, U | D], &["│", "┃", "┃", "┃"]);
+        assert_weighted_line_table(L | R, &[0, L, R, L | R], &["─", "━", "━", "━"]);
     }
 
     #[test]
@@ -1372,10 +1579,264 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(2, 2)].symbol(), "┼");
+        assert_eq!(buffer[(2, 2)].symbol(), "╃");
         assert_eq!(buffer[(2, 2)].style().fg, Some(app.palette.accent));
-        assert_eq!(buffer[(2, 1)].symbol(), "│");
+        assert_eq!(buffer[(2, 1)].symbol(), "┃");
         assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.accent));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum BorderFixtureShape {
+        Horizontal,
+        Vertical,
+        Tee,
+        Cross,
+    }
+
+    fn border_fixture_workspace(shape: BorderFixtureShape) -> Workspace {
+        let mut workspace = Workspace::test_new("border-fixture");
+        let root = workspace.tabs[0].root_pane;
+        match shape {
+            BorderFixtureShape::Horizontal => {
+                workspace.test_split(ratatui::layout::Direction::Horizontal);
+            }
+            BorderFixtureShape::Vertical => {
+                workspace.test_split(ratatui::layout::Direction::Vertical);
+            }
+            BorderFixtureShape::Tee => {
+                workspace.test_split(ratatui::layout::Direction::Horizontal);
+                workspace.test_split(ratatui::layout::Direction::Vertical);
+            }
+            BorderFixtureShape::Cross => {
+                workspace.test_split(ratatui::layout::Direction::Horizontal);
+                workspace.test_split(ratatui::layout::Direction::Vertical);
+                workspace.tabs[0].layout.focus_pane(root);
+                workspace.test_split(ratatui::layout::Direction::Vertical);
+            }
+        }
+        workspace.tabs[0].layout.focus_pane(root);
+        workspace
+    }
+
+    fn rendered_border_cells(
+        app: &AppState,
+        workspace: &Workspace,
+        area: Rect,
+    ) -> Vec<((u16, u16), String)> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                .unwrap();
+        terminal
+            .draw(|frame| render_view_pane_borders(app, workspace, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut cells = Vec::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let symbol = buffer[(x, y)].symbol();
+                if symbol != " " {
+                    cells.push(((x, y), symbol.to_string()));
+                }
+            }
+        }
+        cells
+    }
+
+    fn is_heavy_border_symbol(symbol: &str) -> bool {
+        !matches!(
+            symbol,
+            " " | "│" | "─" | "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼"
+        )
+    }
+
+    #[test]
+    fn focused_thick_border_fixtures_preserve_geometry_for_every_split_shape() {
+        let area = Rect::new(0, 0, 12, 8);
+        for shape in [
+            BorderFixtureShape::Horizontal,
+            BorderFixtureShape::Vertical,
+            BorderFixtureShape::Tee,
+            BorderFixtureShape::Cross,
+        ] {
+            for pane_gaps in [false, true] {
+                for pane_outer_borders in [false, true] {
+                    let workspace = border_fixture_workspace(shape);
+                    let raw_infos = workspace.tabs[0].layout.panes(area);
+                    let infos = apply_pane_chrome(raw_infos, true, pane_gaps, pane_outer_borders);
+                    let splits = workspace.tabs[0].layout.splits(area);
+                    let geometry_before = infos
+                        .iter()
+                        .map(|info| {
+                            (
+                                info.id,
+                                info.rect,
+                                info.inner_rect,
+                                info.scrollbar_rect,
+                                info.borders,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let drag_targets_before = splits
+                        .iter()
+                        .map(|split| {
+                            (
+                                split.pos,
+                                split.direction,
+                                split.ratio.to_bits(),
+                                split.area,
+                                split.path.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+
+                    let mut app = AppState::test_new();
+                    app.mode = Mode::Terminal;
+                    app.pane_gaps = pane_gaps;
+                    app.pane_outer_borders = pane_outer_borders;
+                    app.view.terminal_area = area;
+                    app.view.pane_infos = infos;
+                    app.view.split_borders = splits;
+                    let terminal_cells = rendered_border_cells(&app, &workspace, area);
+                    assert!(
+                        terminal_cells
+                            .iter()
+                            .any(|(_, symbol)| is_heavy_border_symbol(symbol)),
+                        "{shape:?}, gaps={pane_gaps}, outer={pane_outer_borders} has no heavy focused edge"
+                    );
+
+                    app.mode = Mode::Navigate;
+                    let navigate_cells = rendered_border_cells(&app, &workspace, area);
+                    assert!(
+                        navigate_cells
+                            .iter()
+                            .all(|(_, symbol)| !is_heavy_border_symbol(symbol)),
+                        "{shape:?}, gaps={pane_gaps}, outer={pane_outer_borders} stayed heavy outside Terminal mode"
+                    );
+                    assert_eq!(
+                        terminal_cells
+                            .iter()
+                            .map(|(position, _)| *position)
+                            .collect::<Vec<_>>(),
+                        navigate_cells
+                            .iter()
+                            .map(|(position, _)| *position)
+                            .collect::<Vec<_>>(),
+                        "{shape:?}, gaps={pane_gaps}, outer={pane_outer_borders} changed border geometry"
+                    );
+                    if pane_outer_borders {
+                        assert_eq!(
+                            terminal_cells.first(),
+                            Some(&((0, 0), "┏".to_string())),
+                            "{shape:?}, gaps={pane_gaps} did not render the focused outer corner heavy"
+                        );
+                    } else {
+                        assert!(
+                            terminal_cells
+                                .iter()
+                                .all(|(position, _)| *position != (0, 0)),
+                            "{shape:?}, gaps={pane_gaps} restored a disabled outer corner"
+                        );
+                    }
+
+                    assert_eq!(
+                        app.view
+                            .pane_infos
+                            .iter()
+                            .map(|info| {
+                                (
+                                    info.id,
+                                    info.rect,
+                                    info.inner_rect,
+                                    info.scrollbar_rect,
+                                    info.borders,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                        geometry_before,
+                        "{shape:?}, gaps={pane_gaps}, outer={pane_outer_borders} changed pane hit boxes"
+                    );
+                    assert_eq!(
+                        app.view
+                            .split_borders
+                            .iter()
+                            .map(|split| {
+                                (
+                                    split.pos,
+                                    split.direction,
+                                    split.ratio.to_bits(),
+                                    split.area,
+                                    split.path.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                        drag_targets_before,
+                        "{shape:?}, gaps={pane_gaps}, outer={pane_outer_borders} changed split drag targets"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn focused_border_labels_overlay_heavy_edges_without_moving() {
+        let area = Rect::new(0, 0, 20, 6);
+        let mut workspace = border_fixture_workspace(BorderFixtureShape::Horizontal);
+        let root = workspace.tabs[0].root_pane;
+        workspace.tabs[0].layout.focus_pane(root);
+        let infos = apply_pane_chrome(workspace.tabs[0].layout.panes(area), true, false, true);
+        let focused = infos.iter().find(|info| info.id == root).unwrap().clone();
+
+        let terminal_id = workspace.tabs[0].panes[&root].attached_terminal_id.clone();
+        let mut terminal_state = TerminalState::new(terminal_id.clone(), "/tmp".into());
+        terminal_state.set_manual_label("focus".into());
+
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.view.terminal_area = area;
+        app.view.pane_infos = infos;
+        app.view.split_borders = workspace.tabs[0].layout.splits(area);
+        app.terminals.insert(terminal_id, terminal_state);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 6)).unwrap();
+        terminal
+            .draw(|frame| render_view_pane_borders(&app, &workspace, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let start_x = focused.rect.x + 1;
+
+        assert_eq!(buffer[(focused.rect.x, focused.rect.y)].symbol(), "┏");
+        assert_eq!(buffer[(start_x + 1, focused.rect.y)].symbol(), "f");
+        assert!(buffer[(start_x + 1, focused.rect.y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(buffer[(start_x + 7, focused.rect.y)].symbol(), "━");
+    }
+
+    #[test]
+    fn single_pane_border_stays_light_in_terminal_mode() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.view.terminal_area = Rect::new(0, 0, 8, 4);
+        let workspace = Workspace::test_new("single");
+        let pane = workspace.tabs[0].root_pane;
+        app.view.pane_infos = vec![PaneInfo {
+            id: pane,
+            rect: app.view.terminal_area,
+            inner_rect: Rect::new(1, 1, 6, 2),
+            scrollbar_rect: None,
+            borders: Borders::ALL,
+            is_focused: true,
+        }];
+
+        let cells = rendered_border_cells(&app, &workspace, app.view.terminal_area);
+        assert!(
+            cells
+                .iter()
+                .all(|(_, symbol)| !is_heavy_border_symbol(symbol)),
+            "single-pane chrome must keep the 3.1.0 light border"
+        );
     }
 
     #[test]

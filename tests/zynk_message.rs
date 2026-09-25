@@ -303,6 +303,7 @@ struct CliOutput {
 /// `zynk_pane_id` is `Some`, set `ZYNK_PANE_ID`; when `None`, remove it.
 fn run_cli(fixture: &Fixture, zynk_pane_id: Option<&str>, args: &[&str]) -> CliOutput {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
     command.args(args);
     command.env("XDG_CONFIG_HOME", &fixture.config_home);
     command.env("XDG_RUNTIME_DIR", &fixture.runtime_dir);
@@ -872,6 +873,7 @@ fn run_cli_dead_socket(base: &Path, args: &[&str]) -> CliOutput {
     assert!(!socket_path.exists(), "dead socket must not exist");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_zynk"));
+    support::scrub_pane_injected_env(&mut command);
     command.args(args);
     command.env("XDG_CONFIG_HOME", &config_home);
     command.env("XDG_RUNTIME_DIR", &runtime_dir);
@@ -880,7 +882,6 @@ fn run_cli_dead_socket(base: &Path, args: &[&str]) -> CliOutput {
     command.env_remove("ZYNK_HOME");
     command.env_remove("ZYNK_CLIENT_SOCKET_PATH");
     command.env_remove("ZYNK_ENV");
-    command.env_remove("ZYNK_PANE_ID");
     let output = command.output().expect("run zynk CLI");
     CliOutput {
         code: output.status.code().unwrap_or(-1),

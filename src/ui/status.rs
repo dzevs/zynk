@@ -16,6 +16,16 @@ use crate::{
     detect::AgentState,
 };
 
+const WORKING_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub(super) fn spinner_frame(tick: u32) -> &'static str {
+    WORKING_SPINNER_FRAMES[(tick as usize / 8) % WORKING_SPINNER_FRAMES.len()]
+}
+
+pub(super) fn is_spinner_frame(symbol: &str) -> bool {
+    WORKING_SPINNER_FRAMES.contains(&symbol)
+}
+
 pub(crate) fn copy_feedback_rect(
     area: Rect,
     feedback: &CopyFeedback,
@@ -230,8 +240,13 @@ pub(super) fn agent_icon(
     state: AgentState,
     seen: bool,
     indicator_style: StatusIndicatorStyle,
+    working_animation: bool,
+    tick: u32,
     p: &Palette,
 ) -> (&'static str, Style) {
+    if state == AgentState::Working && working_animation {
+        return (spinner_frame(tick), Style::default().fg(p.yellow));
+    }
     if indicator_style == StatusIndicatorStyle::Symbols {
         return state_icon(state, seen, indicator_style, p);
     }
@@ -286,30 +301,112 @@ mod tests {
     }
 
     #[test]
-    fn static_agent_icon_preserves_navigator_and_mobile_grammar() {
+    fn working_animation_composes_with_navigator_and_mobile_grammar() {
         let p = crate::app::state::Palette::tokyo_night();
-        // Working no longer animates; the other surface-specific marks stay intact.
-        let (gw, sw) = agent_icon(AgentState::Working, false, StatusIndicatorStyle::Dots, &p);
-        assert_eq!(gw, "●");
+        let (gw, sw) = agent_icon(
+            AgentState::Working,
+            false,
+            StatusIndicatorStyle::Dots,
+            true,
+            8,
+            &p,
+        );
+        assert_eq!(gw, "⠙");
         assert_eq!(sw.fg, Some(p.yellow));
-        // idle keeps ● (done/unseen) / ✓ (idle/seen), NOT ○.
         assert_eq!(
-            agent_icon(AgentState::Idle, false, StatusIndicatorStyle::Dots, &p).0,
+            agent_icon(
+                AgentState::Working,
+                false,
+                StatusIndicatorStyle::Symbols,
+                true,
+                16,
+                &p,
+            )
+            .0,
+            "⠹"
+        );
+        assert_eq!(
+            agent_icon(
+                AgentState::Working,
+                false,
+                StatusIndicatorStyle::Dots,
+                false,
+                8,
+                &p,
+            )
+            .0,
             "●"
         );
         assert_eq!(
-            agent_icon(AgentState::Idle, true, StatusIndicatorStyle::Dots, &p).0,
+            agent_icon(
+                AgentState::Working,
+                false,
+                StatusIndicatorStyle::Symbols,
+                false,
+                8,
+                &p,
+            )
+            .0,
+            "◐"
+        );
+        // idle keeps ● (done/unseen) / ✓ (idle/seen), NOT ○.
+        assert_eq!(
+            agent_icon(
+                AgentState::Idle,
+                false,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            )
+            .0,
+            "●"
+        );
+        assert_eq!(
+            agent_icon(
+                AgentState::Idle,
+                true,
+                StatusIndicatorStyle::Dots,
+                false,
+                8,
+                &p,
+            )
+            .0,
             "✓"
         );
         // unknown keeps ○, NOT ◌.
         assert_eq!(
-            agent_icon(AgentState::Unknown, false, StatusIndicatorStyle::Dots, &p).0,
+            agent_icon(
+                AgentState::Unknown,
+                false,
+                StatusIndicatorStyle::Dots,
+                true,
+                8,
+                &p,
+            )
+            .0,
             "○"
         );
         // blocked already ◉ red.
-        let (gb, sb) = agent_icon(AgentState::Blocked, false, StatusIndicatorStyle::Dots, &p);
+        let (gb, sb) = agent_icon(
+            AgentState::Blocked,
+            false,
+            StatusIndicatorStyle::Dots,
+            true,
+            8,
+            &p,
+        );
         assert_eq!(gb, "◉");
         assert_eq!(sb.fg, Some(p.red));
+    }
+
+    #[test]
+    fn working_spinner_uses_the_exact_v301_braille_sequence() {
+        let expected = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        for (index, glyph) in expected.into_iter().enumerate() {
+            assert_eq!(spinner_frame((index as u32) * 8), glyph);
+        }
+        assert_eq!(spinner_frame(80), "⠋");
     }
 
     #[test]

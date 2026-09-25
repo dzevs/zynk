@@ -395,7 +395,7 @@ impl App {
 
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
         if !handled_pane_double_click {
-            self.focus_pane_before_mouse_press(mouse);
+            self.focus_pane_before_mouse_dispatch(mouse);
         }
 
         let previous_agent_panel_sort = self.state.agent_panel_sort;
@@ -498,20 +498,10 @@ impl App {
         }
     }
 
-    fn focus_pane_before_mouse_press(&mut self, mouse: MouseEvent) {
-        if !matches!(self.state.mode, Mode::Terminal | Mode::Resize)
-            || !matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
-            )
-        {
-            return;
-        }
-
+    fn focus_pane_before_mouse_dispatch(&mut self, mouse: MouseEvent) {
         let Some(pane_id) = self
             .state
-            .pane_at(mouse.column, mouse.row)
-            .map(|info| info.id)
+            .pane_focus_target_before_mouse_dispatch(&self.terminal_runtimes, mouse)
         else {
             return;
         };
