@@ -7122,7 +7122,7 @@ mod tests {
     use super::*;
 
     use crate::app::AppState;
-    use crate::protocol::{CellData, CursorState};
+    use crate::protocol::{CellData, CursorState, TerminalFrame};
     use unicode_width::UnicodeWidthStr;
 
     #[test]
@@ -7801,6 +7801,60 @@ mod tests {
         match read_server_message(bytes) {
             ServerMessage::Frame(frame) => frame,
             other => panic!("expected frame, got {other:?}"),
+        }
+    }
+
+    fn read_server_terminal_frame(bytes: Vec<u8>) -> TerminalFrame {
+        match read_server_message(bytes) {
+            ServerMessage::Terminal(frame) => frame,
+            other => panic!("expected terminal frame, got {other:?}"),
+        }
+    }
+
+    fn decode_terminal_ansi_frames(frames: &[&TerminalFrame]) -> FrameData {
+        let first = frames.first().expect("at least one terminal frame");
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(
+            first.width,
+            first.height,
+            b"",
+        );
+        for frame in frames {
+            assert_eq!((frame.width, frame.height), (first.width, first.height));
+            runtime.test_process_pty_bytes(&frame.bytes);
+        }
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+            first.width,
+            first.height,
+        ))
+        .expect("terminal ANSI decoder backend");
+        terminal
+            .draw(|frame| runtime.render(frame, frame.area(), false))
+            .expect("render decoded terminal ANSI state");
+        FrameData::from_ratatui_buffer(terminal.backend().buffer(), None)
+    }
+
+    fn assert_visible_frame_cells_eq(actual: &FrameData, expected: &FrameData) {
+        assert_eq!(
+            (actual.width, actual.height),
+            (expected.width, expected.height)
+        );
+        assert_eq!(actual.cells.len(), expected.cells.len());
+        for (index, (actual_cell, expected_cell)) in
+            actual.cells.iter().zip(expected.cells.iter()).enumerate()
+        {
+            assert!(
+                cells_equivalent_for_frame_compare(
+                    &actual.cells,
+                    &expected.cells,
+                    usize::from(actual.width),
+                    index,
+                    actual_cell,
+                    expected_cell,
+                ),
+                "decoded terminal cell mismatch at index {index} (x={}, y={}): {actual_cell:?} != {expected_cell:?}",
+                index % usize::from(actual.width),
+                index / usize::from(actual.width),
+            );
         }
     }
 
@@ -8755,159 +8809,303 @@ mod tests {
 
     fn working_animation_allocation_server(
         agent_count: usize,
-    ) -> (HeadlessServer, std::sync::mpsc::Receiver<Vec<u8>>) {
+        visible_pane_count: usize,
+        client_count: usize,
+    ) -> (HeadlessServer, Vec<std::sync::mpsc::Receiver<Vec<u8>>>) {
+        assert!(agent_count >= visible_pane_count);
+        assert!(visible_pane_count > 0);
+        assert!(client_count > 0);
         let mut server = test_headless_server();
-        server.app.state.workspaces = (0..agent_count)
-            .map(|index| crate::workspace::Workspace::test_new(&format!("working-{index}")))
-            .collect();
+        let mut active_workspace = crate::workspace::Workspace::test_new("working-active");
+        for _ in 1..visible_pane_count {
+            active_workspace.test_split(ratatui::layout::Direction::Horizontal);
+        }
+        server.app.state.workspaces = vec![active_workspace];
+        server
+            .app
+            .state
+            .workspaces
+            .extend((visible_pane_count..agent_count).map(|index| {
+                crate::workspace::Workspace::test_new(&format!("working-background-{index}"))
+            }));
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
         server.app.state.mode = crate::app::Mode::Terminal;
         server.app.state.ensure_test_terminals();
-        for workspace_index in 0..agent_count {
-            let pane_id = server.app.state.workspaces[workspace_index].tabs[0].root_pane;
-            let terminal_id = server.app.state.workspaces[workspace_index].tabs[0].panes[&pane_id]
-                .attached_terminal_id
-                .clone();
-            server
-                .app
-                .state
-                .terminals
-                .get_mut(&terminal_id)
-                .expect("allocation-probe terminal")
-                .set_detected_state(
-                    Some(crate::detect::Agent::Claude),
-                    crate::detect::AgentState::Working,
-                );
+        for terminal in server.app.state.terminals.values_mut() {
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Working,
+            );
         }
 
-        let (writer, _control_rx, render_rx) = test_client_writer();
-        server.clients.insert(
-            1,
-            ClientConnection::new(
-                (120, 40),
-                crate::kitty_graphics::HostCellSize::default(),
-                crate::terminal_theme::TerminalTheme::default(),
-                None,
-                1,
-                RenderEncoding::SemanticFrame,
-                Some(writer),
-            ),
-        );
+        let render_receivers = (1..=client_count)
+            .map(|client_id| {
+                add_animation_test_client(
+                    &mut server,
+                    client_id as u64,
+                    (240, 80),
+                    RenderEncoding::SemanticFrame,
+                )
+            })
+            .collect();
         server.foreground_client_id = Some(1);
         server.sync_foreground_client_state();
         server.resize_shared_runtime_to_effective_size();
-        (server, render_rx)
+        (server, render_receivers)
     }
 
-    fn assert_working_animation_boundary_allocation_shape(
+    #[derive(Clone, Copy, Debug)]
+    struct WorkingAnimationAllocationSample {
+        agents: usize,
+        visible_panes: usize,
+        clients: usize,
+        animated_cells: usize,
+        scheduler_allocations: usize,
+        frame_ownership_allocations: usize,
+        frames_sent: usize,
+        serialized_bytes: usize,
+        full_renders: usize,
+        fallbacks: usize,
+    }
+
+    fn measure_working_animation_boundary_allocations(
+        agent_count: usize,
+        visible_pane_count: usize,
+        client_count: usize,
         begin_count: fn(),
         end_count: fn() -> usize,
-    ) {
-        let mut expected_frame_ownership_allocations = None;
-        for agent_count in [1, 15] {
-            let (mut server, render_rx) = working_animation_allocation_server(agent_count);
-            server.app.git_refresh_in_flight = true;
-            server.app.next_auto_update_check = None;
-            server.app.next_agent_manifest_update_check = None;
+    ) -> WorkingAnimationAllocationSample {
+        let (mut server, render_receivers) =
+            working_animation_allocation_server(agent_count, visible_pane_count, client_count);
+        server.app.git_refresh_in_flight = true;
+        server.app.next_auto_update_check = None;
+        server.app.next_agent_manifest_update_check = None;
 
-            server.render_and_stream();
-            render_rx
+        server.render_and_stream();
+        assert_eq!(
+            server.app.state.view.pane_infos.len(),
+            visible_pane_count,
+            "fixed geometry must show every allocation-probe pane"
+        );
+        for receiver in &render_receivers {
+            receiver
                 .recv_timeout(Duration::from_millis(100))
                 .expect("allocation-probe full-render warm-up");
-            let first_deadline = server
-                .app
-                .next_animation_tick
-                .expect("full render arms animation");
-            assert_eq!(
-                server.handle_scheduled_tasks_headless_with_impact(first_deadline, false),
-                ScheduledRenderImpact::Animation
-            );
-            let first_request = server.app.render_dirty.take();
-            assert!(first_request.animation);
-            assert_eq!(
-                retained_render_plan(RetainedRenderInput {
-                    needs_full_render: false,
-                    animation: first_request.animation,
-                    pty: PtyRenderState::Clean,
-                }),
-                RetainedRenderPlan::Animation
-            );
-            assert!(server.render_retained_animation_update_and_stream());
-            render_rx
+        }
+        let first_deadline = server
+            .app
+            .next_animation_tick
+            .expect("full render arms animation");
+        assert_eq!(
+            server.handle_scheduled_tasks_headless_with_impact(first_deadline, false),
+            ScheduledRenderImpact::Animation
+        );
+        let first_request = server.app.render_dirty.take();
+        assert!(first_request.animation);
+        assert_eq!(
+            retained_render_plan(RetainedRenderInput {
+                needs_full_render: false,
+                animation: first_request.animation,
+                pty: PtyRenderState::Clean,
+            }),
+            RetainedRenderPlan::Animation
+        );
+        assert!(server.render_retained_animation_update_and_stream());
+        for receiver in &render_receivers {
+            receiver
                 .recv_timeout(Duration::from_millis(100))
                 .expect("allocation-probe first animation warm-up");
+        }
 
-            let target_count = server.clients[&1].working_animation_cells.len();
-            assert!(target_count > 0, "{agent_count} agents need animated cells");
+        let animated_cells = server
+            .clients
+            .values()
+            .map(|client| client.working_animation_cells.len())
+            .sum();
+        for client in server.clients.values() {
+            assert!(
+                !client.working_animation_cells.is_empty(),
+                "every allocation-probe client needs animated cells"
+            );
+        }
 
-            for tick_index in 0..16 {
-                let deadline = server
-                    .app
-                    .next_animation_tick
-                    .expect("animation remains armed");
-                let before_deadline = deadline
-                    .checked_sub(Duration::from_nanos(1))
-                    .expect("animation deadline has a predecessor");
-                begin_count();
-                let baseline_impact =
-                    server.handle_scheduled_tasks_headless_with_impact(before_deadline, false);
-                let baseline_scheduler_allocations = end_count();
-                begin_count();
-                let impact = server.handle_scheduled_tasks_headless_with_impact(deadline, false);
-                let scheduler_allocations = end_count();
-                let request = server.app.render_dirty.take();
-                let plan = retained_render_plan(RetainedRenderInput {
-                    needs_full_render: false,
-                    animation: request.animation,
-                    pty: PtyRenderState::Clean,
-                });
-                begin_count();
-                let rendered = server.render_retained_animation_update_and_stream();
-                let frame_ownership_allocations = end_count();
-                render_rx
+        let mut expected_scheduler_allocations = None;
+        let mut expected_frame_ownership_allocations = None;
+        let mut frames_sent = 0usize;
+        let mut serialized_bytes = 0usize;
+        for tick_index in 0..16 {
+            let deadline = server
+                .app
+                .next_animation_tick
+                .expect("animation remains armed");
+            let before_deadline = deadline
+                .checked_sub(Duration::from_nanos(1))
+                .expect("animation deadline has a predecessor");
+            begin_count();
+            let baseline_impact =
+                server.handle_scheduled_tasks_headless_with_impact(before_deadline, false);
+            let baseline_scheduler_allocations = end_count();
+            begin_count();
+            let impact = server.handle_scheduled_tasks_headless_with_impact(deadline, false);
+            let scheduler_allocations = end_count();
+            let request = server.app.render_dirty.take();
+            let plan = retained_render_plan(RetainedRenderInput {
+                needs_full_render: false,
+                animation: request.animation,
+                pty: PtyRenderState::Clean,
+            });
+            begin_count();
+            let rendered = server.render_retained_animation_update_and_stream();
+            let frame_ownership_allocations = end_count();
+            for receiver in &render_receivers {
+                let bytes = receiver
                     .recv_timeout(Duration::from_millis(100))
                     .expect("allocation-probe retained frame");
+                frames_sent += 1;
+                serialized_bytes += bytes.len();
+            }
 
-                assert_eq!(impact, ScheduledRenderImpact::Animation);
-                assert_eq!(baseline_impact, ScheduledRenderImpact::None);
-                assert_eq!(
-                    scheduler_allocations, baseline_scheduler_allocations,
-                    "{agent_count} agents animation scheduling added allocations at tick {tick_index}"
-                );
-                assert!(
-                    request.animation,
-                    "tick {tick_index} keeps animation origin"
-                );
-                assert!(
-                    !request.generic,
-                    "tick {tick_index} must not become generic"
-                );
-                assert_eq!(plan, RetainedRenderPlan::Animation);
-                assert!(rendered, "tick {tick_index} retained render");
-                assert!(
-                    frame_ownership_allocations > 0,
-                    "the per-client frame clone and send must be measured"
-                );
-                match expected_frame_ownership_allocations {
-                    Some(expected) => assert_eq!(
-                        frame_ownership_allocations, expected,
-                        "retained frame ownership allocations scaled with {agent_count} agents"
-                    ),
-                    None => {
-                        expected_frame_ownership_allocations = Some(frame_ownership_allocations)
-                    }
-                }
+            assert_eq!(impact, ScheduledRenderImpact::Animation);
+            assert_eq!(baseline_impact, ScheduledRenderImpact::None);
+            assert_eq!(
+                scheduler_allocations, baseline_scheduler_allocations,
+                "animation scheduling added allocations at tick {tick_index}"
+            );
+            match expected_scheduler_allocations {
+                Some(expected) => assert_eq!(scheduler_allocations, expected),
+                None => expected_scheduler_allocations = Some(scheduler_allocations),
+            }
+            assert!(
+                request.animation,
+                "tick {tick_index} keeps animation origin"
+            );
+            assert!(
+                !request.generic,
+                "tick {tick_index} must not become generic"
+            );
+            assert_eq!(plan, RetainedRenderPlan::Animation);
+            assert!(rendered, "tick {tick_index} retained render");
+            assert!(
+                frame_ownership_allocations > 0,
+                "the per-client frame clone and send must be measured"
+            );
+            match expected_frame_ownership_allocations {
+                Some(expected) => assert_eq!(frame_ownership_allocations, expected),
+                None => expected_frame_ownership_allocations = Some(frame_ownership_allocations),
             }
         }
+        assert_eq!(frames_sent, client_count * 16);
+
+        let sample = WorkingAnimationAllocationSample {
+            agents: agent_count,
+            visible_panes: visible_pane_count,
+            clients: client_count,
+            animated_cells,
+            scheduler_allocations: expected_scheduler_allocations.expect("scheduler sample"),
+            frame_ownership_allocations: expected_frame_ownership_allocations
+                .expect("frame ownership sample"),
+            frames_sent,
+            serialized_bytes,
+            full_renders: 0,
+            fallbacks: 0,
+        };
+        eprintln!(
+            "working-animation-allocation geometry=240x80 agents={} panes={} clients={} cells={} scheduler_allocations={} frame_ownership_allocations={} retained_frames={} full_renders={} fallbacks={} serialized_bytes={}",
+            sample.agents,
+            sample.visible_panes,
+            sample.clients,
+            sample.animated_cells,
+            sample.scheduler_allocations,
+            sample.frame_ownership_allocations,
+            sample.frames_sent,
+            sample.full_renders,
+            sample.fallbacks,
+            sample.serialized_bytes,
+        );
+        sample
     }
 
     #[test]
     fn working_animation_boundary_only_allocates_for_per_client_frame_ownership() {
-        assert_working_animation_boundary_allocation_shape(
+        let one = measure_working_animation_boundary_allocations(
+            1,
+            1,
+            1,
             crate::test_alloc::begin,
             crate::test_alloc::end,
         );
+        let fifteen = measure_working_animation_boundary_allocations(
+            15,
+            1,
+            1,
+            crate::test_alloc::begin,
+            crate::test_alloc::end,
+        );
+        assert_eq!(
+            one.frame_ownership_allocations,
+            fifteen.frame_ownership_allocations
+        );
+        assert_eq!((one.agents, fifteen.agents), (1, 15));
+        assert_eq!((one.frames_sent, fifteen.frames_sent), (16, 16));
+    }
+
+    #[test]
+    fn working_animation_allocations_do_not_scale_with_visible_panes() {
+        let one = measure_working_animation_boundary_allocations(
+            15,
+            1,
+            1,
+            crate::test_alloc::begin,
+            crate::test_alloc::end,
+        );
+        let fifteen = measure_working_animation_boundary_allocations(
+            15,
+            15,
+            1,
+            crate::test_alloc::begin,
+            crate::test_alloc::end,
+        );
+        assert_eq!(
+            one.frame_ownership_allocations,
+            fifteen.frame_ownership_allocations
+        );
+        assert_eq!((one.visible_panes, fifteen.visible_panes), (1, 15));
+        assert_eq!((one.frames_sent, fifteen.frames_sent), (16, 16));
+    }
+
+    #[test]
+    fn working_animation_allocations_scale_only_per_app_client_frame() {
+        let one = measure_working_animation_boundary_allocations(
+            1,
+            1,
+            1,
+            crate::test_alloc::begin,
+            crate::test_alloc::end,
+        );
+        let fifteen = measure_working_animation_boundary_allocations(
+            1,
+            1,
+            15,
+            crate::test_alloc::begin,
+            crate::test_alloc::end,
+        );
+        assert_eq!(
+            fifteen.frame_ownership_allocations % fifteen.clients,
+            0,
+            "fanout allocations must normalize exactly per App client"
+        );
+        assert_eq!(
+            fifteen.frame_ownership_allocations / fifteen.clients,
+            one.frame_ownership_allocations
+        );
+        assert_eq!((one.clients, fifteen.clients), (1, 15));
+        assert_eq!((one.frames_sent, fifteen.frames_sent), (16, 240));
+        assert_eq!(
+            fifteen.serialized_bytes / fifteen.clients,
+            one.serialized_bytes
+        );
+        assert_eq!(fifteen.serialized_bytes % fifteen.clients, 0);
     }
 
     #[tokio::test]
@@ -9029,16 +9227,34 @@ mod tests {
 
         retained_server.render_and_stream();
         full_server.render_and_stream();
-        for receiver in [
-            &retained_desktop_rx,
-            &retained_mobile_rx,
-            &full_desktop_rx,
-            &full_mobile_rx,
-        ] {
-            let _ = receiver
+        let _ = retained_desktop_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("retained desktop baseline");
+        let retained_mobile_baseline = read_server_terminal_frame(
+            retained_mobile_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("baseline frame");
-        }
+                .expect("retained mobile baseline"),
+        );
+        let _ = full_desktop_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("full desktop baseline");
+        let full_mobile_baseline = read_server_terminal_frame(
+            full_mobile_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("full mobile baseline"),
+        );
+        assert_eq!(retained_mobile_baseline.seq, 1);
+        assert_eq!(full_mobile_baseline.seq, 1);
+        assert_eq!(
+            (
+                retained_mobile_baseline.width,
+                retained_mobile_baseline.height
+            ),
+            (44, 20)
+        );
+        assert_eq!(retained_mobile_baseline, full_mobile_baseline);
+        assert!(retained_mobile_baseline.full);
+        assert!(!retained_mobile_baseline.bytes.is_empty());
         assert!(!retained_server.clients[&1]
             .working_animation_cells
             .is_empty());
@@ -9050,6 +9266,41 @@ mod tests {
         full_server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
         assert!(retained_server.render_retained_animation_update_and_stream());
         full_server.render_and_stream();
+
+        let retained_mobile_update = read_server_terminal_frame(
+            retained_mobile_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("retained mobile update"),
+        );
+        let full_mobile_update = read_server_terminal_frame(
+            full_mobile_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("full-render mobile update"),
+        );
+        assert_eq!(retained_mobile_update.seq, 2);
+        assert_eq!(full_mobile_update.seq, 2);
+        assert_eq!(
+            (
+                retained_mobile_update.width,
+                retained_mobile_update.height,
+                retained_mobile_update.full,
+            ),
+            (44, 20, false)
+        );
+        assert_eq!(
+            (
+                full_mobile_update.width,
+                full_mobile_update.height,
+                full_mobile_update.full,
+            ),
+            (44, 20, false)
+        );
+        assert!(!retained_mobile_update.bytes.is_empty());
+        assert_eq!(retained_mobile_update.bytes, full_mobile_update.bytes);
+        assert_ne!(
+            retained_mobile_update.bytes, retained_mobile_baseline.bytes,
+            "the retained update must not reuse stale baseline bytes"
+        );
 
         for client_id in [1, 2] {
             assert_frame_data_eq(
@@ -9063,6 +9314,18 @@ mod tests {
                     .expect("full frame"),
             );
         }
+        let decoded_retained =
+            decode_terminal_ansi_frames(&[&retained_mobile_baseline, &retained_mobile_update]);
+        let decoded_full =
+            decode_terminal_ansi_frames(&[&full_mobile_baseline, &full_mobile_update]);
+        assert_frame_data_eq(&decoded_retained, &decoded_full);
+        assert_visible_frame_cells_eq(
+            &decoded_retained,
+            full_server.clients[&2]
+                .render_state
+                .last_frame()
+                .expect("full mobile semantic frame"),
+        );
     }
 
     fn configure_mobile_clamped_animation_surface(server: &mut HeadlessServer) {
@@ -15001,7 +15264,8 @@ next_tab = ""
 
     #[test]
     fn detached_server_with_fifteen_working_agents_never_ticks_or_renders_animation() {
-        let (mut server, render_rx) = working_animation_allocation_server(15);
+        let (mut server, mut render_receivers) = working_animation_allocation_server(15, 1, 1);
+        let render_rx = render_receivers.pop().expect("single test client receiver");
         server.clients.clear();
         server.foreground_client_id = None;
         server.app.next_auto_update_check = None;

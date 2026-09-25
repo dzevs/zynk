@@ -57,6 +57,12 @@ pub(super) enum MouseAction {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     },
+    CompleteRightClickPassthrough {
+        ws_idx: usize,
+        source_id: crate::app::InputSourceId,
+        pane_info: PaneInfo,
+        modifiers_to_strip: crossterm::event::KeyModifiers,
+    },
     FocusToastTarget,
     MoveWorkspace {
         source_ws_idx: usize,
@@ -296,8 +302,10 @@ impl AppState {
             && mouse.row >= sidebar.y
             && mouse.row < sidebar.y + sidebar.height;
 
-        if self.handle_right_click_passthrough(terminal_runtimes, source_id, mouse, in_sidebar) {
-            return None;
+        if let Some(action) =
+            self.begin_right_click_passthrough(terminal_runtimes, source_id, mouse, in_sidebar)
+        {
+            return Some(action);
         }
 
         if self.mode == Mode::OpenExistingWorktree {
@@ -1600,20 +1608,6 @@ impl AppState {
             MouseEventKind::Down(MouseButton::Middle) => {
                 self.pane_at(mouse.column, mouse.row).map(|info| info.id)
             }
-            MouseEventKind::Down(MouseButton::Right) => {
-                let in_sidebar = rect_contains(self.view.sidebar_rect, mouse.column, mouse.row);
-                self.right_click_passthrough_target(mouse, in_sidebar)
-                    .filter(|(info, modifiers)| {
-                        self.pane_mouse_button_will_forward(
-                            terminal_runtimes,
-                            info,
-                            mouse,
-                            *modifiers,
-                        )
-                    })
-                    .map(|(info, _)| info.id)
-                    .filter(|pane_id| self.mouse_pane_focus_action(*pane_id).is_some())
-            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 if self
                     .selection
@@ -1720,35 +1714,51 @@ impl AppState {
             .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
     }
 
-    fn handle_right_click_passthrough(
+    fn begin_right_click_passthrough(
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
         source_id: crate::app::InputSourceId,
         mouse: MouseEvent,
         in_sidebar: bool,
-    ) -> bool {
-        let Some((info, modifiers)) = self.right_click_passthrough_target(mouse, in_sidebar) else {
-            return false;
-        };
+    ) -> Option<MouseAction> {
+        let (info, modifiers) = self.right_click_passthrough_target(mouse, in_sidebar)?;
 
-        let result =
-            self.forward_pane_mouse_button(terminal_runtimes, source_id, &info, mouse, modifiers);
-        if result == PaneMouseForwardResult::Unhandled {
-            return false;
+        if self.send_pane_mouse_button(terminal_runtimes, &info, mouse, modifiers)
+            != PaneMouseForwardResult::Accepted
+        {
+            return None;
         }
+        Some(MouseAction::CompleteRightClickPassthrough {
+            ws_idx: self
+                .active
+                .expect("accepted pane mouse send has a workspace"),
+            source_id,
+            pane_info: info,
+            modifiers_to_strip: modifiers,
+        })
+    }
 
+    pub(super) fn complete_right_click_passthrough(
+        &mut self,
+        source_id: crate::app::InputSourceId,
+        pane_info: PaneInfo,
+        modifiers_to_strip: crossterm::event::KeyModifiers,
+    ) {
         self.selection = None;
         self.selection_autoscroll = None;
         self.clear_chrome_press(source_id);
         self.clear_chrome_drag(source_id);
         self.context_menu = None;
-        if result == PaneMouseForwardResult::Accepted {
-            self.right_click_passthrough = Some(RightClickPassthroughGesture {
-                source_id,
-                pane_info: info,
-            });
-        }
-        true
+        self.install_terminal_mouse_gesture(
+            source_id,
+            MouseButton::Right,
+            pane_info.clone(),
+            modifiers_to_strip,
+        );
+        self.right_click_passthrough = Some(RightClickPassthroughGesture {
+            source_id,
+            pane_info,
+        });
     }
 
     fn right_click_passthrough_target(
@@ -1777,37 +1787,6 @@ impl AppState {
         configured_modifiers
             .or_else(|| pane_passthrough.then(crossterm::event::KeyModifiers::empty))
             .map(|modifiers| (info, modifiers))
-    }
-
-    fn pane_mouse_button_will_forward(
-        &self,
-        terminal_runtimes: &TerminalRuntimeRegistry,
-        info: &PaneInfo,
-        mouse: MouseEvent,
-        modifiers_to_strip: crossterm::event::KeyModifiers,
-    ) -> bool {
-        if self
-            .copy_mode
-            .as_ref()
-            .is_some_and(|copy_mode| copy_mode.pane_id == info.id)
-        {
-            return false;
-        }
-        let Some(ws_idx) = self.active else {
-            return false;
-        };
-        let Some(runtime) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
-        else {
-            return false;
-        };
-        let position = self.pane_mouse_position(runtime, info.inner_rect, mouse);
-        runtime
-            .encode_mouse_button(
-                mouse.kind,
-                position,
-                mouse.modifiers.difference(modifiers_to_strip),
-            )
-            .is_some()
     }
 
     fn pane_reported_wheel_will_forward(
@@ -1912,6 +1891,35 @@ impl AppState {
         mouse: MouseEvent,
         modifiers_to_strip: crossterm::event::KeyModifiers,
     ) -> PaneMouseForwardResult {
+        let result =
+            self.send_pane_mouse_button(terminal_runtimes, info, mouse, modifiers_to_strip);
+        if result == PaneMouseForwardResult::Accepted {
+            if let MouseEventKind::Down(button) = mouse.kind {
+                self.install_terminal_mouse_gesture(
+                    source_id,
+                    button,
+                    info.clone(),
+                    modifiers_to_strip,
+                );
+            }
+        }
+        result
+    }
+
+    fn send_pane_mouse_button(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        info: &PaneInfo,
+        mouse: MouseEvent,
+        modifiers_to_strip: crossterm::event::KeyModifiers,
+    ) -> PaneMouseForwardResult {
+        if self
+            .copy_mode
+            .as_ref()
+            .is_some_and(|copy_mode| copy_mode.pane_id == info.id)
+        {
+            return PaneMouseForwardResult::Unhandled;
+        }
         let Some(ws_idx) = self.active else {
             return PaneMouseForwardResult::Unhandled;
         };
@@ -1938,17 +1946,24 @@ impl AppState {
             warn!(pane = info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward mouse button event");
             return PaneMouseForwardResult::Rejected;
         }
-        if let MouseEventKind::Down(button) = mouse.kind {
-            self.terminal_mouse_gestures.insert(
-                (source_id, button),
-                TerminalMouseGesture {
-                    pane_info: info.clone(),
-                    modifiers_to_strip,
-                    popup_terminal_id: None,
-                },
-            );
-        }
         PaneMouseForwardResult::Accepted
+    }
+
+    fn install_terminal_mouse_gesture(
+        &mut self,
+        source_id: crate::app::InputSourceId,
+        button: MouseButton,
+        pane_info: PaneInfo,
+        modifiers_to_strip: crossterm::event::KeyModifiers,
+    ) {
+        self.terminal_mouse_gestures.insert(
+            (source_id, button),
+            TerminalMouseGesture {
+                pane_info,
+                modifiers_to_strip,
+                popup_terminal_id: None,
+            },
+        );
     }
 
     pub(crate) fn forward_owned_terminal_mouse_gesture(
@@ -3199,10 +3214,11 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
+        crate::app::runtime_mutations::reset_runtime_pane_focus_calls();
+        reset_mouse_forward_focus_observation();
 
         let col = passthrough_info.inner_rect.x + 2;
         let row = passthrough_info.inner_rect.y + 3;
-        reset_mouse_forward_focus_observation();
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
 
         assert_eq!(app.state.mode, Mode::Terminal);
@@ -3210,7 +3226,8 @@ mod tests {
             app.state.workspaces[0].focused_pane_id(),
             Some(passthrough_pane)
         );
-        assert_eq!(last_mouse_forward_was_focused(), Some(true));
+        assert_eq!(crate::app::runtime_mutations::runtime_pane_focus_calls(), 1);
+        assert_eq!(last_mouse_forward_was_focused(), Some(false));
         assert!(app.state.context_menu.is_none());
         assert_eq!(
             passthrough_input.try_recv().unwrap(),
@@ -3292,6 +3309,271 @@ mod tests {
             } if pane_id == target_info.id && source == focused
         ));
         assert!(menu.items().contains(&"Swap with focused pane"));
+    }
+
+    #[tokio::test]
+    async fn rejected_full_right_click_passthrough_keeps_focus_and_opens_pane_menu() {
+        let (mut app, focused, target_info) = two_pane_mouse_app(Mode::Terminal);
+        app.state.workspaces[0]
+            .pane_state_mut(target_info.id)
+            .expect("target pane")
+            .right_click_passthrough = true;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                target_info.inner_rect.width,
+                target_info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                1,
+            );
+        runtime
+            .try_send_bytes(Bytes::from_static(b"filler"))
+            .expect("fill target input queue");
+        app.state.insert_test_runtime(target_info.id, runtime);
+        crate::app::runtime_mutations::reset_runtime_pane_focus_calls();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            target_info.inner_rect.x + 1,
+            target_info.inner_rect.y + 1,
+        ));
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(focused));
+        assert_eq!(crate::app::runtime_mutations::runtime_pane_focus_calls(), 0);
+        assert!(
+            !app.state.workspaces[0].tabs[0]
+                .panes
+                .get(&target_info.id)
+                .expect("target pane")
+                .seen
+        );
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::Pane {
+                pane_id,
+                source_pane_id: Some(source),
+                ..
+            } if pane_id == target_info.id && source == focused
+        ));
+        assert!(menu.items().contains(&"Swap with focused pane"));
+        assert!(app.state.right_click_passthrough.is_none());
+        assert!(app.state.terminal_mouse_gestures.is_empty());
+        assert_eq!(
+            input_rx.try_recv().expect("queued filler remains first"),
+            Bytes::from_static(b"filler")
+        );
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn rejected_closed_right_click_passthrough_keeps_focus_and_opens_pane_menu() {
+        let (mut app, focused, target_info) = two_pane_mouse_app(Mode::Terminal);
+        app.state.workspaces[0]
+            .pane_state_mut(target_info.id)
+            .expect("target pane")
+            .right_click_passthrough = true;
+        let (runtime, input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                target_info.inner_rect.width,
+                target_info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                1,
+            );
+        drop(input_rx);
+        app.state.insert_test_runtime(target_info.id, runtime);
+        crate::app::runtime_mutations::reset_runtime_pane_focus_calls();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            target_info.inner_rect.x + 1,
+            target_info.inner_rect.y + 1,
+        ));
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(focused));
+        assert_eq!(crate::app::runtime_mutations::runtime_pane_focus_calls(), 0);
+        assert!(
+            !app.state.workspaces[0].tabs[0]
+                .panes
+                .get(&target_info.id)
+                .expect("target pane")
+                .seen
+        );
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::Pane {
+                pane_id,
+                source_pane_id: Some(source),
+                ..
+            } if pane_id == target_info.id && source == focused
+        ));
+        assert!(menu.items().contains(&"Swap with focused pane"));
+        assert!(app.state.right_click_passthrough.is_none());
+        assert!(app.state.terminal_mouse_gestures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepted_right_click_passthrough_on_focused_pane_skips_focus_api() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("right-click-focused");
+        let pane_id = ws.tabs[0].root_pane;
+        ws.pane_state_mut(pane_id)
+            .expect("target pane")
+            .right_click_passthrough = true;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                4,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        crate::app::runtime_mutations::reset_runtime_pane_focus_calls();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            info.inner_rect.x + 1,
+            info.inner_rect.y + 1,
+        ));
+
+        assert_eq!(crate::app::runtime_mutations::runtime_pane_focus_calls(), 0);
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded right mouse down"),
+            Bytes::from_static(b"\x1b[<2;2;2M")
+        );
+        assert!(app.state.context_menu.is_none());
+        assert!(app.state.right_click_passthrough.is_some());
+        assert!(app
+            .state
+            .terminal_mouse_gestures
+            .contains_key(&(0, MouseButton::Right)));
+    }
+
+    #[tokio::test]
+    async fn accepted_right_click_passthrough_focus_failure_keeps_explicit_target_delivery() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("right-click-focus-failure");
+        let focused = ws.tabs[0].root_pane;
+        let target = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(focused);
+        ws.pane_state_mut(target)
+            .expect("target pane")
+            .right_click_passthrough = true;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let target_info = pane_infos
+            .iter()
+            .find(|info| info.id == target)
+            .expect("target pane geometry")
+            .clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                target_info.inner_rect.width,
+                target_info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006h",
+                4,
+            );
+        ws.insert_test_runtime(target, runtime);
+        ws.public_pane_numbers.remove(&target);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        crate::app::runtime_mutations::reset_runtime_pane_focus_calls();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            target_info.inner_rect.x + 1,
+            target_info.inner_rect.y + 1,
+        ));
+
+        assert_eq!(
+            input_rx.try_recv().expect("explicit target received click"),
+            Bytes::from_static(b"\x1b[<2;2;2M")
+        );
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(focused));
+        assert_eq!(crate::app::runtime_mutations::runtime_pane_focus_calls(), 0);
+        assert_eq!(
+            app.state
+                .right_click_passthrough
+                .as_ref()
+                .map(|gesture| gesture.pane_info.id),
+            Some(target)
+        );
+        assert_eq!(
+            app.state
+                .terminal_mouse_gestures
+                .get(&(0, MouseButton::Right))
+                .map(|gesture| gesture.pane_info.id),
+            Some(target)
+        );
+    }
+
+    #[tokio::test]
+    async fn right_click_passthrough_bytes_precede_decset_1004_focus_in() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("right-click-focus-order");
+        let focused = ws.tabs[0].root_pane;
+        let target = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(focused);
+        ws.pane_state_mut(target)
+            .expect("target pane")
+            .right_click_passthrough = true;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let target_info = pane_infos
+            .iter()
+            .find(|info| info.id == target)
+            .expect("target pane geometry")
+            .clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                target_info.inner_rect.width,
+                target_info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1004h\x1b[?1006h",
+                4,
+            );
+        ws.insert_test_runtime(target, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        app.last_focus = Some((0, focused));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            target_info.inner_rect.x + 1,
+            target_info.inner_rect.y + 1,
+        ));
+
+        assert_eq!(
+            input_rx.try_recv().expect("right-click bytes arrive first"),
+            Bytes::from_static(b"\x1b[<2;2;2M")
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "FocusIn was sent during input handling"
+        );
+        app.sync_focus_events();
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("FocusIn follows the accepted click"),
+            Bytes::from_static(b"\x1b[I")
+        );
+        assert!(input_rx.try_recv().is_err());
     }
 
     #[tokio::test]

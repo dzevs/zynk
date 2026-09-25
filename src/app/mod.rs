@@ -2077,6 +2077,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn popup_owns_prefix_g_and_keeps_navigator_closed_on_every_input_path() {
+        for monolithic in [false, true] {
+            let mut app = test_app();
+            app.state.workspaces = vec![Workspace::test_new("popup-navigator-guard")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            let (runtime, mut popup_input) =
+                TerminalRuntime::test_with_channel_and_scrollback_bytes(40, 12, 0, b"", 4);
+            app.install_test_popup_runtime(runtime);
+            assert_eq!(app.state.mode, Mode::Terminal);
+
+            let events = vec![
+                raw_key(
+                    KeyCode::Char('b'),
+                    KeyModifiers::CONTROL,
+                    KeyEventKind::Press,
+                ),
+                raw_key(
+                    KeyCode::Char('g'),
+                    KeyModifiers::empty(),
+                    KeyEventKind::Press,
+                ),
+            ];
+            if monolithic {
+                for event in events {
+                    assert!(app.handle_raw_input_event(event).await);
+                }
+            } else {
+                app.route_client_events_from(17, events, false);
+            }
+
+            assert!(app.state.popup_pane.is_some(), "monolithic={monolithic}");
+            assert_eq!(app.state.mode, Mode::Terminal, "monolithic={monolithic}");
+            assert_eq!(
+                popup_input
+                    .try_recv()
+                    .expect("prefix reaches popup")
+                    .as_ref(),
+                b"\x02",
+                "monolithic={monolithic}"
+            );
+            assert_eq!(
+                popup_input.try_recv().expect("g reaches popup").as_ref(),
+                b"g",
+                "monolithic={monolithic}"
+            );
+            assert!(popup_input.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn m833_popup_close_releases_original_key_target_before_replacement() {
         let mut app = test_app();
         app.state.workspaces = vec![Workspace::test_new("popup-lease")];

@@ -4572,8 +4572,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_right_passthrough_is_consumed_without_durable_ownership() {
+    async fn rejected_right_passthrough_falls_back_without_durable_ownership() {
+        use crate::app::state::ContextMenuKind;
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut ordinary_app, ordinary_source, _sibling, _target) =
+            app_with_cross_workspace_move_source(false);
+        ordinary_app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
+        let _ordinary_rx = install_global_reporting_runtime(
+            &mut ordinary_app,
+            0,
+            ordinary_source,
+            b"\x1b[?1002h\x1b[?1006h",
+            1,
+        );
+        crate::ui::compute_view(
+            &mut ordinary_app.state,
+            ratatui::layout::Rect::new(0, 0, 106, 30),
+        );
+        let ordinary_info = ordinary_app
+            .state
+            .pane_info_by_id(ordinary_source)
+            .unwrap()
+            .clone();
+        let column = ordinary_info.inner_rect.x + 2;
+        let row = ordinary_info.inner_rect.y + 3;
+        ordinary_app.state.selection = Some(crate::selection::Selection::range(
+            ordinary_source,
+            0,
+            0,
+            1,
+            None,
+        ));
+        ordinary_app.handle_mouse_from_input_source(
+            7,
+            pane_mouse(MouseEventKind::Down(MouseButton::Right), column, row),
+        );
+        let ordinary_menu = ordinary_app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("ordinary pane context menu");
+        let ordinary_items = ordinary_menu.items();
+        let ordinary_anchor = (ordinary_menu.x, ordinary_menu.y);
+        let ContextMenuKind::Pane {
+            ws_idx: ordinary_ws_idx,
+            tab_idx: ordinary_tab_idx,
+            pane_id: ordinary_pane_id,
+            source_pane_id: ordinary_source_pane_id,
+            has_manual_label: ordinary_has_manual_label,
+            right_click_passthrough: ordinary_pane_passthrough,
+        } = &ordinary_menu.kind
+        else {
+            panic!("expected ordinary pane menu")
+        };
+        assert_eq!(*ordinary_pane_id, ordinary_source);
 
         let (mut app, source, _sibling, _target) = app_with_cross_workspace_move_source(false);
         app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
@@ -4581,6 +4634,14 @@ mod tests {
             install_global_reporting_runtime(&mut app, 0, source, b"\x1b[?1002h\x1b[?1006h", 1);
         crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
         let info = app.state.pane_info_by_id(source).unwrap().clone();
+        assert_eq!(
+            (info.inner_rect.x + 2, info.inner_rect.y + 3),
+            (column, row)
+        );
+        app.state.selection = Some(crate::selection::Selection::range(source, 0, 0, 1, None));
+        let focus_before = app.state.workspaces[0].focused_pane_id();
+        let seen_before = app.state.workspaces[0].tabs[0].panes[&source].seen;
+        let selection_before = format!("{:?}", app.state.selection);
         app.state
             .runtime_for_pane(&app.terminal_runtimes, source)
             .unwrap()
@@ -4599,8 +4660,37 @@ mod tests {
             },
         );
 
-        assert_eq!(app.state.mode, Mode::Terminal);
-        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), focus_before);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&source].seen,
+            seen_before
+        );
+        assert_eq!(format!("{:?}", app.state.selection), selection_before);
+        let fallback_menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("rejected passthrough falls back to pane menu");
+        assert_eq!(fallback_menu.items(), ordinary_items);
+        assert_eq!((fallback_menu.x, fallback_menu.y), ordinary_anchor);
+        let ContextMenuKind::Pane {
+            ws_idx,
+            tab_idx,
+            pane_id,
+            source_pane_id,
+            has_manual_label,
+            right_click_passthrough,
+        } = &fallback_menu.kind
+        else {
+            panic!("expected fallback pane menu")
+        };
+        assert_eq!(*pane_id, source);
+        assert_eq!(ws_idx, ordinary_ws_idx);
+        assert_eq!(tab_idx, ordinary_tab_idx);
+        assert_eq!(source_pane_id.is_some(), ordinary_source_pane_id.is_some());
+        assert_eq!(has_manual_label, ordinary_has_manual_label);
+        assert_eq!(right_click_passthrough, ordinary_pane_passthrough);
         assert!(app.state.right_click_passthrough.is_none());
         assert!(!app
             .state

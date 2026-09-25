@@ -439,6 +439,32 @@ impl App {
                     MouseAction::FocusPane { ws_idx, pane_id } => {
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
+                    MouseAction::CompleteRightClickPassthrough {
+                        ws_idx,
+                        source_id,
+                        pane_info,
+                        modifiers_to_strip,
+                    } => {
+                        let already_focused = self
+                            .state
+                            .workspaces
+                            .get(ws_idx)
+                            .and_then(crate::workspace::Workspace::focused_pane_id)
+                            == Some(pane_info.id);
+                        if !already_focused
+                            && !self.try_focus_pane_internal_via_api(ws_idx, pane_info.id)
+                        {
+                            tracing::warn!(
+                                pane = pane_info.id.raw(),
+                                "right-click passthrough was delivered but pane focus failed"
+                            );
+                        }
+                        self.state.complete_right_click_passthrough(
+                            source_id,
+                            pane_info,
+                            modifiers_to_strip,
+                        );
+                    }
                     MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
                     MouseAction::MoveWorkspace {
                         source_ws_idx,

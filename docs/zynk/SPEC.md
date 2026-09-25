@@ -354,14 +354,19 @@ retained chrome path only when equivalence is proven, and composes that chrome p
 update when both are due; generic work, geometry/config changes, unsafe retained state, or preparation failure
 selects or falls back once to a full render. Animation demand is suppressed outside Terminal, Navigate, and
 Navigator modes, and the server arms its timer only when at least one App client's committed frame contains an
-animated cell. The measured steady path performs no filesystem/process inspection. Scheduling, demand lookup,
-planning, target lookup, and in-place chrome patching add no heap allocation after one full render and first
-animation frame per App client. Protocol 20 frame ownership still requires one `FrameData` clone and send
-preparation per client, which is O(frame cells) and is explicitly allowlisted and counted; its allocation count
-is independent of whether one or fifteen agent/pane cells animate. The allocation counter is a thread-scoped,
-opt-in `cfg(test)` global allocator in the unit-test crate, so the release binary has no allocator or counting
-seam and the proof does not duplicate the crate's unit tests in an integration binary. A working list entry may
-be scrolled out of view, but without a committed animated cell it arms no timer and sends no frame.
+animated cell. The measured steady path performs no filesystem/process inspection. At each fixed topology,
+animation scheduling adds no heap allocation relative to the same before-deadline idle pass; demand lookup,
+planning, target lookup, and in-place chrome patching likewise add no separate allocation after one full render
+and first animation frame per App client. Protocol 20 frame ownership still requires one `FrameData` clone and
+send preparation per client, which is O(frame cells) and is explicitly allowlisted and counted. Fixed 240x80
+controls cover one and fifteen animated agents, one and fifteen visible panes with agent count held at fifteen,
+and one and fifteen same-size App clients over sixteen consecutive ticks. The per-client frame-ownership
+allocation count is unchanged across agent and visible-pane cardinality; total allocation, frame count, and
+serialized bytes scale linearly with App clients and normalize to the one-client result. The allocation counter
+is a thread-scoped, opt-in `cfg(test)` global allocator in the unit-test crate, so the release binary has no
+allocator or counting seam and the proof does not duplicate the crate's unit tests in an integration binary. A
+working list entry may be scrolled out of view, but without a committed animated cell it arms no timer and sends
+no frame.
 Switching the last App client to Observe can permit one already-scheduled harmless tick before the next demand
 commit cancels the timer. Demand is deliberately recomputed from each client's rendered list rather than reused
 from renderer internals; that is a bounded performance note, not an additional topology or process scan.
@@ -371,16 +376,26 @@ corner, tee, and cross combination; light and heavy straight arms collapse to th
 glyphs. The focused pane's four edges are heavy only while its terminal is active and no popup is open; all
 other edges remain light. Pane gaps, outer-border policy, drag hit boxes, inner rectangles, and border/agent-label
 placement retain their geometry, a single pane is unchanged, and `pane_borders = false` draws no border. Wheel
-events over pane content or its scrollbar, left-button scrollbar clicks, and configured modifier-right-click
-passthrough first focus an unfocused pane through runtime authority in Terminal or Resize mode only. Horizontal
-wheel focus follows the same Terminal-only forwarding gate as horizontal mouse reporting. Wheel and
-modifier-right events over the already-focused pane skip the focus API, preserving mode and seen state;
-intentional left/middle presses keep their existing pre-focus behavior. A wheel over an unfocused pane in Resize
-mode deliberately focuses that pane and settles the mode to Terminal. Focus failure cannot mutate state or
-forward to the stale pane. Navigate owns its overlays and mouse input, so pane mouse hit testing never
-pre-focuses through an active Navigate view. A wheel during an in-progress selection whose pane lost focus is
-consumed without stale scrolling or bytes. Navigate-mode Tab and Shift-Tab cycle panes without leaving Navigate;
-the existing Enter, numeric, and Escape exit paths remain.
+events over pane content or its scrollbar and left-button scrollbar clicks first focus an unfocused pane through
+runtime authority in Terminal or Resize mode only. Horizontal wheel focus follows the same Terminal-only
+forwarding gate as horizontal mouse reporting. Wheel events over the already-focused pane skip the focus API,
+preserving mode and seen state; intentional left/middle presses keep their existing pre-focus behavior. A wheel
+over an unfocused pane in Resize mode deliberately focuses that pane and settles the mode to Terminal. Focus
+failure on these pre-focus paths stops forwarding to a stale pane.
+
+Configured or per-pane right-click passthrough uses deliver-then-focus ordering in Terminal mode. Zynk first
+encodes and tries the Down event against the explicit pane runtime under the pointer. Only an accepted send may
+focus an unfocused target through runtime authority, clear selection and owned chrome state, and install the
+terminal/right-click gesture owners; an already-focused target skips the focus API. Under DECSET 1004 the
+application-visible order is right-click bytes followed by `FocusIn`. If the accepted send is followed by a focus
+failure, the explicit target has already received the bytes, focus remains unchanged, and the gesture remains
+owned so Drag/Up keep the same target. An unencodable, missing, Full, or Closed send does not focus, change seen
+state, clear selection, or install owners; it falls through to the ordinary pane menu, including “Swap with
+focused pane”. The target runtime's existing `scroll_reset` may already have run before a Full or Closed result.
+Navigate owns its overlays and mouse input, so pane mouse hit testing never pre-focuses through an active Navigate
+view. A wheel during an in-progress selection whose pane lost focus is consumed without stale scrolling or bytes.
+Navigate-mode Tab and Shift-Tab cycle panes without leaving Navigate; the existing Enter, numeric, and Escape exit
+paths remain.
 
 `ui.window_title` defaults to empty, leaving the host terminal title untouched. A template such as
 `{hostname}: {workspace}` opts in and may also use `{tab}`, `{pane}`, and `{terminal_title}`. Malformed
@@ -775,6 +790,9 @@ not a universal close shortcut. Existing key/mouse gestures retain their origina
 source and target. Closing releases forwarded keys before removing the runtime
 and suppresses later repeats until the existing release/teardown policy clears
 their ownership. A failed repeat does not erase its original forwarded lease.
+Opening a popup forces Terminal mode. While the popup owns input, both local and
+headless key ingress route prefix sequences to its runtime before modal or Navigator
+dispatch, so input such as the ordinary `prefix+g` binding cannot open Navigator.
 
 Process exit or `{"id":"close","method":"popup.close","params":{}}` closes
 the popup. Close returns `ok`, or `popup_not_open` when absent. The fork convenience

@@ -8162,3 +8162,42 @@ precondition. The first mutation record and the 4915-pass FULL that preceded thi
 retained but excluded from final-byte claims. Other animation equality oracles likewise establish their
 non-vacuous preconditions first: a non-empty cell cache, an emitted frame, PTY damage, or an observed focus
 transition as appropriate.
+
+### 3.2.0 Gate-3 successor correction (IMPLEMENTED / PENDING VERIFICATION)
+
+Independent Gate-3 review of exact `c66445ec` rejected two closure claims and two evidence gaps. First, the M2
+shared presented-workspace-reconcile fault began from an earlier `src/server/headless.rs` blob (`ae0a0cc`) rather
+than the candidate's final blob (`a408074a`), so its “final-byte” label was inaccurate even though the production
+reconcile remained present. The successor packet must rerun that mutation on its own final whole-file hash, name
+the stopping two-App-client oracle, restore the identical hash, and apply the same hash rule to every other cited
+final-byte fault. Earlier-byte mutations remain admissible only when labeled as such and accompanied by
+production-hunk identity proof.
+
+Second, the prior right-click wording at lines 8115-8120 confused successful encoding with successful queue
+delivery. The eager pre-focus could therefore change focus and seen state before `try_send_bytes` returned Full
+or Closed; the rejected Down was then consumed without terminal bytes or the ordinary pane menu. This successor
+supersedes that claim with deliver-then-focus ordering. Right-click is removed from eager mouse pre-focus. Its
+explicit target runtime receives the encoded Down first; only Accepted then invokes runtime-authoritative focus
+when needed and installs both gesture owners. Full, Closed, Unhandled, or unencodable delivery leaves focus and
+seen state unchanged and falls through to the normal pane menu with “Swap with focused pane”; the pre-existing
+target `scroll_reset` may already have occurred. Focus failure after Accepted is logged, leaves focus unchanged,
+and cannot retarget bytes that already reached the explicit pane. DECSET 1004 pins the observable order as click
+bytes then `FocusIn`. This design amendment avoids a PTY write-gate reservation or callback under a synchronous
+mutex.
+
+The TerminalAnsi retained-animation oracle now reads the actual protocol-20 `ServerMessage::Terminal` frames.
+It pins baseline and update sequence numbers, dimensions, full flags, nonempty and non-stale payloads, exact
+retained-versus-same-tick-full bytes, and decoded visible cells after applying the common baseline. The semantic
+frame oracle remains separate. Popup-plus-Navigator forced state remains only a render hardening case; a
+production-state control instead proves that local and headless popup input keep Terminal mode and route
+`prefix+g` to the popup rather than opening Navigator.
+
+The thread-scoped allocation fixture now drives the production scheduler and retained sender at fixed 240x80
+geometry for one/fifteen agents, one/fifteen visible panes (holding agents at fifteen), and one/fifteen App
+clients over sixteen measured ticks after warm-up. Each scheduled tick matches its own before-deadline idle
+allocation baseline. Frame-ownership allocation is identical across agent and visible-pane cardinality; client
+fanout is linear and normalizes exactly per client. Every eligible client receives one retained frame per tick,
+with zero full renders or fallbacks, and the packet records the deterministic cells, allocations, frames, and
+serialized-byte table. These additions change no protocol, configuration, schema, timeout, capacity, dependency,
+or release surface. This entry remains pending until an exact successor Gate-2 and fresh Gate-3 approve the same
+SHA/tree.
