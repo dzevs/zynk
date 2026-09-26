@@ -152,3 +152,26 @@ from `/proc/<pid>/stat` field 22.
   5.15 kernel, so adopting it now would fail closed on a supported platform. Until that floor moves,
   `(pid, start time)` is the mechanism; the residual window is that the walk reads each hop at a
   different instant, with the two endpoints pinned.
+
+## Amendment 2026-09-26 (post-dogfood; shared Codex daemon ancestry)
+
+The pane-tree principal remains necessary but is not sufficient for Codex session ownership. Codex 0.157.1 can
+run `codex app-server --managed-daemon` below the first Codex pane and use that shared process to serve a second
+session. A hook launched for that second session then inherits the first pane's `ZYNK_*` environment and is
+technically inside the first pane's process tree, even though the session belongs to another pane. After a server
+restart this produced two terminals carrying one hook-authoritative session and misattributed later CLI calls.
+
+- Every zynk-managed Codex start, resume, and restore receives exactly one `--no-daemon`; Codex older than the
+  verified 0.157.1 minimum fails with a typed launch error rather than silently falling back.
+- Session-bearing Codex reports add a bounded Linux ancestry walk, pinning the peer and every observed hop by PID
+  plus start time. Crossing `codex app-server --managed-daemon` returns `shared_codex_daemon`. Unreadable,
+  replaced, cyclic, or over-bound ancestry also fails closed.
+- Hook authority remains terminal-local. One normalized `(source, agent, kind, value)` session cannot be claimed
+  by two terminals. Runtime duplicates return `duplicate_agent_session`; snapshot duplicates restore the layout
+  but resume neither claimant and discard both anchors.
+- Optional Codex session environment values are contradiction detectors, not principals. Their absence cannot
+  block hook-less setups, and their presence never authorizes rerouting to another pane.
+
+The incident's message workspace, tab, cwd, and branch fields came from the recipient projection, not from a
+mixed sender environment. Both pane shells retained internally consistent and distinct `ZYNK_*` values; the
+shared daemon's inherited environment was the attribution failure.

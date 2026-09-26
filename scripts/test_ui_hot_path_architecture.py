@@ -22,6 +22,7 @@ HEADLESS_SOURCE = PROJECT_ROOT / "src" / "server" / "headless.rs"
 RENDER_STREAM_SOURCE = PROJECT_ROOT / "src" / "server" / "render_stream.rs"
 APP_RUNTIME_SOURCE = PROJECT_ROOT / "src" / "app" / "runtime.rs"
 UI_SOURCE = PROJECT_ROOT / "src" / "ui.rs"
+STATUS_SOURCE = PROJECT_ROOT / "src" / "ui" / "status.rs"
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
@@ -127,7 +128,7 @@ WORKING_ANIMATION_BODY_FINGERPRINTS = {
         "b82a678c41498c5ab3030286522883d6a9b094b27e8ec74f8049b2986966dbc4"
     ),
     "retained_animation_preflight": (
-        "7317980fae831e89c947cdf9ba580a0e2b24e9a4644ef58956e1c6049ce32ae0"
+        "a17e07740ff6a2afae3727d0f5848c23a63b953faff161ee545e1ba74cc37357"
     ),
     "render_retained_pty_update_and_stream_with_animation": (
         "a4d61bb2e6c3fdb40836bd22db09f44bb331507918c04867a2b1626804bd15ea"
@@ -135,10 +136,16 @@ WORKING_ANIMATION_BODY_FINGERPRINTS = {
 }
 WORKING_ANIMATION_RENDER_STREAM_FINGERPRINTS = {
     "collect_working_animation_cells": (
-        "ee7153aae245abb6a1c999b7f9676c3306efc1339411e09f4cbb4dc41cdc8a5f"
+        "f0aa6bcc6fb0b455e00e827c1a1b81afe65a9b9e2aabd26079ba7b8266a0a01c"
+    ),
+    "collect_working_shimmer_cells": (
+        "732d67067976509087db6a255b624de74c86e54a4330b835519af1b8eee8d2dd"
+    ),
+    "can_apply": (
+        "ec5240ffed4c97a5b232bd7cd9542061d02d497443bc8e81a8b856afe979d42e"
     ),
     "apply_working_animation_cells": (
-        "066e8f771b5e94546e8a8bb1e3d2df434a95a6c7f22a0ef66b7a4a11234b6df4"
+        "5da61dd0a0679ca2db7e62fa7e5d9b19bf1b90bf2d9c5e597bd44cf6f526e486"
     ),
 }
 WORKING_ANIMATION_APP_RUNTIME_FINGERPRINTS = {
@@ -148,7 +155,21 @@ WORKING_ANIMATION_APP_RUNTIME_FINGERPRINTS = {
 }
 WORKING_ANIMATION_UI_FINGERPRINTS = {
     "computed_working_animation_demand": (
-        "403111405902de5b99a5c5539cadb594295abdd529651427a9286a4222c7423b"
+        "77ba9364ce4961ad57bd244b78f7bbb14a5512080519b135792c53f2ab583275"
+    ),
+}
+WORKING_ANIMATION_STATUS_FINGERPRINTS = {
+    "working_label_shimmer_palette": (
+        "9f59a642eb76743b6862462ec77075102f47b3e55fac38908e58149b63d4b693"
+    ),
+    "working_label_shimmer_color": (
+        "51f0e483b3855a768d2642f62d04e5820135cf5e27f89ac5ff6ef584def33ce4"
+    ),
+    "working_label_shimmer_weight": (
+        "8ebb87ba9847249d91daecf7b0d185f904b22c5a42b161d2ef2bfb178e82a543"
+    ),
+    "working_label_spans": (
+        "d0b7fcee77a1d671b74cf74504c5a1bf7d505fcd3562042308dd1084d5410efc"
     ),
 }
 WORKING_ANIMATION_RETAINED_FORBIDDEN = (
@@ -366,6 +387,7 @@ def headless_working_animation_violations(
     render_stream_source: str,
     app_runtime_source: str | None = None,
     ui_source: str | None = None,
+    status_source: str | None = None,
 ) -> list[str]:
     violations: list[str] = []
     headless_bodies = {
@@ -382,6 +404,11 @@ def headless_working_animation_violations(
         else app_runtime_source
     )
     ui_source = UI_SOURCE.read_text(encoding="utf-8") if ui_source is None else ui_source
+    status_source = (
+        STATUS_SOURCE.read_text(encoding="utf-8")
+        if status_source is None
+        else status_source
+    )
     app_runtime_bodies = {
         name: rust_function_body(app_runtime_source, name)
         for name in WORKING_ANIMATION_APP_RUNTIME_FINGERPRINTS
@@ -389,6 +416,10 @@ def headless_working_animation_violations(
     ui_bodies = {
         name: rust_function_body(ui_source, name)
         for name in WORKING_ANIMATION_UI_FINGERPRINTS
+    }
+    status_bodies = {
+        name: rust_function_body(status_source, name)
+        for name in WORKING_ANIMATION_STATUS_FINGERPRINTS
     }
 
     for name, expected in WORKING_ANIMATION_BODY_FINGERPRINTS.items():
@@ -415,6 +446,12 @@ def headless_working_animation_violations(
             violations.append(
                 f"{name} body fingerprint changed: expected {expected}, got {actual}"
             )
+    for name, expected in WORKING_ANIMATION_STATUS_FINGERPRINTS.items():
+        actual = normalized_body_fingerprint(status_bodies[name])
+        if actual != expected:
+            violations.append(
+                f"{name} body fingerprint changed: expected {expected}, got {actual}"
+            )
 
     retained_bodies = {
         "render_retained_animation_update_and_stream": headless_bodies[
@@ -426,6 +463,7 @@ def headless_working_animation_violations(
         "apply_working_animation_cells": render_stream_bodies[
             "apply_working_animation_cells"
         ],
+        "working_animation_cell_can_apply": render_stream_bodies["can_apply"],
     }
     frame_clone_body = retained_bodies["render_retained_animation_update_and_stream"]
     frame_clone_matches = list(FRAME_OWNERSHIP_CLONE.finditer(frame_clone_body))
@@ -828,6 +866,49 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             any(
                 violation.startswith(
                     "apply_working_animation_cells body fingerprint changed:"
+                )
+                for violation in violations
+            ),
+            violations,
+        )
+
+        shimmer_collect_needle = "let width = usize::from(rendered.area.width);"
+        self.assertEqual(render_stream.count(shimmer_collect_needle), 1)
+        changed_render_stream = render_stream.replace(
+            shimmer_collect_needle,
+            "let width = 0usize;",
+            1,
+        )
+        violations = headless_working_animation_violations(
+            headless, changed_render_stream
+        )
+        self.assertTrue(
+            any(
+                violation.startswith(
+                    "collect_working_shimmer_cells body fingerprint changed:"
+                )
+                for violation in violations
+            ),
+            violations,
+        )
+
+        status_source = STATUS_SOURCE.read_text(encoding="utf-8")
+        shimmer_period_needle = "% 10) as usize"
+        self.assertEqual(status_source.count(shimmer_period_needle), 1)
+        changed_status = status_source.replace(
+            shimmer_period_needle,
+            "% 9) as usize",
+            1,
+        )
+        violations = headless_working_animation_violations(
+            headless,
+            render_stream,
+            status_source=changed_status,
+        )
+        self.assertTrue(
+            any(
+                violation.startswith(
+                    "working_label_shimmer_weight body fingerprint changed:"
                 )
                 for violation in violations
             ),

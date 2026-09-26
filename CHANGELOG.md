@@ -18,9 +18,13 @@ not change binary protocol 20, the JSON socket surface, persistence schema, sess
 - `[ui.sidebar.agents].group_gap` is independent of `row_gap` and defaults to 1. With the default agent
   `row_gap = 0`, this restores no gap within groups and one blank row before every later emitted group header.
 - `ui.working_animation` defaults to true and restores the yellow sidebar pulse plus navigator/mobile braille
-  spinner. The server advances one visible frame per 128 ms only while App clients demand animation and uses a
-  retained chrome path; detached and terminal-attach-only servers schedule none. Animation is active render
-  work and can raise idle CPU, so set the key to false to use the static 3.1.0 marks.
+  spinner. Expanded agent rows, mobile switcher rows, and navigator rows also sweep a theme-derived brightness
+  shimmer across the literal `working` label without changing its glyphs or width. The server advances one
+  visible frame per 128 ms only while App clients demand animation and uses a retained chrome path; detached
+  and terminal-attach-only servers schedule none. Animation is active render work and can raise idle CPU, so
+  set the key to false to use the static 3.1.0 marks and labels.
+- Exact Alt+left-drag performs zynk-local selection in a pane even when its application captures mouse input.
+  Plain drag keeps the application's existing mouse-reporting behavior.
 - `zynk agent wait --status S` is an alias of `--until S`. Either form can repeat with the same any-of status
   semantics; `agent prompt` does not gain the alias.
 
@@ -35,14 +39,20 @@ not change binary protocol 20, the JSON socket surface, persistence schema, sess
   `{hostname}: {workspace}` to opt in; explicit API title overrides keep their existing behavior.
 - A focused, terminal-active pane in a multi-pane layout uses heavy merged-border edges. Split geometry, labels,
   drag hit boxes, single-pane rendering, pane-gap behavior, and disabled borders remain unchanged.
-- Wheel, scrollbar, and modifier-right-click passthrough over an unfocused pane now focus it through runtime
-  authority before acting. Navigate-mode Tab and Shift-Tab cycle panes without leaving Navigate.
+- Wheel forwarding and left-button scrollbar actions over an unfocused pane focus it through runtime authority
+  before acting. Accepted modifier-right-click passthrough instead delivers its Down bytes to the explicit pane
+  first, then focuses it; rejected delivery leaves focus unchanged and opens the ordinary pane menu.
+  Navigate-mode Tab and Shift-Tab cycle panes without leaving Navigate.
 
 **Fixed**
 
 - Protocol-version refusals from native `send`, `reply`, and caller-bound `inbox` now retain the typed F4
   `protocol_mismatch` with both versions instead of becoming a generic transport failure. Explicit
   `inbox --agent` remains database-only.
+- Zynk-managed Codex 0.157.1+ launches and resumes with `--no-daemon`, preventing a shared managed daemon from
+  reporting one session through another pane's inherited identity. Session reports through such a daemon,
+  cross-pane duplicate authoritative sessions, and contradictory Codex session hints now fail closed. Snapshot
+  restore preserves the layout but resumes neither owner of a duplicated session.
 - The bundled root skill now stays numerically pinned to binary protocol 20.
 
 ## [3.1.0] — 2026-09-25

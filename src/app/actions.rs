@@ -411,6 +411,7 @@ impl AppState {
                 depth: 0,
                 label: format!("{workspace_label} ({pane_count})"),
                 meta: activity,
+                default_working_label: false,
                 status: state,
                 seen,
                 is_current: self.active == Some(ws_idx),
@@ -507,6 +508,7 @@ impl AppState {
             depth: 1,
             label,
             meta,
+            default_working_label: false,
             status,
             seen,
             is_current: false,
@@ -566,6 +568,8 @@ impl AppState {
             let status_label = terminal
                 .map(|terminal| terminal.effective_presentation().state_labels)
                 .and_then(|labels| labels.get(state_label_text(state, pane.seen)).cloned());
+            let default_working_label =
+                state == AgentState::Working && agent_label.is_some() && status_label.is_none();
             let status = status_label
                 .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
             let meta = match (agent_label, status.as_deref()) {
@@ -584,6 +588,7 @@ impl AppState {
                 depth: if show_tab_row { 2 } else { 1 },
                 label,
                 meta,
+                default_working_label,
                 status: state,
                 seen: pane.seen,
                 is_current,
@@ -2150,6 +2155,7 @@ impl AppState {
         pane_id: crate::layout::PaneId,
         viewport_row: u16,
         col: u16,
+        allow_mouse_reporting: bool,
     ) -> bool {
         // Resolve the active pane cell the double-click landed on.
         let Some(ws_idx) = self
@@ -2171,7 +2177,7 @@ impl AppState {
         else {
             return false;
         };
-        if rt.mouse_reporting_enabled() {
+        if rt.mouse_reporting_enabled() && !allow_mouse_reporting {
             return false;
         }
 

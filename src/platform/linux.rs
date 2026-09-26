@@ -430,6 +430,61 @@ pub fn process_parent_and_start_time(pid: u32) -> Option<(u32, u64)> {
     (ppid > 0).then_some((ppid as u32, start_time))
 }
 
+/// Read one process ancestry hop and its argv without trusting a reused PID.
+/// The identical stat tuple before and after `/proc/<pid>/cmdline` proves the
+/// argv belongs to the process principal returned here.
+pub(crate) fn process_inspection(pid: u32) -> Option<super::ProcessInspection> {
+    let before = process_parent_and_start_time(pid)?;
+    let argv = process_argv(pid)?;
+    let after = process_parent_and_start_time(pid)?;
+    if before != after {
+        return None;
+    }
+    Some(super::ProcessInspection {
+        principal: super::ProcessPrincipal {
+            pid,
+            start_time: before.1,
+        },
+        parent_pid: before.0,
+        argv,
+    })
+}
+
+/// Read a process environment only while `pid` still names the peer principal
+/// captured at socket accept time. Invalid UTF-8 entries are ignored; failure
+/// to pin the process returns `None` rather than attributing another process's
+/// environment to the caller.
+pub(crate) fn process_environment(
+    principal: super::ProcessPrincipal,
+) -> Option<std::collections::HashMap<String, String>> {
+    let before = process_parent_and_start_time(principal.pid)?;
+    if before.1 != principal.start_time {
+        return None;
+    }
+    let bytes = std::fs::read(format!("/proc/{}/environ", principal.pid)).ok()?;
+    let after = process_parent_and_start_time(principal.pid)?;
+    if before != after {
+        return None;
+    }
+    let mut environment = std::collections::HashMap::new();
+    for entry in bytes
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Some(separator) = entry.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        let Ok(key) = std::str::from_utf8(&entry[..separator]) else {
+            continue;
+        };
+        let Ok(value) = std::str::from_utf8(&entry[separator + 1..]) else {
+            continue;
+        };
+        environment.insert(key.to_string(), value.to_string());
+    }
+    Some(environment)
+}
+
 /// The start time `pid` was stamped with, in clock ticks since boot.
 ///
 /// This is the half of a process's identity a pid alone does not carry: pids are

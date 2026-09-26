@@ -10,7 +10,7 @@ use ratatui::{
 
 use super::{
     scrollbar::{render_scrollbar, should_show_scrollbar},
-    status::{agent_icon, state_label_color},
+    status::{agent_icon, state_label_color, working_label_spans, WORKING_LABEL},
     text::{display_width_u16, middle_elide, truncate_end},
     widgets::{panel_contrast_fg, render_panel_shell},
 };
@@ -283,8 +283,25 @@ fn render_row(
                 .fg(state_label_color(row.status, row.seen, p))
                 .bg(p.panel_bg)
         };
+        let mut meta_spans = Vec::new();
+        let working_start = row
+            .default_working_label
+            .then(|| meta.len().checked_sub(WORKING_LABEL.len()))
+            .flatten()
+            .filter(|start| meta.get(*start..) == Some(WORKING_LABEL));
+        if let Some(start) = working_start {
+            meta_spans.push(Span::styled(format!(" {}", &meta[..start]), meta_style));
+            meta_spans.extend(working_label_spans(
+                WORKING_LABEL.to_string(),
+                meta_style.fg(p.yellow),
+                true,
+                app,
+            ));
+        } else {
+            meta_spans.push(Span::styled(format!(" {meta}"), meta_style));
+        }
         frame.render_widget(
-            Paragraph::new(format!(" {meta}")).style(meta_style),
+            Paragraph::new(Line::from(meta_spans)).style(meta_style),
             meta_rect,
         );
     }
@@ -662,6 +679,7 @@ mod tests {
             depth,
             label: String::new(),
             meta: String::new(),
+            default_working_label: false,
             status: AgentState::Idle,
             seen: true,
             is_current: false,
@@ -713,6 +731,53 @@ mod tests {
             let mut spans = Vec::new();
             push_state_chip(&mut spans, AgentState::Blocked, true, "blocked", &app);
             assert!(spans.iter().any(|span| span.content == expected));
+        }
+    }
+
+    #[test]
+    fn navigator_working_shimmer_preserves_every_cell_after_the_label() {
+        let render = |working_animation| {
+            let mut app = AppState::test_new();
+            app.working_animation = working_animation;
+            app.spinner_tick = 0;
+            let mut entry = row(0, false);
+            entry.label = "agent".into();
+            entry.meta = WORKING_LABEL.into();
+            entry.default_working_label = true;
+            entry.status = AgentState::Working;
+            let rows = vec![entry];
+            let width = 68;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1)).unwrap();
+            terminal
+                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, width, 1), &rows, 0, false))
+                .unwrap();
+            (terminal.backend().buffer().clone(), app)
+        };
+
+        let (static_buffer, static_app) = render(false);
+        let (animated_buffer, animated_app) = render(true);
+        let meta_start = static_buffer.area.width - metadata_width(static_buffer.area.width);
+        let label_start = meta_start + 1;
+        let label_end = label_start + WORKING_LABEL.len() as u16;
+        assert!(
+            (label_start..label_end)
+                .any(|x| static_buffer[(x, 0)].fg != animated_buffer[(x, 0)].fg),
+            "the on/off comparison must exercise the shimmer"
+        );
+        for x in label_end..static_buffer.area.width {
+            let before = &static_buffer[(x, 0)];
+            let after = &animated_buffer[(x, 0)];
+            assert_eq!(after.symbol(), before.symbol(), "cell x={x}");
+            assert_eq!(after.fg, before.fg, "cell x={x}");
+            assert_eq!(after.bg, before.bg, "cell x={x}");
+            assert_eq!(after.modifier, before.modifier, "cell x={x}");
+            for (name, cell, app) in [("off", before, &static_app), ("on", after, &animated_app)] {
+                assert_eq!(cell.symbol(), " ", "{name} cell x={x}");
+                assert_eq!(cell.fg, app.palette.yellow, "{name} cell x={x}");
+                assert_eq!(cell.bg, app.palette.panel_bg, "{name} cell x={x}");
+                assert_eq!(cell.modifier, Modifier::empty(), "{name} cell x={x}");
+            }
         }
     }
 

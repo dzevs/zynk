@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
-use super::status::{state_label, state_label_color};
+use super::status::{state_label, state_label_color, working_label_spans};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, Mode};
@@ -1505,6 +1505,7 @@ fn resolved_token_spans(
     p: &Palette,
     max_width: usize,
     right_align_state: bool,
+    working_shimmer_app: Option<&AppState>,
 ) -> Vec<Span<'static>> {
     if right_align_state {
         if let Some((text, style)) = resolved.last().and_then(|token| {
@@ -1524,6 +1525,7 @@ fn resolved_token_spans(
                 p,
                 max_width.saturating_sub(width + usize::from(!prefix.is_empty())),
                 false,
+                working_shimmer_app,
             );
             let used = spans
                 .iter()
@@ -1535,10 +1537,12 @@ fn resolved_token_spans(
             if padding > 0 {
                 spans.push(Span::raw(" ".repeat(padding)));
             }
-            spans.push(Span::styled(
-                text,
-                apply_token_style(styles.state_text, style),
-            ));
+            let style = apply_token_style(styles.state_text, style);
+            if let Some(app) = working_shimmer_app {
+                spans.extend(working_label_spans(text, style, true, app));
+            } else {
+                spans.push(Span::styled(text, style));
+            }
             return spans;
         }
     }
@@ -1658,10 +1662,15 @@ fn resolved_token_spans(
                 state_icon.0.to_string(),
                 apply_token_style(state_icon.1, token_style),
             )),
-            ResolvedToken::StateText(text) => spans.push(Span::styled(
-                truncate_end(text, budgets[index]),
-                apply_token_style(styles.state_text, token_style),
-            )),
+            ResolvedToken::StateText(text) => {
+                let text = truncate_end(text, budgets[index]);
+                let style = apply_token_style(styles.state_text, token_style);
+                if let Some(app) = working_shimmer_app {
+                    spans.extend(working_label_spans(text, style, true, app));
+                } else {
+                    spans.push(Span::styled(text, style));
+                }
+            }
             ResolvedToken::Workspace(text) => spans.push(Span::styled(
                 truncate_end(text, budgets[index]),
                 apply_token_style(styles.workspace, token_style),
@@ -1913,6 +1922,7 @@ fn render_workspace_list(
                 p,
                 (card.rect.width as usize).saturating_sub(prefix_width + trailing_width),
                 false,
+                None,
             ));
             frame.render_widget(
                 Paragraph::new(Line::from(spans)).style(row_style),
@@ -2164,6 +2174,11 @@ fn render_agent_detail(
                     custom: name_style,
                 };
                 let resolved = agent_resolved_rows(app, detail);
+                let working_shimmer_app = (detail.state == AgentState::Working
+                    && !detail
+                        .state_labels
+                        .contains_key(agent_panel_status_key(detail.state, detail.seen)))
+                .then_some(app);
                 for line in 0..height {
                     let row_y = y.saturating_add(line);
                     let mut spans = if line == 0 {
@@ -2185,6 +2200,7 @@ fn render_agent_detail(
                             p,
                             body_width.saturating_sub(3),
                             true,
+                            working_shimmer_app,
                         ));
                     }
                     if is_active {
@@ -3608,6 +3624,7 @@ mod tests {
                 &app.palette,
                 width as usize,
                 align,
+                None,
             );
             let mut terminal = Terminal::new(TestBackend::new(width + 4, 3)).unwrap();
             terminal
@@ -3777,6 +3794,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                 &app.palette,
                 width as usize,
                 false,
+                None,
             );
             let text = spans
                 .iter()
@@ -7534,6 +7552,91 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         }
         // the state label is present.
         assert!(joined.contains("working"), "state label present:\n{joined}");
+    }
+
+    #[test]
+    fn sidebar_working_shimmer_preserves_every_cell_after_the_label() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("zynk")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.spinner_tick = 0;
+        app.sidebar_agents.rows = vec![vec![
+            crate::config::AgentSidebarToken::StateText,
+            crate::config::AgentSidebarToken::Agent,
+        ]];
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        let area = Rect::new(0, 0, 40, 12);
+        let body = agent_panel_body_rect(area, false);
+        let child_y = agent_visible_rows(&app, area)
+            .into_iter()
+            .find_map(|row| match row {
+                AgentVisibleRow::Child { y, .. } => Some(y),
+                AgentVisibleRow::GroupHeader { .. } => None,
+            })
+            .expect("working child row");
+        let render = |app: &AppState| {
+            let runtimes = TerminalRuntimeRegistry::new();
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_agent_detail(app, &runtimes, frame, area))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+
+        app.working_animation = false;
+        let static_buffer = render(&app);
+        app.working_animation = true;
+        let animated_buffer = render(&app);
+        let label = "working";
+        let label_start = (body.x..=body.right() - label.len() as u16)
+            .find(|start| {
+                label.chars().enumerate().all(|(offset, character)| {
+                    static_buffer[(*start + offset as u16, child_y)].symbol()
+                        == character.to_string()
+                })
+            })
+            .expect("working label in child row");
+        let label_end = label_start + label.len() as u16;
+        assert!(
+            (label_start..label_end)
+                .any(|x| static_buffer[(x, child_y)].fg != animated_buffer[(x, child_y)].fg),
+            "the on/off comparison must exercise the shimmer"
+        );
+        for x in label_end..body.right() {
+            let before = &static_buffer[(x, child_y)];
+            let after = &animated_buffer[(x, child_y)];
+            assert_eq!(after.symbol(), before.symbol(), "cell x={x}");
+            assert_eq!(after.fg, before.fg, "cell x={x}");
+            assert_eq!(after.bg, before.bg, "cell x={x}");
+            assert_eq!(after.modifier, before.modifier, "cell x={x}");
+        }
+
+        let last_content = (body.x..body.right())
+            .rfind(|x| static_buffer[(*x, child_y)].symbol() != " ")
+            .expect("rendered child content");
+        assert!(
+            last_content + 1 < body.right(),
+            "non-vacuous trailing cells"
+        );
+        for x in last_content + 1..body.right() {
+            for (name, buffer) in [("off", &static_buffer), ("on", &animated_buffer)] {
+                let cell = &buffer[(x, child_y)];
+                assert_eq!(cell.symbol(), " ", "{name} cell x={x}");
+                assert_eq!(cell.fg, Color::Reset, "{name} cell x={x}");
+                assert_eq!(cell.bg, app.palette.active_row_bg, "{name} cell x={x}");
+                assert_eq!(cell.modifier, Modifier::empty(), "{name} cell x={x}");
+            }
+        }
     }
 
     #[test]

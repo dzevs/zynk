@@ -5,6 +5,7 @@ pub mod db_path;
 pub mod embed;
 pub mod embedding_worker;
 pub mod header;
+pub mod identity;
 pub mod inbox;
 pub mod message;
 pub mod persistence;

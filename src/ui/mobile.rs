@@ -13,7 +13,9 @@ use super::sidebar::{
     next_entry_is_indented_workspace, workspace_list_entries_expanded, AgentPanelEntry,
     WorkspaceListEntry,
 };
-use super::status::{agent_icon, state_icon, state_icon_symbol};
+use super::status::{
+    agent_icon, state_icon, state_icon_symbol, working_label_spans, WORKING_LABEL,
+};
 use super::text::{display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
@@ -555,7 +557,10 @@ fn render_mobile_switcher_content(
                         .add_modifier(Modifier::BOLD),
                 ),
             ]);
-            let detail = mobile_agent_detail(entry);
+            let detail_layout = mobile_agent_detail_layout(entry);
+            let detail = truncate_end(&detail_layout.text, content.width as usize);
+            let detail =
+                mobile_agent_detail_line(detail, detail_layout.default_working_range, bg, app);
             render_two_line_item(
                 frame,
                 viewport,
@@ -564,7 +569,7 @@ fn render_mobile_switcher_content(
                 app.mobile_switcher_scroll,
                 bg,
                 title,
-                truncate_end(&detail, content.width as usize),
+                detail,
                 p.overlay0,
             );
             doc_y += 2;
@@ -658,7 +663,10 @@ fn render_mobile_switcher_content(
             app.mobile_switcher_scroll,
             bg,
             Line::from(title_spans),
-            truncate_end(&detail, content.width as usize),
+            Line::from(Span::styled(
+                truncate_end(&detail, content.width as usize),
+                Style::default().fg(p.overlay0).bg(bg),
+            )),
             p.overlay0,
         );
         doc_y += 2;
@@ -741,25 +749,78 @@ fn render_mobile_switcher_content(
     }
 }
 
-fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
+struct MobileAgentDetail {
+    text: String,
+    default_working_range: Option<std::ops::Range<usize>>,
+}
+
+fn mobile_agent_detail_layout(entry: &AgentPanelEntry) -> MobileAgentDetail {
     let mut parts = Vec::new();
     if let Some(tab_label) = entry.primary_tab_label.as_deref() {
-        parts.push(tab_label.to_string());
+        parts.push((tab_label.to_string(), false));
     }
+    let status_key = super::sidebar::agent_panel_status_key(entry.state, entry.seen);
+    let default_working =
+        entry.state == AgentState::Working && !entry.state_labels.contains_key(status_key);
     let status = entry
         .state_labels
-        .get(super::sidebar::agent_panel_status_key(
-            entry.state,
-            entry.seen,
-        ))
+        .get(status_key)
         .cloned()
         .unwrap_or_else(|| super::status::state_label(entry.state, entry.seen).to_string());
-    parts.push(status);
+    parts.push((status, default_working));
     if let Some(agent_label) = entry.agent_label.as_deref() {
-        parts.push(agent_label.to_string());
+        parts.push((agent_label.to_string(), false));
     }
 
-    format!("  {}", parts.join(" · "))
+    let mut text = String::from("  ");
+    let mut default_working_range = None;
+    for (index, (part, is_default_working)) in parts.into_iter().enumerate() {
+        if index > 0 {
+            text.push_str(" · ");
+        }
+        let start = text.len();
+        text.push_str(&part);
+        if is_default_working {
+            default_working_range = Some(start..text.len());
+        }
+    }
+    MobileAgentDetail {
+        text,
+        default_working_range,
+    }
+}
+
+#[cfg(test)]
+fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
+    mobile_agent_detail_layout(entry).text
+}
+
+fn mobile_agent_detail_line(
+    text: String,
+    working_range: Option<std::ops::Range<usize>>,
+    bg: ratatui::style::Color,
+    app: &AppState,
+) -> Line<'static> {
+    let static_style = Style::default().fg(app.palette.overlay0).bg(bg);
+    let Some(range) = working_range.filter(|range| text.get(range.clone()) == Some(WORKING_LABEL))
+    else {
+        return Line::from(Span::styled(text, static_style));
+    };
+
+    let mut spans = Vec::new();
+    if range.start > 0 {
+        spans.push(Span::styled(text[..range.start].to_string(), static_style));
+    }
+    spans.extend(working_label_spans(
+        WORKING_LABEL.to_string(),
+        Style::default().fg(app.palette.yellow).bg(bg),
+        true,
+        app,
+    ));
+    if range.end < text.len() {
+        spans.push(Span::styled(text[range.end..].to_string(), static_style));
+    }
+    Line::from(spans)
 }
 
 fn render_section_title_at(
@@ -831,7 +892,7 @@ fn render_two_line_item(
     scroll: usize,
     bg: ratatui::style::Color,
     title: Line<'_>,
-    detail: String,
+    detail: Line<'_>,
     detail_fg: ratatui::style::Color,
 ) {
     fill_visible_doc_rect(
@@ -1608,6 +1669,72 @@ mod tests {
         let entry = agent_entry(None, Some("pi"));
 
         assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
+    }
+
+    #[test]
+    fn mobile_working_shimmer_preserves_every_cell_after_the_label() {
+        let render = |working_animation| {
+            let mut app = AppState::test_new();
+            app.working_animation = working_animation;
+            app.spinner_tick = 0;
+            let width = 24;
+            let area = Rect::new(0, 0, width, 2);
+            let bg = app.palette.active_row_bg;
+            let detail_text = format!("  {WORKING_LABEL} · claude");
+            let detail =
+                mobile_agent_detail_line(detail_text, Some(2..2 + WORKING_LABEL.len()), bg, &app);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                    .unwrap();
+            terminal
+                .draw(|frame| {
+                    render_two_line_item(
+                        frame,
+                        area,
+                        area,
+                        0,
+                        0,
+                        bg,
+                        Line::from("title"),
+                        detail.clone(),
+                        app.palette.overlay0,
+                    )
+                })
+                .unwrap();
+            (terminal.backend().buffer().clone(), app)
+        };
+
+        let (static_buffer, static_app) = render(false);
+        let (animated_buffer, animated_app) = render(true);
+        let label_start = 2u16;
+        let label_end = label_start + WORKING_LABEL.len() as u16;
+        assert!(
+            (label_start..label_end)
+                .any(|x| static_buffer[(x, 1)].fg != animated_buffer[(x, 1)].fg),
+            "the on/off comparison must exercise the shimmer"
+        );
+        for x in label_end..static_buffer.area.width {
+            let before = &static_buffer[(x, 1)];
+            let after = &animated_buffer[(x, 1)];
+            assert_eq!(after.symbol(), before.symbol(), "cell x={x}");
+            assert_eq!(after.fg, before.fg, "cell x={x}");
+            assert_eq!(after.bg, before.bg, "cell x={x}");
+            assert_eq!(after.modifier, before.modifier, "cell x={x}");
+        }
+
+        let content_end = format!("  {WORKING_LABEL} · claude").len() as u16;
+        for x in content_end..static_buffer.area.width {
+            for (name, buffer, app) in [
+                ("off", &static_buffer, &static_app),
+                ("on", &animated_buffer, &animated_app),
+            ] {
+                let cell = &buffer[(x, 1)];
+                assert_eq!(cell.symbol(), " ", "{name} cell x={x}");
+                assert_eq!(cell.fg, app.palette.overlay0, "{name} cell x={x}");
+                assert_eq!(cell.bg, app.palette.active_row_bg, "{name} cell x={x}");
+                assert_eq!(cell.modifier, Modifier::empty(), "{name} cell x={x}");
+            }
+        }
     }
 
     #[tokio::test]

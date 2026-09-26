@@ -279,6 +279,135 @@ pub(super) fn state_label_color(state: AgentState, seen: bool, p: &Palette) -> C
     }
 }
 
+pub(crate) const WORKING_LABEL: &str = "working";
+pub(crate) const WORKING_LABEL_LEN: usize = 7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkingShimmerPalette {
+    pub(crate) base: crate::terminal_theme::RgbColor,
+    pub(crate) target: crate::terminal_theme::RgbColor,
+}
+
+pub(crate) fn working_label_shimmer_palette(
+    base: Color,
+    target: Color,
+    host: &crate::terminal_theme::TerminalTheme,
+) -> Option<WorkingShimmerPalette> {
+    Some(WorkingShimmerPalette {
+        base: resolve_shimmer_color(base, host)?,
+        target: resolve_shimmer_color(target, host)?,
+    })
+}
+
+pub(crate) fn working_label_shimmer_color(
+    palette: WorkingShimmerPalette,
+    tick: u32,
+    character_index: usize,
+) -> Color {
+    let weight = working_label_shimmer_weight(tick, character_index);
+    let blended = blend_quarters(palette.base, palette.target, weight);
+    Color::Rgb(blended.r, blended.g, blended.b)
+}
+
+pub(crate) fn working_label_shimmer_weight(tick: u32, character_index: usize) -> u16 {
+    let step = ((tick / crate::app::WORKING_ANIMATION_TICK_STEP) % 10) as usize;
+    match step.checked_sub(character_index) {
+        Some(0) => 3,
+        Some(1) => 2,
+        Some(2) => 1,
+        _ => 0,
+    }
+}
+
+pub(super) fn working_label_spans(
+    label: String,
+    style: Style,
+    animate_default_working: bool,
+    app: &crate::app::state::AppState,
+) -> Vec<Span<'static>> {
+    if !animate_default_working || !app.working_animation || label != WORKING_LABEL {
+        return vec![Span::styled(label, style)];
+    }
+    let Some(palette) = working_label_shimmer_palette(
+        style.fg.unwrap_or(app.palette.yellow),
+        app.palette.text,
+        &app.host_terminal_theme,
+    ) else {
+        return vec![Span::styled(label, style)];
+    };
+    label
+        .chars()
+        .enumerate()
+        .map(|(index, character)| {
+            Span::styled(
+                character.to_string(),
+                style.fg(working_label_shimmer_color(
+                    palette,
+                    app.spinner_tick,
+                    index,
+                )),
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn working_label_shimmer_colors(
+    base: Color,
+    target: Color,
+    tick: u32,
+    host: &crate::terminal_theme::TerminalTheme,
+) -> Option<[Color; WORKING_LABEL_LEN]> {
+    let palette = working_label_shimmer_palette(base, target, host)?;
+    Some(std::array::from_fn(|index| {
+        working_label_shimmer_color(palette, tick, index)
+    }))
+}
+
+fn blend_quarters(
+    base: crate::terminal_theme::RgbColor,
+    target: crate::terminal_theme::RgbColor,
+    weight: u16,
+) -> crate::terminal_theme::RgbColor {
+    let blend = |base: u8, target: u8| {
+        let value = u16::from(base) * (4 - weight) + u16::from(target) * weight + 2;
+        (value / 4) as u8
+    };
+    crate::terminal_theme::RgbColor {
+        r: blend(base.r, target.r),
+        g: blend(base.g, target.g),
+        b: blend(base.b, target.b),
+    }
+}
+
+fn resolve_shimmer_color(
+    color: Color,
+    host: &crate::terminal_theme::TerminalTheme,
+) -> Option<crate::terminal_theme::RgbColor> {
+    let palette_index = match color {
+        Color::Black => Some(0),
+        Color::Red => Some(1),
+        Color::Green => Some(2),
+        Color::Yellow => Some(3),
+        Color::Blue => Some(4),
+        Color::Magenta => Some(5),
+        Color::Cyan => Some(6),
+        Color::Gray => Some(7),
+        Color::DarkGray => Some(8),
+        Color::LightRed => Some(9),
+        Color::LightGreen => Some(10),
+        Color::LightYellow => Some(11),
+        Color::LightBlue => Some(12),
+        Color::LightMagenta => Some(13),
+        Color::LightCyan => Some(14),
+        Color::White => Some(15),
+        Color::Indexed(index) => Some(usize::from(index)),
+        Color::Reset => return host.foreground,
+        Color::Rgb(r, g, b) => return Some(crate::terminal_theme::RgbColor { r, g, b }),
+    };
+    host.palette[palette_index?]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +527,204 @@ mod tests {
         );
         assert_eq!(gb, "◉");
         assert_eq!(sb.fg, Some(p.red));
+    }
+
+    #[test]
+    fn working_label_shimmer_uses_the_exact_quarter_blend_sequence() {
+        let base = Color::Rgb(20, 40, 60);
+        let target = Color::Rgb(100, 120, 140);
+        let expected = [
+            [Color::Rgb(80, 100, 120), base, base, base, base, base, base],
+            [
+                Color::Rgb(60, 80, 100),
+                Color::Rgb(80, 100, 120),
+                base,
+                base,
+                base,
+                base,
+                base,
+            ],
+            [
+                Color::Rgb(40, 60, 80),
+                Color::Rgb(60, 80, 100),
+                Color::Rgb(80, 100, 120),
+                base,
+                base,
+                base,
+                base,
+            ],
+            [
+                base,
+                Color::Rgb(40, 60, 80),
+                Color::Rgb(60, 80, 100),
+                Color::Rgb(80, 100, 120),
+                base,
+                base,
+                base,
+            ],
+            [
+                base,
+                base,
+                Color::Rgb(40, 60, 80),
+                Color::Rgb(60, 80, 100),
+                Color::Rgb(80, 100, 120),
+                base,
+                base,
+            ],
+            [
+                base,
+                base,
+                base,
+                Color::Rgb(40, 60, 80),
+                Color::Rgb(60, 80, 100),
+                Color::Rgb(80, 100, 120),
+                base,
+            ],
+            [
+                base,
+                base,
+                base,
+                base,
+                Color::Rgb(40, 60, 80),
+                Color::Rgb(60, 80, 100),
+                Color::Rgb(80, 100, 120),
+            ],
+            [
+                base,
+                base,
+                base,
+                base,
+                base,
+                Color::Rgb(40, 60, 80),
+                Color::Rgb(60, 80, 100),
+            ],
+            [base, base, base, base, base, base, Color::Rgb(40, 60, 80)],
+            [base; 7],
+        ];
+
+        for (step, expected) in expected.into_iter().enumerate() {
+            assert_eq!(
+                working_label_shimmer_colors(base, target, step as u32 * 8, &Default::default()),
+                Some(expected),
+                "step {step}"
+            );
+        }
+        assert_eq!(
+            working_label_shimmer_colors(base, target, 80, &Default::default()),
+            working_label_shimmer_colors(base, target, 0, &Default::default())
+        );
+    }
+
+    #[test]
+    fn working_label_shimmer_resolves_host_colors_or_stays_static() {
+        let host = crate::terminal_theme::TerminalTheme::default()
+            .with_color(
+                crate::terminal_theme::DefaultColorKind::Foreground,
+                crate::terminal_theme::RgbColor {
+                    r: 240,
+                    g: 241,
+                    b: 242,
+                },
+            )
+            .with_palette_color(
+                3,
+                crate::terminal_theme::RgbColor {
+                    r: 30,
+                    g: 31,
+                    b: 32,
+                },
+            )
+            .with_palette_color(
+                11,
+                crate::terminal_theme::RgbColor {
+                    r: 110,
+                    g: 111,
+                    b: 112,
+                },
+            );
+        assert_eq!(
+            resolve_shimmer_color(Color::Reset, &host),
+            Some(crate::terminal_theme::RgbColor {
+                r: 240,
+                g: 241,
+                b: 242
+            })
+        );
+        assert_eq!(
+            resolve_shimmer_color(Color::Indexed(3), &host),
+            Some(crate::terminal_theme::RgbColor {
+                r: 30,
+                g: 31,
+                b: 32
+            })
+        );
+        assert_eq!(
+            resolve_shimmer_color(Color::LightYellow, &host),
+            Some(crate::terminal_theme::RgbColor {
+                r: 110,
+                g: 111,
+                b: 112
+            })
+        );
+        assert_eq!(
+            working_label_shimmer_colors(Color::Indexed(4), Color::Reset, 0, &host),
+            None
+        );
+    }
+
+    #[test]
+    fn working_label_shimmer_uses_the_rendered_label_color_as_its_base() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.palette.yellow = Color::Rgb(200, 180, 20);
+        app.palette.text = Color::Rgb(100, 120, 140);
+        app.spinner_tick = 0;
+        let rendered_base = Color::Rgb(12, 24, 36);
+        let spans = working_label_spans(
+            WORKING_LABEL.to_string(),
+            Style::default().fg(rendered_base),
+            true,
+            &app,
+        );
+        let expected = working_label_shimmer_colors(
+            rendered_base,
+            app.palette.text,
+            0,
+            &app.host_terminal_theme,
+        )
+        .unwrap();
+        assert_eq!(spans.len(), WORKING_LABEL_LEN);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.style.fg.unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn working_label_shimmer_is_static_when_disabled_or_not_the_builtin_label() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.palette.yellow = Color::Rgb(20, 40, 60);
+        app.palette.text = Color::Rgb(100, 120, 140);
+        app.spinner_tick = 16;
+        let style = Style::default()
+            .fg(app.palette.yellow)
+            .bg(Color::Rgb(1, 2, 3))
+            .add_modifier(Modifier::BOLD);
+
+        app.working_animation = false;
+        let off = working_label_spans(WORKING_LABEL.to_string(), style, true, &app);
+        assert_eq!(off, vec![Span::styled(WORKING_LABEL.to_string(), style)]);
+
+        app.working_animation = true;
+        let custom = working_label_spans("building".to_string(), style, true, &app);
+        assert_eq!(custom, vec![Span::styled("building".to_string(), style)]);
+        let nonworking = working_label_spans(WORKING_LABEL.to_string(), style, false, &app);
+        assert_eq!(
+            nonworking,
+            vec![Span::styled(WORKING_LABEL.to_string(), style)]
+        );
     }
 
     #[test]

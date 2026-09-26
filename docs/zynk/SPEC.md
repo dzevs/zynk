@@ -340,9 +340,15 @@ Working-agent animation is a fork-owned presentation feature controlled by reloa
 `ui.working_animation`, which defaults to true. Dots-mode sidebar surfaces use the yellow
 `◌ ◎ ◉ ● ◉ ◎` pulse for working agent rows, group aggregates, workspace dots, and the collapsed rail.
 Navigator rows/chips and mobile header/switcher surfaces use `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`.
-Symbols-mode sidebar marks remain static while those braille surfaces animate. Turning the key off restores
-the static 3.1.0 marks everywhere. Both execution loops advance by eight tick units every 128 ms, producing
-the same one-frame-per-128-ms visual cadence without intermediate wakeups.
+The literal `working` label on expanded sidebar rows, mobile switcher rows, and navigator rows also receives a
+style-only brightness sweep. Its symbols, width, alignment, background, and modifiers never change. The base is
+the label's rendered working foreground; the peak blends three quarters toward the theme text color, followed
+by one-half and one-quarter tail cells. The deterministic ten-step period is the seven-character label plus the
+three-cell tail. Symbols-mode sidebar marks remain static while the label shimmer and braille surfaces animate.
+If either palette endpoint cannot resolve, the label stays static. Turning the key off restores the static
+3.1.0 marks and labels everywhere. Both execution loops advance by eight tick units every 128 ms, producing the
+same one-frame-per-128-ms visual cadence without intermediate wakeups; the shimmer is intentionally stepped,
+and no faster timer or doubled frame rate is part of this release.
 
 View computation exposes a scalar `WorkingAnimationDemand`; schedulers never recollect UI topology merely to
 check a deadline. A headless full-render pass resets demand and ORs it across every full App render target.
@@ -396,6 +402,29 @@ Navigate owns its overlays and mouse input, so pane mouse hit testing never pre-
 view. A wheel during an in-progress selection whose pane lost focus is consumed without stale scrolling or bytes.
 Navigate-mode Tab and Shift-Tab cycle panes without leaving Navigate; the existing Enter, numeric, and Escape exit
 paths remain.
+
+An exact Alt+left press inside a pane selects locally even when that application enabled mouse reporting. The
+press anchors the same selection state as a plain press in a non-capturing pane; drag extends it, release follows
+the existing `copy_on_select` policy, and double-click keeps the existing word-selection behavior. No byte from
+that Alt gesture is forwarded to the application. Without exact Alt, a capturing pane retains its current mouse
+reporting behavior; on a non-capturing pane, Alt+drag is equivalent to plain local selection. Shift is not the
+bypass because host terminals commonly reserve Shift+drag for native selection, while desktop environments may
+intercept Alt+drag before zynk receives it.
+
+Zynk-managed Codex requires CLI 0.157.1 or newer and receives exactly one `--no-daemon` argument on every start,
+resume, and snapshot restore. A session-bearing Codex hook report is accepted only when its peer ancestry remains
+inside that pane without crossing `codex app-server --managed-daemon`; unreadable, replaced, cyclic, over-bound,
+or managed-daemon ancestry fails closed. A normalized `(source, agent, kind, value)` session may be authoritative
+for only one terminal. Duplicate runtime claims return `duplicate_agent_session`. If a snapshot contains one
+session on two terminals, the layout and pane working directories restore, but neither owner is resumed, both
+session anchors are dropped, and one diagnostic names the conflicting panes and session rather than choosing an
+owner. Clearing the current owner releases the session for a later terminal.
+
+For Codex-origin CLI operations, `CODEX_THREAD_ID` and `CODEX_SESSION_ID` are optional consistency hints, never
+routing authority. When both are present they must agree. When the source pane already has an authoritative Codex
+session, any present hint must match it; contradiction returns `caller_identity_conflict` before socket or DB
+mutation. Missing hints, or hints observed before hook authority exists, proceed through the existing pane-bound
+path and are reported as unverified. No mismatch reroutes a request to a pane found by session value.
 
 `ui.window_title` defaults to empty, leaving the host terminal title untouched. A template such as
 `{hostname}: {workspace}` opts in and may also use `{tab}`, `{pane}`, and `{terminal_title}`. Malformed

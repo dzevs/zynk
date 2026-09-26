@@ -61,6 +61,10 @@ use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
     toast_notification_rect,
 };
+pub(crate) use self::status::{
+    working_label_shimmer_color, working_label_shimmer_palette, working_label_shimmer_weight,
+    WorkingShimmerPalette, WORKING_LABEL, WORKING_LABEL_LEN,
+};
 pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, tab_surface_cursor,
     tab_surface_hyperlinks, TabSurfaceLayout, TabSurfaceView,
@@ -288,17 +292,38 @@ fn computed_working_animation_demand(
     match app.view.layout {
         ViewLayout::Desktop => {
             let mut demand = WorkingAnimationDemand::NONE;
-            if app.view.sidebar_rect.width > 0
-                && app.status_indicators == crate::config::StatusIndicatorStyle::Dots
-            {
-                let spaces_working = app.workspaces.iter().any(|workspace| {
-                    workspace.aggregate_state(&app.terminals).0
-                        == crate::detect::AgentState::Working
-                });
-                let agents_working = sidebar::agent_panel_entries_from(app, terminal_runtimes)
-                    .iter()
-                    .any(|entry| entry.state == crate::detect::AgentState::Working);
-                if spaces_working || agents_working {
+            if app.view.sidebar_rect.width > 0 {
+                let dots = app.status_indicators == crate::config::StatusIndicatorStyle::Dots;
+                let spaces_working = dots
+                    && app.workspaces.iter().any(|workspace| {
+                        workspace.aggregate_state(&app.terminals).0
+                            == crate::detect::AgentState::Working
+                    });
+                let shimmer_resolvable = !app.sidebar_collapsed
+                    && working_label_shimmer_palette(
+                        app.palette.yellow,
+                        app.palette.text,
+                        &app.host_terminal_theme,
+                    )
+                    .is_some();
+                let (agents_working, label_working) = if dots || !app.sidebar_collapsed {
+                    let entries = sidebar::agent_panel_entries_from(app, terminal_runtimes);
+                    (
+                        entries
+                            .iter()
+                            .any(|entry| entry.state == crate::detect::AgentState::Working),
+                        shimmer_resolvable
+                            && entries.iter().any(|entry| {
+                                entry.state == crate::detect::AgentState::Working
+                                    && !entry.state_labels.contains_key(
+                                        sidebar::agent_panel_status_key(entry.state, entry.seen),
+                                    )
+                            }),
+                    )
+                } else {
+                    (false, false)
+                };
+                if spaces_working || (dots && agents_working) || label_working {
                     demand |= WorkingAnimationDemand::SIDEBAR;
                 }
             }
@@ -808,14 +833,24 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 100, 24));
         assert_eq!(
             app.view.working_animation_demand,
-            WorkingAnimationDemand::NONE
+            WorkingAnimationDemand::SIDEBAR
         );
+
+        app.palette = crate::app::state::Palette::terminal();
+        app.host_terminal_theme = crate::terminal_theme::TerminalTheme::default();
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::NONE,
+            "an unresolvable label stays static and creates no text demand"
+        );
+        app.palette = crate::app::state::Palette::catppuccin_latte();
 
         app.mode = Mode::Navigator;
         compute_view(&mut app, Rect::new(0, 0, 100, 24));
         assert_eq!(
             app.view.working_animation_demand,
-            WorkingAnimationDemand::BRAILLE
+            WorkingAnimationDemand::SIDEBAR | WorkingAnimationDemand::BRAILLE
         );
 
         app.mode = Mode::Terminal;

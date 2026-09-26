@@ -2223,7 +2223,7 @@ impl TerminalState {
         })
     }
 
-    fn current_session_identity_for_persistence(
+    pub(crate) fn current_session_identity_for_persistence(
         &self,
     ) -> Option<(
         String,
@@ -2749,6 +2749,11 @@ impl TerminalState {
                         sources.push(identity.source.clone());
                     }
                 }
+                if let Some(session) = self.persisted_agent_session.as_ref() {
+                    if !sources.iter().any(|known| known == &session.source) {
+                        sources.push(session.source.clone());
+                    }
+                }
                 sources
             }
         };
@@ -2768,7 +2773,15 @@ impl TerminalState {
             .hook_identity
             .as_ref()
             .is_some_and(|identity| source.is_none_or(|source| identity.source == source));
-        if !should_clear_authority && !should_clear_identity {
+        // A session-start report can anchor persistence without lifecycle
+        // authority. The explicit clear is the operator/API retirement path for
+        // that owner too; otherwise a dead anchor would reserve its session
+        // identity forever.
+        let should_clear_persisted_session = self
+            .persisted_agent_session
+            .as_ref()
+            .is_some_and(|session| source.is_none_or(|source| session.source == source));
+        if !should_clear_authority && !should_clear_identity && !should_clear_persisted_session {
             return None;
         }
         let admission = HookReportAdmission::Accept {
@@ -2803,6 +2816,8 @@ impl TerminalState {
             if self.persisted_agent_session_matches(&identity.source, &identity.agent_label) {
                 self.persisted_agent_session = None;
             }
+        } else if should_clear_persisted_session {
+            self.persisted_agent_session = None;
         }
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(

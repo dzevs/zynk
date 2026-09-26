@@ -1537,6 +1537,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn alt_drag_locally_selects_and_copies_in_a_mouse_reporting_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("alt-selection");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006halpha beta",
+                8,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        let row = info.inner_rect.y;
+        let start_col = info.inner_rect.x;
+        let end_col = start_col + 4;
+        for (kind, col) in [
+            (MouseEventKind::Down(MouseButton::Left), start_col),
+            (MouseEventKind::Drag(MouseButton::Left), end_col),
+            (MouseEventKind::Up(MouseButton::Left), end_col),
+        ] {
+            app.handle_mouse(modified_mouse(kind, col, row, KeyModifiers::ALT));
+        }
+
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+        assert!(app.state.selection.is_none());
+        assert!(input_rx.try_recv().is_err(), "Alt drag reached the pane");
+        assert!(app.state.terminal_mouse_gestures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn alt_double_click_locally_selects_a_word_in_a_mouse_reporting_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("alt-double-click");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006halpha beta",
+                8,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        let col = info.inner_rect.x + 7;
+        let row = info.inner_rect.y;
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            app.handle_mouse(modified_mouse(kind, col, row, KeyModifiers::ALT));
+        }
+
+        assert_eq!(clipboard_write_content(&mut app), b"beta");
+        assert_visible_selection(&app);
+        assert!(
+            input_rx.try_recv().is_err(),
+            "Alt double-click reached the pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn alt_drag_in_a_non_reporting_pane_matches_plain_local_selection() {
+        let (mut app, info) = app_with_screen_bytes(b"alpha beta");
+        let row = info.inner_rect.y;
+        let start_col = info.inner_rect.x;
+        let end_col = start_col + 4;
+
+        for (kind, col) in [
+            (MouseEventKind::Down(MouseButton::Left), start_col),
+            (MouseEventKind::Drag(MouseButton::Left), end_col),
+            (MouseEventKind::Up(MouseButton::Left), end_col),
+        ] {
+            app.handle_mouse(modified_mouse(kind, col, row, KeyModifiers::ALT));
+        }
+
+        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+        assert!(app.state.selection.is_none());
+    }
+
+    #[tokio::test]
+    async fn alt_with_another_modifier_remains_owned_by_a_mouse_reporting_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("modified-selection");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006halpha beta",
+                8,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        app.handle_mouse(modified_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.inner_rect.x,
+            info.inner_rect.y,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+
+        assert!(app.state.selection.is_none());
+        assert!(
+            input_rx.try_recv().is_ok(),
+            "only exact Alt may bypass pane mouse reporting"
+        );
+    }
+
+    #[tokio::test]
     async fn copy_on_select_disabled_still_forwards_mouse_reporting_gestures() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");

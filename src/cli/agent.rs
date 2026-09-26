@@ -519,7 +519,13 @@ fn wait_for_started_agent(
         } else if !agent.launch_pending {
             Some(ErrorBody {
                 code: "agent_start_failed".into(),
-                message: "agent launch ended before becoming interactive".into(),
+                message: if kind == "codex" {
+                    "Codex launch ended before becoming interactive; zynk requires Codex \
+                     0.157.1 or newer with --no-daemon support"
+                        .into()
+                } else {
+                    "agent launch ended before becoming interactive".into()
+                },
             })
         } else {
             None
@@ -1130,8 +1136,8 @@ fn wait_after_prompt(
 
 fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     use crate::zynk::message::{
-        new_message_id, now_rfc3339, resolve_source, resolve_target, Proof, SendCommand, SendError,
-        SendOutcome, TargetResolution, TraceSpec,
+        new_message_id, now_rfc3339, resolve_source_checked, resolve_target, Party, Proof,
+        SendCommand, SendError, SendOutcome, TargetResolution, TraceSpec,
     };
     use crate::zynk::persistence::{
         append_delivery_event, attach_to_outcome, begin_send_attempt, failed_event_payload,
@@ -1145,9 +1151,28 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         }
     };
     let send = |request: Request| super::send_request(&request);
-    let from = resolve_source(crate::config::env_first(&["ZYNK_PANE_ID"]), send);
-    let (to, resolution) = resolve_target(&args.name, send);
     let message_id = new_message_id();
+    let from = match resolve_source_checked(crate::config::env_first(&["ZYNK_PANE_ID"]), send) {
+        Ok(from) => from,
+        Err(error) => {
+            let outcome = SendOutcome::failed(
+                SendCommand::AgentPrompt,
+                message_id,
+                Party::default(),
+                Party::default(),
+                TargetResolution::Unknown,
+                args.message_type,
+                SendError {
+                    code: error.code.into(),
+                    message: error.message,
+                    context: None,
+                },
+            );
+            println!("{}", outcome.to_json());
+            return Ok(1);
+        }
+    };
+    let (to, resolution) = resolve_target(&args.name, send);
     let failure = |error| {
         SendOutcome::failed(
             SendCommand::AgentPrompt,
@@ -1405,8 +1430,8 @@ fn agent_send(args: &[String]) -> std::io::Result<i32> {
 
     use crate::api::schema::PaneSendInputParams;
     use crate::zynk::message::{
-        new_message_id, now_rfc3339, parse_type_and_text, resolve_source, resolve_target, Party,
-        Proof, SendCommand, SendError, SendOutcome, TargetResolution,
+        new_message_id, now_rfc3339, parse_type_and_text, resolve_source_checked, resolve_target,
+        Party, Proof, SendCommand, SendError, SendOutcome, TargetResolution,
     };
     use crate::zynk::persistence::{
         append_delivery_event, attach_to_outcome, empty_event_payload, failed_event_payload,
@@ -1420,9 +1445,28 @@ fn agent_send(args: &[String]) -> std::io::Result<i32> {
     // borrows a `&Request`; the resolvers pass an owned `Request`.
     let send = |request: Request| super::send_request(&request);
 
-    let from = resolve_source(crate::config::env_first(&["ZYNK_PANE_ID"]), send);
-    let (to, resolution) = resolve_target(target, send);
     let message_id = new_message_id();
+    let from = match resolve_source_checked(crate::config::env_first(&["ZYNK_PANE_ID"]), send) {
+        Ok(from) => from,
+        Err(error) => {
+            let outcome = SendOutcome::failed(
+                SendCommand::AgentSend,
+                message_id,
+                Party::default(),
+                Party::default(),
+                TargetResolution::Unknown,
+                message_type,
+                SendError {
+                    code: error.code.into(),
+                    message: error.message,
+                    context: None,
+                },
+            );
+            println!("{}", outcome.to_json());
+            return Ok(1);
+        }
+    };
+    let (to, resolution) = resolve_target(target, send);
 
     // ADR 0002 honest-submit correction: resolve the agent to its pane and submit
     // via `pane.send_input` (atomic), NOT zynk's literal-no-Enter `agent.send`.

@@ -1070,6 +1070,7 @@ mod tests {
             cwd: None,
             branch: None,
             git_sha: None,
+            identity_verification: None,
         };
         let a = participant_fields(&party);
         let b = participant_fields(&party);

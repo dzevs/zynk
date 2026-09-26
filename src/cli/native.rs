@@ -107,8 +107,9 @@ fn native_send(
     rest: &[String],
 ) -> std::io::Result<i32> {
     use crate::zynk::message::{
-        new_message_id, now_rfc3339, parse_type_trace_and_text, resolve_source, resolve_target,
-        validate_trace_id, Party, Proof, SendError, SendOutcome, TargetResolution, TraceSpec,
+        new_message_id, now_rfc3339, parse_type_trace_and_text, resolve_source_checked,
+        resolve_target, validate_trace_id, Party, Proof, SendError, SendOutcome, TargetResolution,
+        TraceSpec,
     };
     use crate::zynk::persistence::{
         append_delivery_event, attach_to_outcome, empty_event_payload, failed_event_payload,
@@ -136,9 +137,28 @@ fn native_send(
         }
         result
     };
-    let from = resolve_source(caller_pane_id_env(), send);
-    let (to, resolution) = resolve_target(target, send);
     let message_id = new_message_id();
+    let from = match resolve_source_checked(caller_pane_id_env(), send) {
+        Ok(from) => from,
+        Err(error) => {
+            let outcome = SendOutcome::failed(
+                command,
+                message_id,
+                Party::default(),
+                Party::default(),
+                TargetResolution::Unknown,
+                message_type,
+                SendError {
+                    code: error.code.into(),
+                    message: error.message,
+                    context: None,
+                },
+            );
+            println!("{}", outcome.to_json());
+            return Ok(1);
+        }
+    };
+    let (to, resolution) = resolve_target(target, send);
 
     if let Some((response, context)) = protocol_mismatch.into_inner() {
         let outcome = SendOutcome::failed(
@@ -579,36 +599,54 @@ pub(super) fn run_inbox_command(args: &[String]) -> std::io::Result<i32> {
 
     // Default the caller to the LIVE pane identity (hook-authoritative agent_session,
     // falling back to the pane's authoritative agent label) when --agent is absent.
-    let agent = match agent {
-        Some(a) => a,
-        None => match caller_agent_label() {
-            Ok(Some(a)) => a,
-            Ok(None) => {
-                let resp = crate::zynk::inbox::InboxResponse::unidentified_caller(
-                    "no --agent given and the caller's pane identity could not be resolved",
-                );
-                return emit_inbox(&resp, json);
+    let (agent, identity_verification) = match agent {
+        Some(a) => (a, crate::zynk::identity::CodexHintVerification::NotPresent),
+        None => {
+            let hints = match crate::zynk::identity::CodexSessionHints::from_process_env() {
+                Ok(hints) => hints,
+                Err(conflict) => {
+                    return emit_inbox(
+                        &crate::zynk::inbox::InboxResponse::identity_conflict(&conflict),
+                        json,
+                    );
+                }
+            };
+            match caller_agent_label(&hints) {
+                Ok(Some(identity)) => identity,
+                Ok(None) => {
+                    let resp = crate::zynk::inbox::InboxResponse::unidentified_caller(
+                        "no --agent given and the caller's pane identity could not be resolved",
+                    );
+                    return emit_inbox(&resp, json);
+                }
+                Err(CallerAgentLookupError::Transport(err)) => {
+                    let resp = match super::protocol_mismatch_response(&err) {
+                        Some(response) => match super::protocol_mismatch_context(&err) {
+                            Some(context) => crate::zynk::inbox::InboxResponse::protocol_mismatch(
+                                response, context,
+                            ),
+                            None => crate::zynk::inbox::InboxResponse::unidentified_caller(
+                                "the caller lookup returned an incomplete protocol mismatch",
+                            ),
+                        },
+                        None => crate::zynk::inbox::InboxResponse::unidentified_caller(format!(
+                            "no --agent given and the caller's pane identity could not be resolved: {err}"
+                        )),
+                    };
+                    return emit_inbox(&resp, json);
+                }
+                Err(CallerAgentLookupError::Identity(conflict)) => {
+                    return emit_inbox(
+                        &crate::zynk::inbox::InboxResponse::identity_conflict(&conflict),
+                        json,
+                    );
+                }
             }
-            Err(err) => {
-                let resp = match super::protocol_mismatch_response(&err) {
-                    Some(response) => match super::protocol_mismatch_context(&err) {
-                        Some(context) => crate::zynk::inbox::InboxResponse::protocol_mismatch(
-                            response, context,
-                        ),
-                        None => crate::zynk::inbox::InboxResponse::unidentified_caller(
-                            "the caller lookup returned an incomplete protocol mismatch",
-                        ),
-                    },
-                    None => crate::zynk::inbox::InboxResponse::unidentified_caller(format!(
-                        "no --agent given and the caller's pane identity could not be resolved: {err}"
-                    )),
-                };
-                return emit_inbox(&resp, json);
-            }
-        },
+        }
     };
 
-    let resp = crate::zynk::inbox::run_inbox(&agent, limit);
+    let resp = crate::zynk::inbox::run_inbox(&agent, limit)
+        .with_identity_verification(identity_verification);
     emit_inbox(&resp, json)
 }
 
@@ -624,7 +662,15 @@ fn emit_inbox(resp: &crate::zynk::inbox::InboxResponse, json: bool) -> std::io::
 /// Resolve the caller's agent label from the live pane (`ZYNK_PANE_ID` → `pane.get`),
 /// preferring the HOOK-AUTHORITATIVE `agent_session.agent`, then the pane's
 /// authoritative `agent` label. Returns `None` when no pane/identity resolves.
-fn caller_agent_label() -> std::io::Result<Option<String>> {
+enum CallerAgentLookupError {
+    Transport(std::io::Error),
+    Identity(crate::zynk::identity::CallerIdentityConflict),
+}
+
+fn caller_agent_label(
+    hints: &crate::zynk::identity::CodexSessionHints,
+) -> Result<Option<(String, crate::zynk::identity::CodexHintVerification)>, CallerAgentLookupError>
+{
     let Some(pane_id) = caller_pane_id_env() else {
         return Ok(None);
     };
@@ -633,17 +679,21 @@ fn caller_agent_label() -> std::io::Result<Option<String>> {
         method: Method::PaneGet(PaneTarget {
             pane_id: pane_id.clone(),
         }),
-    })?;
+    })
+    .map_err(CallerAgentLookupError::Transport)?;
     if value.get("error").is_some() {
         return Ok(None);
     }
     let pane = &value["result"]["pane"];
+    let verification = hints
+        .validate_pane_info(pane)
+        .map_err(CallerAgentLookupError::Identity)?;
     Ok(pane
         .get("agent_session")
         .and_then(|s| s.get("agent"))
         .and_then(|a| a.as_str())
         .or_else(|| pane.get("agent").and_then(|a| a.as_str()))
-        .map(str::to_string))
+        .map(|agent| (agent.to_string(), verification)))
 }
 
 /// `zynk whoami [--json]` — the caller's live identity, hook-authoritative.
@@ -666,6 +716,14 @@ pub(super) fn run_whoami_command(args: &[String]) -> std::io::Result<i32> {
 
     let socket_namespace = crate::zynk::runtime::socket_namespace();
     let runtime_session_id = crate::zynk::runtime::read_runtime_id().ok();
+    let hints = match crate::zynk::identity::CodexSessionHints::from_process_env() {
+        Ok(hints) => hints,
+        Err(conflict) => {
+            let resp =
+                caller_identity_conflict_response("zynk whoami", &socket_namespace, &conflict);
+            return emit_value(&resp, json, true);
+        }
+    };
 
     let Some(pane_id) = caller_pane_id_env() else {
         let resp = serde_json::json!({
@@ -699,6 +757,14 @@ pub(super) fn run_whoami_command(args: &[String]) -> std::io::Result<i32> {
     }
 
     let pane = &value["result"]["pane"];
+    let identity_verification = match hints.validate_pane_info(pane) {
+        Ok(verification) => verification,
+        Err(conflict) => {
+            let resp =
+                caller_identity_conflict_response("zynk whoami", &socket_namespace, &conflict);
+            return emit_value(&resp, json, true);
+        }
+    };
     // HOOK-AUTHORITATIVE identity: the agent comes from agent_session, NEVER detection.
     let agent_session = pane.get("agent_session").filter(|v| !v.is_null());
     let authoritative_agent = agent_session
@@ -713,7 +779,7 @@ pub(super) fn run_whoami_command(args: &[String]) -> std::io::Result<i32> {
         None
     };
 
-    let resp = serde_json::json!({
+    let mut resp = serde_json::json!({
         "result": "ok",
         "command": "zynk whoami",
         "type": "zynk_whoami_result",
@@ -729,7 +795,26 @@ pub(super) fn run_whoami_command(args: &[String]) -> std::io::Result<i32> {
         "socket_namespace": socket_namespace,
         "next": "identity is hook-authoritative (agent_session); a 'detected' label is non-authoritative",
     });
+    if identity_verification != crate::zynk::identity::CodexHintVerification::NotPresent {
+        resp["identity_verification"] = serde_json::json!(identity_verification);
+    }
     emit_value(&resp, json, false)
+}
+
+fn caller_identity_conflict_response(
+    command: &'static str,
+    socket_namespace: &str,
+    conflict: &crate::zynk::identity::CallerIdentityConflict,
+) -> serde_json::Value {
+    serde_json::json!({
+        "result": "failed",
+        "command": command,
+        "code": conflict.code,
+        "message": conflict.message,
+        "context": {},
+        "socket_namespace": socket_namespace,
+        "next": "run the command from the pane whose hook-authoritative Codex session matches the process hints",
+    })
 }
 
 /// `zynk who [--json]` — the live participant topology (`agent.list`).

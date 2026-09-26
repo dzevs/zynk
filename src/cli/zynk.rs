@@ -227,6 +227,24 @@ fn message_received(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
+    let hints = match crate::zynk::identity::CodexSessionHints::from_process_env() {
+        Ok(hints) => hints,
+        Err(conflict) => return emit_identity_conflict(&conflict),
+    };
+    if hints.is_present() {
+        let pane_response = super::send_request(&Request {
+            id: "cli:zynk:message-received:caller".into(),
+            method: Method::PaneGet(crate::api::schema::PaneTarget {
+                pane_id: pane_id.clone(),
+            }),
+        })?;
+        if pane_response.get("error").is_none() {
+            if let Err(conflict) = hints.validate_pane_info(&pane_response["result"]["pane"]) {
+                return emit_identity_conflict(&conflict);
+            }
+        }
+    }
+
     let response = super::send_request(&Request {
         id: "cli:zynk:message-received".into(),
         method: Method::ZynkMessageReceived(ZynkMessageReceivedParams {
@@ -246,4 +264,18 @@ fn message_received(args: &[String]) -> std::io::Result<i32> {
     let failed = response.get("error").is_some();
     println!("{}", serde_json::to_string(&response).unwrap());
     Ok(if failed { 1 } else { 0 })
+}
+
+fn emit_identity_conflict(
+    conflict: &crate::zynk::identity::CallerIdentityConflict,
+) -> std::io::Result<i32> {
+    let response = serde_json::json!({
+        "id": "cli:zynk:message-received",
+        "error": {
+            "code": conflict.code,
+            "message": conflict.message,
+        }
+    });
+    println!("{response}");
+    Ok(1)
 }

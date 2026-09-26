@@ -765,15 +765,18 @@ impl AppState {
                         self.mode = Mode::Terminal;
                     }
 
-                    if self
-                        .forward_pane_mouse_button(
-                            terminal_runtimes,
-                            source_id,
-                            &info,
-                            mouse,
-                            crossterm::event::KeyModifiers::empty(),
-                        )
-                        .is_handled()
+                    let local_selection_override =
+                        mouse.modifiers == crossterm::event::KeyModifiers::ALT;
+                    if !local_selection_override
+                        && self
+                            .forward_pane_mouse_button(
+                                terminal_runtimes,
+                                source_id,
+                                &info,
+                                mouse,
+                                crossterm::event::KeyModifiers::empty(),
+                            )
+                            .is_handled()
                     {
                         self.selection = None;
                         self.selection_autoscroll = None;

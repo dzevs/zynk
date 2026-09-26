@@ -962,6 +962,34 @@ impl App {
                 return responses::encode_error(request.id, caller::CALLER_OUTSIDE_PANE, message);
             }
         }
+        if caller::is_codex_session_report(&request.method) {
+            if let Err(message) = self.codex_session_report_has_per_pane_ancestry(caller) {
+                tracing::warn!(
+                    rejection = %message,
+                    "refusing a Codex session report from unverifiable or shared-daemon ancestry"
+                );
+                return responses::encode_error(request.id, caller::SHARED_CODEX_DAEMON, message);
+            }
+        }
+        if let Some(pane_id) = caller::codex_hint_sensitive_target(&request.method) {
+            match self.caller_codex_hints_match_pane(pane_id, caller) {
+                Ok(crate::zynk::identity::CodexHintVerification::Unverified) => {
+                    tracing::debug!(
+                        pane_id,
+                        "Codex session hint arrived before hook-authoritative identity; proceeding unverified"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        pane_id,
+                        rejection = %error.message,
+                        "refusing a pane-bound request with contradictory Codex identity hints"
+                    );
+                    return responses::encode_error(request.id, error.code, error.message);
+                }
+            }
+        }
 
         self.sync_pending_terminal_titles();
 

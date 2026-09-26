@@ -913,6 +913,9 @@ pub(crate) struct NavigatorRow {
     pub depth: u8,
     pub label: String,
     pub meta: String,
+    /// The metadata ends in the built-in literal `working` state label.
+    /// Custom state labels never opt into the working-label shimmer.
+    pub default_working_label: bool,
     pub status: AgentState,
     pub seen: bool,
     pub is_current: bool,
@@ -2525,6 +2528,7 @@ mod tests {
             depth: if is_workspace { 0 } else { 1 },
             label: String::new(),
             meta: String::new(),
+            default_working_label: false,
             status: crate::detect::AgentState::Idle,
             seen: true,
             is_current: false,

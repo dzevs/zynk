@@ -75,6 +75,10 @@ pub struct Party {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_sha: Option<String>,
+    /// Present only when Codex exported a session hint. Hints constrain the
+    /// pane selected by ZYNK_PANE_ID; they never select or reroute a pane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) identity_verification: Option<crate::zynk::identity::CodexHintVerification>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -509,6 +513,7 @@ pub fn party_from_pane_info(info: &serde_json::Value) -> Party {
         cwd: info_str(info, "cwd"),
         branch: None,
         git_sha: None,
+        identity_verification: None,
     }
 }
 
@@ -571,6 +576,37 @@ where
         party.git_sha = sha;
     }
     party
+}
+
+/// Resolve the source and apply Codex's process-local session hints as a
+/// consistency check. An absent authoritative hook session is explicitly
+/// unverified but remains usable; only contradictions fail.
+pub fn resolve_source_checked<S>(
+    zynk_pane_id: Option<String>,
+    send: S,
+) -> Result<Party, crate::zynk::identity::CallerIdentityConflict>
+where
+    S: Fn(Request) -> std::io::Result<serde_json::Value>,
+{
+    let hints = crate::zynk::identity::CodexSessionHints::from_process_env()?;
+    resolve_source_with_hints(zynk_pane_id, hints, send)
+}
+
+fn resolve_source_with_hints<S>(
+    zynk_pane_id: Option<String>,
+    hints: crate::zynk::identity::CodexSessionHints,
+    send: S,
+) -> Result<Party, crate::zynk::identity::CallerIdentityConflict>
+where
+    S: Fn(Request) -> std::io::Result<serde_json::Value>,
+{
+    let mut party = resolve_source(zynk_pane_id, send);
+    let verification = hints.validate_agent_session(party.agent_session.as_ref())?;
+    party.identity_verification = match verification {
+        crate::zynk::identity::CodexHintVerification::NotPresent => None,
+        verified => Some(verified),
+    };
+    Ok(party)
 }
 
 /// Resolve the TARGET [`Party`] + its [`TargetResolution`] for an `agent send`. Query `agent.get`
@@ -896,6 +932,59 @@ mod tests {
         assert_eq!(p.agent.as_deref(), Some("claude"));
         assert_eq!(p.terminal_id.as_deref(), Some("term-7"));
         assert_eq!(p.workspace.as_deref(), Some("w65abc"));
+    }
+
+    #[test]
+    fn codex_hints_validate_the_selected_pane_without_rerouting() {
+        let pane = |session: Option<&str>| {
+            let mut pane = serde_json::json!({
+                "pane_id": "w1:p1",
+                "terminal_id": "term-1",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+                "agent": "codex"
+            });
+            if let Some(value) = session {
+                pane["agent_session"] = serde_json::json!({
+                    "source": "zynk:codex",
+                    "agent": "codex",
+                    "kind": "id",
+                    "value": value
+                });
+            }
+            pane
+        };
+
+        let aligned = resolve_source_with_hints(
+            Some("w1:p1".into()),
+            crate::zynk::identity::CodexSessionHints::present("session-a"),
+            |_| Ok(serde_json::json!({"result":{"pane":pane(Some("session-a"))}})),
+        )
+        .unwrap();
+        assert_eq!(
+            aligned.identity_verification,
+            Some(crate::zynk::identity::CodexHintVerification::Verified)
+        );
+        assert_eq!(aligned.pane.as_deref(), Some("w1:p1"));
+
+        let early = resolve_source_with_hints(
+            Some("w1:p1".into()),
+            crate::zynk::identity::CodexSessionHints::present("session-a"),
+            |_| Ok(serde_json::json!({"result":{"pane":pane(None)}})),
+        )
+        .unwrap();
+        assert_eq!(
+            early.identity_verification,
+            Some(crate::zynk::identity::CodexHintVerification::Unverified)
+        );
+
+        let conflict = resolve_source_with_hints(
+            Some("w1:p1".into()),
+            crate::zynk::identity::CodexSessionHints::present("session-b"),
+            |_| Ok(serde_json::json!({"result":{"pane":pane(Some("session-a"))}})),
+        )
+        .unwrap_err();
+        assert_eq!(conflict.code, "caller_identity_conflict");
     }
 
     #[test]

@@ -1127,7 +1127,10 @@ fn m839a_agent_start_names_existing_terminal_over_socket() {
         started["result"]["agent"]["cwd"],
         fixture.base.display().to_string()
     );
-    assert_eq!(started["result"]["argv"], serde_json::json!(["codex"]));
+    assert_eq!(
+        started["result"]["argv"],
+        serde_json::json!(["codex", "--no-daemon"])
+    );
     assert_eq!(started["result"]["agent"]["terminal_id"], original_terminal);
     assert_eq!(started["result"]["agent"]["pane_id"], pane);
     assert!(started["result"]["agent"].get("agent_session").is_none());

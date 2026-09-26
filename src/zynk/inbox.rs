@@ -200,6 +200,8 @@ pub struct InboxResponse {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_verification: Option<crate::zynk::identity::CodexHintVerification>,
     pub next: String,
 }
 
@@ -226,6 +228,7 @@ impl InboxResponse {
             code: None,
             message: None,
             context: None,
+            identity_verification: None,
             next,
         }
     }
@@ -247,6 +250,7 @@ impl InboxResponse {
             code: Some(code.to_string()),
             message: Some(message.into()),
             context: Some(context),
+            identity_verification: None,
             next: next.to_string(),
         }
     }
@@ -272,6 +276,25 @@ impl InboxResponse {
             context,
             "restart or upgrade zynk as directed by the protocol mismatch",
         )
+    }
+
+    pub fn identity_conflict(conflict: &crate::zynk::identity::CallerIdentityConflict) -> Self {
+        Self::failed(
+            conflict.code,
+            &conflict.message,
+            serde_json::json!({}),
+            "run the command from the pane whose hook-authoritative Codex session matches the process hints",
+        )
+    }
+
+    pub fn with_identity_verification(
+        mut self,
+        verification: crate::zynk::identity::CodexHintVerification,
+    ) -> Self {
+        if verification != crate::zynk::identity::CodexHintVerification::NotPresent {
+            self.identity_verification = Some(verification);
+        }
+        self
     }
 
     pub fn is_failed(&self) -> bool {

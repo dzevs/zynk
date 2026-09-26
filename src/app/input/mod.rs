@@ -707,7 +707,8 @@ impl App {
             return None;
         }
 
-        if !mouse.modifiers.is_empty() {
+        let local_selection_override = mouse.modifiers == KeyModifiers::ALT;
+        if !mouse.modifiers.is_empty() && !local_selection_override {
             self.last_pane_click = None;
             return None;
         }
@@ -726,6 +727,7 @@ impl App {
             pane_id: info.id,
             viewport_row: mouse.row - info.inner_rect.y,
             col: mouse.column - info.inner_rect.x,
+            local_selection_override,
             at: std::time::Instant::now(),
         })
     }
@@ -749,6 +751,7 @@ impl App {
             click.pane_id,
             click.viewport_row,
             click.col,
+            click.local_selection_override,
         );
         if selected {
             self.selection_highlight_clear_deadline = self

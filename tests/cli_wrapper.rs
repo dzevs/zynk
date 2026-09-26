@@ -4288,11 +4288,11 @@ fn m839a_agent_start_cli_uses_existing_pane_and_preserves_child_arguments() {
     assert!(started["result"]["agent"].get("agent_session").is_none());
     assert_eq!(
         started["result"]["argv"],
-        serde_json::json!(["codex", "--session", "child-session"])
+        serde_json::json!(["codex", "--no-daemon", "--session", "child-session"])
     );
     assert_eq!(
         fs::read(base.join("child-args")).unwrap(),
-        b"--session\nchild-session\n"
+        b"--no-daemon\n--session\nchild-session\n"
     );
     let listed = m839_managed_cli_bounded(&base, &socket, &["agent", "list"]);
     assert_eq!(listed.status.code(), Some(0));
@@ -6917,6 +6917,262 @@ fn m835_explicit_inbox_agent_remains_database_only_on_a_mismatched_socket() {
 }
 
 #[test]
+fn post_dogfood_codex_hint_conflict_stops_implicit_identity_paths_before_effects() {
+    let ping = serde_json::json!({
+        "result": {"type": "pong", "version": "fixture", "protocol": support::CURRENT_PROTOCOL}
+    });
+    let pane = serde_json::json!({
+        "result": {
+            "pane": {
+                "pane_id": "w1:p1",
+                "terminal_id": "term-1",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+                "cwd": "/tmp/caller",
+                "agent": "codex",
+                "agent_session": {
+                    "source": "zynk:codex",
+                    "agent": "codex",
+                    "kind": "id",
+                    "value": "authoritative-session"
+                }
+            }
+        }
+    });
+    let cases: &[(&[&str], &[&str])] = &[
+        (&["inbox", "--json"], &["ping", "pane.get"]),
+        (&["whoami", "--json"], &["ping", "pane.get"]),
+        (
+            &[
+                "zynk",
+                "message-received",
+                "--pane-id",
+                "w1:p1",
+                "--message-id",
+                "msg-1",
+                "--conversation-id",
+                "conv-1",
+                "--conversation-seq",
+                "1",
+                "--runtime-session-id",
+                "runtime-1",
+                "--socket-namespace",
+                "/tmp/zynk.sock",
+            ],
+            &["ping", "pane.get"],
+        ),
+    ];
+
+    for (args, expected_methods) in cases {
+        let (requests, output) = m835_scripted_cli_with_env(
+            args,
+            vec![ping.clone(), pane.clone()],
+            false,
+            &[
+                ("ZYNK_PANE_ID", "w1:p1"),
+                ("CODEX_THREAD_ID", "stale-session"),
+            ],
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            *expected_methods,
+            "{args:?}: {requests:?}"
+        );
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let code = value
+            .pointer("/error/code")
+            .or_else(|| value.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some("caller_identity_conflict"), "{args:?}: {value}");
+    }
+}
+
+#[test]
+fn post_dogfood_explicit_inbox_ignores_codex_hints_and_stays_database_only() {
+    let (requests, output) = m835_scripted_cli_with_env(
+        &["inbox", "--agent", "codex", "--json"],
+        vec![],
+        false,
+        &[
+            ("ZYNK_PANE_ID", "stale-pane"),
+            ("CODEX_THREAD_ID", "thread-a"),
+            ("CODEX_SESSION_ID", "session-b"),
+        ],
+    );
+    assert!(requests.is_empty(), "explicit inbox touched the socket");
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["result"], "ok", "{value}");
+    assert_eq!(value["agent"], "codex", "{value}");
+}
+
+#[test]
+fn post_dogfood_codex_hint_conflict_stops_every_message_source_before_target_lookup() {
+    let ping = serde_json::json!({
+        "result": {"type": "pong", "version": "fixture", "protocol": support::CURRENT_PROTOCOL}
+    });
+    let pane = serde_json::json!({
+        "result": {
+            "pane": {
+                "pane_id": "w1:p1",
+                "terminal_id": "source-terminal",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+                "cwd": "/tmp/source",
+                "agent": "codex",
+                "agent_session": {
+                    "source": "zynk:codex",
+                    "agent": "codex",
+                    "kind": "id",
+                    "value": "authoritative-session"
+                }
+            }
+        }
+    });
+    for args in [
+        vec!["send", "worker", "--", "body"],
+        vec!["reply", "worker", "--", "body"],
+        vec!["agent", "send", "worker", "--", "body"],
+        vec!["agent", "prompt", "worker", "--", "body"],
+        vec!["pane", "send-text", "w2:p2", "--", "body"],
+        vec!["pane", "run", "w2:p2", "--", "body"],
+    ] {
+        let (requests, output) = m835_scripted_cli_with_env(
+            &args,
+            vec![ping.clone(), pane.clone()],
+            false,
+            &[
+                ("ZYNK_PANE_ID", "w1:p1"),
+                ("CODEX_SESSION_ID", "stale-session"),
+            ],
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["ping", "pane.get"],
+            "{args:?}: {requests:?}"
+        );
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            Some("caller_identity_conflict"),
+            "{args:?}: {value}"
+        );
+        for field in ["delivery_status", "proof", "conversation_id"] {
+            assert!(value.get(field).is_none(), "{args:?}: {field}: {value}");
+        }
+    }
+}
+
+#[test]
+fn post_dogfood_codex_hint_pair_conflict_never_opens_the_socket() {
+    for args in [
+        vec!["inbox", "--json"],
+        vec!["whoami", "--json"],
+        vec!["send", "worker", "--", "body"],
+        vec!["agent", "send", "worker", "--", "body"],
+        vec!["pane", "run", "w2:p2", "--", "body"],
+        vec![
+            "zynk",
+            "message-received",
+            "--pane-id",
+            "w1:p1",
+            "--message-id",
+            "msg-1",
+            "--conversation-id",
+            "conv-1",
+            "--conversation-seq",
+            "1",
+            "--runtime-session-id",
+            "runtime-1",
+            "--socket-namespace",
+            "/tmp/zynk.sock",
+        ],
+    ] {
+        let (requests, output) = m835_scripted_cli_with_env(
+            &args,
+            vec![],
+            false,
+            &[
+                ("ZYNK_PANE_ID", "w1:p1"),
+                ("CODEX_THREAD_ID", "thread-a"),
+                ("CODEX_SESSION_ID", "session-b"),
+            ],
+        );
+        assert!(requests.is_empty(), "{args:?}: {requests:?}");
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let code = value
+            .pointer("/error/code")
+            .or_else(|| value.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some("caller_identity_conflict"), "{args:?}: {value}");
+    }
+}
+
+#[test]
+fn post_dogfood_codex_hint_alignment_and_absent_authority_are_reported_honestly() {
+    let ping = serde_json::json!({
+        "result": {"type": "pong", "version": "fixture", "protocol": support::CURRENT_PROTOCOL}
+    });
+    for (session, expected) in [(Some("session-a"), "verified"), (None, "unverified")] {
+        let agent_session = session.map(|value| {
+            serde_json::json!({
+                "source": "zynk:codex",
+                "agent": "codex",
+                "kind": "id",
+                "value": value,
+            })
+        });
+        let pane = serde_json::json!({
+            "result": {
+                "pane": {
+                    "pane_id": "w1:p1",
+                    "terminal_id": "term-1",
+                    "workspace_id": "w1",
+                    "tab_id": "w1:t1",
+                    "cwd": "/tmp/source",
+                    "agent": "codex",
+                    "agent_session": agent_session,
+                }
+            }
+        });
+        for args in [vec!["inbox", "--json"], vec!["whoami", "--json"]] {
+            let (requests, output) = m835_scripted_cli_with_env(
+                &args,
+                vec![ping.clone(), pane.clone()],
+                false,
+                &[("ZYNK_PANE_ID", "w1:p1"), ("CODEX_THREAD_ID", "session-a")],
+            );
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|request| request["method"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["ping", "pane.get"],
+                "{args:?}: {requests:?}"
+            );
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                value["identity_verification"], expected,
+                "{args:?}: {value}"
+            );
+        }
+    }
+}
+
+#[test]
 fn native_message_commands_keep_non_mismatch_transport_classifications() {
     let malformed_pong = serde_json::json!({
         "result": {"type": "pong", "version": "fixture"}
@@ -7924,6 +8180,10 @@ fn m839c_start_waits_for_ready_and_refuses_nonpending_failure() {
             assert!(output.stdout.is_empty());
             let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
             assert_eq!(error["error"]["code"], "agent_start_failed");
+            assert_eq!(
+                error["error"]["message"],
+                "Codex launch ended before becoming interactive; zynk requires Codex 0.157.1 or newer with --no-daemon support"
+            );
         } else {
             assert!(output.stderr.is_empty());
             let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();

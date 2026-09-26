@@ -518,6 +518,12 @@ Detected but not fully tested: gemini CLI, cline. For agents outside the list, z
 multiplexer; custom integrations can report agent labels over the socket API. Install official integrations
 with `zynk integration install <agent>` (`claude`, `codex`, `copilot`, `droid`, `pi`, `opencode`, and more).
 
+Zynk-managed Codex requires Codex CLI 0.157.1 or newer and always starts or resumes it with `--no-daemon`.
+That keeps each hook reporter inside the pane that owns its session. Manual Codex launches intended to report
+through zynk should also use `--no-daemon`; a report inherited through `codex app-server --managed-daemon` is
+rejected as `shared_codex_daemon`. Zynk also rejects one authoritative session claimed by two terminals rather
+than guessing an owner.
+
 ## Keybindings
 
 Press `ctrl+b` to enter prefix mode; default actions are prefix-first and tmux-like.
@@ -532,8 +538,11 @@ Press `ctrl+b` to enter prefix mode; default actions are prefix-first and tmux-l
 | `prefix+shift+h/j/k/l` | swap pane | | `prefix+b` | toggle sidebar |
 | `prefix+g` | session navigator | | `prefix+q` | detach |
 
-Mouse works throughout. For copy: drag-select inside a pane, or `prefix+[` for keyboard copy mode (`v` to
-select, `y` to copy, `q` to leave).
+Mouse works throughout. For copy: drag-select inside a pane, or hold exact Alt while dragging to force zynk-local
+selection when the application captures mouse input. Plain drag remains application-owned under mouse capture;
+Shift+drag is usually reserved for the host terminal's native selection. Window managers that bind Alt+drag
+(including KDE's default) must rebind that desktop gesture for zynk to receive it. Keyboard copy mode is
+`prefix+[` (`v` to select, `y` to copy, `q` to leave).
 
 ## Configuration
 
@@ -722,15 +731,19 @@ and reload use the config file. Attached app clients share the server-rendered s
 topology projections, and global mobile status counts remain complete and unchanged.
 
 With `working_animation = true`, dots-mode sidebar working marks use the yellow `◌ ◎ ◉ ● ◉ ◎` pulse and
-navigator/mobile working marks use the braille spinner. Symbols-mode sidebar marks remain static while the
-braille surfaces still animate. Setting the key to false makes every affected surface use its static 3.1.0
-mark. Animation advances once per 128 ms only while an App client renders eligible working UI; a detached
-server or terminal-attach-only server does not schedule animation.
+navigator/mobile working marks use the braille spinner. The literal `working` label on expanded agent rows,
+mobile switcher rows, and navigator rows keeps the same glyphs and width while a three-character brightness
+tail sweeps across it using only theme colors. Symbols-mode sidebar marks remain static while the label shimmer
+and braille surfaces still animate. Setting the key to false makes every affected mark and label static.
+Animation advances once per 128 ms only while an App client renders eligible working UI; the shimmer is
+deliberately stepped rather than 60 fps. A detached or terminal-attach-only server schedules no animation.
 
 In a multi-pane layout, the focused pane uses heavy borders while its terminal is active; single-pane layouts
-and border geometry remain unchanged. Wheel, scrollbar, and modifier-right-click passthrough over an unfocused
-pane first focus it through the runtime-authoritative path. Navigate-mode Tab and Shift-Tab cycle panes without
-leaving Navigate. Custom keys and prefixes continue to displace conflicting defaults.
+and border geometry remain unchanged. Wheel forwarding and left-button scrollbar actions over an unfocused pane
+focus it through the runtime-authoritative path before acting. Accepted modifier-right-click passthrough sends
+the Down event to the explicit pane first and focuses it afterward; a rejected send keeps focus unchanged and
+opens the ordinary pane menu. Navigate-mode Tab and Shift-Tab cycle panes without leaving Navigate. Custom keys
+and prefixes continue to displace conflicting defaults.
 
 For environments without native terminal foreground-group information, start a new server with
 `ZYNK_PROCESS_DETECTION=child-groups` to opt into best-effort process detection from direct child

@@ -28,6 +28,7 @@ use super::{
 struct AgentRestoreState<'a> {
     enabled: bool,
     resumed_sessions: &'a mut HashSet<String>,
+    conflicting_sessions: &'a HashSet<String>,
 }
 
 struct PaneRestoreStartup<'a> {
@@ -169,6 +170,73 @@ fn collect_snapshot_ids_inner(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     }
 }
 
+fn conflicting_snapshot_agent_sessions(snapshot: &SessionSnapshot) -> HashSet<String> {
+    let mut owners: HashMap<String, (String, Vec<String>)> = HashMap::new();
+    for (workspace_index, workspace) in snapshot.workspaces.iter().enumerate() {
+        let workspace_label = workspace
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("workspace[{workspace_index}]"));
+        for tab in &workspace.tabs {
+            for old_pane_id in collect_snapshot_pane_ids(&tab.layout) {
+                let Some(session) = tab
+                    .panes
+                    .get(&old_pane_id)
+                    .and_then(|pane| pane.agent_session.as_ref())
+                    .and_then(persisted_agent_session_from_snapshot)
+                else {
+                    continue;
+                };
+                let key = crate::agent_resume::dedupe_key(
+                    &session.source,
+                    &session.agent,
+                    &session.session_ref,
+                );
+                let descriptor = format!(
+                    "{}/{} {:?} {}",
+                    session.source,
+                    session.agent,
+                    session.session_ref.kind,
+                    session.session_ref.value
+                );
+                let pane_label = workspace
+                    .public_pane_numbers
+                    .get(&old_pane_id)
+                    .map(|number| {
+                        format!(
+                            "{}:p{}",
+                            workspace_label,
+                            crate::workspace::encode_public_number(*number)
+                        )
+                    })
+                    .unwrap_or_else(|| format!("{workspace_label}/pane[{old_pane_id}]"));
+                owners
+                    .entry(key)
+                    .or_insert_with(|| (descriptor, Vec::new()))
+                    .1
+                    .push(pane_label);
+            }
+        }
+    }
+
+    let mut conflicts: Vec<_> = owners
+        .into_iter()
+        .filter(|(_, (_, owners))| owners.len() > 1)
+        .collect();
+    conflicts.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut keys = HashSet::new();
+    for (key, (session, mut panes)) in conflicts {
+        panes.sort();
+        warn!(
+            session,
+            panes = %panes.join(", "),
+            "snapshot contains a duplicate agent session; restoring every conflicting pane as a plain shell"
+        );
+        keys.insert(key);
+    }
+    keys
+}
+
 fn migrated_public_pane_numbers_by_old_raw(
     snap: &WorkspaceSnapshot,
     next_public_pane_number: &mut usize,
@@ -290,6 +358,7 @@ fn restore_with_imports_and_failures(
     let mut terminals = HashMap::new();
     let mut terminal_runtimes = HashMap::new();
     let mut resumed_agent_sessions = HashSet::new();
+    let conflicting_agent_sessions = conflicting_snapshot_agent_sessions(snapshot);
     let mut failed_imports = 0;
     for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
         let runtime_context = RestoreRuntimeContext {
@@ -308,6 +377,7 @@ fn restore_with_imports_and_failures(
             cols,
             &runtime_context,
             &mut resumed_agent_sessions,
+            &conflicting_agent_sessions,
             imported_panes,
         );
         failed_imports += workspace_failed_imports;
@@ -330,6 +400,7 @@ fn restore_workspace(
     cols: u16,
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
+    conflicting_agent_sessions: &HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
 ) -> RestoreFailures<Option<RestoredWorkspace>> {
     let mut tabs = Vec::new();
@@ -382,6 +453,7 @@ fn restore_workspace(
             cols,
             runtime_context,
             resumed_agent_sessions,
+            conflicting_agent_sessions,
             imported_panes,
             &public_pane_ids_by_old_raw,
             &workspace_id,
@@ -496,6 +568,7 @@ fn restore_tab(
     cols: u16,
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
+    conflicting_agent_sessions: &HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     public_pane_ids_by_old_raw: &HashMap<u32, String>,
     workspace_id: &str,
@@ -555,6 +628,7 @@ fn restore_tab(
             let mut agent_restore = AgentRestoreState {
                 enabled: runtime_context.resume_agents_on_restore,
                 resumed_sessions: resumed_agent_sessions,
+                conflicting_sessions: conflicting_agent_sessions,
             };
             pane_restore_startup(
                 saved_agent_session,
@@ -583,7 +657,10 @@ fn restore_tab(
                 )
             })
             .unwrap_or_default();
-        let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
+        let imported_runtime = suppress_conflicting_imported_runtime(
+            old_pane_id.and_then(|old_id| imported_panes.remove(&old_id)),
+            startup.duplicate_agent_session,
+        );
         let was_imported = imported_runtime.is_some();
         let pending_native_agent_restore = if was_imported {
             None
@@ -782,21 +859,34 @@ fn pane_restore_startup<'a>(
         restore_plan_for_snapshot(session, agent_restore.enabled, original_argv)
     });
     let has_native_agent_restore = restore_plan.is_some();
+    let snapshot_session_key =
+        session
+            .and_then(persisted_agent_session_from_snapshot)
+            .map(|session| {
+                crate::agent_resume::dedupe_key(
+                    &session.source,
+                    &session.agent,
+                    &session.session_ref,
+                )
+            });
     // Reserve before spawning so later panes in the same restore pass cannot
     // launch the same native agent session. The caller rolls this reservation
     // back if runtime spawn fails before any agent process is started.
     let mut reserved_agent_session = None;
-    let duplicate_agent_session = restore_plan.as_ref().is_some_and(|plan| {
-        if agent_restore
-            .resumed_sessions
-            .insert(plan.dedupe_key.clone())
-        {
-            reserved_agent_session = Some(plan.dedupe_key.clone());
-            false
-        } else {
-            true
-        }
-    });
+    let duplicate_agent_session = snapshot_session_key
+        .as_ref()
+        .is_some_and(|key| agent_restore.conflicting_sessions.contains(key))
+        || restore_plan.as_ref().is_some_and(|plan| {
+            if agent_restore
+                .resumed_sessions
+                .insert(plan.dedupe_key.clone())
+            {
+                reserved_agent_session = Some(plan.dedupe_key.clone());
+                false
+            } else {
+                true
+            }
+        });
     let restore_plan = if duplicate_agent_session {
         None
     } else {
@@ -851,6 +941,23 @@ fn restored_terminal_agent_session(
         return None;
     }
     session.and_then(persisted_agent_session_from_snapshot)
+}
+
+fn suppress_conflicting_imported_runtime(
+    imported: Option<crate::handoff_runtime::ImportedHandoffRuntime>,
+    duplicate_agent_session: bool,
+) -> Option<crate::handoff_runtime::ImportedHandoffRuntime> {
+    if !duplicate_agent_session {
+        return imported;
+    }
+    if let Some(imported) = imported {
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        // The conflicting process cannot retain either identity owner. Consume
+        // the transferred master so the normal restore path starts a plain shell.
+        drop(unsafe { OwnedFd::from_raw_fd(imported.master_fd) });
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1738,9 +1845,11 @@ mod tests {
             lines: 1,
         };
         let mut resumed = HashSet::new();
+        let conflicts = HashSet::new();
         let mut agent_restore = AgentRestoreState {
             enabled: true,
             resumed_sessions: &mut resumed,
+            conflicting_sessions: &conflicts,
         };
 
         let startup =
@@ -1764,9 +1873,11 @@ mod tests {
             lines: 1,
         };
         let mut resumed = HashSet::new();
+        let conflicts = HashSet::new();
         let mut agent_restore = AgentRestoreState {
             enabled: true,
             resumed_sessions: &mut resumed,
+            conflicting_sessions: &conflicts,
         };
 
         let first = pane_restore_startup(Some(&session), Some(&history), &mut agent_restore, None);
@@ -1793,9 +1904,11 @@ mod tests {
             lines: 1,
         };
         let mut resumed = HashSet::new();
+        let conflicts = HashSet::new();
         let mut agent_restore = AgentRestoreState {
             enabled: false,
             resumed_sessions: &mut resumed,
+            conflicting_sessions: &conflicts,
         };
 
         let startup =
@@ -1836,6 +1949,40 @@ mod tests {
         assert!(take_restore_plan_for_snapshot(&session, true, &mut resumed).is_none());
 
         assert!(restored_terminal_agent_session(Some(&session), true).is_none());
+    }
+
+    #[test]
+    fn duplicate_restore_discards_the_imported_runtime_before_starting_a_shell() {
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        use std::os::unix::net::UnixStream;
+
+        let (imported, peer) = UnixStream::pair().expect("handoff fixture socket pair");
+        let raw_fd = imported.as_raw_fd();
+        let imported = crate::handoff_runtime::ImportedHandoffRuntime {
+            master_fd: imported.into_raw_fd(),
+            state: crate::handoff_runtime::HandoffRuntimeState {
+                pane_id: 7,
+                child_pid: 123,
+                child_start_time: 456,
+                rows: 24,
+                cols: 80,
+                cell_width_px: 9,
+                cell_height_px: 18,
+                keyboard_protocol_flags: 0,
+                keyboard_protocol_ansi: None,
+                input_state: None,
+                terminal_title: None,
+                initial_history_ansi: None,
+            },
+        };
+
+        assert!(suppress_conflicting_imported_runtime(Some(imported), true).is_none());
+        assert_eq!(unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
+        drop(peer);
     }
 
     #[tokio::test]
@@ -1915,6 +2062,87 @@ mod tests {
         assert_eq!(session.source, "zynk:opencode");
         assert_eq!(session.agent, "opencode");
         assert_eq!(session.session_ref.value, "opencode-session");
+    }
+
+    #[tokio::test]
+    async fn duplicate_snapshot_session_resumes_neither_owner_and_keeps_the_layout() {
+        let cwd = std::env::current_dir().unwrap();
+        let session = super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "zynk:codex".into(),
+            agent: "codex".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "shared-codex-session".into(),
+        };
+        let pane = |cwd: &std::path::Path| super::super::snapshot::PaneSnapshot {
+            cwd: cwd.to_path_buf(),
+            label: None,
+            agent_name: Some("codex".into()),
+            managed_agent_kind: Some("codex".into()),
+            agent_session: Some(session.clone()),
+            launch_argv: Some(vec!["codex".into(), "resume".into(), session.value.clone()]),
+            hook_retirement: None,
+        };
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("w1".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::from([(10, 1), (20, 2)]),
+                next_public_pane_number: 3,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Split {
+                        direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(LayoutSnapshot::Pane(10)),
+                        second: Box::new(LayoutSnapshot::Pane(20)),
+                    },
+                    panes: HashMap::from([(10, pane(&cwd)), (20, pane(&cwd))]),
+                    zoomed: false,
+                    focused: Some(10),
+                    root_pane: Some(10),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        let snapshot_before = serde_json::to_vec(&snapshot).unwrap();
+
+        let (workspaces, terminals, mut runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            mpsc::channel(4).0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].tabs[0].panes.len(), 2);
+        assert_eq!(terminals.len(), 2);
+        assert_eq!(runtimes.len(), 2, "both conflicting owners become shells");
+        assert_eq!(serde_json::to_vec(&snapshot).unwrap(), snapshot_before);
+        for terminal in terminals.values() {
+            assert!(terminal.pending_agent_resume_plan.is_none());
+            assert!(terminal.persisted_agent_session.is_none());
+            assert!(terminal.managed_agent_kind().is_none());
+        }
+        for (_, runtime) in runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     #[tokio::test]

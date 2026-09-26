@@ -462,6 +462,35 @@ fn latest_event(fixture: &Fixture, message_id: &str) -> (String, String) {
     })
 }
 
+fn assert_no_receipt_or_delivery_transition(fixture: &Fixture, message_id: &str, phase: &str) {
+    let (event_count, received_count) = sqlite_runtime().block_on(async {
+        let mut conn = open_test_db(fixture).await;
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS event_count, \
+             COALESCE(SUM(CASE WHEN event_type = 'received' THEN 1 ELSE 0 END), 0) \
+             AS received_count FROM delivery_events WHERE message_id = ?",
+        )
+        .bind(message_id)
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+        (
+            row.try_get::<i64, _>("event_count").unwrap(),
+            row.try_get::<i64, _>("received_count").unwrap(),
+        )
+    });
+    assert_eq!(received_count, 0, "{phase}: no receipt row may be recorded");
+    assert_eq!(
+        event_count, 1,
+        "{phase}: receipt rejection must not append a delivery event"
+    );
+    assert_eq!(
+        latest_event(fixture, message_id).0,
+        "submitted",
+        "{phase}: delivery status must remain submitted"
+    );
+}
+
 fn parse_outcome(out: &CliOutput) -> Value {
     let line = out
         .stdout
@@ -912,27 +941,44 @@ fn a_legacy_target_row_without_an_anchor_is_not_receipt_capable() {
 
 #[test]
 fn a_partial_stored_session_triple_is_not_receipt_capable() {
-    // A stored session missing its source is not an anchor: the impostor is refused, and so is the
-    // original pane (fail closed rather than degrading to a value-only or terminal check).
+    // A stored session missing its source is not an anchor, even when its terminal and value match.
+    // It also must not degrade to a value-only or terminal-only check.
     let _guard = test_lock();
     let fixture = spawn_fixture();
     let target = create_root_pane(&fixture.socket_path, "partial-target");
     let impostor = create_root_pane(&fixture.socket_path, "partial-impostor");
-    report_pi_agent_session(&fixture.socket_path, &target, "pi-session-shared");
-    report_pi_agent_session(&fixture.socket_path, &impostor, "pi-session-shared");
+    report_pi_agent_session(&fixture.socket_path, &target, "pi-session-target");
+    report_pi_agent_session(&fixture.socket_path, &impostor, "pi-session-impostor");
     let out = run_cli(&fixture, None, &["send", &target, "--", "to a partial row"]);
     let sent = parse_outcome(&out);
     assert_eq!(out.code, 0, "send must succeed: {}", out.stderr);
     let message_id = sent["message_id"].as_str().expect("message_id").to_string();
+
+    // Phase 1: terminal and value match the target, but the required source is absent.
     mutate_target_participant(&fixture, &message_id, "agent_session_source = NULL");
+    for pane in [&target, &impostor] {
+        let response = send_json(&fixture.socket_path, &receipt_request(&sent, pane));
+        assert_eq!(
+            response["error"]["code"], "receiver_identity_mismatch",
+            "phase 1: a source-less stored session must not bind: {response}"
+        );
+    }
+    assert_no_receipt_or_delivery_transition(&fixture, &message_id, "phase 1");
+
+    // Phase 2: the value now matches only the impostor, while the terminal matches only the target.
+    mutate_target_participant(
+        &fixture,
+        &message_id,
+        "agent_session_value = 'pi-session-impostor'",
+    );
     for pane in [&impostor, &target] {
         let response = send_json(&fixture.socket_path, &receipt_request(&sent, pane));
         assert_eq!(
             response["error"]["code"], "receiver_identity_mismatch",
-            "a partial stored session must not bind: {response}"
+            "phase 2: a partial value-only or terminal-only match must not bind: {response}"
         );
     }
-    assert_eq!(latest_event(&fixture, &message_id).0, "submitted");
+    assert_no_receipt_or_delivery_transition(&fixture, &message_id, "phase 2");
 }
 
 #[test]

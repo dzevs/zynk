@@ -190,8 +190,13 @@ impl App {
         })?;
         let shell = crate::platform::available_pane_shell(child_pid)
             .map_err(AgentStartError::TargetBusy)?;
+        let mut args = params.args;
         let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
-        argv.extend(params.args);
+        if kind == crate::detect::Agent::Codex {
+            args.retain(|arg| arg != "--no-daemon");
+            argv.push("--no-daemon".into());
+        }
+        argv.extend(args);
         let command = crate::platform::interactive_shell_command(&argv, &shell)
             .ok_or(AgentStartError::InvalidArgument)?;
         let bytes = super::api_helpers::encode_api_submission(runtime, &command);

@@ -27,7 +27,68 @@ use super::super::api_helpers::{
 };
 use super::responses::{encode_error, encode_success};
 
+#[cfg(test)]
+std::thread_local! {
+    static DUPLICATE_AGENT_SESSION_TERMINAL_VISITS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 impl App {
+    fn duplicate_agent_session_owner(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        source: &str,
+        agent: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> Option<&crate::terminal::TerminalId> {
+        let target_terminal = self.state.workspaces.get(ws_idx)?.terminal_id(pane_id)?;
+        self.state
+            .terminals
+            .iter()
+            .find_map(|(terminal_id, terminal)| {
+                #[cfg(test)]
+                DUPLICATE_AGENT_SESSION_TERMINAL_VISITS.with(|visits| {
+                    visits.set(visits.get().saturating_add(1));
+                });
+                if terminal_id == target_terminal {
+                    return None;
+                }
+                let identity = terminal.current_session_identity_for_persistence()?;
+                (identity.0 == source
+                    && identity.1 == agent
+                    && identity.2 == session_ref.kind
+                    && identity.3 == session_ref.value)
+                    .then_some(terminal_id)
+            })
+    }
+
+    fn reject_duplicate_agent_session(
+        &self,
+        id: String,
+        ws_idx: usize,
+        pane_id: PaneId,
+        pane_label: &str,
+        source: &str,
+        agent: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> Result<(), String> {
+        let Some(owner) =
+            self.duplicate_agent_session_owner(ws_idx, pane_id, source, agent, session_ref)
+        else {
+            return Ok(());
+        };
+        Err(encode_error(
+            id,
+            "duplicate_agent_session",
+            format!(
+                "agent session {} is already owned by terminal {owner}; pane {pane_label} cannot claim it until the existing owner is released",
+                session_ref.value
+            ),
+        ))
+    }
+
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
             self.parse_pane_id(target_pane_id)
@@ -1429,20 +1490,34 @@ impl App {
         id: String,
         params: PaneReportAgentParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
-        self.handle_internal_event(crate::events::AppEvent::HookStateReported {
-            pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id,
+            params.agent_session_path,
+        );
+        if let Some(session_ref) = session_ref.as_ref() {
+            if let Err(response) = self.reject_duplicate_agent_session(
+                id.clone(),
+                ws_idx,
+                pane_id,
+                &params.pane_id,
                 &params.source,
                 &agent_label,
-                params.agent_session_id,
-                params.agent_session_path,
-            ),
+                session_ref,
+            ) {
+                return response;
+            }
+        }
+        self.handle_internal_event(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            session_ref,
             source: params.source,
             agent_label,
             state: detect_state_from_api(params.state),
@@ -1459,20 +1534,34 @@ impl App {
         id: String,
         params: PaneReportAgentSessionParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
-        self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
-            pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id,
+            params.agent_session_path,
+        );
+        if let Some(session_ref) = session_ref.as_ref() {
+            if let Err(response) = self.reject_duplicate_agent_session(
+                id.clone(),
+                ws_idx,
+                pane_id,
+                &params.pane_id,
                 &params.source,
                 &agent_label,
-                params.agent_session_id,
-                params.agent_session_path,
-            ),
+                session_ref,
+            ) {
+                return response;
+            }
+        }
+        self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
+            pane_id,
+            session_ref,
             source: params.source,
             agent_label,
             seq: params.seq,
@@ -2473,6 +2562,125 @@ mod tests {
                 .as_deref(),
             Some("kept message")
         );
+    }
+
+    #[test]
+    fn duplicate_agent_session_is_idempotent_per_terminal_and_released_before_transfer() {
+        let mut app = m828b_app();
+        let first = m828b_target(&app, 0);
+        let second = m828b_target(&app, 1);
+        let report = |pane_id: String, seq| PaneReportAgentSessionParams {
+            pane_id,
+            source: "zynk:codex".into(),
+            agent: "codex".into(),
+            seq: Some(seq),
+            agent_session_id: Some("shared-codex-session".into()),
+            agent_session_path: None,
+            session_start_source: Some("resume".into()),
+        };
+
+        let first_response: serde_json::Value = serde_json::from_str(
+            &app.handle_pane_report_agent_session("first".into(), report(first.clone(), 1)),
+        )
+        .unwrap();
+        assert_eq!(first_response["result"]["type"], "ok");
+
+        let (_, first_pane) = app.parse_pane_id(&first).unwrap();
+        app.state
+            .public_pane_id_aliases
+            .insert("legacy-first".into(), first_pane);
+        let alias_response: serde_json::Value = serde_json::from_str(
+            &app.handle_pane_report_agent_session("alias".into(), report("legacy-first".into(), 2)),
+        )
+        .unwrap();
+        assert_eq!(alias_response["result"]["type"], "ok");
+
+        let second_before = m828b_info(&app, &second);
+        let sequence_before = app.event_hub.current_sequence();
+
+        let second_response: serde_json::Value = serde_json::from_str(
+            &app.handle_pane_report_agent_session("second".into(), report(second.clone(), 1)),
+        )
+        .unwrap();
+        assert_eq!(second_response["error"]["code"], "duplicate_agent_session");
+        assert_eq!(m828b_info(&app, &second), second_before);
+        assert!(app.event_hub.events_after(sequence_before).is_empty());
+        assert_eq!(
+            m828b_info(&app, &first)["agent_session"]["value"],
+            "shared-codex-session"
+        );
+
+        let cleared: serde_json::Value =
+            serde_json::from_str(&app.handle_pane_clear_agent_authority(
+                "clear".into(),
+                PaneClearAgentAuthorityParams {
+                    pane_id: first.clone(),
+                    source: Some("zynk:codex".into()),
+                    seq: Some(3),
+                },
+            ))
+            .unwrap();
+        assert_eq!(cleared["result"]["type"], "ok");
+        assert!(m828b_info(&app, &first)["agent_session"].is_null());
+
+        let transferred: serde_json::Value = serde_json::from_str(
+            &app.handle_pane_report_agent_session("transfer".into(), report(second.clone(), 2)),
+        )
+        .unwrap();
+        assert_eq!(transferred["result"]["type"], "ok");
+        assert_eq!(
+            m828b_info(&app, &second)["agent_session"]["value"],
+            "shared-codex-session"
+        );
+    }
+
+    #[test]
+    fn duplicate_session_scan_is_report_bound_and_linear_in_terminal_count() {
+        for terminal_count in [1, 15] {
+            let mut app = App::new(
+                &Config::default(),
+                true,
+                None,
+                tokio::sync::mpsc::unbounded_channel().1,
+                crate::api::EventHub::default(),
+            );
+            app.state.workspaces = (0..terminal_count)
+                .map(|index| Workspace::test_new(&format!("workspace-{index}")))
+                .collect();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.ensure_test_terminals();
+            let target = m828b_target(&app, 0);
+
+            DUPLICATE_AGENT_SESSION_TERMINAL_VISITS.with(|visits| visits.set(0));
+            crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+            assert_eq!(
+                DUPLICATE_AGENT_SESSION_TERMINAL_VISITS.with(std::cell::Cell::get),
+                0,
+                "view computation must not scan duplicate-session ownership"
+            );
+
+            let response: serde_json::Value =
+                serde_json::from_str(&app.handle_pane_report_agent_session(
+                    "cardinality".into(),
+                    PaneReportAgentSessionParams {
+                        pane_id: target,
+                        source: "zynk:codex".into(),
+                        agent: "codex".into(),
+                        seq: Some(1),
+                        agent_session_id: Some(format!("unique-{terminal_count}")),
+                        agent_session_path: None,
+                        session_start_source: Some("resume".into()),
+                    },
+                ))
+                .unwrap();
+            assert_eq!(response["result"]["type"], "ok");
+            assert_eq!(
+                DUPLICATE_AGENT_SESSION_TERMINAL_VISITS.with(std::cell::Cell::get),
+                terminal_count,
+                "one session report must examine each current terminal once"
+            );
+        }
     }
 
     fn m828b_app() -> App {
@@ -4087,6 +4295,7 @@ mod tests {
             pane_id: source,
             viewport_row: 0,
             col: 0,
+            local_selection_override: false,
             at: std::time::Instant::now(),
         });
 
@@ -6058,6 +6267,7 @@ mod tests {
             pane_id: source,
             viewport_row: 13,
             col: 14,
+            local_selection_override: false,
             at: pane_click_at,
         });
 

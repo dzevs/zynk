@@ -99,6 +99,15 @@ pub struct ProcessPrincipal {
     pub start_time: u64,
 }
 
+/// One PID/start-time-pinned ancestry observation. Linux builds bracket the
+/// argv read with two stat reads and return `None` if the process changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessInspection {
+    pub(crate) principal: ProcessPrincipal,
+    pub(crate) parent_pid: u32,
+    pub(crate) argv: Vec<String>,
+}
+
 /// Where a caller sits relative to a pane's process tree (ADR 0014).
 ///
 /// Every variant but `Inside` is a refusal; they are kept apart so the F4

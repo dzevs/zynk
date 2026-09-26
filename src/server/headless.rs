@@ -4927,11 +4927,10 @@ impl HeadlessServer {
                 return Err(RetainedAnimationPreflightFailure::FrameSizeMismatch);
             }
             for target in &client.working_animation_cells {
-                let symbol = target.glyph.symbol(tick);
                 if frame
                     .cells
                     .get(target.index)
-                    .is_none_or(|cell| cell.symbol.capacity() < symbol.len())
+                    .is_none_or(|cell| !target.can_apply(cell, tick))
                 {
                     return Err(RetainedAnimationPreflightFailure::InvalidCell);
                 }
@@ -9439,6 +9438,7 @@ mod tests {
     enum RetainedAnimationSurfaceCase {
         ExpandedDesktop,
         CollapsedDesktop,
+        DesktopNavigate,
         Navigator,
         MobileHeader,
         MobileSwitcher,
@@ -9450,12 +9450,24 @@ mod tests {
         case: RetainedAnimationSurfaceCase,
     ) {
         match case {
-            RetainedAnimationSurfaceCase::ExpandedDesktop => {}
+            RetainedAnimationSurfaceCase::ExpandedDesktop => {
+                // Symbols make this a shimmer-only surface: its working mark is static.
+                server.app.state.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+            }
             RetainedAnimationSurfaceCase::CollapsedDesktop => {
                 server.app.state.sidebar_collapsed = true;
             }
+            RetainedAnimationSurfaceCase::DesktopNavigate => {
+                server.app.state.mode = crate::app::Mode::Navigate;
+            }
             RetainedAnimationSurfaceCase::Navigator => {
                 server.app.state.mode = crate::app::Mode::Navigator;
+                server
+                    .app
+                    .state
+                    .navigator
+                    .expanded_workspaces
+                    .insert(server.app.state.workspaces[0].id.clone());
             }
             RetainedAnimationSurfaceCase::MobileHeader => {
                 server.clients.get_mut(&1).unwrap().terminal_size = (44, 20);
@@ -9476,6 +9488,7 @@ mod tests {
         for case in [
             RetainedAnimationSurfaceCase::ExpandedDesktop,
             RetainedAnimationSurfaceCase::CollapsedDesktop,
+            RetainedAnimationSurfaceCase::DesktopNavigate,
             RetainedAnimationSurfaceCase::Navigator,
             RetainedAnimationSurfaceCase::MobileHeader,
             RetainedAnimationSurfaceCase::MobileSwitcher,
@@ -9502,6 +9515,31 @@ mod tests {
                     .is_empty(),
                 "{case:?} should cache animated cells"
             );
+            let shimmer_cells = retained_server.clients[&1]
+                .working_animation_cells
+                .iter()
+                .filter(|cell| {
+                    matches!(
+                        cell.transition,
+                        crate::server::render_stream::WorkingAnimationTransition::Shimmer { .. }
+                    )
+                })
+                .count();
+            match case {
+                RetainedAnimationSurfaceCase::ExpandedDesktop
+                | RetainedAnimationSurfaceCase::DesktopNavigate
+                | RetainedAnimationSurfaceCase::Navigator
+                | RetainedAnimationSurfaceCase::MobileSwitcher => assert_eq!(
+                    shimmer_cells,
+                    crate::ui::WORKING_LABEL_LEN,
+                    "{case:?} should cache one visible working-label shimmer"
+                ),
+                RetainedAnimationSurfaceCase::CollapsedDesktop
+                | RetainedAnimationSurfaceCase::MobileHeader
+                | RetainedAnimationSurfaceCase::MobileNavigator => {
+                    assert_eq!(shimmer_cells, 0, "{case:?} has no working state label")
+                }
+            }
 
             retained_server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
             full_server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
@@ -17045,6 +17083,108 @@ next_tab = ""
                 .is_err(),
             "background client should not receive clipboard writes"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pane_osc52_reaches_only_the_foreground_headless_client() {
+        use std::{
+            io::Write,
+            os::{fd::IntoRawFd, unix::net::UnixStream},
+        };
+
+        let mut server = test_headless_server();
+        let (background_tx, background_control_rx, _background_rx) = test_client_writer();
+        let (foreground_tx, foreground_control_rx, _foreground_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(background_tx),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(foreground_tx),
+            ),
+        );
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+
+        let (socket, mut pane_peer) = UnixStream::pair().expect("PTY socket pair");
+        let pid = std::process::id();
+        let runtime = crate::pane::PaneRuntime::from_handoff_fd(
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: socket.into_raw_fd(),
+                state: crate::handoff_runtime::HandoffRuntimeState {
+                    pane_id: 1,
+                    child_pid: pid,
+                    child_start_time: crate::platform::process_start_time(pid)
+                        .expect("test process start time"),
+                    rows: 24,
+                    cols: 80,
+                    cell_width_px: 9,
+                    cell_height_px: 18,
+                    keyboard_protocol_flags: 0,
+                    keyboard_protocol_ansi: None,
+                    input_state: None,
+                    terminal_title: None,
+                    initial_history_ansi: None,
+                },
+            },
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            server.app.event_tx.clone(),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("import PTY fixture");
+        runtime.set_handoff_reader_paused(false);
+
+        pane_peer
+            .write_all(b"\x1b]52;c;Y29kZXggbG9jYWwgY29weQ==\x07")
+            .expect("application writes OSC 52");
+        let event = tokio::time::timeout(Duration::from_secs(3), server.app.event_rx.recv())
+            .await
+            .expect("OSC 52 parser event timed out")
+            .expect("internal event channel closed");
+        let AppEvent::ClipboardWrite { content } = event else {
+            panic!("OSC 52 must become a clipboard event");
+        };
+        assert_eq!(content, b"codex local copy");
+        assert!(server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite { content }));
+
+        match read_server_message(
+            foreground_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("foreground clipboard message"),
+        ) {
+            ServerMessage::Clipboard { data } => {
+                assert_eq!(data, "Y29kZXggbG9jYWwgY29weQ==")
+            }
+            other => panic!("expected clipboard message, got {other:?}"),
+        }
+        assert!(
+            background_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "nonforeground App clients must not receive pane clipboard writes"
+        );
+
+        drop(runtime);
+        drop(pane_peer);
     }
 
     #[test]

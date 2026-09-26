@@ -966,8 +966,10 @@ mod tests {
         let terminals = fixture.app.state.terminals.len();
         let mut params = m839_start_params(pane.clone());
         params.args = vec![
+            "--no-daemon".into(),
             "two words".into(),
             "a'b".into(),
+            "--no-daemon".into(),
             "$HOME".into(),
             "one\\two".into(),
             String::new(),
@@ -989,7 +991,7 @@ mod tests {
         assert_eq!(attempts[0].outcome, crate::pane::TestInputOutcome::Accepted);
         assert_eq!(
             attempts[0].bytes.as_ref(),
-            b"codex 'two words' 'a'\\''b' '$HOME' 'one\\two' ''\r"
+            b"codex --no-daemon 'two words' 'a'\\''b' '$HOME' 'one\\two' ''\r"
         );
         assert_eq!(fixture.app.state.current_pane_focus_target(), focus);
         assert_eq!(fixture.app.state.previous_pane_focus, previous);
@@ -1007,7 +1009,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             if let Ok(text) = std::fs::read_to_string(&path) {
-                if text == "two words\na'b\n$HOME\none\\two\n\n" {
+                if text == "--no-daemon\ntwo words\na'b\n$HOME\none\\two\n\n" {
                     break;
                 }
             }
@@ -1097,7 +1099,7 @@ mod tests {
             );
             assert_eq!(attempts.len(), 1);
             assert_eq!(attempts[0].outcome, crate::pane::TestInputOutcome::Closed);
-            assert_eq!(attempts[0].bytes.as_ref(), b"codex\r");
+            assert_eq!(attempts[0].bytes.as_ref(), b"codex --no-daemon\r");
             let state = &fixture.app.state.terminals[&terminal];
             assert_eq!(state.manual_label.as_deref(), label);
             assert_eq!(state.agent_name, None);

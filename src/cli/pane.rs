@@ -1026,8 +1026,8 @@ fn pane_send_text(args: &[String]) -> std::io::Result<i32> {
     }
 
     use crate::zynk::message::{
-        new_message_id, now_rfc3339, parse_type_trace_and_text, resolve_source, Party, Proof,
-        SendCommand, SendError, SendOutcome, TargetResolution,
+        new_message_id, now_rfc3339, parse_type_trace_and_text, resolve_source_checked, Party,
+        Proof, SendCommand, SendError, SendOutcome, TargetResolution,
     };
     use crate::zynk::persistence::{
         append_delivery_event, attach_to_outcome, empty_event_payload, failed_event_payload,
@@ -1038,9 +1038,28 @@ fn pane_send_text(args: &[String]) -> std::io::Result<i32> {
     let (message_type, trace_spec, text) = parse_type_trace_and_text(&args[1..]);
 
     let send = |request: Request| super::send_request(&request);
-    let from = resolve_source(crate::config::env_first(&["ZYNK_PANE_ID"]), send);
-    let (to, resolution) = resolve_pane_target_party(&pane_id);
     let message_id = new_message_id();
+    let from = match resolve_source_checked(crate::config::env_first(&["ZYNK_PANE_ID"]), send) {
+        Ok(from) => from,
+        Err(error) => {
+            let outcome = SendOutcome::failed(
+                SendCommand::PaneSendText,
+                message_id,
+                Party::default(),
+                Party::default(),
+                TargetResolution::Unknown,
+                message_type,
+                SendError {
+                    code: error.code.into(),
+                    message: error.message,
+                    context: None,
+                },
+            );
+            println!("{}", outcome.to_json());
+            return Ok(1);
+        }
+    };
+    let (to, resolution) = resolve_pane_target_party(&pane_id);
 
     // Gate the submit on resolution: do NOT write any bytes to a pane that is
     // unreachable (transport) or absent (server said not_found).
@@ -1325,8 +1344,8 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
     }
 
     use crate::zynk::message::{
-        new_message_id, now_rfc3339, parse_type_trace_and_text, resolve_source, Party, Proof,
-        SendCommand, SendError, SendOutcome, TargetResolution,
+        new_message_id, now_rfc3339, parse_type_trace_and_text, resolve_source_checked, Party,
+        Proof, SendCommand, SendError, SendOutcome, TargetResolution,
     };
     use crate::zynk::persistence::{
         append_delivery_event, attach_to_outcome, empty_event_payload, failed_event_payload,
@@ -1337,9 +1356,28 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
     let (message_type, trace_spec, text) = parse_type_trace_and_text(&args[1..]);
 
     let send = |request: Request| super::send_request(&request);
-    let from = resolve_source(crate::config::env_first(&["ZYNK_PANE_ID"]), send);
-    let (to, resolution) = resolve_pane_target_party(&pane_id);
     let message_id = new_message_id();
+    let from = match resolve_source_checked(crate::config::env_first(&["ZYNK_PANE_ID"]), send) {
+        Ok(from) => from,
+        Err(error) => {
+            let outcome = SendOutcome::failed(
+                SendCommand::PaneRun,
+                message_id,
+                Party::default(),
+                Party::default(),
+                TargetResolution::Unknown,
+                message_type,
+                SendError {
+                    code: error.code.into(),
+                    message: error.message,
+                    context: None,
+                },
+            );
+            println!("{}", outcome.to_json());
+            return Ok(1);
+        }
+    };
+    let (to, resolution) = resolve_pane_target_party(&pane_id);
 
     // Gate the submit on resolution: do NOT submit to a pane that is unreachable
     // (transport) or absent (server said not_found).

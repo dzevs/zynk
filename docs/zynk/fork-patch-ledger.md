@@ -8201,3 +8201,42 @@ with zero full renders or fallbacks, and the packet records the deterministic ce
 serialized-byte table. These additions change no protocol, configuration, schema, timeout, capacity, dependency,
 or release surface. This entry remains pending until an exact successor Gate-2 and fresh Gate-3 approve the same
 SHA/tree.
+
+### 3.2.0 post-dogfood successor (IMPLEMENTED / PENDING VERIFICATION)
+
+Dogfood of exact `ca13b379` restored the accepted panel scope, group spacing, marks, borders, and animation, then
+exposed a pre-existing Codex attribution failure. A shared `codex app-server --managed-daemon`, descended from
+the first Codex pane, served another pane's session while retaining the first pane's `ZYNK_*` environment. Both
+pane shells themselves had consistent identities. The misleading workspace/tab/cwd/branch fields on the three
+misattributed message rows were recipient fields, not proof of a mixed sender environment. Retained diagnosis
+hashes and live identifiers belong to the review packet, not this durable contract. The incident inventory and
+hashed read-only captures are retained under
+`dogfood-ca13b379-20260926T091816Z/identity-incident/` in the feature evidence root.
+
+The successor injects exactly one `--no-daemon` into every zynk-managed Codex start, resume, and restore, with a
+typed minimum-version failure for Codex older than verified 0.157.1 support. Session-bearing Codex reports reject
+a managed-daemon ancestor through a 64-hop, PID-plus-start-time Linux walk. Runtime identity accepts only one
+normalized `(source, agent, kind, value)` session per terminal; idempotent aliases on the same terminal remain
+valid, clearing an owner releases the session, and cross-terminal reuse returns `duplicate_agent_session`.
+Snapshot restore preserves the complete layout but resumes neither claimant of a duplicate, drops both anchors,
+and emits one diagnostic naming the session and panes. Optional `CODEX_THREAD_ID`/`CODEX_SESSION_ID` values only
+detect contradictions: absent authority proceeds as unverified, disagreement fails before socket/DB mutation,
+and no hint reroutes a request. ADR 0014 carries the architectural amendment.
+
+The same successor adds a theme-derived style-only shimmer to the literal `working` label on expanded sidebar,
+mobile switcher, and navigator rows. Its three-cell 3/2/1 quarter-blend tail advances on the existing 128 ms tick;
+glyphs, width, background, hit testing, and layout are unchanged. The retained animation cache uses tagged glyph
+and shimmer transitions, requires exact current style before patching, and remains allocation/cardinality-bound.
+`ui.working_animation = false` makes both marks and labels static. Exact Alt+left-drag now forces zynk-local
+selection, including double-click and copy-on-select, while a capturing application's plain drag remains
+untouched; KDE-style desktop Alt+drag bindings must be rebound. Existing OSC 52 tests retain the parser-to-App
+event path, and a headless fixture now proves the exact clipboard payload reaches only the foreground App client,
+without a new protocol or production-path change.
+
+Public README and CHANGELOG wording now reflects the already-approved right-click order: wheel/scrollbar focus
+before forwarding, while an accepted modifier-right-click Down reaches its explicit pane before runtime focus.
+Rejected delivery retains the ordinary menu. Architecture fingerprints explicitly cover the new shimmer color,
+span, collection, and retained-application helpers. Protocol 20, persistence schema, handoff shape, config keys,
+animation cadence, and release version are unchanged. This implementation is not closed by author checks; it
+requires one exact-object Claude Gate-2, a fresh swarm Gate-3 using the approved packet-v5 machinery, and a second
+operator-gated dogfood install before any merge or push.

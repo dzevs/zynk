@@ -14,7 +14,50 @@ use crate::terminal::TerminalRuntimeRegistry;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct WorkingAnimationCell {
     pub(crate) index: usize,
-    pub(crate) glyph: crate::ui::WorkingAnimationGlyph,
+    pub(crate) transition: WorkingAnimationTransition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkingAnimationTransition {
+    Glyph(crate::ui::WorkingAnimationGlyph),
+    Shimmer {
+        character_index: u8,
+        palette: crate::ui::WorkingShimmerPalette,
+        bg: u32,
+        modifier: u16,
+    },
+}
+
+impl WorkingAnimationCell {
+    pub(crate) fn can_apply(self, cell: &crate::protocol::CellData, tick: u32) -> bool {
+        match self.transition {
+            WorkingAnimationTransition::Glyph(glyph) => {
+                let symbol = glyph.symbol(tick);
+                cell.symbol.capacity() >= symbol.len()
+            }
+            WorkingAnimationTransition::Shimmer {
+                character_index,
+                palette,
+                bg,
+                modifier,
+            } => {
+                let character_index = usize::from(character_index);
+                let Some(character) = crate::ui::WORKING_LABEL.as_bytes().get(character_index)
+                else {
+                    return false;
+                };
+                cell.symbol.as_bytes() == [*character]
+                    && cell.fg
+                        == crate::protocol::color_to_u32(crate::ui::working_label_shimmer_color(
+                            palette,
+                            tick.wrapping_sub(crate::app::WORKING_ANIMATION_TICK_STEP),
+                            character_index,
+                        ))
+                    && cell.bg == bg
+                    && cell.modifier == modifier
+            }
+        }
+    }
 }
 
 pub(crate) fn collect_working_animation_cells(
@@ -56,11 +99,104 @@ pub(crate) fn collect_working_animation_cells(
             if let Some(glyph) =
                 crate::ui::working_animation_glyph_transition(current.symbol(), next.symbol())
             {
-                cells.push(WorkingAnimationCell { index, glyph });
+                cells.push(WorkingAnimationCell {
+                    index,
+                    transition: WorkingAnimationTransition::Glyph(glyph),
+                });
             }
         }
     }
+    collect_working_shimmer_cells(app_state, rendered, next, cells);
     true
+}
+
+fn collect_working_shimmer_cells(
+    app_state: &AppState,
+    rendered: &ratatui::buffer::Buffer,
+    next: &ratatui::buffer::Buffer,
+    cells: &mut Vec<WorkingAnimationCell>,
+) {
+    let width = usize::from(rendered.area.width);
+    if width < crate::ui::WORKING_LABEL_LEN {
+        return;
+    }
+    let current_tick = app_state.spinner_tick;
+    let next_tick = current_tick.wrapping_add(crate::app::WORKING_ANIMATION_TICK_STEP);
+    for row in 0..usize::from(rendered.area.height) {
+        let row_start = row.saturating_mul(width);
+        let mut column = 0usize;
+        while column + crate::ui::WORKING_LABEL_LEN <= width {
+            let start = row_start + column;
+            let symbols_match = crate::ui::WORKING_LABEL
+                .as_bytes()
+                .iter()
+                .copied()
+                .enumerate()
+                .all(|(character_index, character)| {
+                    let current = &rendered.content[start + character_index];
+                    let next = &next.content[start + character_index];
+                    current.symbol().as_bytes() == [character]
+                        && next.symbol().as_bytes() == [character]
+                        && current.bg == next.bg
+                        && current.modifier == next.modifier
+                });
+            if !symbols_match {
+                column += 1;
+                continue;
+            }
+            let Some(base_color) = (0..crate::ui::WORKING_LABEL_LEN)
+                .find(|character_index| {
+                    crate::ui::working_label_shimmer_weight(current_tick, *character_index) == 0
+                        && crate::ui::working_label_shimmer_weight(next_tick, *character_index) == 0
+                        && rendered.content[start + *character_index].fg
+                            == next.content[start + *character_index].fg
+                })
+                .map(|character_index| rendered.content[start + character_index].fg)
+            else {
+                column += 1;
+                continue;
+            };
+            let Some(palette) = crate::ui::working_label_shimmer_palette(
+                base_color,
+                app_state.palette.text,
+                &app_state.host_terminal_theme,
+            ) else {
+                column += 1;
+                continue;
+            };
+            let styles_match = (0..crate::ui::WORKING_LABEL_LEN).all(|character_index| {
+                rendered.content[start + character_index].fg
+                    == crate::ui::working_label_shimmer_color(
+                        palette,
+                        current_tick,
+                        character_index,
+                    )
+                    && next.content[start + character_index].fg
+                        == crate::ui::working_label_shimmer_color(
+                            palette,
+                            next_tick,
+                            character_index,
+                        )
+            });
+            if !styles_match {
+                column += 1;
+                continue;
+            }
+            for character_index in 0..crate::ui::WORKING_LABEL_LEN {
+                let current = &rendered.content[start + character_index];
+                cells.push(WorkingAnimationCell {
+                    index: start + character_index,
+                    transition: WorkingAnimationTransition::Shimmer {
+                        character_index: character_index as u8,
+                        palette,
+                        bg: crate::protocol::color_to_u32(current.bg),
+                        modifier: crate::protocol::modifier_to_u16(current.modifier),
+                    },
+                });
+            }
+            column += crate::ui::WORKING_LABEL_LEN;
+        }
+    }
 }
 
 pub(crate) fn apply_working_animation_cells(
@@ -72,12 +208,27 @@ pub(crate) fn apply_working_animation_cells(
         let Some(cell) = frame.cells.get_mut(target.index) else {
             return false;
         };
-        let symbol = target.glyph.symbol(tick);
-        if cell.symbol.capacity() < symbol.len() {
+        if !target.can_apply(cell, tick) {
             return false;
         }
-        cell.symbol.clear();
-        cell.symbol.push_str(symbol);
+        match target.transition {
+            WorkingAnimationTransition::Glyph(glyph) => {
+                let symbol = glyph.symbol(tick);
+                cell.symbol.clear();
+                cell.symbol.push_str(symbol);
+            }
+            WorkingAnimationTransition::Shimmer {
+                character_index,
+                palette,
+                ..
+            } => {
+                cell.fg = crate::protocol::color_to_u32(crate::ui::working_label_shimmer_color(
+                    palette,
+                    tick,
+                    usize::from(character_index),
+                ));
+            }
+        }
     }
     true
 }
@@ -574,6 +725,73 @@ fn focused_terminal_suppresses_host_cursor(
     app_state
         .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         .is_some_and(crate::terminal::TerminalRuntime::synchronized_output_active)
+}
+
+#[cfg(test)]
+mod working_animation_tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn shimmer_collection_requires_the_exact_next_tick_style_run() {
+        let mut app = AppState::test_new();
+        app.spinner_tick = 0;
+        app.palette.yellow = Color::Rgb(20, 40, 60);
+        app.palette.text = Color::Rgb(100, 120, 140);
+        let rendered_base = Color::Rgb(5, 15, 25);
+        let palette = crate::ui::working_label_shimmer_palette(
+            rendered_base,
+            app.palette.text,
+            &app.host_terminal_theme,
+        )
+        .expect("RGB endpoints resolve without a host palette");
+        let area = Rect::new(0, 0, 20, 1);
+        let mut current = ratatui::buffer::Buffer::empty(area);
+        let mut next = ratatui::buffer::Buffer::empty(area);
+
+        for index in 0..crate::ui::WORKING_LABEL_LEN {
+            let character = &crate::ui::WORKING_LABEL[index..=index];
+            current[(index as u16, 0)]
+                .set_symbol(character)
+                .set_fg(rendered_base);
+            next[(index as u16, 0)]
+                .set_symbol(character)
+                .set_fg(rendered_base);
+        }
+        let mut cells = Vec::new();
+        collect_working_shimmer_cells(&app, &current, &next, &mut cells);
+        assert!(
+            cells.is_empty(),
+            "an unrelated static yellow working string must not animate"
+        );
+
+        for index in 0..crate::ui::WORKING_LABEL_LEN {
+            current[(index as u16, 0)].set_fg(crate::ui::working_label_shimmer_color(
+                palette,
+                app.spinner_tick,
+                index,
+            ));
+            next[(index as u16, 0)].set_fg(crate::ui::working_label_shimmer_color(
+                palette,
+                app.spinner_tick
+                    .wrapping_add(crate::app::WORKING_ANIMATION_TICK_STEP),
+                index,
+            ));
+        }
+        collect_working_shimmer_cells(&app, &current, &next, &mut cells);
+        assert_eq!(cells.len(), crate::ui::WORKING_LABEL_LEN);
+        assert!(cells.iter().enumerate().all(|(index, cell)| {
+            cell.index == index
+                && matches!(
+                    cell.transition,
+                    WorkingAnimationTransition::Shimmer {
+                        character_index,
+                        palette: recorded_palette,
+                        ..
+                    } if usize::from(character_index) == index && recorded_palette == palette
+                )
+        }));
+    }
 }
 
 #[cfg(test)]

@@ -89,12 +89,14 @@ pub(crate) struct PaneClickState {
     pane_id: crate::layout::PaneId,
     viewport_row: u16,
     col: u16,
+    local_selection_override: bool,
     at: Instant,
 }
 
 impl PaneClickState {
     fn is_double_click_for(self, next: Self) -> bool {
         self.pane_id == next.pane_id
+            && self.local_selection_override == next.local_selection_override
             && next.at.duration_since(self.at) <= PANE_DOUBLE_CLICK_WINDOW
             && self.viewport_row.abs_diff(next.viewport_row) <= 1
             && self.col.abs_diff(next.col) <= 1
@@ -4143,6 +4145,7 @@ mod tests {
             pane_id: selection_pane,
             viewport_row: 0,
             col: 0,
+            local_selection_override: false,
             at: selection_deadline,
         });
         app.next_auto_update_check = Some(Instant::now());

@@ -186,7 +186,12 @@ fn canonical_resume_argv(
             ]
         }
         ("zynk:codex", "codex", AgentSessionRefKind::Id) => {
-            vec!["codex".into(), "resume".into(), session_ref.value.clone()]
+            vec![
+                "codex".into(),
+                "--no-daemon".into(),
+                "resume".into(),
+                session_ref.value.clone(),
+            ]
         }
         ("zynk:copilot", "copilot", AgentSessionRefKind::Id) => {
             vec!["copilot".into(), format!("--resume={}", session_ref.value)]
@@ -403,6 +408,7 @@ const PI_SPEC: AgentRewriteSpec = AgentRewriteSpec {
 // the runtime/policy options below. `-c/--config` (arbitrary key=value, secret risk),
 // `--remote-auth-token-env`, and `-i/--image` are excluded.
 const CODEX_BOOL_ALLOW: &[&str] = &[
+    "--no-daemon",
     "--dangerously-bypass-approvals-and-sandbox",
     "--dangerously-bypass-hook-trust",
     "--oss",
@@ -519,6 +525,9 @@ fn rewrite_codex(argv0: String, rest: &[String], value: &str) -> Option<Vec<Stri
         let tok = rest[i].as_str();
         if tok == "--" {
             return None;
+        } else if tok == "--no-daemon" {
+            // Zynk owns this process-isolation flag. Drop every input copy and
+            // inject exactly one canonical token below.
         } else if CODEX_SELECTOR_DROP.contains(&tok) {
             // redundant with a concrete resumed id — drop
         } else if tok == "resume" && !subcommand_seen {
@@ -540,7 +549,12 @@ fn rewrite_codex(argv0: String, rest: &[String], value: &str) -> Option<Vec<Stri
         }
         i += 1;
     }
-    let mut out = vec![argv0, "resume".to_string(), value.to_string()];
+    let mut out = vec![
+        argv0,
+        "--no-daemon".to_string(),
+        "resume".to_string(),
+        value.to_string(),
+    ];
     out.extend(kept);
     Some(out)
 }
@@ -719,7 +733,10 @@ mod tests {
             "--yolo".to_string(),
         ];
         let out = rewrite_preserving_flags("codex", &orig, &id).unwrap();
-        assert_eq!(out, vec!["codex", "resume", "new-id", "--yolo"]);
+        assert_eq!(
+            out,
+            vec!["codex", "--no-daemon", "resume", "new-id", "--yolo"]
+        );
     }
 
     #[test]
@@ -727,7 +744,45 @@ mod tests {
         let id = AgentSessionRef::id("new-id").unwrap();
         let orig = vec!["codex".to_string(), "--yolo".to_string()];
         let out = rewrite_preserving_flags("codex", &orig, &id).unwrap();
-        assert_eq!(out, vec!["codex", "resume", "new-id", "--yolo"]);
+        assert_eq!(
+            out,
+            vec!["codex", "--no-daemon", "resume", "new-id", "--yolo"]
+        );
+    }
+
+    #[test]
+    fn codex_resume_forces_exactly_one_no_daemon() {
+        let id = AgentSessionRef::id("new-id").unwrap();
+        for original in [
+            vec!["codex", "resume", "old-id", "--yolo"],
+            vec!["codex", "--no-daemon", "resume", "old-id", "--yolo"],
+            vec![
+                "codex",
+                "--no-daemon",
+                "resume",
+                "old-id",
+                "--no-daemon",
+                "--yolo",
+            ],
+        ] {
+            let original: Vec<String> = original.into_iter().map(str::to_string).collect();
+            let out = rewrite_preserving_flags("codex", &original, &id).unwrap();
+            assert_eq!(
+                out,
+                vec!["codex", "--no-daemon", "resume", "new-id", "--yolo"]
+            );
+            assert_eq!(
+                out.iter()
+                    .filter(|arg| arg.as_str() == "--no-daemon")
+                    .count(),
+                1
+            );
+        }
+
+        assert_eq!(
+            canonical_resume_argv("zynk:codex", "codex", &id).unwrap(),
+            vec!["codex", "--no-daemon", "resume", "new-id"]
+        );
     }
 
     // --- Finalized allowlist coverage (flags taken from claude/codex/pi --help) ---
@@ -814,7 +869,14 @@ mod tests {
                 &id,
             )
             .unwrap(),
-            vec!["codex", "resume", "new-id", "--model", "gpt-5"]
+            vec![
+                "codex",
+                "--no-daemon",
+                "resume",
+                "new-id",
+                "--model",
+                "gpt-5",
+            ]
         );
         assert_eq!(
             rewrite_preserving_flags(
@@ -828,7 +890,7 @@ mod tests {
                 &id,
             )
             .unwrap(),
-            vec!["codex", "resume", "new-id", "-m", "gpt-5"]
+            vec!["codex", "--no-daemon", "resume", "new-id", "-m", "gpt-5"]
         );
         assert_eq!(
             rewrite_preserving_flags(
@@ -841,7 +903,7 @@ mod tests {
                 &id,
             )
             .unwrap(),
-            vec!["codex", "resume", "new-id", "--model=gpt-5"]
+            vec!["codex", "--no-daemon", "resume", "new-id", "--model=gpt-5",]
         );
     }
 
@@ -864,6 +926,7 @@ mod tests {
             out,
             vec![
                 "codex",
+                "--no-daemon",
                 "resume",
                 "new-id",
                 "--sandbox",
@@ -886,7 +949,10 @@ mod tests {
             "--yolo".to_string(),
         ];
         let out = rewrite_preserving_flags("codex", &orig, &id).unwrap();
-        assert_eq!(out, vec!["codex", "resume", "new-id", "--yolo"]);
+        assert_eq!(
+            out,
+            vec!["codex", "--no-daemon", "resume", "new-id", "--yolo"]
+        );
     }
 
     #[test]
@@ -965,7 +1031,15 @@ mod tests {
         ];
         assert_eq!(
             persisted_resume_argv("zynk:codex", "codex", &id, Some(&fg), None).unwrap(),
-            vec!["codex", "resume", "X", "--yolo", "--model", "gpt-5"]
+            vec![
+                "codex",
+                "--no-daemon",
+                "resume",
+                "X",
+                "--yolo",
+                "--model",
+                "gpt-5",
+            ]
         );
     }
 
@@ -1173,7 +1247,7 @@ mod tests {
             )
             .unwrap()
             .argv,
-            vec!["codex", "resume", "codex-session"]
+            vec!["codex", "--no-daemon", "resume", "codex-session"]
         );
         assert_eq!(
             plan(
@@ -1537,7 +1611,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(codex_plan.argv, vec!["codex", "resume", id]);
+        assert_eq!(codex_plan.argv, vec!["codex", "--no-daemon", "resume", id]);
 
         let copilot_plan = plan(
             "zynk:copilot",
