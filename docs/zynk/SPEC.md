@@ -451,11 +451,12 @@ the old authority. Contradiction returns `caller_identity_conflict` before state
 or hints observed before hook authority exists, proceed through the existing pane-bound path and are reported as
 unverified. No mismatch reroutes a request to a pane found by session value. These three additive error codes use
 the existing error envelope. The socket API remains on protocol 20 with unchanged methods and request/response
-field shapes; persistence, handoff, and session-snapshot schemas are also unchanged. Native F4 JSON responses add
-optional Codex-hint verification metadata at the top level of `zynk whoami --json` and implicit
-`zynk inbox --json`, and under `from` for native `zynk send` and `zynk reply`. The field is `verified` or
-`unverified` when a hint is present, is omitted without one, and reports consistency without granting routing or
-receipt authority.
+field shapes; persistence, handoff, and session-snapshot schemas are also unchanged. The complete F4 SendOutcome
+command roster is: `zynk agent send`, `zynk agent prompt`, `zynk pane run`, `zynk pane send-text`, `zynk send`,
+`zynk reply`. All six serialize optional Codex-hint audit metadata at `from.identity_verification`; its value is
+`verified` or `unverified`, and the member is omitted without a Codex hint. It reports hint consistency only and
+grants no routing or receipt authority. The separate reader surfaces expose top-level `identity_verification` on
+`zynk whoami --json` and implicit `zynk inbox --json`.
 
 `ui.window_title` defaults to empty, leaving the host terminal title untouched. A template such as
 `{hostname}: {workspace}` opts in and may also use `{tab}`, `{pane}`, and `{terminal_title}`. Malformed

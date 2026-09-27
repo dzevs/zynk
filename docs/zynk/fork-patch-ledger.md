@@ -8353,3 +8353,24 @@ paths. `verified` and `unverified` report consistency, omission means no Codex h
 no authority. README, CHANGELOG, SPEC, root SKILL, and an append-only ADR 0014 amendment now state that exact
 boundary. The source successor and fresh packet remain unapproved until exact-object Claude Gate-2 and standing-
 swarm Gate-3; no dogfood, merge, push, version, tag, publish, or release authority follows this row.
+
+#### c90caefe Gate-3 bounded successor (IMPLEMENTED / PENDING VERIFICATION)
+
+Fresh standing-swarm Gate-3 found that the prior native-only documentation understated the common serializer
+surface. The complete F4 SendOutcome command roster is: `zynk agent send`, `zynk agent prompt`, `zynk pane run`,
+`zynk pane send-text`, `zynk send`, `zynk reply`. All six serialize optional Codex-hint audit metadata at
+`from.identity_verification`; its value is `verified` or `unverified`, and the member is omitted without a Codex
+hint. It reports hint consistency only and grants no routing or receipt authority. The separate reader surfaces
+expose top-level `identity_verification` on `zynk whoami --json` and implicit `zynk inbox --json`. This
+documentation correction changes no production serializer, routing, receipt authority, protocol-20 socket API,
+schema, persistence, snapshot, handoff, configuration, or rendering behavior.
+
+The same Gate-3 found that packet v6 classified fault regions from stale unified-diff header coordinates rather
+than the lines where each patch actually applied. Packet v7 regenerates every final-byte patch against the exact
+successor, rejects all offset or fuzz, and derives sealed pre- and post-image spans from the same replay that
+proves each mutated whole-file hash. Both images are checked against `cfg(test)` ranges, and a shifted-header
+test-only negative prevents the old false-green. This row records Gate-3 `msg_10344aed0cfd12fa`, Claude's
+verification `msg_a7d375a682c9e733`, and Gate-1 approval `msg_f24186f84be02a47`. The accepted Dots-mode mobile
+Navigate demand and capture-time CPU digest hardening remain disclosed nonblocking residuals. This implementation
+and its packet remain pending exact-object Claude Gate-2 and fresh standing-swarm Gate-3; no dogfood, merge,
+push, version, tag, publish, or release authority follows this row.

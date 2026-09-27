@@ -224,3 +224,13 @@ unchanged. Native `zynk send` and `zynk reply` may add `from.identity_verificati
 `verified` when the optional Codex process hint agrees with hook authority and `unverified` when authority is not
 yet present. `identity_verification` is omitted without a Codex hint. It reports consistency only and cannot
 select a pane, reroute a request, or grant receipt authority.
+
+### Complete F4 serializer-surface amendment (2026-09-27)
+
+The complete F4 SendOutcome command roster is: `zynk agent send`, `zynk agent prompt`, `zynk pane run`,
+`zynk pane send-text`, `zynk send`, `zynk reply`. All six serialize optional Codex-hint audit metadata at
+`from.identity_verification`; its value is `verified` or `unverified`, and the member is omitted without a Codex
+hint. It reports hint consistency only and grants no routing or receipt authority. The separate reader surfaces
+expose top-level `identity_verification` on `zynk whoami --json` and implicit `zynk inbox --json`. This amendment
+supersedes the incomplete native-only command enumeration above; protocol 20 and the socket API method and field
+shapes remain unchanged.

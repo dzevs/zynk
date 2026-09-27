@@ -525,10 +525,12 @@ rejected as `shared_codex_daemon`. An older managed Codex fails with a typed err
 `--no-daemon` support on `agent start`; snapshot restore/resume exposes Codex's own launch error. Neither path
 silently falls back. Zynk also rejects one authoritative session claimed by two terminals as
 `duplicate_agent_session` rather than guessing an owner; contradictory session hints fail as
-`caller_identity_conflict`. Native F4 JSON responses add an optional `identity_verification` field at the top
-level of `zynk whoami --json` and implicit `zynk inbox --json`, and under `from` for native `zynk send` and
-`zynk reply`. Its value is `verified` or `unverified` and is omitted when no Codex hint is present. This field
-reports hint consistency and never grants routing or receipt authority.
+`caller_identity_conflict`. The complete F4 SendOutcome command roster is: `zynk agent send`,
+`zynk agent prompt`, `zynk pane run`, `zynk pane send-text`, `zynk send`, `zynk reply`. All six serialize
+optional Codex-hint audit metadata at `from.identity_verification`; its value is `verified` or `unverified`, and
+the member is omitted without a Codex hint. It reports hint consistency only and grants no routing or receipt
+authority. The separate reader surfaces expose top-level `identity_verification` on `zynk whoami --json` and
+implicit `zynk inbox --json`.
 
 ## Keybindings
 

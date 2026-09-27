@@ -7012,6 +7012,269 @@ fn post_dogfood_explicit_inbox_ignores_codex_hints_and_stays_database_only() {
     assert_eq!(value["agent"], "codex", "{value}");
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PostDogfoodF4CommandCase {
+    envelope: &'static str,
+    cli_argv: &'static [&'static str],
+    target_method: &'static str,
+    submit_method: &'static str,
+}
+
+const POST_DOGFOOD_F4_COMMAND_CASES: &[PostDogfoodF4CommandCase] = &[
+    PostDogfoodF4CommandCase {
+        envelope: "agent send",
+        cli_argv: &["agent", "send", "worker", "--", "body"],
+        target_method: "agent.get",
+        submit_method: "pane.send_input",
+    },
+    PostDogfoodF4CommandCase {
+        envelope: "agent prompt",
+        cli_argv: &["agent", "prompt", "worker", "--", "body"],
+        target_method: "agent.get",
+        submit_method: "agent.prompt",
+    },
+    PostDogfoodF4CommandCase {
+        envelope: "pane run",
+        cli_argv: &["pane", "run", "w2:p2", "--", "body"],
+        target_method: "pane.get",
+        submit_method: "pane.send_input",
+    },
+    PostDogfoodF4CommandCase {
+        envelope: "pane send-text",
+        cli_argv: &["pane", "send-text", "w2:p2", "--", "body"],
+        target_method: "pane.get",
+        submit_method: "pane.send_text",
+    },
+    PostDogfoodF4CommandCase {
+        envelope: "zynk send",
+        cli_argv: &["send", "worker", "--", "body"],
+        target_method: "agent.get",
+        submit_method: "pane.send_input",
+    },
+    PostDogfoodF4CommandCase {
+        envelope: "zynk reply",
+        cli_argv: &["reply", "worker", "--", "body"],
+        target_method: "agent.get",
+        submit_method: "pane.send_input",
+    },
+];
+
+#[derive(Clone, Copy, Debug)]
+struct PostDogfoodF4HintCase {
+    name: &'static str,
+    authoritative_session: Option<&'static str>,
+    thread_hint: Option<&'static str>,
+    session_hint: Option<&'static str>,
+    expected: Option<&'static str>,
+}
+
+const POST_DOGFOOD_F4_HINT_CASES: &[PostDogfoodF4HintCase] = &[
+    PostDogfoodF4HintCase {
+        name: "verified",
+        authoritative_session: Some("session-a"),
+        thread_hint: Some("session-a"),
+        session_hint: Some("session-a"),
+        expected: Some("verified"),
+    },
+    PostDogfoodF4HintCase {
+        name: "unverified",
+        authoritative_session: None,
+        thread_hint: Some("session-a"),
+        session_hint: Some("session-a"),
+        expected: Some("unverified"),
+    },
+    PostDogfoodF4HintCase {
+        name: "omitted",
+        authoritative_session: Some("session-a"),
+        thread_hint: None,
+        session_hint: None,
+        expected: None,
+    },
+];
+
+fn post_dogfood_f4_source(session: Option<&str>) -> serde_json::Value {
+    let agent_session = session.map(|value| {
+        serde_json::json!({
+            "source": "zynk:codex",
+            "agent": "codex",
+            "kind": "id",
+            "value": value,
+        })
+    });
+    serde_json::json!({
+        "result": {"type": "pane_info", "pane": {
+            "pane_id": "w1:p1",
+            "terminal_id": "source-terminal",
+            "workspace_id": "w1",
+            "tab_id": "w1:t1",
+            "cwd": "/tmp/f4-source",
+            "agent": "codex",
+            "agent_session": agent_session,
+        }}
+    })
+}
+
+fn post_dogfood_f4_target_agent() -> serde_json::Value {
+    let mut target = m839_agent_json("idle", "worker", "target-terminal", 7);
+    target["workspace_id"] = serde_json::json!("w2");
+    target["tab_id"] = serde_json::json!("w2:t1");
+    target["pane_id"] = serde_json::json!("w2:p2");
+    target
+}
+
+fn post_dogfood_f4_target_pane() -> serde_json::Value {
+    serde_json::json!({
+        "result": {"type": "pane_info", "pane": {
+            "pane_id": "w2:p2",
+            "terminal_id": "target-terminal",
+            "workspace_id": "w2",
+            "tab_id": "w2:t1",
+            "cwd": "/tmp/f4-target",
+            "agent": "codex",
+            "agent_session": {
+                "source": "zynk:codex",
+                "agent": "codex",
+                "kind": "id",
+                "value": "target-session",
+            },
+        }}
+    })
+}
+
+fn post_dogfood_f4_env(hint: PostDogfoodF4HintCase) -> Vec<(&'static str, &'static str)> {
+    // run_snapshot_cli_with_timeout_and_env scrubs both hint keys before
+    // applying this explicit per-case model. None therefore means absent,
+    // never an ambient value inherited by the test child.
+    let mut env = vec![("ZYNK_PANE_ID", "w1:p1")];
+    if let Some(value) = hint.thread_hint {
+        env.push(("CODEX_THREAD_ID", value));
+    }
+    if let Some(value) = hint.session_hint {
+        env.push(("CODEX_SESSION_ID", value));
+    }
+    env
+}
+
+#[test]
+fn post_dogfood_every_f4_command_reports_verified_unverified_or_omitted_source() {
+    for command in POST_DOGFOOD_F4_COMMAND_CASES {
+        for hint in POST_DOGFOOD_F4_HINT_CASES {
+            let source = post_dogfood_f4_source(hint.authoritative_session);
+            let target_agent = post_dogfood_f4_target_agent();
+            let target_pane = post_dogfood_f4_target_pane();
+            let env = post_dogfood_f4_env(*hint);
+            let (_fixture, requests, output) =
+                m839_cli_exchange_with_env(command.cli_argv, &env, |request, base| {
+                    match request["method"].as_str().unwrap() {
+                        "ping" => m839_pong(),
+                        "pane.get" if request["id"] == "zynk:resolve:source" => source.clone(),
+                        "pane.get" => {
+                            fs::write(base.join("runtime.id"), "rt_f4_matrix\n").unwrap();
+                            target_pane.clone()
+                        }
+                        "agent.get" => {
+                            fs::write(base.join("runtime.id"), "rt_f4_matrix\n").unwrap();
+                            m839_agent_reply(target_agent.clone())
+                        }
+                        "agent.prompt" => serde_json::json!({
+                            "result": {
+                                "type": "agent_prompted",
+                                "agent": target_agent.clone(),
+                                "baseline_state_change_seq": 7,
+                            }
+                        }),
+                        "pane.send_input" | "pane.send_text" => {
+                            serde_json::json!({"result": {"type": "ok"}})
+                        }
+                        other => panic!(
+                            "unexpected F4 matrix method {other}; command={:?}; hint={}",
+                            command.cli_argv, hint.name
+                        ),
+                    }
+                });
+            assert!(
+                output.status.success(),
+                "command={:?}; hint={}; output={output:?}",
+                command.cli_argv,
+                hint.name
+            );
+            assert!(output.stderr.is_empty(), "{output:?}");
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["command"], command.envelope, "{value}");
+            assert_eq!(value["from"]["pane"], "w1:p1", "{value}");
+            assert_eq!(value["from"]["workspace"], "w1", "{value}");
+            assert_eq!(value["from"]["tab"], "w1:t1", "{value}");
+            assert_eq!(value["from"]["cwd"], "/tmp/f4-source", "{value}");
+            match hint.expected {
+                Some(expected) => {
+                    assert_eq!(value["from"]["identity_verification"], expected, "{value}")
+                }
+                None => assert!(
+                    value["from"].get("identity_verification").is_none(),
+                    "omitted means absent, not null: {value}"
+                ),
+            }
+            assert!(value.get("identity_verification").is_none(), "{value}");
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|request| request["method"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "ping",
+                    "pane.get",
+                    "ping",
+                    command.target_method,
+                    "ping",
+                    command.submit_method,
+                ],
+                "command={:?}; hint={}",
+                command.cli_argv,
+                hint.name
+            );
+        }
+    }
+}
+
+#[test]
+fn post_dogfood_target_failure_retains_verified_f4_source_for_every_command() {
+    for command in POST_DOGFOOD_F4_COMMAND_CASES {
+        let source = post_dogfood_f4_source(Some("session-a"));
+        let env = post_dogfood_f4_env(POST_DOGFOOD_F4_HINT_CASES[0]);
+        let (_fixture, requests, output) =
+            m839_cli_exchange_with_env(command.cli_argv, &env, |request, _base| {
+                match request["method"].as_str().unwrap() {
+                    "ping" => m839_pong(),
+                    "pane.get" if request["id"] == "zynk:resolve:source" => source.clone(),
+                    "pane.get" => serde_json::json!({
+                        "error": {"code": "pane_not_found", "message": "fixture target missing"}
+                    }),
+                    "agent.get" => serde_json::json!({
+                        "error": {"code": "agent_not_found", "message": "fixture target missing"}
+                    }),
+                    other => panic!("target failure reached {other}: {:?}", command.cli_argv),
+                }
+            });
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["command"], command.envelope, "{value}");
+        assert_eq!(
+            value["from"]["identity_verification"], "verified",
+            "{value}"
+        );
+        assert!(value.get("identity_verification").is_none(), "{value}");
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["ping", "pane.get", "ping", command.target_method],
+            "{:?}",
+            command.cli_argv
+        );
+    }
+}
+
 #[test]
 fn post_dogfood_codex_hint_conflict_stops_every_message_source_before_target_lookup() {
     let ping = serde_json::json!({
@@ -7068,6 +7331,10 @@ fn post_dogfood_codex_hint_conflict_stops_every_message_source_before_target_loo
                 .and_then(serde_json::Value::as_str),
             Some("caller_identity_conflict"),
             "{args:?}: {value}"
+        );
+        assert!(
+            value["from"].get("identity_verification").is_none(),
+            "conflicting source must stay empty: {args:?}: {value}"
         );
         for field in ["delivery_status", "proof", "conversation_id"] {
             assert!(value.get(field).is_none(), "{args:?}: {field}: {value}");

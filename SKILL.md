@@ -47,9 +47,7 @@ zynk who --json     # live participant topology of agents in the session
 zynk workspace list # JSON
 ```
 
-`pane list` shows which pane has UI focus; it does **not** tell you which pane is you — `ZYNK_PANE_ID` and `whoami --json` do. Use `--json` for any identity you parse; the plain forms are for humans.
-`zynk whoami --json` may include `identity_verification: "verified" | "unverified"` when a Codex hint is present.
-It is omitted when no Codex hint is present and grants no authority; pane-bound hook identity remains decisive.
+`pane list` shows which pane has UI focus; it does **not** tell you which pane is you — `ZYNK_PANE_ID` and `whoami --json` do. Use `--json` for any identity you parse; the plain forms are for humans. The complete F4 SendOutcome command roster is: `zynk agent send`, `zynk agent prompt`, `zynk pane run`, `zynk pane send-text`, `zynk send`, `zynk reply`. All six serialize optional Codex-hint audit metadata at `from.identity_verification`; its value is `verified` or `unverified`, and the member is omitted without a Codex hint. It reports hint consistency only and grants no routing or receipt authority. The separate reader surfaces expose top-level `identity_verification` on `zynk whoami --json` and implicit `zynk inbox --json`. Pane-bound hook identity remains decisive.
 
 ## Read another pane
 

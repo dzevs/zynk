@@ -4,11 +4,13 @@
 
 This release restores operator-selected 3.0.x presentation and interaction behavior on top of 3.1.0. Binary
 protocol 20 and the socket API method and field shapes remain unchanged, as do persistence, session snapshots,
-and handoff data. Native F4 JSON responses add an optional `identity_verification` field at the top level of
-`whoami` and implicit `inbox`, and under `from` for native `send` and `reply`. Its value is `verified` or
-`unverified` and is omitted without a Codex hint; it reports consistency and grants no authority. The existing
-JSON error envelope also gains three typed code values: `shared_codex_daemon`, `duplicate_agent_session`, and
-`caller_identity_conflict`.
+and handoff data. The complete F4 SendOutcome command roster is: `zynk agent send`, `zynk agent prompt`,
+`zynk pane run`, `zynk pane send-text`, `zynk send`, `zynk reply`. All six serialize optional Codex-hint audit
+metadata at `from.identity_verification`; its value is `verified` or `unverified`, and the member is omitted
+without a Codex hint. It reports hint consistency only and grants no routing or receipt authority. The separate
+reader surfaces expose top-level `identity_verification` on `zynk whoami --json` and implicit
+`zynk inbox --json`. The existing JSON error envelope also gains three typed code values:
+`shared_codex_daemon`, `duplicate_agent_session`, and `caller_identity_conflict`.
 
 **Added**
 
