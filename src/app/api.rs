@@ -1560,6 +1560,7 @@ mod tests {
                 uid: 1000,
                 start_time: Some(40),
             }),
+            #[cfg(debug_assertions)]
             trusted_as_pane_child: false,
         }
     }
