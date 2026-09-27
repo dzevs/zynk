@@ -18,6 +18,18 @@ F4_CONTRACT_DOCUMENTS = (
     "docs/zynk/decisions/0014-receipt-principals-same-uid-pane-tree.md",
     "docs/zynk/fork-patch-ledger.md",
 )
+DELIVERY_STATUS_MARKER = "The source-derived delivery-status roster is:"
+DELIVERY_STATUS_CONTRACT_DOCUMENTS = (
+    "CHANGELOG.md",
+    "docs/zynk/SPEC.md",
+    "docs/zynk/decisions/0002-message-protocol-delivery-receipt.md",
+    "docs/zynk/fork-patch-ledger.md",
+)
+AWARENESS_HEADER_MARKER = "The current awareness-header roster is:"
+AWARENESS_HEADER_CONTRACT_DOCUMENTS = (
+    "docs/zynk/decisions/0005-draft-wire-footer-deferral.md",
+    "docs/zynk/fork-patch-ledger.md",
+)
 
 
 def normalized(path: str) -> str:
@@ -153,7 +165,9 @@ def without_rust_comments(text: str) -> str:
     return "".join(result)
 
 
-def parse_send_command_source(text: str) -> tuple[list[str], list[str]]:
+def parse_send_command_source(
+    text: str,
+) -> tuple[list[str], list[str], dict[str, str]]:
     enum_body = without_rust_comments(
         declaration_body(text, r"pub\s+enum\s+SendCommand\s*\{")
     )
@@ -197,7 +211,50 @@ def parse_send_command_source(text: str) -> tuple[list[str], list[str]]:
         raise ValueError("SendCommand variants and as_str labels must form a bijection")
     envelopes = [arms[variant] for variant in variants]
     public = [label if label.startswith("zynk ") else f"zynk {label}" for label in envelopes]
-    return envelopes, public
+
+    status_function = declaration_body(
+        text, r"pub\s+fn\s+delivery_status_for\s*\([^)]*\)[^{]*\{"
+    )
+    status_body = without_rust_comments(
+        declaration_body(status_function, r"match\s+cmd\s*\{")
+    )
+    remaining = re.sub(r"\s+", " ", status_body).strip()
+    statuses: dict[str, str] = {}
+    while remaining:
+        if re.match(r"_\s*=>", remaining):
+            raise ValueError("delivery_status_for wildcard arm is unsupported")
+        match = re.match(
+            r"(.+?)\s*=>\s*DeliveryStatus::([A-Za-z_][A-Za-z0-9_]*)\s*,",
+            remaining,
+        )
+        if match is None:
+            raise ValueError(f"unsupported delivery_status_for arm: {remaining}")
+        variant_list, status = match.groups()
+        if status not in {"Submitted", "Drafted"}:
+            raise ValueError(f"unknown DeliveryStatus in delivery_status_for: {status}")
+        arm_variants = [part.strip() for part in variant_list.split("|")]
+        if not arm_variants:
+            raise ValueError("delivery_status_for arm must name a SendCommand")
+        for part in arm_variants:
+            variant_match = re.fullmatch(
+                r"SendCommand::([A-Za-z_][A-Za-z0-9_]*)", part
+            )
+            if variant_match is None:
+                raise ValueError(f"unsupported delivery_status_for variant: {part}")
+            variant = variant_match.group(1)
+            if variant in statuses:
+                raise ValueError(f"duplicate delivery_status_for variant: {variant}")
+            statuses[variant] = status.lower()
+        remaining = remaining[match.end() :].strip()
+
+    if set(variants) != set(statuses):
+        raise ValueError(
+            "SendCommand variants and delivery_status_for arms must form a bijection"
+        )
+    public_statuses = {
+        public[index]: statuses[variant] for index, variant in enumerate(variants)
+    }
+    return envelopes, public, public_statuses
 
 
 def parse_f4_command_cases(text: str) -> tuple[list[str], list[list[str]]]:
@@ -256,6 +313,31 @@ def documented_f4_roster(path: str) -> list[str]:
     return re.findall(r"`(zynk [^`]+)`", match.group(1))
 
 
+def canonical_marked_contract(path: str, marker: str) -> str:
+    paragraphs = re.split(r"\n\s*\n", (ROOT / path).read_text(encoding="utf-8"))
+    normalized_paragraphs = [
+        re.sub(r"\s+", " ", paragraph).strip() for paragraph in paragraphs
+    ]
+    matches = [paragraph for paragraph in normalized_paragraphs if marker in paragraph]
+    if len(matches) != 1:
+        raise AssertionError(f"{path} must contain exactly one contract marked {marker}")
+    return matches[0]
+
+
+def documented_status_roster(path: str, marker: str) -> dict[str, list[str]]:
+    contract = canonical_marked_contract(path, marker)
+    match = re.search(
+        rf"{re.escape(marker)}\s*submitted:\s*(.*?);\s*drafted:\s*(.*?)\.",
+        contract,
+    )
+    if match is None:
+        raise AssertionError(f"{path} has a malformed status roster marked {marker}")
+    return {
+        "submitted": re.findall(r"`(zynk [^`]+)`", match.group(1)),
+        "drafted": re.findall(r"`(zynk [^`]+)`", match.group(2)),
+    }
+
+
 class PostDogfoodDocsTest(unittest.TestCase):
     def test_right_click_order_is_consistent_in_every_public_contract(self) -> None:
         documents = {
@@ -306,7 +388,7 @@ class PostDogfoodDocsTest(unittest.TestCase):
 
     def test_f4_identity_verification_roster_is_source_derived_and_complete(self) -> None:
         source = (ROOT / SEND_COMMAND_SOURCE).read_text(encoding="utf-8")
-        envelopes, public = parse_send_command_source(source)
+        envelopes, public, _statuses = parse_send_command_source(source)
         test_envelopes, test_argvs = parse_f4_command_cases(
             (ROOT / F4_COMMAND_CASE_SOURCE).read_text(encoding="utf-8")
         )
@@ -318,6 +400,104 @@ class PostDogfoodDocsTest(unittest.TestCase):
         for path in F4_CONTRACT_DOCUMENTS:
             with self.subTest(path=path):
                 self.assertEqual(documented_f4_roster(path), public)
+
+    def test_delivery_status_roster_is_source_derived_and_complete(self) -> None:
+        source = (ROOT / SEND_COMMAND_SOURCE).read_text(encoding="utf-8")
+        envelopes, _public, statuses = parse_send_command_source(source)
+        expected = {
+            status: [command for command, actual in statuses.items() if actual == status]
+            for status in ("submitted", "drafted")
+        }
+        self.assertEqual(
+            expected,
+            {
+                "submitted": [
+                    "zynk agent send",
+                    "zynk agent prompt",
+                    "zynk pane run",
+                    "zynk send",
+                    "zynk reply",
+                ],
+                "drafted": ["zynk pane send-text"],
+            },
+            "delivery_status_for changed; review the public contract",
+        )
+        for path in DELIVERY_STATUS_CONTRACT_DOCUMENTS:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    documented_status_roster(path, DELIVERY_STATUS_MARKER), expected
+                )
+
+        envelope_statuses = {
+            envelope: statuses[
+                envelope if envelope.startswith("zynk ") else f"zynk {envelope}"
+            ]
+            for envelope in envelopes
+        }
+        submitted = [
+            envelope
+            for envelope, status in envelope_statuses.items()
+            if status == "submitted"
+        ]
+        drafted = [
+            envelope
+            for envelope, status in envelope_statuses.items()
+            if status == "drafted"
+        ]
+        claude_clause = (
+            f"{' / '.join(submitted)} dispatch (atomic submit) -> submitted; "
+            f"{' / '.join(drafted)} (persist only, no dispatch) -> drafted"
+        )
+        self.assertEqual(normalized("CLAUDE.md").count(claude_clause), 1)
+
+        stale_current_rosters = {
+            "docs/zynk/SPEC.md": (
+                "only `agent send`/`pane run`/a future submit produce it",
+                "native `pane.send_input` ok (`agent send`/`pane run`;",
+            ),
+            "CLAUDE.md": (
+                "`agent send`/`pane run` dispatch via native `pane.send_input`",
+            ),
+        }
+        for path, clauses in stale_current_rosters.items():
+            with self.subTest(path=path):
+                text = normalized(path)
+                for clause in clauses:
+                    self.assertNotIn(clause, text)
+
+    def test_current_awareness_header_roster_matches_submitted_commands(self) -> None:
+        source = (ROOT / SEND_COMMAND_SOURCE).read_text(encoding="utf-8")
+        _envelopes, _public, statuses = parse_send_command_source(source)
+        expected = {
+            status: [command for command, actual in statuses.items() if actual == status]
+            for status in ("submitted", "drafted")
+        }
+        for path in AWARENESS_HEADER_CONTRACT_DOCUMENTS:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    documented_status_roster(path, AWARENESS_HEADER_MARKER), expected
+                )
+
+        header_functions = {
+            "src/cli/agent.rs": ("agent_prompt", "agent_send"),
+            "src/cli/pane.rs": ("pane_run",),
+            "src/cli/native.rs": ("native_send",),
+        }
+        for path, functions in header_functions.items():
+            text = (ROOT / path).read_text(encoding="utf-8")
+            for function in functions:
+                with self.subTest(path=path, function=function):
+                    body = declaration_body(text, rf"fn\s+{function}\s*\([^)]*\)[^{{]*\{{")
+                    self.assertIn("crate::zynk::header::render_header", body)
+
+        pane_source = (ROOT / "src/cli/pane.rs").read_text(encoding="utf-8")
+        send_text_body = declaration_body(
+            pane_source, r"fn\s+pane_send_text\s*\([^)]*\)[^{]*\{"
+        )
+        self.assertNotIn("render_header", send_text_body)
+        native_source = (ROOT / "src/cli/native.rs").read_text(encoding="utf-8")
+        self.assertIn("SendCommand::ZynkSend", native_source)
+        self.assertIn("SendCommand::ZynkReply", native_source)
 
     def test_f4_identity_verification_shape_is_documented_exactly(self) -> None:
         required = {
@@ -410,6 +590,92 @@ impl SendCommand {
 }
 '''
         with self.assertRaisesRegex(ValueError, "bijection"):
+            parse_send_command_source(source)
+
+    def test_rejects_delivery_status_wildcard_arm(self) -> None:
+        source = '''
+pub enum SendCommand { AgentSend, }
+impl SendCommand {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::AgentSend => "agent send", }
+    }
+}
+pub fn delivery_status_for(cmd: SendCommand) -> DeliveryStatus {
+    match cmd { _ => DeliveryStatus::Submitted, }
+}
+'''
+        with self.assertRaisesRegex(ValueError, "wildcard"):
+            parse_send_command_source(source)
+
+    def test_rejects_unsupported_delivery_status_arm_syntax(self) -> None:
+        source = '''
+pub enum SendCommand { AgentSend, }
+impl SendCommand {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::AgentSend => "agent send", }
+    }
+}
+pub fn delivery_status_for(cmd: SendCommand) -> DeliveryStatus {
+    match cmd {
+        SendCommand::AgentSend if enabled() => DeliveryStatus::Submitted,
+    }
+}
+'''
+        with self.assertRaisesRegex(ValueError, "unsupported delivery_status_for variant"):
+            parse_send_command_source(source)
+
+    def test_rejects_duplicate_delivery_status_variant(self) -> None:
+        source = '''
+pub enum SendCommand { AgentSend, }
+impl SendCommand {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::AgentSend => "agent send", }
+    }
+}
+pub fn delivery_status_for(cmd: SendCommand) -> DeliveryStatus {
+    match cmd {
+        SendCommand::AgentSend => DeliveryStatus::Submitted,
+        SendCommand::AgentSend => DeliveryStatus::Drafted,
+    }
+}
+'''
+        with self.assertRaisesRegex(ValueError, "duplicate delivery_status_for variant"):
+            parse_send_command_source(source)
+
+    def test_rejects_unknown_delivery_status(self) -> None:
+        source = '''
+pub enum SendCommand { AgentSend, }
+impl SendCommand {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::AgentSend => "agent send", }
+    }
+}
+pub fn delivery_status_for(cmd: SendCommand) -> DeliveryStatus {
+    match cmd { SendCommand::AgentSend => DeliveryStatus::Received, }
+}
+'''
+        with self.assertRaisesRegex(ValueError, "unknown DeliveryStatus"):
+            parse_send_command_source(source)
+
+    def test_rejects_missing_delivery_status_variant(self) -> None:
+        source = '''
+pub enum SendCommand {
+    AgentSend,
+    AgentPrompt,
+}
+impl SendCommand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentSend => "agent send",
+            Self::AgentPrompt => "agent prompt",
+        }
+    }
+}
+pub fn delivery_status_for(cmd: SendCommand) -> DeliveryStatus {
+    match cmd { SendCommand::AgentSend => DeliveryStatus::Submitted, }
+}
+'''
+        with self.assertRaisesRegex(ValueError, "delivery_status_for arms must form a bijection"):
             parse_send_command_source(source)
 
 

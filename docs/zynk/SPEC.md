@@ -172,8 +172,9 @@ zynk agent prompt   <name>   <text> [--type <t>] [--trace <id|inherit>] [--wait]
     sequence observations never create receiver or receipt authority.
   - `zynk pane send-text` → explicit NO Enter (deliberately staging text). → `delivery_status = drafted`
     (message persisted + protocol metadata/type, but NOT submitted; a future submit transitions it to `submitted`).
-  So `submitted` (§6) is consistent: only `agent send`/`pane run`/a future submit produce it; `send-text`
-  produces `drafted`. M2/F1 persists drafts but defers `pane submit` per ADR 0004.
+  The source-derived delivery-status roster is: submitted: `zynk agent send`, `zynk agent prompt`,
+  `zynk pane run`, `zynk send`, `zynk reply`; drafted: `zynk pane send-text`. M2/F1 persists drafts but
+  defers the future `pane submit` transition per ADR 0004.
 - **Draft → submitted transition (explicit, no implicit Enter-binding):** deferred by ADR 0004 until
   zynk has exact raw-input proof or a reviewed fail-closed draft guard. The intended future command is
   `zynk pane submit <pane> [--message-id <id>]`, sending one Enter and transitioning the targeted draft
@@ -575,9 +576,10 @@ Four explicit states; never collapse:
 - **`drafted`** — message persisted + protocol metadata/type, text written to the pane but NOT submitted
   (`pane send-text`, no Enter). A durable, typed-only state; a future exact submit transitions it to
   `submitted` (deferred by ADR 0004). Raw input commands are not protocol "deliveries" until submitted.
-- **`submitted`** — native `pane.send_input` ok (`agent send`/`pane run`; `proof_source=pane.send_input`),
-  plus future explicit `zynk pane submit` once exact proof exists (`proof_source=pane.submit`). Native
-  submit proof is authoritative — zynk owns the PTY.
+- **`submitted`** — atomic dispatch succeeds for `zynk agent send`, `zynk agent prompt`, `zynk pane run`,
+  `zynk send`, or `zynk reply`. The direct send paths use `proof_source=pane.send_input`; the readiness-gated
+  prompt uses `proof_source=agent.prompt`. A future explicit `zynk pane submit`, once exact proof exists,
+  uses `proof_source=pane.submit`. Native submit proof is authoritative — zynk owns the PTY.
 - **`received`** — the **receiving zynk integration** reports a **message-specific** receipt via a
   native event **`zynk.message_received`** (`message_id`, `conversation_id`, `conversation_seq`,
   receiver `agent_session`, `status`, `seq`, `timestamp`). SEPARATE from `report-agent` (lifecycle/state).

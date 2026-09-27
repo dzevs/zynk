@@ -75,3 +75,11 @@ proves the bytes were submitted to the PTY, NOT that the receiver application in
   `submitted`-only. Only the agent-specific hook MECHANICS (how each integration emits the event) are
   implementation detail; the receipt **acceptance invariants (Decision 4) are BINDING** in this ADR.
 - The `drafted` state + explicit `pane submit` add a small, well-bounded surface.
+
+## Amendment — current delivery-status command roster (2026-09-27)
+
+Decision 2 and Decision 4 above record the original command roster. Later readiness-gated and native F4
+commands use the same honest submit boundary. The source-derived delivery-status roster is: submitted:
+`zynk agent send`, `zynk agent prompt`, `zynk pane run`, `zynk send`, `zynk reply`; drafted:
+`zynk pane send-text`. This amendment changes neither the submit-versus-receipt boundary nor the rule that
+only a validated `zynk.message_received` event advances a submitted message to `received`.

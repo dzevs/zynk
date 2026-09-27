@@ -8374,3 +8374,24 @@ verification `msg_a7d375a682c9e733`, and Gate-1 approval `msg_f24186f84be02a47`.
 Navigate demand and capture-time CPU digest hardening remain disclosed nonblocking residuals. This implementation
 and its packet remain pending exact-object Claude Gate-2 and fresh standing-swarm Gate-3; no dogfood, merge,
 push, version, tag, publish, or release authority follows this row.
+
+#### 5ed52644 Gate-3 delivery-roster correction (IMPLEMENTED / PENDING VERIFICATION)
+
+Fresh standing-swarm Gate-3 found that the current delivery-status contract still repeated the original
+three-command roster even though `delivery_status_for` now governs six F4 send commands. The source-derived
+delivery-status roster is: submitted: `zynk agent send`, `zynk agent prompt`, `zynk pane run`, `zynk send`,
+`zynk reply`; drafted: `zynk pane send-text`. ADR 0002's original roster remains historical; its append-only
+amendment records the five current submitted commands without changing the submit-versus-receipt boundary.
+
+The same source audit verified ADR 0005's historical rendered-footer scope against current awareness-header
+behavior. The current awareness-header roster is: submitted: `zynk agent send`, `zynk agent prompt`,
+`zynk pane run`, `zynk send`, `zynk reply`; drafted: `zynk pane send-text`. For an agent target, each submitted
+command prepends the current ADR 0009 awareness header; the drafted `pane send-text` path preserves exact bytes
+and prepends none. The header remains presentation, not receipt authority.
+
+This bounded docs/tests-only successor records Gate-3 `msg_b51dc76e0d389c92`, Claude's reproduced findings and
+pre-Gate-1 expectations `msg_0a0e42956e543f54`, and Gate-1 approval `msg_81ce24bd94e14f3b`. The source-derived
+oracle covers the status mapping, the current header call sites, and the explicitly authorized `CLAUDE.md`
+clause. Production Rust, protocol 20, routing, receipts, persistence, configuration, rendering, and runtime
+behavior are unchanged. This successor remains pending exact-object Claude Gate-2 and fresh standing-swarm
+Gate-3; no dogfood, merge, push, version, tag, publish, or release authority follows this row.

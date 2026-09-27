@@ -68,3 +68,11 @@ invariant.
   `body_hash` and submit honestly.
 - Whether `pane submit` renders/verifies a footer at submit time is explicitly future work, gated by its own
   ADR/amendment.
+
+## Amendment — current awareness-header command roster (2026-09-27)
+
+Decision 2 above remains the historical M3b rendered-footer scope. The current visible awareness header from
+ADR 0009 is prepended when an agent target is atomically dispatched by any submitted F4 send command; it is
+presentation only and never receipt proof. The current awareness-header roster is: submitted:
+`zynk agent send`, `zynk agent prompt`, `zynk pane run`, `zynk send`, `zynk reply`; drafted:
+`zynk pane send-text`. The draft path still preserves exact input bytes and renders no awareness header.

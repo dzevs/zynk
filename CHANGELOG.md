@@ -12,6 +12,10 @@ reader surfaces expose top-level `identity_verification` on `zynk whoami --json`
 `zynk inbox --json`. The existing JSON error envelope also gains three typed code values:
 `shared_codex_daemon`, `duplicate_agent_session`, and `caller_identity_conflict`.
 
+The source-derived delivery-status roster is: submitted: `zynk agent send`, `zynk agent prompt`,
+`zynk pane run`, `zynk send`, `zynk reply`; drafted: `zynk pane send-text`. Submission proves atomic
+dispatch, not receipt; the server-validated receipt event remains the only path to `received`.
+
 **Added**
 
 - `ui.agent_panel_scope = "current" | "all"` is effective again, with `all` as the default. Scope filters the
