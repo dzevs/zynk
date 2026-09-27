@@ -72,11 +72,12 @@ fn is_managed_codex_daemon(argv: &[String]) -> bool {
     let Some(executable) = argv.first() else {
         return false;
     };
+    let arguments = &argv[1..];
     std::path::Path::new(executable)
         .file_name()
         .is_some_and(|name| name == "codex")
-        && argv.get(1).is_some_and(|arg| arg == "app-server")
-        && argv.iter().any(|arg| arg == "--managed-daemon")
+        && arguments.iter().any(|arg| arg == "app-server")
+        && arguments.iter().any(|arg| arg == "--managed-daemon")
 }
 
 fn inspect_codex_ancestry_in_pane(
@@ -139,11 +140,11 @@ fn inspect_codex_ancestry_in_pane(
                 ))
             };
         }
-        if process.principal == pane_root {
-            return Ok(CodexAncestry::PerPane);
-        }
         if is_managed_codex_daemon(&process.argv) {
             return Ok(CodexAncestry::SharedManagedDaemon);
+        }
+        if process.principal == pane_root {
+            return Ok(CodexAncestry::PerPane);
         }
         child = Some((process.principal.pid, process.principal.start_time));
         current_pid = process.parent_pid;
@@ -731,6 +732,74 @@ mod tests {
             ),
             Ok(CodexAncestry::PerPane)
         );
+
+        let managed_root = HashMap::from([(
+            100,
+            inspected(100, 10, 1, &["codex", "app-server", "--managed-daemon"]),
+        )]);
+        assert_eq!(
+            inspect_codex_ancestry_in_pane(
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
+                |pid| managed_root.get(&pid).cloned(),
+            ),
+            Ok(CodexAncestry::SharedManagedDaemon),
+            "a managed daemon at hop zero must not pass as a per-pane root"
+        );
+
+        let reordered_managed_root = HashMap::from([(
+            100,
+            inspected(
+                100,
+                10,
+                1,
+                &["/opt/codex", "--managed-daemon", "app-server"],
+            ),
+        )]);
+        assert_eq!(
+            inspect_codex_ancestry_in_pane(
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
+                |pid| reordered_managed_root.get(&pid).cloned(),
+            ),
+            Ok(CodexAncestry::SharedManagedDaemon),
+            "supported managed-daemon option ordering must be fail-closed"
+        );
+
+        for argv in [
+            &["not-codex", "app-server", "--managed-daemon"][..],
+            &["codex", "app-server"][..],
+            &["codex", "app-server", "--managed-daemon-like"][..],
+        ] {
+            let near_miss = HashMap::from([(100, inspected(100, 10, 1, argv))]);
+            assert_eq!(
+                inspect_codex_ancestry_in_pane(
+                    ProcessPrincipal {
+                        pid: 100,
+                        start_time: 10,
+                    },
+                    ProcessPrincipal {
+                        pid: 100,
+                        start_time: 10,
+                    },
+                    |pid| near_miss.get(&pid).cloned(),
+                ),
+                Ok(CodexAncestry::PerPane),
+                "near miss was classified as a managed daemon: {argv:?}"
+            );
+        }
     }
 
     #[test]

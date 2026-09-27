@@ -318,23 +318,34 @@ pub(crate) fn working_label_shimmer_weight(tick: u32, character_index: usize) ->
     }
 }
 
+pub(super) struct WorkingLabelRender {
+    pub spans: Vec<Span<'static>>,
+    pub animated: bool,
+}
+
 pub(super) fn working_label_spans(
     label: String,
     style: Style,
     animate_default_working: bool,
     app: &crate::app::state::AppState,
-) -> Vec<Span<'static>> {
+) -> WorkingLabelRender {
     if !animate_default_working || !app.working_animation || label != WORKING_LABEL {
-        return vec![Span::styled(label, style)];
+        return WorkingLabelRender {
+            spans: vec![Span::styled(label, style)],
+            animated: false,
+        };
     }
     let Some(palette) = working_label_shimmer_palette(
         style.fg.unwrap_or(app.palette.yellow),
         app.palette.text,
         &app.host_terminal_theme,
     ) else {
-        return vec![Span::styled(label, style)];
+        return WorkingLabelRender {
+            spans: vec![Span::styled(label, style)],
+            animated: false,
+        };
     };
-    label
+    let spans = label
         .chars()
         .enumerate()
         .map(|(index, character)| {
@@ -347,7 +358,11 @@ pub(super) fn working_label_spans(
                 )),
             )
         })
-        .collect()
+        .collect();
+    WorkingLabelRender {
+        spans,
+        animated: true,
+    }
 }
 
 #[cfg(test)]
@@ -705,9 +720,11 @@ mod tests {
             &app.host_terminal_theme,
         )
         .unwrap();
-        assert_eq!(spans.len(), WORKING_LABEL_LEN);
+        assert!(spans.animated);
+        assert_eq!(spans.spans.len(), WORKING_LABEL_LEN);
         assert_eq!(
             spans
+                .spans
                 .iter()
                 .map(|span| span.style.fg.unwrap())
                 .collect::<Vec<_>>(),
@@ -728,14 +745,23 @@ mod tests {
 
         app.working_animation = false;
         let off = working_label_spans(WORKING_LABEL.to_string(), style, true, &app);
-        assert_eq!(off, vec![Span::styled(WORKING_LABEL.to_string(), style)]);
+        assert!(!off.animated);
+        assert_eq!(
+            off.spans,
+            vec![Span::styled(WORKING_LABEL.to_string(), style)]
+        );
 
         app.working_animation = true;
         let custom = working_label_spans("building".to_string(), style, true, &app);
-        assert_eq!(custom, vec![Span::styled("building".to_string(), style)]);
-        let nonworking = working_label_spans(WORKING_LABEL.to_string(), style, false, &app);
+        assert!(!custom.animated);
         assert_eq!(
-            nonworking,
+            custom.spans,
+            vec![Span::styled("building".to_string(), style)]
+        );
+        let nonworking = working_label_spans(WORKING_LABEL.to_string(), style, false, &app);
+        assert!(!nonworking.animated);
+        assert_eq!(
+            nonworking.spans,
             vec![Span::styled(WORKING_LABEL.to_string(), style)]
         );
     }

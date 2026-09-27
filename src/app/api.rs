@@ -1737,14 +1737,53 @@ mod tests {
 
     #[tokio::test]
     async fn shared_codex_daemon_refuses_both_report_methods_before_any_mutation() {
-        for method in ["pane.report_agent", "pane.report_agent_session"] {
+        for (placement, method) in [
+            ("below-root", "pane.report_agent"),
+            ("below-root", "pane.report_agent_session"),
+            ("daemon-root", "pane.report_agent"),
+            ("daemon-root", "pane.report_agent_session"),
+            ("peer-is-root", "pane.report_agent"),
+            ("peer-is-root", "pane.report_agent_session"),
+        ] {
             let (mut app, pane_id, terminal_id, mut facts) = codex_report_fixture("shared-session");
-            facts.inspections.insert(
-                200,
-                inspected_process(200, 20, 100, &["codex", "app-server", "--managed-daemon"]),
-            );
+            match placement {
+                "below-root" => {
+                    facts.inspections.insert(
+                        200,
+                        inspected_process(
+                            200,
+                            20,
+                            100,
+                            &["codex", "app-server", "--managed-daemon"],
+                        ),
+                    );
+                }
+                "daemon-root" => {
+                    facts
+                        .inspections
+                        .insert(400, inspected_process(400, 40, 100, &["hook"]));
+                    facts.inspections.insert(
+                        100,
+                        inspected_process(100, 10, 1, &["codex", "app-server", "--managed-daemon"]),
+                    );
+                    facts.inspections.remove(&200);
+                }
+                "peer-is-root" => {
+                    app.terminal_runtimes
+                        .get(&terminal_id)
+                        .unwrap()
+                        .test_set_child_principal(400, 40);
+                    facts.inspections.clear();
+                    facts.inspections.insert(
+                        400,
+                        inspected_process(400, 40, 1, &["codex", "app-server", "--managed-daemon"]),
+                    );
+                }
+                _ => unreachable!(),
+            }
             facts.hints = Some((Some("shared-session".into()), None));
             let before = app.state.terminals[&terminal_id].test_identity_mutation_fingerprint();
+            let render_pending = app.render_dirty.is_pending();
             let event_sequence = app.event_hub.current_sequence();
             let params = if method == "pane.report_agent" {
                 serde_json::json!({
@@ -1781,17 +1820,28 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(response["error"]["code"], "shared_codex_daemon");
+            assert_eq!(
+                response["error"]["code"], "shared_codex_daemon",
+                "{placement}/{method}: {response}"
+            );
             assert_eq!(
                 app.state.terminals[&terminal_id].test_identity_mutation_fingerprint(),
                 before,
-                "{method} mutated identity state before rejecting shared ancestry"
+                "{placement}/{method} mutated identity state before rejecting shared ancestry"
             );
-            assert!(!app.state.session_dirty, "{method} dirtied the session");
+            assert!(
+                !app.state.session_dirty,
+                "{placement}/{method} dirtied the session"
+            );
+            assert_eq!(
+                app.render_dirty.is_pending(),
+                render_pending,
+                "{placement}/{method} changed render dirtiness"
+            );
             assert!(app.event_hub.events_after(event_sequence).is_empty());
             assert_eq!(
                 facts.hint_reads, 0,
-                "hint read happened after ancestry refusal"
+                "{placement}/{method}: hint read happened after ancestry refusal"
             );
         }
     }

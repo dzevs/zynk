@@ -57,7 +57,10 @@ data. It adds only three typed error-code values to the existing JSON error enve
   cross-pane duplicate authoritative sessions, and contradictory Codex session hints now fail closed with the
   additive typed errors named above. Cold snapshot restore preserves the layout but resumes neither owner of a
   duplicated session; live handoff preserves both imported runtimes while dropping both conflicting identity
-  anchors.
+  anchors. Managed-daemon detection also applies when the daemon itself is the pane-root process.
+- Attached/local animation scheduling now commits Symbols-mode label demand from rows actually rendered after
+  viewport clipping and truncation. Offscreen or shortened `working` labels in the expanded sidebar, mobile
+  switcher, and Navigator no longer keep the 128 ms render timer active; visible full labels continue to animate.
 - The bundled root skill now stays numerically pinned to binary protocol 20.
 
 ## [3.1.0] — 2026-09-25

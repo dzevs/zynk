@@ -1112,6 +1112,7 @@ impl App {
                 }
                 let mut cell_size = crate::kitty_graphics::HostCellSize::default();
                 let mut observed_cell_size = crate::kitty_graphics::HostCellSize::default();
+                let mut rendered_animation_demand = state::WorkingAnimationDemand::NONE;
                 terminal.draw(|frame| {
                     let area = frame.area();
                     if kitty_graphics_enabled {
@@ -1133,13 +1134,13 @@ impl App {
                             area,
                         );
                     }
-                    crate::ui::render_with_runtime_registry(
+                    rendered_animation_demand = crate::ui::render_with_runtime_registry(
                         &self.state,
                         &self.terminal_runtimes,
                         frame,
                     );
                 })?;
-                self.rendered_animation_demand = self.state.view.working_animation_demand;
+                self.rendered_animation_demand = rendered_animation_demand;
                 self.sync_animation_timer(now);
                 self.state.host_cell_size = observed_cell_size;
                 if kitty_graphics_enabled {
@@ -6814,6 +6815,106 @@ mod tests {
         app.rendered_animation_demand = WorkingAnimationDemand::NONE;
         app.sync_animation_timer(now + Duration::from_millis(129));
         assert_eq!(app.next_animation_tick, None);
+    }
+
+    #[test]
+    fn local_symbols_scheduler_uses_render_committed_label_demand() {
+        use crate::app::state::WorkingAnimationDemand;
+        use crate::config::StatusIndicatorStyle;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let render = |app: &mut App, area: Rect| {
+            crate::ui::compute_view_with_runtime_registry(
+                &mut app.state,
+                &app.terminal_runtimes,
+                area,
+            );
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            let mut demand = WorkingAnimationDemand::NONE;
+            terminal
+                .draw(|frame| {
+                    demand = crate::ui::render_with_runtime_registry(
+                        &app.state,
+                        &app.terminal_runtimes,
+                        frame,
+                    );
+                })
+                .unwrap();
+            app.rendered_animation_demand = demand;
+            demand
+        };
+        let set_state = |app: &mut App, ws_idx: usize, agent_state: AgentState| {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), agent_state);
+        };
+        let configure = |names: &[&str]| {
+            let mut app = test_app();
+            app.state.workspaces = names.iter().map(|name| Workspace::test_new(name)).collect();
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.status_indicators = StatusIndicatorStyle::Symbols;
+            app
+        };
+
+        let area = Rect::new(0, 0, 100, 24);
+        let mut offscreen = configure(&[
+            "space-0", "space-1", "space-2", "space-3", "space-4", "space-5", "space-6", "space-7",
+            "space-8", "space-9", "space-10", "space-11",
+        ]);
+        for index in 0..offscreen.state.workspaces.len() {
+            let agent_state = if index + 1 == offscreen.state.workspaces.len() {
+                AgentState::Working
+            } else {
+                AgentState::Idle
+            };
+            set_state(&mut offscreen, index, agent_state);
+        }
+        assert_eq!(render(&mut offscreen, area), WorkingAnimationDemand::NONE);
+        let now = Instant::now();
+        offscreen.render_dirty.take();
+        offscreen.sync_animation_timer(now);
+        assert_eq!(offscreen.next_animation_tick, None);
+        assert!(!offscreen.tick_working_animation(now + WORKING_ANIMATION_INTERVAL));
+        assert_eq!(offscreen.state.spinner_tick, 0);
+        assert!(!offscreen.render_dirty.take().animation);
+
+        let mut truncated = configure(&["idle", "working"]);
+        truncated.state.sidebar_min_width = 8;
+        truncated.state.sidebar_max_width = 8;
+        truncated.state.sidebar_width = 8;
+        set_state(&mut truncated, 0, AgentState::Idle);
+        set_state(&mut truncated, 1, AgentState::Working);
+        assert_eq!(render(&mut truncated, area), WorkingAnimationDemand::NONE);
+        truncated.render_dirty.take();
+        truncated.sync_animation_timer(now);
+        assert_eq!(truncated.next_animation_tick, None);
+        assert!(!truncated.tick_working_animation(now + WORKING_ANIMATION_INTERVAL));
+        assert_eq!(truncated.state.spinner_tick, 0);
+        assert!(!truncated.render_dirty.take().animation);
+
+        let mut visible = configure(&["working"]);
+        set_state(&mut visible, 0, AgentState::Working);
+        assert_eq!(render(&mut visible, area), WorkingAnimationDemand::SIDEBAR);
+        visible.render_dirty.take();
+        visible.sync_animation_timer(now);
+        assert_eq!(
+            visible.next_animation_tick,
+            Some(now + WORKING_ANIMATION_INTERVAL)
+        );
+        assert!(visible.tick_working_animation(now + WORKING_ANIMATION_INTERVAL));
+        assert_eq!(visible.state.spinner_tick, WORKING_ANIMATION_TICK_STEP);
+        let request = visible.render_dirty.take();
+        assert!(request.animation);
+        assert!(!request.generic);
     }
 
     #[tokio::test]

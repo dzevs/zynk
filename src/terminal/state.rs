@@ -524,16 +524,21 @@ impl TerminalState {
     #[cfg(test)]
     pub(crate) fn test_identity_mutation_fingerprint(&self) -> String {
         format!(
-            "authority={:?};identity={:?};persisted={:?};sequences={:?};suppressed={:?};stale={:?};state={:?};revision={};argv={:?}",
+            "authority={:?};identity={:?};persisted={:?};sequences={:?};suppressed={:?};stale={:?};unanswered={:?};handoff={:?};metadata_sequences={:?};metadata_sources={:?};state={:?};revision={};argv={:?};pending_resume={:?}",
             self.hook_authority,
             self.hook_identity,
             self.persisted_agent_session,
             self.hook_report_sequences,
             self.suppressed_hook_reports,
             self.stale_hook_sessions,
+            self.unanswered_hook_exit,
+            self.handoff_confirmation,
+            self.metadata_report_sequences,
+            self.metadata_token_sequence_sources,
             self.state,
             self.revision,
             self.launch_argv,
+            self.pending_agent_resume_plan,
         )
     }
 

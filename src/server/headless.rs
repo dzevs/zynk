@@ -6718,7 +6718,7 @@ mod tests {
                         &server.app.state,
                         &server.app.terminal_runtimes,
                         frame,
-                    )
+                    );
                 })
                 .unwrap();
             terminal.backend_mut().assert_cursor_position((0, 0));

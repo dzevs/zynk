@@ -170,7 +170,7 @@ WORKING_ANIMATION_STATUS_FINGERPRINTS = {
         "8ebb87ba9847249d91daecf7b0d185f904b22c5a42b161d2ef2bfb178e82a543"
     ),
     "working_label_spans": (
-        "d0b7fcee77a1d671b74cf74504c5a1bf7d505fcd3562042308dd1084d5410efc"
+        "7a503692d452877171ba2f9fb58a7f3feb4fc3f11101a48c02eca2a589d919b7"
     ),
     "blend_quarters": (
         "fb06b28d9003480653577686b27ceda1317096f4cc9590ae28bbf5d2375e0b84"
@@ -334,6 +334,28 @@ def rust_function_body(source: str, name: str) -> str:
             if depth == 0:
                 return code[start + 1 : end]
     raise AssertionError(f"production fn {name} has an unterminated body")
+
+
+def render_state_purity_violations(source: str) -> list[str]:
+    code = production_code(source)
+    violations: list[str] = []
+    for name in ("render", "render_with_runtime_registry"):
+        signature = re.compile(
+            rf"\b(?:pub(?:\([^)]*\))?\s+)?fn\s+{re.escape(name)}\s*\((.*?)\)\s*(?:->[^{{]+)?{{",
+            re.DOTALL,
+        )
+        matches = list(signature.finditer(code))
+        if len(matches) != 1:
+            violations.append(
+                f"expected one production render entry {name}, found {len(matches)}"
+            )
+            continue
+        parameters = matches[0].group(1)
+        if not re.search(r"\bapp\s*:\s*&\s*AppState\b", parameters):
+            violations.append(f"{name} must borrow AppState immutably")
+        if re.search(r"\bapp\s*:\s*&\s*mut\s+AppState\b", parameters):
+            violations.append(f"{name} must not borrow AppState mutably")
+    return violations
 
 
 def normalized_body_fingerprint(body: str) -> str:
@@ -518,6 +540,31 @@ def headless_working_animation_violations(
 
 
 class UiHotPathArchitectureTests(unittest.TestCase):
+    def test_render_entries_keep_app_state_immutable(self) -> None:
+        violations = render_state_purity_violations(
+            UI_SOURCE.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            violations,
+            [],
+            "Render-committed metadata must be returned without mutating AppState:\n"
+            + "\n".join(violations),
+        )
+
+    def test_render_purity_guard_rejects_mutable_app_state(self) -> None:
+        source = UI_SOURCE.read_text(encoding="utf-8")
+        needle = "pub fn render_with_runtime_registry(\n    app: &AppState,"
+        replacement = "pub fn render_with_runtime_registry(\n    app: &mut AppState,"
+        self.assertEqual(source.count(needle), 1)
+        source = source.replace(needle, replacement, 1)
+
+        violations = render_state_purity_violations(source)
+        self.assertIn(
+            "render_with_runtime_registry must not borrow AppState mutably",
+            violations,
+        )
+
     def test_render_hot_paths_avoid_known_expensive_runtime_queries(self) -> None:
         violations = find_violations(HOT_PATH_SOURCES, FORBIDDEN_CALLS)
 

@@ -824,6 +824,14 @@ impl WorkingAnimationDemand {
     pub(crate) fn is_empty(self) -> bool {
         self == Self::NONE
     }
+
+    pub(crate) fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    pub(crate) fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
 }
 
 impl std::ops::BitOr for WorkingAnimationDemand {

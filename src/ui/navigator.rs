@@ -24,31 +24,32 @@ pub(super) fn render_navigator_overlay(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
-) {
+) -> bool {
     let popup = app.navigator_popup_rect();
     let Some(inner) = render_panel_shell(frame, popup, app.palette.accent, app.palette.panel_bg)
     else {
-        return;
+        return false;
     };
 
     let search = app.navigator_search_rect();
     let body = app.navigator_body_rect();
     let detail = app.navigator_detail_rect();
     let footer = app.navigator_footer_rect();
-    render_search(app, frame, search);
+    let mut animated = render_search(app, frame, search);
 
     if body.height > 0 {
         let rows = app.navigator_rows_from(terminal_runtimes);
         let lines = navigator_display_lines(&rows);
         render_separator(frame, Rect::new(inner.x, search.y + 1, inner.width, 1), app);
-        render_rows(app, &rows, &lines, frame, body);
+        animated |= render_rows(app, &rows, &lines, frame, body);
         render_navigator_scrollbar(app, lines.len(), frame, body);
     }
     render_detail(app, terminal_runtimes, frame, detail);
     render_footer(app, frame, footer);
+    animated
 }
 
-fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
+fn render_search(app: &AppState, frame: &mut Frame, area: Rect) -> bool {
     let p = &app.palette;
     let focus_style = if app.navigator.search_focused {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
@@ -106,6 +107,9 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
         Style::default().fg(p.overlay0),
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    app.working_animation
+        && app.navigator.state_filter == Some(NavigatorStateFilter::Working)
+        && area.width > 3
 }
 
 fn push_state_chip(
@@ -150,9 +154,10 @@ fn render_rows(
     lines: &[NavigatorDisplayLine],
     frame: &mut Frame,
     body: Rect,
-) {
+) -> bool {
     let start = app.navigator.scroll.min(lines.len());
     let end = lines.len().min(start.saturating_add(body.height as usize));
+    let mut animated = false;
     for (visible_idx, line) in lines[start..end].iter().enumerate() {
         let NavigatorDisplayLine::Row(idx) = *line else {
             continue;
@@ -160,8 +165,9 @@ fn render_rows(
         let y = body.y + visible_idx as u16;
         let rect = Rect::new(body.x, y, body.width, 1);
         let selected = idx == app.navigator.selected;
-        render_row(app, frame, rect, rows, idx, selected);
+        animated |= render_row(app, frame, rect, rows, idx, selected);
     }
+    animated
 }
 
 fn render_row(
@@ -171,7 +177,7 @@ fn render_row(
     rows: &[NavigatorRow],
     idx: usize,
     selected: bool,
-) {
+) -> bool {
     let row = &rows[idx];
     let p = &app.palette;
     frame.render_widget(Clear, rect);
@@ -266,6 +272,7 @@ fn render_row(
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), rect);
 
+    let mut animated_working_label = false;
     if meta_width > 0 {
         let meta_rect = Rect::new(
             rect.x + rect.width.saturating_sub(meta_width),
@@ -291,12 +298,9 @@ fn render_row(
             .filter(|start| meta.get(*start..) == Some(WORKING_LABEL));
         if let Some(start) = working_start {
             meta_spans.push(Span::styled(format!(" {}", &meta[..start]), meta_style));
-            meta_spans.extend(working_label_spans(
-                WORKING_LABEL.to_string(),
-                meta_style,
-                true,
-                app,
-            ));
+            let label = working_label_spans(WORKING_LABEL.to_string(), meta_style, true, app);
+            animated_working_label = label.animated;
+            meta_spans.extend(label.spans);
         } else {
             meta_spans.push(Span::styled(format!(" {meta}"), meta_style));
         }
@@ -305,6 +309,7 @@ fn render_row(
             meta_rect,
         );
     }
+    animated_working_label
 }
 
 /// Tree prefix for a navigator row: expand caret for workspaces, connected
@@ -718,7 +723,9 @@ mod tests {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 1)).unwrap();
             terminal
-                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, 40, 1), &rows, 0, false))
+                .draw(|frame| {
+                    render_row(&app, frame, Rect::new(0, 0, 40, 1), &rows, 0, false);
+                })
                 .unwrap();
             let rendered: String = terminal
                 .backend()
@@ -750,7 +757,9 @@ mod tests {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1)).unwrap();
             terminal
-                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, width, 1), &rows, 0, false))
+                .draw(|frame| {
+                    render_row(&app, frame, Rect::new(0, 0, width, 1), &rows, 0, false);
+                })
                 .unwrap();
             (terminal.backend().buffer().clone(), app)
         };
@@ -803,7 +812,7 @@ mod tests {
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1)).unwrap();
             terminal
                 .draw(|frame| {
-                    render_row(&app, frame, Rect::new(0, 0, width, 1), &rows, 0, selected)
+                    render_row(&app, frame, Rect::new(0, 0, width, 1), &rows, 0, selected);
                 })
                 .unwrap();
             (terminal.backend().buffer().clone(), app)

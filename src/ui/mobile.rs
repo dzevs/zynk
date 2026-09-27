@@ -210,9 +210,9 @@ pub(crate) fn render_mobile_header(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> bool {
     if area.width == 0 || area.height == 0 {
-        return;
+        return false;
     }
 
     let p = &app.palette;
@@ -222,8 +222,9 @@ pub(crate) fn render_mobile_header(
     let status_w = switch.x.saturating_sub(area.x).saturating_sub(1);
     let status = Rect::new(area.x, area.y, status_w, area.height);
 
-    render_header_status(app, terminal_runtimes, frame, status);
+    let animated = render_header_status(app, terminal_runtimes, frame, status);
     render_switch_button(app, frame, switch);
+    animated
 }
 
 pub(crate) fn mobile_toast_banner_rect(area: Rect, offset_for_warning: bool) -> Rect {
@@ -283,9 +284,9 @@ pub(crate) fn render_mobile_panel(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> bool {
     if area.width == 0 || area.height == 0 {
-        return;
+        return false;
     }
 
     let p = &app.palette;
@@ -312,7 +313,7 @@ pub(crate) fn render_mobile_panel(
         );
     }
 
-    render_mobile_switcher_content(app, terminal_runtimes, frame, areas.viewport);
+    render_mobile_switcher_content(app, terminal_runtimes, frame, areas.viewport)
 }
 
 fn render_header_status(
@@ -320,14 +321,14 @@ fn render_header_status(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> bool {
     if area.width == 0 || area.height == 0 {
-        return;
+        return false;
     }
     let p = &app.palette;
     let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) else {
         frame.render_widget(Paragraph::new(" no workspace"), area);
-        return;
+        return false;
     };
 
     let (state, seen) = ws.aggregate_state(&app.terminals);
@@ -377,6 +378,7 @@ fn render_header_status(
             Rect::new(area.x, area.y + 1, area.width, 1),
         );
     }
+    state == AgentState::Working && app.working_animation && name_w > 1
 }
 
 fn render_switch_button(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -470,9 +472,9 @@ fn render_mobile_switcher_content(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     viewport: Rect,
-) {
+) -> bool {
     if viewport.width == 0 || viewport.height == 0 {
-        return;
+        return false;
     }
 
     let p = &app.palette;
@@ -487,10 +489,11 @@ fn render_mobile_switcher_content(
     );
     let content = inset_for_left_scrollbar(viewport);
     if content == Rect::default() {
-        return;
+        return false;
     }
 
     let mut doc_y = 0usize;
+    let mut animated_working_label = false;
 
     let entries = agent_panel_entries_from(app, terminal_runtimes);
     if !entries.is_empty() || app.agent_view_override.is_some() {
@@ -561,6 +564,15 @@ fn render_mobile_switcher_content(
             let detail = truncate_end(&detail_layout.text, content.width as usize);
             let detail =
                 mobile_agent_detail_line(detail, detail_layout.default_working_range, bg, app);
+            if visible_y(
+                viewport,
+                app.mobile_switcher_scroll,
+                doc_y.saturating_add(1),
+            )
+            .is_some()
+            {
+                animated_working_label |= detail.animated;
+            }
             render_two_line_item(
                 frame,
                 viewport,
@@ -569,7 +581,7 @@ fn render_mobile_switcher_content(
                 app.mobile_switcher_scroll,
                 bg,
                 title,
-                detail,
+                detail.line,
                 p.overlay0,
             );
             doc_y += 2;
@@ -747,6 +759,7 @@ fn render_mobile_switcher_content(
         }
         doc_y += 1;
     }
+    animated_working_label
 }
 
 struct MobileAgentDetail {
@@ -795,32 +808,40 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     mobile_agent_detail_layout(entry).text
 }
 
+struct MobileAgentDetailLine {
+    line: Line<'static>,
+    animated: bool,
+}
+
 fn mobile_agent_detail_line(
     text: String,
     working_range: Option<std::ops::Range<usize>>,
     bg: ratatui::style::Color,
     app: &AppState,
-) -> Line<'static> {
+) -> MobileAgentDetailLine {
     let static_style = Style::default().fg(app.palette.overlay0).bg(bg);
     let Some(range) = working_range.filter(|range| text.get(range.clone()) == Some(WORKING_LABEL))
     else {
-        return Line::from(Span::styled(text, static_style));
+        return MobileAgentDetailLine {
+            line: Line::from(Span::styled(text, static_style)),
+            animated: false,
+        };
     };
 
     let mut spans = Vec::new();
     if range.start > 0 {
         spans.push(Span::styled(text[..range.start].to_string(), static_style));
     }
-    spans.extend(working_label_spans(
-        WORKING_LABEL.to_string(),
-        static_style,
-        true,
-        app,
-    ));
+    let label = working_label_spans(WORKING_LABEL.to_string(), static_style, true, app);
+    let animated = label.animated;
+    spans.extend(label.spans);
     if range.end < text.len() {
         spans.push(Span::styled(text[range.end..].to_string(), static_style));
     }
-    Line::from(spans)
+    MobileAgentDetailLine {
+        line: Line::from(spans),
+        animated,
+    }
 }
 
 fn render_section_title_at(
@@ -1696,7 +1717,7 @@ mod tests {
                         0,
                         bg,
                         Line::from("title"),
-                        detail.clone(),
+                        detail.line.clone(),
                         app.palette.overlay0,
                     )
                 })
@@ -1804,7 +1825,8 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_mobile_header(&app, &runtime_registry, frame, Rect::new(0, 0, 40, 2))
+                let _ =
+                    render_mobile_header(&app, &runtime_registry, frame, Rect::new(0, 0, 40, 2));
             })
             .unwrap();
         let row = (0..40)

@@ -560,25 +560,30 @@ fn compute_mobile_view(
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn render(app: &AppState, frame: &mut Frame) {
     let terminal_runtimes = TerminalRuntimeRegistry::new();
-    render_with_runtime_registry(app, &terminal_runtimes, frame);
+    let _ = render_with_runtime_registry(app, &terminal_runtimes, frame);
 }
 
 pub fn render_with_runtime_registry(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
-) {
+) -> crate::app::state::WorkingAnimationDemand {
     let sidebar_area = app.view.sidebar_rect;
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
+    let mut mobile_header_animation = false;
+    let mut sidebar_label_animation = false;
+    let mut mobile_switcher_label_animation = false;
+    let mut navigator_label_animation = false;
 
     if app.view.layout == ViewLayout::Mobile {
-        render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
+        mobile_header_animation =
+            render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
     } else if sidebar_area.width > 0 {
         if app.sidebar_collapsed {
             render_sidebar_collapsed(app, frame, sidebar_area);
         } else {
-            render_sidebar(app, terminal_runtimes, frame, sidebar_area);
+            sidebar_label_animation = render_sidebar(app, terminal_runtimes, frame, sidebar_area);
         }
     }
     if app.view.layout != ViewLayout::Mobile {
@@ -607,7 +612,8 @@ pub fn render_with_runtime_registry(
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
         Mode::ProductAnnouncement => render_product_announcement_overlay(app, frame, frame.area()),
         Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
-            render_mobile_panel(app, terminal_runtimes, frame, frame.area())
+            mobile_switcher_label_animation =
+                render_mobile_panel(app, terminal_runtimes, frame, frame.area());
         }
         Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
         Mode::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
@@ -630,10 +636,49 @@ pub fn render_with_runtime_registry(
         Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
-        Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
+        Mode::Navigator => {
+            navigator_label_animation = render_navigator_overlay(app, terminal_runtimes, frame);
+        }
         Mode::Terminal => {}
     }
     render_popup_pane(app, terminal_runtimes, frame, terminal_area);
+
+    let mut committed = app.view.working_animation_demand;
+    if app.status_indicators == crate::config::StatusIndicatorStyle::Symbols {
+        match app.view.layout {
+            ViewLayout::Desktop => {
+                let sidebar = crate::app::state::WorkingAnimationDemand::SIDEBAR;
+                if committed.contains(sidebar) {
+                    committed = committed.without(sidebar);
+                    if sidebar_label_animation {
+                        committed |= sidebar;
+                    }
+                }
+                if app.mode == Mode::Navigator {
+                    let braille = crate::app::state::WorkingAnimationDemand::BRAILLE;
+                    if committed.contains(braille) {
+                        committed = committed.without(braille);
+                        if navigator_label_animation {
+                            committed |= braille;
+                        }
+                    }
+                }
+            }
+            ViewLayout::Mobile => {
+                let braille = crate::app::state::WorkingAnimationDemand::BRAILLE;
+                if committed.contains(braille) {
+                    committed = committed.without(braille);
+                    if mobile_header_animation
+                        || mobile_switcher_label_animation
+                        || navigator_label_animation
+                    {
+                        committed |= braille;
+                    }
+                }
+            }
+        }
+    }
+    committed
 }
 
 pub(crate) fn render_working_animation(
@@ -642,22 +687,22 @@ pub(crate) fn render_working_animation(
     frame: &mut Frame,
 ) {
     if app.view.layout == ViewLayout::Mobile {
-        render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
+        let _ = render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
         if app.mode == Mode::Navigate {
-            render_mobile_panel(app, terminal_runtimes, frame, frame.area());
+            let _ = render_mobile_panel(app, terminal_runtimes, frame, frame.area());
         } else if app.mode == Mode::Navigator {
-            render_navigator_overlay(app, terminal_runtimes, frame);
+            let _ = render_navigator_overlay(app, terminal_runtimes, frame);
         }
     } else {
         if app.view.sidebar_rect.width > 0 {
             if app.sidebar_collapsed {
                 render_sidebar_collapsed(app, frame, app.view.sidebar_rect);
             } else {
-                render_sidebar(app, terminal_runtimes, frame, app.view.sidebar_rect);
+                let _ = render_sidebar(app, terminal_runtimes, frame, app.view.sidebar_rect);
             }
         }
         if app.mode == Mode::Navigator {
-            render_navigator_overlay(app, terminal_runtimes, frame);
+            let _ = render_navigator_overlay(app, terminal_runtimes, frame);
         }
     }
 }
@@ -788,6 +833,14 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     fn set_workspace_working(app: &mut crate::app::state::AppState, ws_idx: usize) {
+        set_workspace_agent_state(app, ws_idx, crate::detect::AgentState::Working);
+    }
+
+    fn set_workspace_agent_state(
+        app: &mut crate::app::state::AppState,
+        ws_idx: usize,
+        state: crate::detect::AgentState,
+    ) {
         let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
         let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -795,10 +848,27 @@ mod tests {
         app.terminals
             .get_mut(&terminal_id)
             .unwrap()
-            .set_detected_state(
-                Some(crate::detect::Agent::Claude),
-                crate::detect::AgentState::Working,
-            );
+            .set_detected_state(Some(crate::detect::Agent::Claude), state);
+    }
+
+    fn render_committed_demand(
+        app: &mut crate::app::state::AppState,
+        area: Rect,
+    ) -> (crate::app::state::WorkingAnimationDemand, String) {
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        compute_view_with_runtime_registry(app, &terminal_runtimes, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let mut demand = crate::app::state::WorkingAnimationDemand::NONE;
+        terminal
+            .draw(|frame| {
+                demand = render_with_runtime_registry(app, &terminal_runtimes, frame);
+            })
+            .unwrap();
+        let screen = (0..area.height)
+            .map(|row| buffer_row_text(terminal.backend().buffer(), area, row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (demand, screen)
     }
 
     #[test]
@@ -900,6 +970,206 @@ mod tests {
         assert_eq!(
             app.view.working_animation_demand,
             WorkingAnimationDemand::NONE
+        );
+    }
+
+    #[test]
+    fn local_symbols_sidebar_demand_uses_visible_post_truncation_labels() {
+        use crate::app::state::WorkingAnimationDemand;
+
+        let area = Rect::new(0, 0, 100, 24);
+        let mut offscreen = crate::app::state::AppState::test_new();
+        offscreen.workspaces = [
+            "space-0", "space-1", "space-2", "space-3", "space-4", "space-5", "space-6", "space-7",
+            "space-8", "space-9", "space-10", "space-11",
+        ]
+        .into_iter()
+        .map(Workspace::test_new)
+        .collect();
+        offscreen.ensure_test_terminals();
+        offscreen.active = Some(0);
+        offscreen.selected = 0;
+        offscreen.mode = Mode::Terminal;
+        offscreen.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        for index in 0..offscreen.workspaces.len() {
+            set_workspace_agent_state(
+                &mut offscreen,
+                index,
+                if index + 1 == 12 {
+                    crate::detect::AgentState::Working
+                } else {
+                    crate::detect::AgentState::Idle
+                },
+            );
+        }
+        let (offscreen_demand, offscreen_screen) = render_committed_demand(&mut offscreen, area);
+        assert_eq!(
+            offscreen.view.working_animation_demand,
+            WorkingAnimationDemand::SIDEBAR,
+            "preflight must remain conservative"
+        );
+        assert!(!offscreen_screen.contains("working"), "{offscreen_screen}");
+        assert_eq!(offscreen_demand, WorkingAnimationDemand::NONE);
+
+        let mut truncated = crate::app::state::AppState::test_new();
+        truncated.workspaces = vec![Workspace::test_new("idle"), Workspace::test_new("work")];
+        truncated.ensure_test_terminals();
+        truncated.active = Some(0);
+        truncated.selected = 0;
+        truncated.mode = Mode::Terminal;
+        truncated.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        truncated.sidebar_min_width = 8;
+        truncated.sidebar_max_width = 8;
+        truncated.sidebar_width = 8;
+        set_workspace_agent_state(&mut truncated, 0, crate::detect::AgentState::Idle);
+        set_workspace_working(&mut truncated, 1);
+        let (truncated_demand, truncated_screen) = render_committed_demand(&mut truncated, area);
+        assert_eq!(
+            truncated.view.working_animation_demand,
+            WorkingAnimationDemand::SIDEBAR,
+            "preflight must see the working model entry"
+        );
+        assert!(!truncated_screen.contains("working"), "{truncated_screen}");
+        assert_eq!(truncated_demand, WorkingAnimationDemand::NONE);
+
+        let mut visible = crate::app::state::AppState::test_new();
+        visible.workspaces = vec![Workspace::test_new("work")];
+        visible.ensure_test_terminals();
+        visible.active = Some(0);
+        visible.selected = 0;
+        visible.mode = Mode::Terminal;
+        visible.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        set_workspace_working(&mut visible, 0);
+        let (visible_demand, visible_screen) = render_committed_demand(&mut visible, area);
+        assert!(visible_screen.contains("working"), "{visible_screen}");
+        assert_eq!(visible_demand, WorkingAnimationDemand::SIDEBAR);
+
+        visible.mode = Mode::Prefix;
+        let (suppressed_demand, suppressed_screen) = render_committed_demand(&mut visible, area);
+        assert!(suppressed_screen.contains("working"), "{suppressed_screen}");
+        assert_eq!(
+            visible.view.working_animation_demand,
+            WorkingAnimationDemand::NONE
+        );
+        assert_eq!(suppressed_demand, WorkingAnimationDemand::NONE);
+    }
+
+    #[test]
+    fn local_symbols_mobile_and_navigator_demand_uses_visible_labels() {
+        use crate::app::state::WorkingAnimationDemand;
+
+        let mut mobile_offscreen = crate::app::state::AppState::test_new();
+        mobile_offscreen.workspaces = [
+            "mobile-0", "mobile-1", "mobile-2", "mobile-3", "mobile-4", "mobile-5", "mobile-6",
+            "mobile-7",
+        ]
+        .into_iter()
+        .map(Workspace::test_new)
+        .collect();
+        mobile_offscreen.ensure_test_terminals();
+        mobile_offscreen.active = Some(0);
+        mobile_offscreen.selected = 0;
+        mobile_offscreen.mode = Mode::Navigate;
+        mobile_offscreen.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        for index in 0..mobile_offscreen.workspaces.len() {
+            set_workspace_agent_state(
+                &mut mobile_offscreen,
+                index,
+                if index + 1 == 8 {
+                    crate::detect::AgentState::Working
+                } else {
+                    crate::detect::AgentState::Idle
+                },
+            );
+        }
+        let (offscreen_demand, offscreen_screen) =
+            render_committed_demand(&mut mobile_offscreen, Rect::new(0, 0, 60, 10));
+        assert_eq!(mobile_offscreen.view.layout, ViewLayout::Mobile);
+        assert_eq!(
+            mobile_offscreen.view.working_animation_demand,
+            WorkingAnimationDemand::BRAILLE
+        );
+        assert!(!offscreen_screen.contains("working"), "{offscreen_screen}");
+        assert_eq!(offscreen_demand, WorkingAnimationDemand::NONE);
+
+        let mut mobile_truncated = crate::app::state::AppState::test_new();
+        mobile_truncated.workspaces = vec![Workspace::test_new("i"), Workspace::test_new("w")];
+        mobile_truncated.ensure_test_terminals();
+        mobile_truncated.active = Some(0);
+        mobile_truncated.selected = 0;
+        mobile_truncated.mode = Mode::Navigate;
+        mobile_truncated.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        set_workspace_agent_state(&mut mobile_truncated, 0, crate::detect::AgentState::Idle);
+        set_workspace_working(&mut mobile_truncated, 1);
+        let (truncated_demand, truncated_screen) =
+            render_committed_demand(&mut mobile_truncated, Rect::new(0, 0, 10, 16));
+        assert_eq!(mobile_truncated.view.layout, ViewLayout::Mobile);
+        assert!(truncated_screen.contains("workin…"), "{truncated_screen}");
+        assert!(!truncated_screen.contains("working"), "{truncated_screen}");
+        assert_eq!(truncated_demand, WorkingAnimationDemand::NONE);
+
+        let mut mobile_visible = mobile_truncated;
+        let (visible_demand, visible_screen) =
+            render_committed_demand(&mut mobile_visible, Rect::new(0, 0, 60, 16));
+        assert!(visible_screen.contains("working"), "{visible_screen}");
+        assert_eq!(visible_demand, WorkingAnimationDemand::BRAILLE);
+
+        let mut navigator_offscreen = crate::app::state::AppState::test_new();
+        navigator_offscreen.workspaces = [
+            "navigator-0",
+            "navigator-1",
+            "navigator-2",
+            "navigator-3",
+            "navigator-4",
+            "navigator-5",
+            "navigator-6",
+            "navigator-7",
+            "navigator-8",
+            "navigator-9",
+            "navigator-10",
+            "navigator-11",
+        ]
+        .into_iter()
+        .map(Workspace::test_new)
+        .collect();
+        navigator_offscreen.ensure_test_terminals();
+        navigator_offscreen.active = Some(0);
+        navigator_offscreen.selected = 0;
+        navigator_offscreen.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        for index in 0..navigator_offscreen.workspaces.len() {
+            set_workspace_agent_state(
+                &mut navigator_offscreen,
+                index,
+                if index + 1 == 12 {
+                    crate::detect::AgentState::Working
+                } else {
+                    crate::detect::AgentState::Idle
+                },
+            );
+        }
+        navigator_offscreen.open_navigator();
+        let (navigator_demand, navigator_screen) =
+            render_committed_demand(&mut navigator_offscreen, Rect::new(0, 0, 120, 20));
+        assert!(!navigator_screen.contains("working"), "{navigator_screen}");
+        assert_eq!(navigator_demand, WorkingAnimationDemand::NONE);
+
+        let mut navigator_visible = crate::app::state::AppState::test_new();
+        navigator_visible.workspaces = vec![Workspace::test_new("work")];
+        navigator_visible.ensure_test_terminals();
+        navigator_visible.active = Some(0);
+        navigator_visible.selected = 0;
+        navigator_visible.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        set_workspace_working(&mut navigator_visible, 0);
+        navigator_visible.open_navigator();
+        let (navigator_visible_demand, navigator_visible_screen) =
+            render_committed_demand(&mut navigator_visible, Rect::new(0, 0, 120, 30));
+        assert!(
+            navigator_visible_screen.contains("working"),
+            "{navigator_visible_screen}"
+        );
+        assert_eq!(
+            navigator_visible_demand,
+            WorkingAnimationDemand::SIDEBAR | WorkingAnimationDemand::BRAILLE
         );
     }
 

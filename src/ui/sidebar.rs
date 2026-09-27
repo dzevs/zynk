@@ -1295,7 +1295,7 @@ pub(super) fn render_sidebar(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> bool {
     let p = &app.palette;
     frame
         .buffer_mut()
@@ -1317,8 +1317,9 @@ pub(super) fn render_sidebar(
     let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_agent_detail(app, terminal_runtimes, frame, detail_area);
+    let animated_working_label = render_agent_detail(app, terminal_runtimes, frame, detail_area);
     render_sidebar_toggle(app, frame, area, false, p);
+    animated_working_label
 }
 
 // Sidebar marks retain their surface-specific non-working glyphs.
@@ -1527,6 +1528,11 @@ struct TokenStyles {
     custom: Style,
 }
 
+struct ResolvedTokenSpans {
+    spans: Vec<Span<'static>>,
+    animated_working_label: bool,
+}
+
 fn resolved_token_spans(
     resolved: &[ResolvedToken],
     state_icon: (&str, Style),
@@ -1535,7 +1541,7 @@ fn resolved_token_spans(
     max_width: usize,
     right_align_state: bool,
     working_shimmer_app: Option<&AppState>,
-) -> Vec<Span<'static>> {
+) -> ResolvedTokenSpans {
     if right_align_state {
         if let Some((text, style)) = resolved.last().and_then(|token| {
             let (token, style) = token.parts();
@@ -1547,7 +1553,7 @@ fn resolved_token_spans(
             let text = truncate_end(text, max_width);
             let width = display_width(&text);
             let prefix = &resolved[..resolved.len() - 1];
-            let mut spans = resolved_token_spans(
+            let mut rendered = resolved_token_spans(
                 prefix,
                 state_icon,
                 styles,
@@ -1556,7 +1562,8 @@ fn resolved_token_spans(
                 false,
                 working_shimmer_app,
             );
-            let used = spans
+            let used = rendered
+                .spans
                 .iter()
                 .map(|span| display_width(&span.content))
                 .sum::<usize>();
@@ -1564,15 +1571,17 @@ fn resolved_token_spans(
                 .saturating_sub(used + width)
                 .max(usize::from(used > 0));
             if padding > 0 {
-                spans.push(Span::raw(" ".repeat(padding)));
+                rendered.spans.push(Span::raw(" ".repeat(padding)));
             }
             let style = apply_token_style(styles.state_text, style);
             if let Some(app) = working_shimmer_app {
-                spans.extend(working_label_spans(text, style, true, app));
+                let label = working_label_spans(text, style, true, app);
+                rendered.animated_working_label |= label.animated;
+                rendered.spans.extend(label.spans);
             } else {
-                spans.push(Span::styled(text, style));
+                rendered.spans.push(Span::styled(text, style));
             }
-            return spans;
+            return rendered;
         }
     }
     let fixed_widths = resolved
@@ -1674,6 +1683,7 @@ fn resolved_token_spans(
         }
     }
     let mut spans = Vec::new();
+    let mut animated_working_label = false;
     for (position, index) in visible_indices.iter().copied().enumerate() {
         let token = &resolved[index];
         let (kind, token_style) = token.parts();
@@ -1695,7 +1705,9 @@ fn resolved_token_spans(
                 let text = truncate_end(text, budgets[index]);
                 let style = apply_token_style(styles.state_text, token_style);
                 if let Some(app) = working_shimmer_app {
-                    spans.extend(working_label_spans(text, style, true, app));
+                    let label = working_label_spans(text, style, true, app);
+                    animated_working_label |= label.animated;
+                    spans.extend(label.spans);
                 } else {
                     spans.push(Span::styled(text, style));
                 }
@@ -1749,7 +1761,10 @@ fn resolved_token_spans(
             ResolvedToken::Styled { .. } => {}
         }
     }
-    spans
+    ResolvedTokenSpans {
+        spans,
+        animated_working_label,
+    }
 }
 
 fn apply_token_style(mut style: Style, patch: crate::config::SidebarTokenStyle) -> Style {
@@ -1944,15 +1959,18 @@ fn render_workspace_list(
                 .map(|span| display_width(&span.content))
                 .sum::<usize>();
             let trailing_width = usize::from(row_index == 0 && parent_group.is_some()) * 2;
-            spans.extend(resolved_token_spans(
-                resolved,
-                state_icon,
-                styles,
-                p,
-                (card.rect.width as usize).saturating_sub(prefix_width + trailing_width),
-                false,
-                None,
-            ));
+            spans.extend(
+                resolved_token_spans(
+                    resolved,
+                    state_icon,
+                    styles,
+                    p,
+                    (card.rect.width as usize).saturating_sub(prefix_width + trailing_width),
+                    false,
+                    None,
+                )
+                .spans,
+            );
             frame.render_widget(
                 Paragraph::new(Line::from(spans)).style(row_style),
                 Rect::new(card.rect.x, y, card.rect.width, 1),
@@ -2046,11 +2064,11 @@ fn render_agent_detail(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> bool {
     let p = &app.palette;
 
     if area.height < 3 {
-        return;
+        return false;
     }
 
     // Section separator: `overlay0` dimmed rather than `surface_dim`, which equals the background on
@@ -2112,7 +2130,7 @@ fn render_agent_detail(
     let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
     let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
     if body == Rect::default() {
-        return;
+        return false;
     }
     if details.is_empty() && app.agent_view_override.is_some() {
         frame.render_widget(
@@ -2120,10 +2138,11 @@ fn render_agent_detail(
                 .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
             Rect::new(body.x, body.y, body.width, 1),
         );
-        return;
+        return false;
     }
 
     let body_width = body.width as usize;
+    let mut animated_working_label = false;
     // Grouped tree: iterate the shared visible-row model (the SAME one hit-test + scroll metrics use).
     // A `GroupHeader` shows the aggregate icon + tab name; a `Child` shows the tree connector, the
     // state-grammar icon, the agent name, and a right-aligned state label.
@@ -2219,7 +2238,7 @@ fn render_agent_detail(
                         )]
                     };
                     if let Some(tokens) = resolved.get(line as usize) {
-                        spans.extend(resolved_token_spans(
+                        let rendered = resolved_token_spans(
                             tokens,
                             (icon, icon_style),
                             styles,
@@ -2227,7 +2246,9 @@ fn render_agent_detail(
                             body_width.saturating_sub(3),
                             true,
                             working_shimmer_app,
-                        ));
+                        );
+                        animated_working_label |= rendered.animated_working_label;
+                        spans.extend(rendered.spans);
                     }
                     if is_active {
                         frame
@@ -2246,6 +2267,7 @@ fn render_agent_detail(
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
+    animated_working_label
 }
 
 pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
@@ -2805,7 +2827,7 @@ mod tests {
                     let mut screen = Terminal::new(TestBackend::new(80, 30)).unwrap();
                     screen
                         .draw(|frame| {
-                            render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, full)
+                            render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, full);
                         })
                         .unwrap();
                     let buffer = screen.backend().buffer();
@@ -3651,7 +3673,8 @@ mod tests {
                 width as usize,
                 align,
                 None,
-            );
+            )
+            .spans;
             let mut terminal = Terminal::new(TestBackend::new(width + 4, 3)).unwrap();
             terminal
                 .draw(|frame| {
@@ -3821,7 +3844,8 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                 width as usize,
                 false,
                 None,
-            );
+            )
+            .spans;
             let text = spans
                 .iter()
                 .map(|span| span.content.as_ref())
@@ -4538,7 +4562,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         );
         let mut agents = Terminal::new(TestBackend::new(48, 14)).unwrap();
         agents
-            .draw(|frame| render_agent_detail(app, &runtimes, frame, area))
+            .draw(|frame| {
+                render_agent_detail(app, &runtimes, frame, area);
+            })
             .unwrap();
         let buffer = agents.backend().buffer();
         assert_eq!(buffer[(0, 3)].symbol(), "◉");
@@ -5000,7 +5026,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
 
         let mut expanded = Terminal::new(TestBackend::new(26, 20)).unwrap();
         expanded
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .draw(|frame| {
+                render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
+            })
             .unwrap();
         assert!(expanded
             .backend()
@@ -5034,7 +5062,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         let selected_row = app.view.workspace_card_areas[1].rect.y;
         let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
         terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .draw(|frame| {
+                render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
 
@@ -5064,7 +5094,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         let inactive_row = app.view.workspace_card_areas[1].rect.y;
         let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
         terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .draw(|frame| {
+                render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
+            })
             .unwrap();
 
         assert_eq!(
@@ -5074,7 +5106,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
 
         app.selected = 1;
         terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .draw(|frame| {
+                render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
+            })
             .unwrap();
         assert_eq!(
             terminal.backend().buffer()[(0, active_row)].bg,
@@ -5088,7 +5122,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         app.palette = crate::app::state::Palette::catppuccin();
         app.selected = 0;
         terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .draw(|frame| {
+                render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
+            })
             .unwrap();
         assert_eq!(
             terminal.backend().buffer()[(0, active_row)].bg,
@@ -5154,7 +5190,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         let entries = agent_panel_entries(&app);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .draw(|frame| {
+                render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
+            })
             .unwrap();
 
         let mut children = 0;
@@ -5307,7 +5345,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         let body = agent_panel_body_rect(area, false);
         let mut terminal = Terminal::new(TestBackend::new(38, 22)).unwrap();
         terminal
-            .draw(|frame| render_agent_detail(&app, &runtimes, frame, area))
+            .draw(|frame| {
+                render_agent_detail(&app, &runtimes, frame, area);
+            })
             .unwrap();
         let mut counts = (0, 0);
         for row in agent_visible_rows(&app, area) {
@@ -7029,7 +7069,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                         Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
                     terminal
                         .draw(|frame| {
-                            render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area)
+                            render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
                         })
                         .unwrap();
                     let buffer = terminal.backend().buffer();
@@ -7393,7 +7433,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         let mut terminal = Terminal::new(TestBackend::new(width, height))
             .expect("test terminal should initialize");
         terminal
-            .draw(|frame| render_agent_detail(app, &runtimes, frame, area))
+            .draw(|frame| {
+                render_agent_detail(app, &runtimes, frame, area);
+            })
             .expect("agent detail should render");
         let buffer = terminal.backend().buffer().clone();
         (0..height)
@@ -7515,7 +7557,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         let runtimes = TerminalRuntimeRegistry::new();
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
-            .draw(|frame| render_agent_detail(&app, &runtimes, frame, area))
+            .draw(|frame| {
+                render_agent_detail(&app, &runtimes, frame, area);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         for x in layout.view_rect.x..layout.view_rect.right() {
@@ -7552,7 +7596,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         let runtimes = TerminalRuntimeRegistry::new();
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
-            .draw(|frame| render_agent_detail(&app, &runtimes, frame, area))
+            .draw(|frame| {
+                render_agent_detail(&app, &runtimes, frame, area);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         let lines: Vec<String> = (0..area.height)
@@ -7614,7 +7660,9 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
             let runtimes = TerminalRuntimeRegistry::new();
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal
-                .draw(|frame| render_agent_detail(app, &runtimes, frame, area))
+                .draw(|frame| {
+                    render_agent_detail(app, &runtimes, frame, area);
+                })
                 .unwrap();
             terminal.backend().buffer().clone()
         };

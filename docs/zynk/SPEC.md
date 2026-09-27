@@ -374,8 +374,15 @@ allocator or counting seam and the proof does not duplicate the crate's unit tes
 working list entry may be scrolled out of view, but without a committed animated cell it arms no timer and sends
 no frame.
 Switching the last App client to Observe can permit one already-scheduled harmless tick before the next demand
-commit cancels the timer. Demand is deliberately recomputed from each client's rendered list rather than reused
-from renderer internals; that is a bounded performance note, not an additional topology or process scan.
+commit cancels the timer. Headless demand is deliberately recomputed from each client's rendered list rather
+than reused from renderer internals; that is a bounded performance note, not an additional topology or process
+scan. The attached/local loop instead treats view-computed demand as a preflight and stores the immutable full
+render's returned, committed demand. In Symbols mode, expanded-sidebar, mobile-switcher, and Navigator shimmer
+demand is present only when a visible post-truncation span emitted the full animated literal `working`; mobile
+header braille demand likewise comes from its rendered status. Dots-mode pulse demand is unchanged. Render entry
+points keep `&AppState`, return this metadata without mutating `AppState` or `ViewState`, and accumulate it during
+the existing placement pass without a second list traversal or per-tick allocation. Committed metadata may only
+narrow a preflight bit; it never re-enables animation in a mode where preflight suppressed that surface.
 
 Multi-pane border rendering represents every junction arm as none, light, or heavy and maps every mixed-weight
 corner, tee, and cross combination; light and heavy straight arms collapse to their single Unicode straight
@@ -416,8 +423,11 @@ Zynk-managed Codex requires CLI 0.157.1 or newer and receives exactly one `--no-
 resume, and snapshot restore. A failed `agent start` returns typed guidance naming the verified minimum and flag;
 snapshot restore/resume exposes the older Codex process's own launch error. Neither path probes or silently
 downgrades. A session-bearing Codex hook report is accepted only when its peer ancestry remains inside that pane
-without crossing `codex app-server --managed-daemon`; unreadable, replaced, cyclic, over-bound,
-or managed-daemon ancestry fails closed, with the managed-daemon case returning `shared_codex_daemon`. A
+without crossing `codex app-server --managed-daemon`. Every inspected principal, including hop zero when the
+peer is the pane root, is classified before a pane-root success return; the exact `app-server` and
+`--managed-daemon` tokens are recognized in either supported argument order. Unreadable, replaced, cyclic,
+over-bound, or managed-daemon ancestry fails closed, with the managed-daemon case returning
+`shared_codex_daemon`. A
 normalized `(source, agent, kind, value)` session may be authoritative for only one terminal. The duplicate
 ownership check is one O(terminals) scan at session-bearing report admission and never runs from view or render
 work. Duplicate runtime claims return `duplicate_agent_session`. On cold snapshot restore, a duplicated session's

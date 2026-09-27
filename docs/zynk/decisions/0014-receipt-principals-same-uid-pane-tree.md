@@ -204,3 +204,13 @@ The post-dogfood implementation tightens that amendment without changing its pri
 
 The three names above are additive values in the existing JSON error envelope. Protocol 20, request/response
 field shapes, persistence schema, snapshot shape, and handoff shape remain unchanged.
+
+### Gate-3 root-classification amendment (2026-09-27)
+
+The ancestry walk classifies each inspected process before deciding that it has reached the pane root. This
+ordering includes hop zero: if the report peer and pane root are the same PID-plus-start-time principal and its
+argv is `codex app-server --managed-daemon`, the report returns `shared_codex_daemon` rather than succeeding as
+per-pane Codex. The matcher requires the exact `codex` executable basename plus exact `app-server` and
+`--managed-daemon` argument tokens, while accepting their supported ordering. Near-miss executables, missing
+tokens, and prefix-like flags are not classified as the managed daemon. Principal pinning, parent start-time
+ordering, the pane-root stopping boundary, and every other fail-closed condition above remain unchanged.

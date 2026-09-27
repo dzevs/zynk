@@ -8282,3 +8282,44 @@ version remain unchanged. The retained-animation preflight fingerprint change is
 the preflight now asks each tagged transition whether the current cell is eligible, while the glyph-only and
 style-only rules remain fingerprinted separately with blend, color resolution, demand, collection, and apply
 helpers. This row remains pending a fresh exact-object Gate-2 and swarm Gate-3.
+
+#### A47 Gate-3 bounded successor (IMPLEMENTED / PENDING VERIFICATION)
+
+Fresh standing-swarm Gate-3 review rejected exact `a47f3fdb` / tree `6bfc4a69` on two source findings and two
+packet-custody findings. The source correction is deliberately bounded to the reviewed classes. First, the Codex
+ancestry walker had returned `PerPane` when an inspected principal equalled the pane root before checking whether
+that same process was `codex app-server --managed-daemon`. A daemon that replaced the PTY child, or a hook peer
+that was itself that root, could therefore mutate hook authority despite the post-dogfood fail-closed contract.
+The walker now classifies every inspected principal before the pane-root success return, including hop zero. Its
+exact-token matcher accepts the supported argument ordering and rejects near misses. Deterministic unit and
+end-to-end controls cover daemon below root, daemon as root, peer as root, both session-bearing report methods,
+and unchanged identity, sequence, retirement, dirty, render, event, and hint-read state on refusal.
+
+Second, the attached/local loop had copied model-level `WorkingAnimationDemand` directly after drawing. In
+Symbols mode that preflight scanned entries before viewport clipping and state-text truncation, so an offscreen
+or shortened `working` label could perpetually wake the local loop without a visible animated label. The full
+render now returns a small committed-demand value while retaining immutable `&AppState` entry points. Existing
+span builders return their spans plus one boolean only after the full built-in label survives the renderer's
+actual width budget, visible-row placement, enabled animation, and resolvable non-equal palette endpoints.
+Desktop sidebar, mobile switcher, and Navigator accumulate that bit during their existing placement pass; the
+mobile header reports its actually rendered braille status. The local scheduler stores the returned value,
+whereas the server retains its already-approved per-client cell collection and commit path. Dots-mode pulse
+demand is unchanged, and render metadata can only narrow a preflight bit rather than revive a mode-suppressed
+surface. Offscreen, truncated, visible, mobile, Navigator, scheduler-deadline, and render-purity controls pin
+the boundary without a second topology traversal or per-tick allocation.
+
+The reviewed `working_label_spans` fingerprint changes from
+`d0b7fcee77a1d671b74cf74504c5a1bf7d505fcd3562042308dd1084d5410efc` to
+`7a503692d452877171ba2f9fb58a7f3feb4fc3f11101a48c02eca2a589d919b7` solely to return the existing spans with
+that allocation-free rendered-animation bit. The headless run body, its associated-call allowlist, scheduling
+cadence, retained server paths, protocol 20, persistence and handoff shapes, config surface, dependencies, and
+release version do not change.
+
+The packet successor is version 6. Its CPU analyzer must consume only sealed packet-relative raw logs and reject
+absolute, escaping, missing, symlinked, or nonregular inputs while binding candidate and binary hashes. Its seal
+verifier must require the literal forty-role field/path schema, declared count, packet map identity, and exactly
+one `delta_inventory_cycle_paths` value naming `MANIFEST.sha256`, `manifest-check.log`, and
+`PREDECESSOR-SUCCESSOR-INVENTORY.tsv`; missing, wrong, empty, duplicate, coordinated-deletion, and path-escape
+controls fail closed. These implementation and machinery changes remain unapproved until one exact successor
+passes Claude Gate-2 and a fresh standing-swarm Gate-3. No dogfood, merge, push, version, tag, publish, or release
+authority follows this ledger entry.
