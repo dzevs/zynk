@@ -8332,7 +8332,7 @@ fn m839c_start_waits_for_ready_and_refuses_nonpending_failure() {
             assert_eq!(error["error"]["code"], "agent_start_failed");
             assert_eq!(
                 error["error"]["message"],
-                "Codex launch ended before becoming interactive; zynk requires Codex 0.157.1 or newer with --no-daemon support"
+                "Codex launch ended before becoming interactive; this may require Codex 0.157.1 or newer with --no-daemon support"
             );
         } else {
             assert!(output.stderr.is_empty());
