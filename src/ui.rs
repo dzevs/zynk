@@ -573,7 +573,7 @@ pub fn render_with_runtime_registry(
     let terminal_area = app.view.terminal_area;
     let mut mobile_header_animation = false;
     let mut sidebar_label_animation = false;
-    let mut mobile_switcher_label_animation = false;
+    let mut mobile_switcher_animation = false;
     let mut navigator_label_animation = false;
 
     if app.view.layout == ViewLayout::Mobile {
@@ -612,7 +612,7 @@ pub fn render_with_runtime_registry(
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
         Mode::ProductAnnouncement => render_product_announcement_overlay(app, frame, frame.area()),
         Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
-            mobile_switcher_label_animation =
+            mobile_switcher_animation =
                 render_mobile_panel(app, terminal_runtimes, frame, frame.area());
         }
         Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
@@ -668,10 +668,13 @@ pub fn render_with_runtime_registry(
                 let braille = crate::app::state::WorkingAnimationDemand::BRAILLE;
                 if committed.contains(braille) {
                     committed = committed.without(braille);
-                    if mobile_header_animation
-                        || mobile_switcher_label_animation
-                        || navigator_label_animation
-                    {
+                    let visible_animation = mobile_symbols_visible_animation(
+                        app.mode,
+                        mobile_header_animation,
+                        mobile_switcher_animation,
+                        navigator_label_animation,
+                    );
+                    if visible_animation {
                         committed |= braille;
                     }
                 }
@@ -679,6 +682,19 @@ pub fn render_with_runtime_registry(
         }
     }
     committed
+}
+
+fn mobile_symbols_visible_animation(
+    mode: Mode,
+    header: bool,
+    switcher: bool,
+    navigator: bool,
+) -> bool {
+    match mode {
+        Mode::Navigate => switcher,
+        Mode::Navigator => header || navigator,
+        _ => header,
+    }
 }
 
 pub(crate) fn render_working_animation(
@@ -851,10 +867,13 @@ mod tests {
             .set_detected_state(Some(crate::detect::Agent::Claude), state);
     }
 
-    fn render_committed_demand(
+    fn render_committed_frame(
         app: &mut crate::app::state::AppState,
         area: Rect,
-    ) -> (crate::app::state::WorkingAnimationDemand, String) {
+    ) -> (
+        crate::app::state::WorkingAnimationDemand,
+        ratatui::buffer::Buffer,
+    ) {
         let terminal_runtimes = TerminalRuntimeRegistry::new();
         compute_view_with_runtime_registry(app, &terminal_runtimes, area);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -864,11 +883,40 @@ mod tests {
                 demand = render_with_runtime_registry(app, &terminal_runtimes, frame);
             })
             .unwrap();
-        let screen = (0..area.height)
-            .map(|row| buffer_row_text(terminal.backend().buffer(), area, row))
+        (demand, terminal.backend().buffer().clone())
+    }
+
+    fn rendered_buffer_text(buffer: &ratatui::buffer::Buffer, area: Rect) -> String {
+        (0..area.height)
+            .map(|row| buffer_row_text(buffer, area, row))
             .collect::<Vec<_>>()
-            .join("\n");
-        (demand, screen)
+            .join("\n")
+    }
+
+    fn render_committed_demand(
+        app: &mut crate::app::state::AppState,
+        area: Rect,
+    ) -> (crate::app::state::WorkingAnimationDemand, String) {
+        let (demand, buffer) = render_committed_frame(app, area);
+        (demand, rendered_buffer_text(&buffer, area))
+    }
+
+    fn buffer_differences(
+        left: &ratatui::buffer::Buffer,
+        right: &ratatui::buffer::Buffer,
+        area: Rect,
+    ) -> Vec<(u16, u16, String, String)> {
+        let mut differences = Vec::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let left_cell = &left[(x, y)];
+                let right_cell = &right[(x, y)];
+                if left_cell != right_cell {
+                    differences.push((x, y, format!("{left_cell:?}"), format!("{right_cell:?}")));
+                }
+            }
+        }
+        differences
     }
 
     #[test]
@@ -1058,6 +1106,83 @@ mod tests {
     fn local_symbols_mobile_and_navigator_demand_uses_visible_labels() {
         use crate::app::state::WorkingAnimationDemand;
 
+        let final_area = Rect::new(0, 0, 60, 10);
+        let mut erased_header = crate::app::state::AppState::test_new();
+        erased_header.workspaces = [
+            "mobile-active-working",
+            "mobile-visible-1",
+            "mobile-visible-2",
+            "mobile-visible-3",
+            "mobile-visible-4",
+            "mobile-visible-5",
+        ]
+        .into_iter()
+        .map(Workspace::test_new)
+        .collect();
+        erased_header.ensure_test_terminals();
+        erased_header.active = Some(0);
+        erased_header.selected = 0;
+        erased_header.mode = Mode::Navigate;
+        erased_header.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        erased_header.mobile_switcher_scroll = 3;
+        for index in 0..erased_header.workspaces.len() {
+            set_workspace_agent_state(
+                &mut erased_header,
+                index,
+                if index == 0 {
+                    crate::detect::AgentState::Working
+                } else {
+                    crate::detect::AgentState::Idle
+                },
+            );
+        }
+        let (erased_demand, erased_tick_0) = render_committed_frame(&mut erased_header, final_area);
+        assert_eq!(erased_header.mobile_switcher_scroll, 3);
+        assert_eq!(
+            erased_header.view.working_animation_demand,
+            WorkingAnimationDemand::BRAILLE,
+            "the model preflight must see the active workspace aggregate"
+        );
+        let erased_screen = rendered_buffer_text(&erased_tick_0, final_area);
+        assert!(
+            erased_screen.contains("mobile-visible"),
+            "the panel must contain visible non-working rows: {erased_screen}"
+        );
+        assert!(
+            !erased_screen.contains("mobile-active-working"),
+            "the only working row must be outside the final viewport: {erased_screen}"
+        );
+        erased_header.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        let (erased_next_demand, erased_tick_8) =
+            render_committed_frame(&mut erased_header, final_area);
+        let differences = buffer_differences(&erased_tick_0, &erased_tick_8, final_area);
+        assert!(
+            differences.is_empty(),
+            "the final composed frame has no animated cell: {differences:#?}"
+        );
+        assert_eq!(erased_demand, WorkingAnimationDemand::NONE);
+        assert_eq!(erased_next_demand, WorkingAnimationDemand::NONE);
+
+        let mut visible_header = crate::app::state::AppState::test_new();
+        visible_header.workspaces = vec![Workspace::test_new("mobile-header")];
+        visible_header.ensure_test_terminals();
+        visible_header.active = Some(0);
+        visible_header.selected = 0;
+        visible_header.mode = Mode::Terminal;
+        visible_header.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        set_workspace_working(&mut visible_header, 0);
+        let (header_demand, header_tick_0) =
+            render_committed_frame(&mut visible_header, final_area);
+        visible_header.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        let (header_next_demand, header_tick_8) =
+            render_committed_frame(&mut visible_header, final_area);
+        assert_eq!(header_demand, WorkingAnimationDemand::BRAILLE);
+        assert_eq!(header_next_demand, WorkingAnimationDemand::BRAILLE);
+        assert!(
+            !buffer_differences(&header_tick_0, &header_tick_8, final_area).is_empty(),
+            "a visible mobile header spinner must change on the next visible tick"
+        );
+
         let mut mobile_offscreen = crate::app::state::AppState::test_new();
         mobile_offscreen.workspaces = [
             "mobile-0", "mobile-1", "mobile-2", "mobile-3", "mobile-4", "mobile-5", "mobile-6",
@@ -1101,12 +1226,36 @@ mod tests {
         mobile_truncated.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
         set_workspace_agent_state(&mut mobile_truncated, 0, crate::detect::AgentState::Idle);
         set_workspace_working(&mut mobile_truncated, 1);
-        let (truncated_demand, truncated_screen) =
-            render_committed_demand(&mut mobile_truncated, Rect::new(0, 0, 10, 16));
+        let truncated_area = Rect::new(0, 0, 10, 16);
+        let (truncated_demand, truncated_tick_0) =
+            render_committed_frame(&mut mobile_truncated, truncated_area);
+        let truncated_screen = rendered_buffer_text(&truncated_tick_0, truncated_area);
         assert_eq!(mobile_truncated.view.layout, ViewLayout::Mobile);
         assert!(truncated_screen.contains("workin…"), "{truncated_screen}");
         assert!(!truncated_screen.contains("working"), "{truncated_screen}");
-        assert_eq!(truncated_demand, WorkingAnimationDemand::NONE);
+        mobile_truncated.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        let (truncated_next_demand, truncated_tick_8) =
+            render_committed_frame(&mut mobile_truncated, truncated_area);
+        assert!(
+            !buffer_differences(&truncated_tick_0, &truncated_tick_8, truncated_area).is_empty(),
+            "the visible title spinner must animate even when the detail label is truncated"
+        );
+        assert_eq!(truncated_demand, WorkingAnimationDemand::BRAILLE);
+        assert_eq!(truncated_next_demand, WorkingAnimationDemand::BRAILLE);
+
+        let clipped_area = Rect::new(0, 0, 2, 16);
+        mobile_truncated.spinner_tick = 0;
+        let (clipped_demand, clipped_tick_0) =
+            render_committed_frame(&mut mobile_truncated, clipped_area);
+        mobile_truncated.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
+        let (clipped_next_demand, clipped_tick_8) =
+            render_committed_frame(&mut mobile_truncated, clipped_area);
+        assert_eq!(clipped_demand, WorkingAnimationDemand::NONE);
+        assert_eq!(clipped_next_demand, WorkingAnimationDemand::NONE);
+        assert!(
+            buffer_differences(&clipped_tick_0, &clipped_tick_8, clipped_area).is_empty(),
+            "a fully clipped icon and label must leave the final frame static"
+        );
 
         let mut mobile_visible = mobile_truncated;
         let (visible_demand, visible_screen) =

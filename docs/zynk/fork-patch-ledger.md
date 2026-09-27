@@ -8332,3 +8332,24 @@ the helper, requires one run-loop delegation with the render-returned value, and
 or a helper body that reads `ViewState` demand. The replacement fault mutates this shared helper, so offscreen and
 truncated Symbols cases must fail while the visible positive remains valid. This is an oracle correction only;
 render behavior, server commit ownership, protocol, schema, cadence, and configuration are unchanged.
+
+#### 8b9656f Gate-3 bounded successor (IMPLEMENTED / PENDING VERIFICATION)
+
+Fresh standing-swarm Gate-3 review rejected exact `8b9656f4` / tree `e3e1ade9` on one final-composition defect and
+one public-contract defect. `G3V6-LOCAL-MOBILE-OVERDRAW-001` found that mobile Navigate recorded animation from
+the header before a later full-frame switcher cleared it, then retained the erased header's bit. Symbols mode now
+commits from final z-order: Navigate uses only visible switcher animation, Navigator retains its bounded popup plus
+visible header, and other eligible modes retain the header. The switcher reports either a visible working spinner
+or a visible full-label shimmer from the existing placement loop, so a truncated label still has demand when its
+title icon is visible, but a clipped or offscreen icon and label do not. This establishes the general rule that a
+later layer replaces animation demand for the cells it covers and a full-frame layer replaces every contribution
+beneath it. Render remains pure, the server path and cadence are unchanged, and no second traversal or allocation
+is added.
+
+`G3-DOC-IDENTITY-JSON-001` supersedes the earlier broad native-JSON shape claim. The socket API remains protocol
+20 with unchanged methods and fields, but approved hint reporting already emits optional `identity_verification`
+on `whoami`, implicit `inbox`, and native `send`/`reply`: top-level on the first two and under `from` on the send
+paths. `verified` and `unverified` report consistency, omission means no Codex hint was present, and the field grants
+no authority. README, CHANGELOG, SPEC, root SKILL, and an append-only ADR 0014 amendment now state that exact
+boundary. The source successor and fresh packet remain unapproved until exact-object Claude Gate-2 and standing-
+swarm Gate-3; no dogfood, merge, push, version, tag, publish, or release authority follows this row.

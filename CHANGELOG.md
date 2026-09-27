@@ -2,10 +2,13 @@
 
 ## [3.2.0] — Unreleased
 
-This release restores operator-selected 3.0.x presentation and interaction behavior on top of 3.1.0. It does
-not change binary protocol 20, JSON method or field shapes, persistence schema, session snapshots, or handoff
-data. It adds only three typed error-code values to the existing JSON error envelope:
-`shared_codex_daemon`, `duplicate_agent_session`, and `caller_identity_conflict`.
+This release restores operator-selected 3.0.x presentation and interaction behavior on top of 3.1.0. Binary
+protocol 20 and the socket API method and field shapes remain unchanged, as do persistence, session snapshots,
+and handoff data. Native F4 JSON responses add an optional `identity_verification` field at the top level of
+`whoami` and implicit `inbox`, and under `from` for native `send` and `reply`. Its value is `verified` or
+`unverified` and is omitted without a Codex hint; it reports consistency and grants no authority. The existing
+JSON error envelope also gains three typed code values: `shared_codex_daemon`, `duplicate_agent_session`, and
+`caller_identity_conflict`.
 
 **Added**
 
@@ -58,9 +61,9 @@ data. It adds only three typed error-code values to the existing JSON error enve
   additive typed errors named above. Cold snapshot restore preserves the layout but resumes neither owner of a
   duplicated session; live handoff preserves both imported runtimes while dropping both conflicting identity
   anchors. Managed-daemon detection also applies when the daemon itself is the pane-root process.
-- Attached/local animation scheduling now commits Symbols-mode label demand from rows actually rendered after
-  viewport clipping and truncation. Offscreen or shortened `working` labels in the expanded sidebar, mobile
-  switcher, and Navigator no longer keep the 128 ms render timer active; visible full labels continue to animate.
+- Attached/local animation scheduling now commits Symbols-mode demand from the final composed frame after
+  viewport clipping, truncation, and overlay z-order. Covered mobile headers and rows with neither a visible
+  animated mark nor a full `working` label no longer keep the 128 ms timer active; visible marks and labels do.
 - The bundled root skill now stays numerically pinned to binary protocol 20.
 
 ## [3.1.0] — 2026-09-25

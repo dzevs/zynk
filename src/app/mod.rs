@@ -6915,6 +6915,40 @@ mod tests {
         let request = visible.render_dirty.take();
         assert!(request.animation);
         assert!(!request.generic);
+
+        let mobile_area = Rect::new(0, 0, 60, 10);
+        let mut mobile = configure(&[
+            "mobile-active-working",
+            "mobile-visible-1",
+            "mobile-visible-2",
+            "mobile-visible-3",
+            "mobile-visible-4",
+            "mobile-visible-5",
+        ]);
+        mobile.state.mode = Mode::Navigate;
+        mobile.state.mobile_switcher_scroll = 3;
+        for index in 0..mobile.state.workspaces.len() {
+            set_state(
+                &mut mobile,
+                index,
+                if index == 0 {
+                    AgentState::Working
+                } else {
+                    AgentState::Idle
+                },
+            );
+        }
+        assert_eq!(
+            render(&mut mobile, mobile_area),
+            WorkingAnimationDemand::NONE,
+            "a full-frame mobile panel must discard demand from the erased header"
+        );
+        mobile.render_dirty.take();
+        mobile.sync_animation_timer(now);
+        assert_eq!(mobile.next_animation_tick, None);
+        assert!(!mobile.tick_working_animation(now + WORKING_ANIMATION_INTERVAL));
+        assert_eq!(mobile.state.spinner_tick, 0);
+        assert!(!mobile.render_dirty.take().animation);
     }
 
     #[tokio::test]

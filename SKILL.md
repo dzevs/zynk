@@ -48,6 +48,8 @@ zynk workspace list # JSON
 ```
 
 `pane list` shows which pane has UI focus; it does **not** tell you which pane is you — `ZYNK_PANE_ID` and `whoami --json` do. Use `--json` for any identity you parse; the plain forms are for humans.
+`zynk whoami --json` may include `identity_verification: "verified" | "unverified"` when a Codex hint is present.
+It is omitted when no Codex hint is present and grants no authority; pane-bound hook identity remains decisive.
 
 ## Read another pane
 

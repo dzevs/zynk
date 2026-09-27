@@ -214,3 +214,13 @@ per-pane Codex. The matcher requires the exact `codex` executable basename plus 
 `--managed-daemon` argument tokens, while accepting their supported ordering. Near-miss executables, missing
 tokens, and prefix-like flags are not classified as the managed daemon. Principal pinning, parent start-time
 ordering, the pane-root stopping boundary, and every other fail-closed condition above remain unchanged.
+
+### Gate-3 native F4 JSON compatibility amendment (2026-09-27)
+
+This amendment supersedes the broad request/response-shape sentence above for native F4 CLI JSON. The socket API
+remains on protocol 20 with unchanged method and field shapes, and persistence, snapshot, and handoff shapes remain
+unchanged. Native `zynk send` and `zynk reply` may add `from.identity_verification`; implicit-caller
+`zynk inbox --json` and `zynk whoami --json` may add the field at the top level. Its successful value is
+`verified` when the optional Codex process hint agrees with hook authority and `unverified` when authority is not
+yet present. `identity_verification` is omitted without a Codex hint. It reports consistency only and cannot
+select a pane, reroute a request, or grant receipt authority.

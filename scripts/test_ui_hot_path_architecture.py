@@ -23,6 +23,7 @@ RENDER_STREAM_SOURCE = PROJECT_ROOT / "src" / "server" / "render_stream.rs"
 APP_SOURCE = PROJECT_ROOT / "src" / "app" / "mod.rs"
 APP_RUNTIME_SOURCE = PROJECT_ROOT / "src" / "app" / "runtime.rs"
 UI_SOURCE = PROJECT_ROOT / "src" / "ui.rs"
+MOBILE_SOURCE = PROJECT_ROOT / "src" / "ui" / "mobile.rs"
 STATUS_SOURCE = PROJECT_ROOT / "src" / "ui" / "status.rs"
 SIDEBAR_SOURCE = PROJECT_ROOT / "src" / "ui" / "sidebar.rs"
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
@@ -161,6 +162,14 @@ WORKING_ANIMATION_APP_RUNTIME_FINGERPRINTS = {
 WORKING_ANIMATION_UI_FINGERPRINTS = {
     "computed_working_animation_demand": (
         "c69e7fbb09fe76b3d64835875bd01ecd9a3cb6a99c855fcc9dea545ed0805100"
+    ),
+    "mobile_symbols_visible_animation": (
+        "019acd7977d90f3cb21bc6061ccd6e4e8eb48a5b25fe06ec9fcdc98700e956a9"
+    ),
+}
+WORKING_ANIMATION_MOBILE_FINGERPRINTS = {
+    "mobile_working_title_animation_visible": (
+        "a8de1cc6666e96d4bf0550e48c92397c90db155d5f8b6c0f2876c7f04039fc85"
     ),
 }
 WORKING_ANIMATION_STATUS_FINGERPRINTS = {
@@ -474,6 +483,7 @@ def headless_working_animation_violations(
     render_stream_source: str,
     app_runtime_source: str | None = None,
     ui_source: str | None = None,
+    mobile_source: str | None = None,
     status_source: str | None = None,
     sidebar_source: str | None = None,
 ) -> list[str]:
@@ -492,6 +502,11 @@ def headless_working_animation_violations(
         else app_runtime_source
     )
     ui_source = UI_SOURCE.read_text(encoding="utf-8") if ui_source is None else ui_source
+    mobile_source = (
+        MOBILE_SOURCE.read_text(encoding="utf-8")
+        if mobile_source is None
+        else mobile_source
+    )
     status_source = (
         STATUS_SOURCE.read_text(encoding="utf-8")
         if status_source is None
@@ -509,6 +524,10 @@ def headless_working_animation_violations(
     ui_bodies = {
         name: rust_function_body(ui_source, name)
         for name in WORKING_ANIMATION_UI_FINGERPRINTS
+    }
+    mobile_bodies = {
+        name: rust_function_body(mobile_source, name)
+        for name in WORKING_ANIMATION_MOBILE_FINGERPRINTS
     }
     status_bodies = {
         name: rust_function_body(status_source, name)
@@ -543,6 +562,12 @@ def headless_working_animation_violations(
             violations.append(
                 f"{name} body fingerprint changed: expected {expected}, got {actual}"
             )
+    for name, expected in WORKING_ANIMATION_MOBILE_FINGERPRINTS.items():
+        actual = normalized_body_fingerprint(mobile_bodies[name])
+        if actual != expected:
+            violations.append(
+                f"{name} body fingerprint changed: expected {expected}, got {actual}"
+            )
     for name, expected in WORKING_ANIMATION_STATUS_FINGERPRINTS.items():
         actual = normalized_body_fingerprint(status_bodies[name])
         if actual != expected:
@@ -570,6 +595,12 @@ def headless_working_animation_violations(
         "working_label_shimmer_color": status_bodies["working_label_shimmer_color"],
         "working_label_shimmer_weight": status_bodies["working_label_shimmer_weight"],
         "working_label_blend_quarters": status_bodies["blend_quarters"],
+        "mobile_symbols_visible_animation": ui_bodies[
+            "mobile_symbols_visible_animation"
+        ],
+        "mobile_working_title_animation_visible": mobile_bodies[
+            "mobile_working_title_animation_visible"
+        ],
     }
     frame_clone_body = retained_bodies["render_retained_animation_update_and_stream"]
     frame_clone_matches = list(FRAME_OWNERSHIP_CLONE.finditer(frame_clone_body))
@@ -1149,6 +1180,51 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             any(
                 violation.startswith(
                     "agent_entry_has_working_shimmer body fingerprint changed:"
+                )
+                for violation in violations
+            ),
+            violations,
+        )
+
+        composition_needle = "Mode::Navigate => switcher,"
+        self.assertEqual(ui_source.count(composition_needle), 1)
+        changed_ui = ui_source.replace(
+            composition_needle,
+            "Mode::Navigate => header || switcher,",
+            1,
+        )
+        violations = headless_working_animation_violations(
+            headless,
+            render_stream,
+            ui_source=changed_ui,
+        )
+        self.assertTrue(
+            any(
+                violation.startswith(
+                    "mobile_symbols_visible_animation body fingerprint changed:"
+                )
+                for violation in violations
+            ),
+            violations,
+        )
+
+        mobile_source = MOBILE_SOURCE.read_text(encoding="utf-8")
+        visibility_needle = "&& content_width > 2"
+        self.assertEqual(mobile_source.count(visibility_needle), 1)
+        changed_mobile = mobile_source.replace(
+            visibility_needle,
+            "&& content_width > 1",
+            1,
+        )
+        violations = headless_working_animation_violations(
+            headless,
+            render_stream,
+            mobile_source=changed_mobile,
+        )
+        self.assertTrue(
+            any(
+                violation.startswith(
+                    "mobile_working_title_animation_visible body fingerprint changed:"
                 )
                 for violation in violations
             ),

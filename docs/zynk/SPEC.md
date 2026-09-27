@@ -371,18 +371,22 @@ allocation count is unchanged across agent and visible-pane cardinality; total a
 serialized bytes scale linearly with App clients and normalize to the one-client result. The allocation counter
 is a thread-scoped, opt-in `cfg(test)` global allocator in the unit-test crate, so the release binary has no
 allocator or counting seam and the proof does not duplicate the crate's unit tests in an integration binary. A
-working list entry may be scrolled out of view, but without a committed animated cell it arms no timer and sends
+A working list entry may be scrolled out of view, but without a committed animated cell it arms no timer and sends
 no frame.
 Switching the last App client to Observe can permit one already-scheduled harmless tick before the next demand
 commit cancels the timer. Headless demand is deliberately recomputed from each client's rendered list rather
 than reused from renderer internals; that is a bounded performance note, not an additional topology or process
 scan. The attached/local loop instead treats view-computed demand as a preflight and stores the immutable full
-render's returned, committed demand. In Symbols mode, expanded-sidebar, mobile-switcher, and Navigator shimmer
-demand is present only when a visible post-truncation span emitted the full animated literal `working`; mobile
-header braille demand likewise comes from its rendered status. Dots-mode pulse demand is unchanged. Render entry
-points keep `&AppState`, return this metadata without mutating `AppState` or `ViewState`, and accumulate it during
-the existing placement pass without a second list traversal or per-tick allocation. Committed metadata may only
-narrow a preflight bit; it never re-enables animation in a mode where preflight suppressed that surface.
+render's returned, committed demand. The final composed frame is the authority for committed local animation demand:
+any later layer replaces the contribution of the earlier cells it covers, and a full-frame layer replaces every
+animation contribution beneath it. In Symbols mode, expanded-sidebar and Navigator shimmer demand is present only
+when a visible post-truncation span emitted the full animated literal `working`. A mobile switcher contributes for
+either that full visible label or its separately visible working spinner; a full-frame Navigate panel replaces the
+header's contribution, while a bounded Navigator popup retains visible header demand. Dots-mode pulse demand is
+unchanged. Render entry points keep `&AppState`, return this metadata without mutating `AppState` or `ViewState`,
+and accumulate it during the existing placement pass without a second list traversal or per-tick allocation.
+Committed metadata may only narrow a preflight bit; it never re-enables animation in a mode where preflight
+suppressed that surface.
 `App::commit_rendered_animation_demand` is the attached loop's sole production writer: each completed draw
 passes its returned demand through that helper exactly once. The helper, its call edge, and the absence of a
 second local writer are architecture-guarded so model-level `ViewState` demand cannot replace rendered demand.
@@ -446,8 +450,12 @@ must match the session ID carried by that report, allowing a same-pane clear, re
 the old authority. Contradiction returns `caller_identity_conflict` before state or DB mutation. Missing hints,
 or hints observed before hook authority exists, proceed through the existing pane-bound path and are reported as
 unverified. No mismatch reroutes a request to a pane found by session value. These three additive error codes use
-the existing error envelope; protocol 20, method and field shapes, persistence schema, handoff shape, and session
-snapshot schema are unchanged.
+the existing error envelope. The socket API remains on protocol 20 with unchanged methods and request/response
+field shapes; persistence, handoff, and session-snapshot schemas are also unchanged. Native F4 JSON responses add
+optional Codex-hint verification metadata at the top level of `zynk whoami --json` and implicit
+`zynk inbox --json`, and under `from` for native `zynk send` and `zynk reply`. The field is `verified` or
+`unverified` when a hint is present, is omitted without one, and reports consistency without granting routing or
+receipt authority.
 
 `ui.window_title` defaults to empty, leaving the host terminal title untouched. A template such as
 `{hostname}: {workspace}` opts in and may also use `{tab}`, `{pane}`, and `{terminal_title}`. Malformed

@@ -493,7 +493,7 @@ fn render_mobile_switcher_content(
     }
 
     let mut doc_y = 0usize;
-    let mut animated_working_label = false;
+    let mut animated_working_cell = false;
 
     let entries = agent_panel_entries_from(app, terminal_runtimes);
     if !entries.is_empty() || app.agent_view_override.is_some() {
@@ -545,6 +545,16 @@ fn render_mobile_switcher_content(
                 app.spinner_tick,
                 p,
             );
+            if mobile_working_title_animation_visible(
+                entry.state,
+                app.working_animation,
+                content.width,
+                viewport,
+                app.mobile_switcher_scroll,
+                doc_y,
+            ) {
+                animated_working_cell = true;
+            }
             let title = Line::from(vec![
                 Span::styled("  ", Style::default().bg(bg)),
                 Span::styled(icon, icon_style.bg(bg)),
@@ -571,7 +581,7 @@ fn render_mobile_switcher_content(
             )
             .is_some()
             {
-                animated_working_label |= detail.animated;
+                animated_working_cell |= detail.animated;
             }
             render_two_line_item(
                 frame,
@@ -759,7 +769,7 @@ fn render_mobile_switcher_content(
         }
         doc_y += 1;
     }
-    animated_working_label
+    animated_working_cell
 }
 
 struct MobileAgentDetail {
@@ -942,6 +952,20 @@ fn render_two_line_item(
 fn visible_y(viewport: Rect, scroll: usize, doc_y: usize) -> Option<u16> {
     let offset = doc_y.checked_sub(scroll)?;
     (offset < viewport.height as usize).then_some(viewport.y + offset as u16)
+}
+
+fn mobile_working_title_animation_visible(
+    state: AgentState,
+    working_animation: bool,
+    content_width: u16,
+    viewport: Rect,
+    scroll: usize,
+    doc_y: usize,
+) -> bool {
+    state == AgentState::Working
+        && working_animation
+        && content_width > 2
+        && visible_y(viewport, scroll, doc_y).is_some()
 }
 
 fn fill_visible_doc_rect(
