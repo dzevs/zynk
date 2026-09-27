@@ -942,6 +942,18 @@ impl App {
         request: crate::api::schema::Request,
         caller: crate::api::ApiCaller,
     ) -> String {
+        let mut facts = caller::SystemCallerProcessFacts;
+        self.handle_api_request_after_internal_events_drained_with_process_facts(
+            request, caller, &mut facts,
+        )
+    }
+
+    fn handle_api_request_after_internal_events_drained_with_process_facts(
+        &mut self,
+        request: crate::api::schema::Request,
+        caller: crate::api::ApiCaller,
+        facts: &mut impl caller::CallerProcessFacts,
+    ) -> String {
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
@@ -951,28 +963,25 @@ impl App {
         // socket-to-state boundary, so no bound handler can be reached without
         // it, and the bound set is one greppable list (`pane_bound_target`).
         if let Some((method, pane_id)) = caller::pane_bound_target(&request.method) {
-            if let Err(rejection) = self.caller_is_inside_pane(pane_id, caller) {
-                let message = rejection.message(pane_id);
+            let placement = if caller::is_codex_session_report(&request.method) {
+                self.codex_session_report_has_per_pane_ancestry(pane_id, caller, facts)
+            } else {
+                self.caller_is_inside_pane(pane_id, caller, facts)
+                    .map_err(|rejection| (caller::CALLER_OUTSIDE_PANE, rejection.message(pane_id)))
+            };
+            if let Err((code, message)) = placement {
                 tracing::warn!(
                     method,
                     pane_id,
-                    rejection = ?rejection,
+                    rejection = %message,
                     "refusing a pane-bound request from outside the pane (ADR 0014)"
                 );
-                return responses::encode_error(request.id, caller::CALLER_OUTSIDE_PANE, message);
+                return responses::encode_error(request.id, code, message);
             }
         }
-        if caller::is_codex_session_report(&request.method) {
-            if let Err(message) = self.codex_session_report_has_per_pane_ancestry(caller) {
-                tracing::warn!(
-                    rejection = %message,
-                    "refusing a Codex session report from unverifiable or shared-daemon ancestry"
-                );
-                return responses::encode_error(request.id, caller::SHARED_CODEX_DAEMON, message);
-            }
-        }
-        if let Some(pane_id) = caller::codex_hint_sensitive_target(&request.method) {
-            match self.caller_codex_hints_match_pane(pane_id, caller) {
+        if let Some(expectation) = caller::codex_hint_expectation(&request.method) {
+            let pane_id = expectation.pane_id();
+            match self.caller_codex_hints_match_method(&request.method, caller, facts) {
                 Ok(crate::zynk::identity::CodexHintVerification::Unverified) => {
                     tracing::debug!(
                         pane_id,
@@ -1426,6 +1435,365 @@ mod tests {
     use super::*;
     use crate::api::schema::{EventData, EventKind};
     use crate::detect::{Agent, AgentState};
+
+    #[derive(Default)]
+    struct TestCallerProcessFacts {
+        uid: u32,
+        parents: std::collections::HashMap<u32, (u32, u64)>,
+        inspections: std::collections::HashMap<u32, crate::platform::ProcessInspection>,
+        hints: Option<(Option<String>, Option<String>)>,
+        parent_reads: usize,
+        inspection_reads: Vec<u32>,
+        hint_reads: usize,
+    }
+
+    impl caller::CallerProcessFacts for TestCallerProcessFacts {
+        fn current_uid(&mut self) -> u32 {
+            self.uid
+        }
+
+        fn process_parent_and_start_time(&mut self, pid: u32) -> Option<(u32, u64)> {
+            self.parent_reads += 1;
+            self.parents.get(&pid).copied()
+        }
+
+        fn process_inspection(&mut self, pid: u32) -> Option<crate::platform::ProcessInspection> {
+            self.inspection_reads.push(pid);
+            self.inspections.get(&pid).cloned()
+        }
+
+        fn codex_session_hints(
+            &mut self,
+            _principal: crate::platform::ProcessPrincipal,
+        ) -> Option<(Option<String>, Option<String>)> {
+            self.hint_reads += 1;
+            self.hints.clone()
+        }
+    }
+
+    fn inspected_process(
+        pid: u32,
+        start_time: u64,
+        parent_pid: u32,
+        argv: &[&str],
+    ) -> crate::platform::ProcessInspection {
+        crate::platform::ProcessInspection {
+            principal: crate::platform::ProcessPrincipal { pid, start_time },
+            parent_pid,
+            argv: argv.iter().map(|value| (*value).to_string()).collect(),
+        }
+    }
+
+    fn codex_report_fixture(
+        session_id: &str,
+    ) -> (
+        App,
+        String,
+        crate::terminal::TerminalId,
+        TestCallerProcessFacts,
+    ) {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("codex-report")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let pane_id = app.public_pane_id(0, pane).unwrap();
+        let terminal_id = app.state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let (runtime, _input_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        runtime.test_set_child_principal(100, 10);
+        runtime.test_record_foreground_probe(
+            Some(7),
+            Some(7),
+            Some(Agent::Codex),
+            std::time::Instant::now(),
+        );
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:codex".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            crate::agent_resume::AgentSessionRef::id(session_id),
+            Some(1),
+        );
+        terminal.launch_argv = Some(vec![
+            "codex".into(),
+            "--no-daemon".into(),
+            "resume".into(),
+            session_id.into(),
+        ]);
+        app.state.session_dirty = false;
+
+        let inspections = std::collections::HashMap::from([
+            (400, inspected_process(400, 40, 200, &["hook"])),
+            (
+                200,
+                inspected_process(200, 20, 100, &["codex", "--no-daemon"]),
+            ),
+            (100, inspected_process(100, 10, 1, &["zsh"])),
+        ]);
+        (
+            app,
+            pane_id,
+            terminal_id,
+            TestCallerProcessFacts {
+                uid: 1000,
+                inspections,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn test_api_caller() -> crate::api::ApiCaller {
+        crate::api::ApiCaller {
+            peer: Some(crate::platform::PeerCredentials {
+                pid: 400,
+                uid: 1000,
+                start_time: Some(40),
+            }),
+            trusted_as_pane_child: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_same_pane_session_change_validates_hint_against_the_reported_session() {
+        for start_source in ["clear", "resume", "compact"] {
+            let (mut app, pane_id, terminal_id, mut facts) = codex_report_fixture("old-session");
+            let new_session = format!("new-{start_source}-session");
+            facts.hints = Some((Some(new_session.clone()), Some(new_session.clone())));
+            let request = serde_json::from_value(serde_json::json!({
+                "id": start_source,
+                "method": "pane.report_agent_session",
+                "params": {
+                    "pane_id": pane_id,
+                    "source": "zynk:codex",
+                    "agent": "codex",
+                    "seq": 2,
+                    "agent_session_id": new_session,
+                    "session_start_source": start_source
+                }
+            }))
+            .unwrap();
+
+            let response: serde_json::Value = serde_json::from_str(
+                &app.handle_api_request_after_internal_events_drained_with_process_facts(
+                    request,
+                    test_api_caller(),
+                    &mut facts,
+                ),
+            )
+            .unwrap();
+
+            assert_eq!(
+                response["result"]["type"], "ok",
+                "{start_source}: {response}"
+            );
+            assert_eq!(
+                app.state.terminals[&terminal_id]
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|session| session.session_ref.value.as_str()),
+                Some(new_session.as_str()),
+                "{start_source} did not replace the same-pane Codex session"
+            );
+            assert_eq!(facts.parent_reads, 0, "Codex used the split ancestry walk");
+            assert_eq!(facts.inspection_reads, vec![400, 200, 100]);
+            assert_eq!(facts.hint_reads, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_state_report_validates_hint_against_its_reported_session() {
+        let (mut app, pane_id, _terminal_id, mut facts) = codex_report_fixture("old-session");
+        facts.hints = Some((Some("new-session".into()), Some("new-session".into())));
+        let request = serde_json::from_value(serde_json::json!({
+            "id": "state-session-change",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": pane_id,
+                "source": "zynk:codex",
+                "agent": "codex",
+                "state": "working",
+                "seq": 2,
+                "agent_session_id": "new-session"
+            }
+        }))
+        .unwrap();
+
+        let response: serde_json::Value = serde_json::from_str(
+            &app.handle_api_request_after_internal_events_drained_with_process_facts(
+                request,
+                test_api_caller(),
+                &mut facts,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(response["result"]["type"], "ok", "{response}");
+        assert_eq!(facts.inspection_reads, vec![400, 200, 100]);
+        assert_eq!(facts.hint_reads, 1);
+    }
+
+    #[tokio::test]
+    async fn reused_codex_peer_is_rejected_before_hint_or_dispatch() {
+        let (mut app, pane_id, terminal_id, mut facts) = codex_report_fixture("session-a");
+        facts
+            .inspections
+            .insert(400, inspected_process(400, 41, 200, &["hook"]));
+        facts.hints = Some((Some("session-a".into()), None));
+        let before = app.state.terminals[&terminal_id].test_identity_mutation_fingerprint();
+        let request = serde_json::from_value(serde_json::json!({
+            "id": "reused-peer",
+            "method": "pane.report_agent_session",
+            "params": {
+                "pane_id": pane_id,
+                "source": "zynk:codex",
+                "agent": "codex",
+                "seq": 2,
+                "agent_session_id": "session-a",
+                "session_start_source": "resume"
+            }
+        }))
+        .unwrap();
+
+        let response: serde_json::Value = serde_json::from_str(
+            &app.handle_api_request_after_internal_events_drained_with_process_facts(
+                request,
+                test_api_caller(),
+                &mut facts,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(response["error"]["code"], "caller_outside_pane");
+        assert_eq!(facts.inspection_reads, vec![400]);
+        assert_eq!(facts.hint_reads, 0);
+        assert_eq!(
+            app.state.terminals[&terminal_id].test_identity_mutation_fingerprint(),
+            before
+        );
+        assert!(!app.state.session_dirty);
+    }
+
+    #[tokio::test]
+    async fn server_hint_validation_fails_only_on_a_present_contradiction() {
+        for (name, hints, expected_code) in [
+            (
+                "pair-conflict",
+                Some((Some("thread-a".into()), Some("session-b".into()))),
+                Some("caller_identity_conflict"),
+            ),
+            ("unreadable", None, None),
+        ] {
+            let (mut app, pane_id, terminal_id, mut facts) = codex_report_fixture("session-a");
+            facts.hints = hints;
+            let before = app.state.terminals[&terminal_id].test_identity_mutation_fingerprint();
+            let request = serde_json::from_value(serde_json::json!({
+                "id": name,
+                "method": "pane.report_agent_session",
+                "params": {
+                    "pane_id": pane_id,
+                    "source": "zynk:codex",
+                    "agent": "codex",
+                    "seq": 2,
+                    "agent_session_id": "session-a",
+                    "session_start_source": "resume"
+                }
+            }))
+            .unwrap();
+
+            let response: serde_json::Value = serde_json::from_str(
+                &app.handle_api_request_after_internal_events_drained_with_process_facts(
+                    request,
+                    test_api_caller(),
+                    &mut facts,
+                ),
+            )
+            .unwrap();
+
+            if let Some(code) = expected_code {
+                assert_eq!(response["error"]["code"], code, "{name}: {response}");
+                assert_eq!(
+                    app.state.terminals[&terminal_id].test_identity_mutation_fingerprint(),
+                    before,
+                    "{name} mutated state"
+                );
+            } else {
+                assert_eq!(response["result"]["type"], "ok", "{name}: {response}");
+            }
+            assert_eq!(facts.hint_reads, 1, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_codex_daemon_refuses_both_report_methods_before_any_mutation() {
+        for method in ["pane.report_agent", "pane.report_agent_session"] {
+            let (mut app, pane_id, terminal_id, mut facts) = codex_report_fixture("shared-session");
+            facts.inspections.insert(
+                200,
+                inspected_process(200, 20, 100, &["codex", "app-server", "--managed-daemon"]),
+            );
+            facts.hints = Some((Some("shared-session".into()), None));
+            let before = app.state.terminals[&terminal_id].test_identity_mutation_fingerprint();
+            let event_sequence = app.event_hub.current_sequence();
+            let params = if method == "pane.report_agent" {
+                serde_json::json!({
+                    "pane_id": pane_id,
+                    "source": "zynk:codex",
+                    "agent": "codex",
+                    "state": "working",
+                    "seq": 2,
+                    "agent_session_id": "shared-session"
+                })
+            } else {
+                serde_json::json!({
+                    "pane_id": pane_id,
+                    "source": "zynk:codex",
+                    "agent": "codex",
+                    "seq": 2,
+                    "agent_session_id": "shared-session",
+                    "session_start_source": "resume"
+                })
+            };
+            let request = serde_json::from_value(serde_json::json!({
+                "id": method,
+                "method": method,
+                "params": params
+            }))
+            .unwrap();
+
+            let response: serde_json::Value = serde_json::from_str(
+                &app.handle_api_request_after_internal_events_drained_with_process_facts(
+                    request,
+                    test_api_caller(),
+                    &mut facts,
+                ),
+            )
+            .unwrap();
+
+            assert_eq!(response["error"]["code"], "shared_codex_daemon");
+            assert_eq!(
+                app.state.terminals[&terminal_id].test_identity_mutation_fingerprint(),
+                before,
+                "{method} mutated identity state before rejecting shared ancestry"
+            );
+            assert!(!app.state.session_dirty, "{method} dirtied the session");
+            assert!(app.event_hub.events_after(event_sequence).is_empty());
+            assert_eq!(
+                facts.hint_reads, 0,
+                "hint read happened after ancestry refusal"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn m828c_caller_refusal_precedes_title_sync() {

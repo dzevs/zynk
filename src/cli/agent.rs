@@ -520,7 +520,7 @@ fn wait_for_started_agent(
             Some(ErrorBody {
                 code: "agent_start_failed".into(),
                 message: if kind == "codex" {
-                    "Codex launch ended before becoming interactive; zynk requires Codex \
+                    "Codex launch ended before becoming interactive; this may require Codex \
                      0.157.1 or newer with --no-daemon support"
                         .into()
                 } else {

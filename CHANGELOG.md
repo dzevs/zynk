@@ -3,7 +3,9 @@
 ## [3.2.0] — Unreleased
 
 This release restores operator-selected 3.0.x presentation and interaction behavior on top of 3.1.0. It does
-not change binary protocol 20, the JSON socket surface, persistence schema, session snapshots, or handoff data.
+not change binary protocol 20, JSON method or field shapes, persistence schema, session snapshots, or handoff
+data. It adds only three typed error-code values to the existing JSON error envelope:
+`shared_codex_daemon`, `duplicate_agent_session`, and `caller_identity_conflict`.
 
 **Added**
 
@@ -24,7 +26,8 @@ not change binary protocol 20, the JSON socket surface, persistence schema, sess
   and terminal-attach-only servers schedule none. Animation is active render work and can raise idle CPU, so
   set the key to false to use the static 3.1.0 marks and labels.
 - Exact Alt+left-drag performs zynk-local selection in a pane even when its application captures mouse input.
-  Plain drag keeps the application's existing mouse-reporting behavior.
+  Exact Alt+click and Alt+double-click are also zynk-owned and do not reach that application; plain gestures
+  keep the application's existing mouse-reporting behavior.
 - `zynk agent wait --status S` is an alias of `--until S`. Either form can repeat with the same any-of status
   semantics; `agent prompt` does not gain the alias.
 
@@ -51,8 +54,10 @@ not change binary protocol 20, the JSON socket surface, persistence schema, sess
   `inbox --agent` remains database-only.
 - Zynk-managed Codex 0.157.1+ launches and resumes with `--no-daemon`, preventing a shared managed daemon from
   reporting one session through another pane's inherited identity. Session reports through such a daemon,
-  cross-pane duplicate authoritative sessions, and contradictory Codex session hints now fail closed. Snapshot
-  restore preserves the layout but resumes neither owner of a duplicated session.
+  cross-pane duplicate authoritative sessions, and contradictory Codex session hints now fail closed with the
+  additive typed errors named above. Cold snapshot restore preserves the layout but resumes neither owner of a
+  duplicated session; live handoff preserves both imported runtimes while dropping both conflicting identity
+  anchors.
 - The bundled root skill now stays numerically pinned to binary protocol 20.
 
 ## [3.1.0] — 2026-09-25

@@ -43,6 +43,10 @@ pub struct Selection {
     cursor: (u32, u16),
     /// Selection phase.
     phase: Phase,
+    /// Input source that owns a local-selection override. Ordinary terminal
+    /// selections remain unowned so their established single-client behavior
+    /// is unchanged.
+    input_source_owner: Option<crate::app::InputSourceId>,
 }
 
 impl Selection {
@@ -60,6 +64,7 @@ impl Selection {
             anchor,
             cursor: anchor,
             phase: Phase::Anchored,
+            input_source_owner: None,
         }
     }
 
@@ -77,6 +82,7 @@ impl Selection {
             anchor: (row, start_col),
             cursor: (row, end_col),
             phase: Phase::Dragging,
+            input_source_owner: None,
         }
     }
 
@@ -96,7 +102,25 @@ impl Selection {
             anchor: (anchor_row, anchor_col),
             cursor: (cursor_row, cursor_col),
             phase: Phase::Dragging,
+            input_source_owner: None,
         }
+    }
+
+    pub(crate) fn with_input_source_owner(mut self, source_id: crate::app::InputSourceId) -> Self {
+        self.input_source_owner = Some(source_id);
+        self
+    }
+
+    pub(crate) fn is_owned_by_other_input_source(
+        &self,
+        source_id: crate::app::InputSourceId,
+    ) -> bool {
+        self.input_source_owner
+            .is_some_and(|owner| owner != source_id)
+    }
+
+    pub(crate) fn is_owned_by_input_source(&self, source_id: crate::app::InputSourceId) -> bool {
+        self.input_source_owner == Some(source_id)
     }
 
     pub(crate) fn absolute_row_for_viewport(

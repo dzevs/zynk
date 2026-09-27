@@ -406,25 +406,35 @@ paths remain.
 An exact Alt+left press inside a pane selects locally even when that application enabled mouse reporting. The
 press anchors the same selection state as a plain press in a non-capturing pane; drag extends it, release follows
 the existing `copy_on_select` policy, and double-click keeps the existing word-selection behavior. No byte from
-that Alt gesture is forwarded to the application. Without exact Alt, a capturing pane retains its current mouse
-reporting behavior; on a non-capturing pane, Alt+drag is equivalent to plain local selection. Shift is not the
-bypass because host terminals commonly reserve Shift+drag for native selection, while desktop environments may
-intercept Alt+drag before zynk receives it.
+that Alt gesture, including its click or double-click, is forwarded to the application. Without exact Alt, a
+capturing pane retains its current mouse-reporting behavior; on a non-capturing pane, Alt+drag is equivalent to
+plain local selection. Shift is not the bypass because host terminals commonly reserve Shift+drag for native
+selection, while desktops that bind Alt+drag to window moves (some KDE setups) may intercept it before zynk
+receives it.
 
 Zynk-managed Codex requires CLI 0.157.1 or newer and receives exactly one `--no-daemon` argument on every start,
-resume, and snapshot restore. A session-bearing Codex hook report is accepted only when its peer ancestry remains
-inside that pane without crossing `codex app-server --managed-daemon`; unreadable, replaced, cyclic, over-bound,
-or managed-daemon ancestry fails closed. A normalized `(source, agent, kind, value)` session may be authoritative
-for only one terminal. Duplicate runtime claims return `duplicate_agent_session`. If a snapshot contains one
-session on two terminals, the layout and pane working directories restore, but neither owner is resumed, both
-session anchors are dropped, and one diagnostic names the conflicting panes and session rather than choosing an
-owner. Clearing the current owner releases the session for a later terminal.
+resume, and snapshot restore. A failed `agent start` returns typed guidance naming the verified minimum and flag;
+snapshot restore/resume exposes the older Codex process's own launch error. Neither path probes or silently
+downgrades. A session-bearing Codex hook report is accepted only when its peer ancestry remains inside that pane
+without crossing `codex app-server --managed-daemon`; unreadable, replaced, cyclic, over-bound,
+or managed-daemon ancestry fails closed, with the managed-daemon case returning `shared_codex_daemon`. A
+normalized `(source, agent, kind, value)` session may be authoritative for only one terminal. The duplicate
+ownership check is one O(terminals) scan at session-bearing report admission and never runs from view or render
+work. Duplicate runtime claims return `duplicate_agent_session`. On cold snapshot restore, a duplicated session's
+layout and pane working directories restore as plain shells, neither owner resumes, both anchors are dropped, and
+one diagnostic names the conflict. Live handoff instead keeps both already-running imported runtimes and drops
+only their conflicting identity and resume anchors. Clearing current authority releases its session anchor for a
+later terminal.
 
 For Codex-origin CLI operations, `CODEX_THREAD_ID` and `CODEX_SESSION_ID` are optional consistency hints, never
 routing authority. When both are present they must agree. When the source pane already has an authoritative Codex
-session, any present hint must match it; contradiction returns `caller_identity_conflict` before socket or DB
-mutation. Missing hints, or hints observed before hook authority exists, proceed through the existing pane-bound
-path and are reported as unverified. No mismatch reroutes a request to a pane found by session value.
+session, a receipt hint must match that current session. For a session-bearing report, a present hint instead
+must match the session ID carried by that report, allowing a same-pane clear, resume, or compaction to replace
+the old authority. Contradiction returns `caller_identity_conflict` before state or DB mutation. Missing hints,
+or hints observed before hook authority exists, proceed through the existing pane-bound path and are reported as
+unverified. No mismatch reroutes a request to a pane found by session value. These three additive error codes use
+the existing error envelope; protocol 20, method and field shapes, persistence schema, handoff shape, and session
+snapshot schema are unchanged.
 
 `ui.window_title` defaults to empty, leaving the host terminal title untouched. A template such as
 `{hostname}: {workspace}` opts in and may also use `{tab}`, `{pane}`, and `{terminal_title}`. Malformed

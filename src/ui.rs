@@ -299,26 +299,16 @@ fn computed_working_animation_demand(
                         workspace.aggregate_state(&app.terminals).0
                             == crate::detect::AgentState::Working
                     });
-                let shimmer_resolvable = !app.sidebar_collapsed
-                    && working_label_shimmer_palette(
-                        app.palette.yellow,
-                        app.palette.text,
-                        &app.host_terminal_theme,
-                    )
-                    .is_some();
                 let (agents_working, label_working) = if dots || !app.sidebar_collapsed {
                     let entries = sidebar::agent_panel_entries_from(app, terminal_runtimes);
                     (
                         entries
                             .iter()
                             .any(|entry| entry.state == crate::detect::AgentState::Working),
-                        shimmer_resolvable
-                            && entries.iter().any(|entry| {
-                                entry.state == crate::detect::AgentState::Working
-                                    && !entry.state_labels.contains_key(
-                                        sidebar::agent_panel_status_key(entry.state, entry.seen),
-                                    )
-                            }),
+                        !app.sidebar_collapsed
+                            && entries
+                                .iter()
+                                .any(|entry| sidebar::agent_entry_has_working_shimmer(app, entry)),
                     )
                 } else {
                     (false, false)
@@ -845,6 +835,22 @@ mod tests {
             "an unresolvable label stays static and creates no text demand"
         );
         app.palette = crate::app::state::Palette::catppuccin_latte();
+
+        let ratatui::style::Color::Rgb(r, g, b) = app.palette.text else {
+            panic!("test palette text must be RGB");
+        };
+        app.sidebar_agents.rows = vec![vec![serde_json::from_value(serde_json::json!({
+            "token": "state_text",
+            "fg": format!("#{r:02x}{g:02x}{b:02x}")
+        }))
+        .unwrap()]];
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+        assert_eq!(
+            app.view.working_animation_demand,
+            WorkingAnimationDemand::NONE,
+            "a token-styled label whose resolved base equals text has no visible shimmer"
+        );
+        app.sidebar_agents = crate::config::AgentsSidebarConfig::default();
 
         app.mode = Mode::Navigator;
         compute_view(&mut app, Rect::new(0, 0, 100, 24));

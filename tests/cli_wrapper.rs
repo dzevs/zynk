@@ -1318,6 +1318,7 @@ fn run_shell_hook_with_env(
         .env("ZYNK_SOCKET_PATH", &socket_path)
         .env("ZYNK_PANE_ID", "p_test")
         .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_SESSION_ID")
         .envs(extra_env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -7170,6 +7171,155 @@ fn post_dogfood_codex_hint_alignment_and_absent_authority_are_reported_honestly(
             );
         }
     }
+}
+
+#[test]
+fn post_dogfood_aligned_hint_records_the_resolved_source_without_rerouting() {
+    use sqlx::{Connection, Row};
+
+    let source = serde_json::json!({
+        "result": {"type": "pane_info", "pane": {
+            "pane_id": "w7:p3",
+            "terminal_id": "source-terminal",
+            "workspace_id": "w7",
+            "tab_id": "w7:t2",
+            "cwd": "/tmp/aligned-source",
+            "agent": "codex",
+            "agent_session": {
+                "source": "zynk:codex",
+                "agent": "codex",
+                "kind": "id",
+                "value": "aligned-session"
+            }
+        }}
+    });
+    let mut target = m839_agent_json("idle", "worker", "target-terminal", 7);
+    target["workspace_id"] = serde_json::json!("w8");
+    target["tab_id"] = serde_json::json!("w8:t1");
+    target["pane_id"] = serde_json::json!("w8:p1");
+    let (fixture, requests, output) = m839_cli_exchange_with_env(
+        &["send", "worker", "--", "aligned body"],
+        &[
+            ("ZYNK_PANE_ID", "w7:p3"),
+            ("CODEX_THREAD_ID", "aligned-session"),
+            ("CODEX_SESSION_ID", "aligned-session"),
+        ],
+        |request, base| match request["method"].as_str().unwrap() {
+            "ping" => m839_pong(),
+            "pane.get" => source.clone(),
+            "agent.get" => {
+                fs::write(base.join("runtime.id"), "rt_identity_aligned\n").unwrap();
+                m839_agent_reply(target.clone())
+            }
+            "pane.send_input" => serde_json::json!({"result":{"type":"ok"}}),
+            other => panic!("unexpected aligned-hint method {other}"),
+        },
+    );
+
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "ping",
+            "pane.get",
+            "ping",
+            "agent.get",
+            "ping",
+            "pane.send_input"
+        ]
+    );
+    assert!(output.status.success(), "{output:?}");
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["from"]["pane"], "w7:p3");
+    assert_eq!(response["from"]["workspace"], "w7");
+    assert_eq!(response["from"]["tab"], "w7:t2");
+    assert_eq!(response["from"]["cwd"], "/tmp/aligned-source");
+    assert_eq!(response["from"]["identity_verification"], "verified");
+
+    let db = fixture.base.join("cli-sqlite/zynk.db");
+    let row = sqlite_block_on(async {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&db)
+            .read_only(true)
+            .busy_timeout(Duration::from_secs(1));
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS count, m.workspace_id, m.tab_id, m.cwd, p.pane_id \
+             FROM messages m JOIN conversation_participants p ON p.id = m.from_participant_id",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+        (
+            row.get::<i64, _>("count"),
+            row.get::<Option<String>, _>("workspace_id"),
+            row.get::<Option<String>, _>("tab_id"),
+            row.get::<Option<String>, _>("cwd"),
+            row.get::<Option<String>, _>("pane_id"),
+        )
+    });
+    assert_eq!(
+        row,
+        (
+            1,
+            // Conversation placement follows the resolved recipient; source
+            // attribution remains the verified sender pane and cwd.
+            Some("w8".into()),
+            Some("w8:t1".into()),
+            Some("/tmp/aligned-source".into()),
+            Some("w7:p3".into())
+        )
+    );
+}
+
+#[test]
+fn post_dogfood_conflicting_hint_writes_no_message_and_sends_no_pane_input() {
+    let pane = serde_json::json!({
+        "result": {"type": "pane_info", "pane": {
+            "pane_id": "w7:p3", "terminal_id": "source-terminal",
+            "workspace_id": "w7", "tab_id": "w7:t2", "cwd": "/tmp/source",
+            "agent": "codex", "agent_session": {
+                "source": "zynk:codex", "agent": "codex", "kind": "id",
+                "value": "authoritative-session"
+            }
+        }}
+    });
+    let (fixture, requests, output) = m839_cli_exchange_with_env(
+        &["send", "worker", "--", "must not persist"],
+        &[
+            ("ZYNK_PANE_ID", "w7:p3"),
+            ("CODEX_THREAD_ID", "stale-session"),
+        ],
+        |request, _base| match request["method"].as_str().unwrap() {
+            "ping" => m839_pong(),
+            "pane.get" => pane.clone(),
+            other => panic!("identity conflict reached {other}"),
+        },
+    );
+
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ping", "pane.get"]
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["error"]["code"], "caller_identity_conflict");
+    let db = fixture.base.join("cli-sqlite/zynk.db");
+    assert!(
+        !db.exists()
+            || m839_message_rows(&db, "identity conflict child reaped")
+                .into_value()
+                .is_empty(),
+        "identity conflict created a message row"
+    );
 }
 
 #[test]

@@ -154,7 +154,7 @@ pub(crate) const MAX_ANCESTRY_HOPS: usize = 64;
 pub(crate) fn place_process_in_tree(
     caller: ProcessPrincipal,
     pane_root: ProcessPrincipal,
-    ancestry_of: impl Fn(u32) -> Option<(u32, u64)>,
+    mut ancestry_of: impl FnMut(u32) -> Option<(u32, u64)>,
 ) -> TreePlacement {
     if caller.pid == 0 || pane_root.pid == 0 {
         return TreePlacement::Outside;

@@ -1566,13 +1566,152 @@ mod tests {
             (MouseEventKind::Drag(MouseButton::Left), end_col),
             (MouseEventKind::Up(MouseButton::Left), end_col),
         ] {
+            app.handle_mouse(modified_mouse(kind, col, row, KeyModifiers::empty()));
+        }
+        assert!(app.state.selection.is_none());
+        assert!(app.event_rx.try_recv().is_err());
+        for phase in ["down", "drag", "up"] {
+            assert!(
+                input_rx.try_recv().is_ok(),
+                "plain capturing-pane {phase} was not forwarded"
+            );
+        }
+        assert!(input_rx.try_recv().is_err());
+
+        for (kind, col) in [
+            (MouseEventKind::Down(MouseButton::Left), start_col),
+            (MouseEventKind::Drag(MouseButton::Left), end_col),
+            (MouseEventKind::Up(MouseButton::Left), end_col),
+        ] {
             app.handle_mouse(modified_mouse(kind, col, row, KeyModifiers::ALT));
         }
 
-        assert_eq!(clipboard_write_content(&mut app), b"alpha");
+        let clipboard_event = app.event_rx.try_recv().ok();
+        let forwarded = std::iter::from_fn(|| input_rx.try_recv().ok()).collect::<Vec<_>>();
+        let copied_alpha = matches!(
+            &clipboard_event,
+            Some(AppEvent::ClipboardWrite { content }) if content == b"alpha"
+        );
+        assert!(
+            copied_alpha && forwarded.is_empty(),
+            "exact Alt must copy locally and forward zero bytes: clipboard={clipboard_event:?}, forwarded={forwarded:?}"
+        );
         assert!(app.state.selection.is_none());
-        assert!(input_rx.try_recv().is_err(), "Alt drag reached the pane");
         assert!(app.state.terminal_mouse_gestures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn alt_selection_is_owned_by_the_input_source_that_anchored_it() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("alt-selection-owner");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006halpha beta",
+                8,
+            );
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        app.handle_mouse_from_input_source(
+            7,
+            modified_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                info.inner_rect.x,
+                info.inner_rect.y,
+                KeyModifiers::ALT,
+            ),
+        );
+        for kind in [
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse_from_input_source(
+                8,
+                modified_mouse(
+                    kind,
+                    info.inner_rect.x + 4,
+                    info.inner_rect.y,
+                    KeyModifiers::ALT,
+                ),
+            );
+        }
+
+        assert!(
+            app.event_rx.try_recv().is_err(),
+            "a foreign source finalized the local selection"
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "override bytes reached the pane"
+        );
+        assert!(
+            app.state
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.was_just_click()),
+            "a foreign source extended the owner's anchor"
+        );
+    }
+
+    #[tokio::test]
+    async fn alt_double_click_does_not_bypass_a_failed_focus_gate() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("alt-double-click-focus-failure");
+        let focused = ws.tabs[0].root_pane;
+        let target = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(focused);
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos
+            .iter()
+            .find(|info| info.id == target)
+            .expect("target pane geometry")
+            .clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1002h\x1b[?1006halpha beta",
+                8,
+            );
+        ws.insert_test_runtime(target, runtime);
+        ws.public_pane_numbers.remove(&target);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        let col = info.inner_rect.x + 1;
+        let row = info.inner_rect.y;
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            app.handle_mouse(modified_mouse(kind, col, row, KeyModifiers::ALT));
+        }
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(focused));
+        assert!(app.state.selection.is_none());
+        assert!(
+            app.event_rx.try_recv().is_err(),
+            "failed focus copied a word"
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "override bytes reached the pane"
+        );
     }
 
     #[tokio::test]
@@ -1635,39 +1774,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn alt_with_another_modifier_remains_owned_by_a_mouse_reporting_pane() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("modified-selection");
-        let pane_id = ws.tabs[0].root_pane;
-        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
-        let info = pane_infos[0].clone();
-        let (runtime, mut input_rx) =
-            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
-                info.inner_rect.width,
-                info.inner_rect.height,
-                0,
-                b"\x1b[?1002h\x1b[?1006halpha beta",
-                8,
-            );
-        ws.insert_test_runtime(pane_id, runtime);
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-        app.state.view.pane_infos = pane_infos;
-
-        app.handle_mouse(modified_mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            info.inner_rect.x,
-            info.inner_rect.y,
+    async fn only_exact_alt_bypasses_mouse_reporting() {
+        for modifiers in [
             KeyModifiers::ALT | KeyModifiers::SHIFT,
-        ));
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+            KeyModifiers::SHIFT,
+            KeyModifiers::SUPER,
+        ] {
+            let mut app = app_for_mouse_test();
+            let mut ws = Workspace::test_new("modified-selection");
+            let pane_id = ws.tabs[0].root_pane;
+            let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+            let info = pane_infos[0].clone();
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    info.inner_rect.width,
+                    info.inner_rect.height,
+                    0,
+                    b"\x1b[?1002h\x1b[?1006halpha beta",
+                    8,
+                );
+            ws.insert_test_runtime(pane_id, runtime);
+            app.state.workspaces = vec![ws];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.view.pane_infos = pane_infos;
 
-        assert!(app.state.selection.is_none());
-        assert!(
-            input_rx.try_recv().is_ok(),
-            "only exact Alt may bypass pane mouse reporting"
-        );
+            app.handle_mouse(modified_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                info.inner_rect.x,
+                info.inner_rect.y,
+                modifiers,
+            ));
+
+            assert!(app.state.selection.is_none(), "{modifiers:?}");
+            assert!(
+                input_rx.try_recv().is_ok(),
+                "only exact Alt may bypass pane mouse reporting: {modifiers:?}"
+            );
+        }
     }
 
     #[tokio::test]

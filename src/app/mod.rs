@@ -90,6 +90,7 @@ pub(crate) struct PaneClickState {
     viewport_row: u16,
     col: u16,
     local_selection_override: bool,
+    source_id: InputSourceId,
     at: Instant,
 }
 
@@ -97,6 +98,7 @@ impl PaneClickState {
     fn is_double_click_for(self, next: Self) -> bool {
         self.pane_id == next.pane_id
             && self.local_selection_override == next.local_selection_override
+            && self.source_id == next.source_id
             && next.at.duration_since(self.at) <= PANE_DOUBLE_CLICK_WINDOW
             && self.viewport_row.abs_diff(next.viewport_row) <= 1
             && self.col.abs_diff(next.col) <= 1
@@ -398,6 +400,15 @@ fn resolve_effective_theme(
     )
 }
 
+fn append_startup_diagnostic(current: &mut Option<String>, diagnostic: String) {
+    if let Some(current) = current {
+        current.push_str("; ");
+        current.push_str(&diagnostic);
+    } else {
+        *current = Some(diagnostic);
+    }
+}
+
 impl App {
     pub fn new(
         config: &Config,
@@ -406,6 +417,7 @@ impl App {
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
     ) -> Self {
+        let mut config_diagnostic = config_diagnostic;
         let (prefix_code, prefix_mods) = config.prefix_key();
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
@@ -434,6 +446,11 @@ impl App {
                 std::collections::HashSet::new(),
             )
         } else if let Some(snap) = crate::persist::load() {
+            if let Some(diagnostic) =
+                crate::persist::snapshot_agent_session_conflict_diagnostic(&snap)
+            {
+                append_startup_diagnostic(&mut config_diagnostic, diagnostic);
+            }
             let history = config
                 .experimental
                 .pane_history
@@ -852,6 +869,11 @@ impl App {
         >,
     ) -> io::Result<Self> {
         let mut app = Self::new(config, true, config_diagnostic, api_rx, event_hub);
+        if let Some(diagnostic) =
+            crate::persist::snapshot_agent_session_conflict_diagnostic(snapshot)
+        {
+            append_startup_diagnostic(&mut app.state.config_diagnostic, diagnostic);
+        }
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,
@@ -1981,6 +2003,14 @@ impl App {
             )
         }) {
             self.state.drag = None;
+        }
+        if self
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.is_owned_by_input_source(source_id))
+        {
+            self.state.clear_selection();
         }
         self.release_input_source_headless(source_id);
     }
@@ -4146,6 +4176,7 @@ mod tests {
             viewport_row: 0,
             col: 0,
             local_selection_override: false,
+            source_id: LOCAL_INPUT_SOURCE,
             at: selection_deadline,
         });
         app.next_auto_update_check = Some(Instant::now());
@@ -4546,6 +4577,22 @@ mod tests {
         assert_eq!(
             app.state.sidebar_max_width, 36,
             "App::new must fall back to default max when bounds are inverted"
+        );
+    }
+
+    #[test]
+    fn startup_diagnostics_preserve_existing_config_guidance() {
+        let mut diagnostic = Some("config.toml; zynk config check".to_string());
+        append_startup_diagnostic(
+            &mut diagnostic,
+            "Duplicate agent session detected: codex/id shared on w1:p1, w1:p2".into(),
+        );
+
+        assert_eq!(
+            diagnostic.as_deref(),
+            Some(
+                "config.toml; zynk config check; Duplicate agent session detected: codex/id shared on w1:p1, w1:p2"
+            )
         );
     }
 

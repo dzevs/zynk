@@ -813,7 +813,7 @@ fn mobile_agent_detail_line(
     }
     spans.extend(working_label_spans(
         WORKING_LABEL.to_string(),
-        Style::default().fg(app.palette.yellow).bg(bg),
+        static_style,
         true,
         app,
     ));
@@ -1713,6 +1713,13 @@ mod tests {
                 .any(|x| static_buffer[(x, 1)].fg != animated_buffer[(x, 1)].fg),
             "the on/off comparison must exercise the shimmer"
         );
+        for x in label_start..label_end {
+            assert_eq!(
+                static_buffer[(x, 1)].fg,
+                static_app.palette.overlay0,
+                "animation-off mobile label must preserve the ca13 row style at x={x}"
+            );
+        }
         for x in label_end..static_buffer.area.width {
             let before = &static_buffer[(x, 1)];
             let after = &animated_buffer[(x, 1)];

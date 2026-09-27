@@ -2156,6 +2156,7 @@ impl AppState {
         viewport_row: u16,
         col: u16,
         allow_mouse_reporting: bool,
+        input_source_owner: Option<crate::app::InputSourceId>,
     ) -> bool {
         // Resolve the active pane cell the double-click landed on.
         let Some(ws_idx) = self
@@ -2198,6 +2199,9 @@ impl AppState {
         };
 
         let mut selection = Selection::range(pane_id, viewport_row, start_col, end_col, metrics);
+        if let Some(source_id) = input_source_owner {
+            selection = selection.with_input_source_owner(source_id);
+        }
         if !selection.finish() {
             return false;
         }

@@ -293,10 +293,9 @@ pub(crate) fn working_label_shimmer_palette(
     target: Color,
     host: &crate::terminal_theme::TerminalTheme,
 ) -> Option<WorkingShimmerPalette> {
-    Some(WorkingShimmerPalette {
-        base: resolve_shimmer_color(base, host)?,
-        target: resolve_shimmer_color(target, host)?,
-    })
+    let base = resolve_shimmer_color(base, host)?;
+    let target = resolve_shimmer_color(target, host)?;
+    (base != target).then_some(WorkingShimmerPalette { base, target })
 }
 
 pub(crate) fn working_label_shimmer_color(
@@ -613,6 +612,15 @@ mod tests {
             working_label_shimmer_colors(base, target, 80, &Default::default()),
             working_label_shimmer_colors(base, target, 0, &Default::default())
         );
+
+        let rounding_base = Color::Rgb(0, 0, 0);
+        let rounding_target = Color::Rgb(1, 2, 3);
+        assert_eq!(
+            working_label_shimmer_colors(rounding_base, rounding_target, 0, &Default::default())
+                .unwrap()[0],
+            Color::Rgb(1, 2, 2),
+            "quarter blending must exercise the +2 nearest-integer rounding"
+        );
     }
 
     #[test]
@@ -669,6 +677,11 @@ mod tests {
         assert_eq!(
             working_label_shimmer_colors(Color::Indexed(4), Color::Reset, 0, &host),
             None
+        );
+        assert_eq!(
+            working_label_shimmer_palette(Color::Indexed(3), Color::Indexed(3), &host),
+            None,
+            "equal resolved endpoints have no visible shimmer and must not arm demand"
         );
     }
 

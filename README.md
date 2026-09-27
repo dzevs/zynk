@@ -521,8 +521,11 @@ with `zynk integration install <agent>` (`claude`, `codex`, `copilot`, `droid`, 
 Zynk-managed Codex requires Codex CLI 0.157.1 or newer and always starts or resumes it with `--no-daemon`.
 That keeps each hook reporter inside the pane that owns its session. Manual Codex launches intended to report
 through zynk should also use `--no-daemon`; a report inherited through `codex app-server --managed-daemon` is
-rejected as `shared_codex_daemon`. Zynk also rejects one authoritative session claimed by two terminals rather
-than guessing an owner.
+rejected as `shared_codex_daemon`. An older managed Codex fails with a typed error that names the required
+`--no-daemon` support on `agent start`; snapshot restore/resume exposes Codex's own launch error. Neither path
+silently falls back. Zynk also rejects one authoritative session claimed by two terminals as
+`duplicate_agent_session` rather than guessing an owner; contradictory session hints fail as
+`caller_identity_conflict`.
 
 ## Keybindings
 
@@ -540,9 +543,10 @@ Press `ctrl+b` to enter prefix mode; default actions are prefix-first and tmux-l
 
 Mouse works throughout. For copy: drag-select inside a pane, or hold exact Alt while dragging to force zynk-local
 selection when the application captures mouse input. Plain drag remains application-owned under mouse capture;
-Shift+drag is usually reserved for the host terminal's native selection. Window managers that bind Alt+drag
-(including KDE's default) must rebind that desktop gesture for zynk to receive it. Keyboard copy mode is
-`prefix+[` (`v` to select, `y` to copy, `q` to leave).
+an exact Alt+click or Alt+double-click is consumed by zynk and is not sent to that application. Shift+drag is
+usually reserved for the host terminal's native selection. Desktops that bind Alt+drag to window moves (some
+KDE setups) must rebind that desktop gesture for zynk to receive it. Keyboard copy mode is `prefix+[` (`v` to
+select, `y` to copy, `q` to leave).
 
 ## Configuration
 

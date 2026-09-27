@@ -43,16 +43,23 @@ class PostDogfoodDocsTest(unittest.TestCase):
             ),
         }
 
-        stale_grouped_claim = re.compile(
-            r"Wheel, scrollbar, and modifier-right-click[^.]*focus[^.]*before acting",
-            re.IGNORECASE,
+        stale_grouped_claims = (
+            "Wheel, scrollbar, and modifier-right-click passthrough over an unfocused pane "
+            "first focus it through the runtime-authoritative path.",
+            "Wheel, scrollbar, and modifier-right-click passthrough over an unfocused pane "
+            "now focus it through runtime authority before acting.",
         )
         for path, required_clauses in documents.items():
             with self.subTest(path=path):
                 text = normalized(path)
-                self.assertNotRegex(text, stale_grouped_claim)
+                for stale in stale_grouped_claims:
+                    self.assertNotIn(stale, text)
                 for clause in required_clauses:
-                    self.assertIn(clause, text)
+                    self.assertEqual(
+                        text.count(clause),
+                        1,
+                        f"{path} must contain exactly one canonical clause: {clause}",
+                    )
 
 
 if __name__ == "__main__":

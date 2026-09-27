@@ -293,7 +293,7 @@ fn render_row(
             meta_spans.push(Span::styled(format!(" {}", &meta[..start]), meta_style));
             meta_spans.extend(working_label_spans(
                 WORKING_LABEL.to_string(),
-                meta_style.fg(p.yellow),
+                meta_style,
                 true,
                 app,
             ));
@@ -777,6 +777,66 @@ mod tests {
                 assert_eq!(cell.fg, app.palette.yellow, "{name} cell x={x}");
                 assert_eq!(cell.bg, app.palette.panel_bg, "{name} cell x={x}");
                 assert_eq!(cell.modifier, Modifier::empty(), "{name} cell x={x}");
+            }
+        }
+    }
+
+    #[test]
+    fn navigator_working_label_off_preserves_selected_and_context_row_styles() {
+        let render = |selected: bool, context_only: bool, working_animation: bool| {
+            let mut app = AppState::test_new();
+            app.palette = crate::app::state::Palette::vesper();
+            app.working_animation = working_animation;
+            app.spinner_tick = 0;
+            if context_only {
+                app.navigator.query = "no-match".into();
+            }
+            let mut entry = row(0, false);
+            entry.label = "agent".into();
+            entry.meta = WORKING_LABEL.into();
+            entry.default_working_label = true;
+            entry.status = AgentState::Working;
+            entry.matched = !context_only;
+            let rows = vec![entry];
+            let width = 68;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_row(&app, frame, Rect::new(0, 0, width, 1), &rows, 0, selected)
+                })
+                .unwrap();
+            (terminal.backend().buffer().clone(), app)
+        };
+
+        for (name, selected, context_only) in [("selected", true, false), ("context", false, true)]
+        {
+            let (off, app) = render(selected, context_only, false);
+            let meta_start = off.area.width - metadata_width(off.area.width);
+            let label_start = meta_start + 1;
+            let expected = if selected {
+                panel_contrast_fg(&app.palette)
+            } else {
+                app.palette.overlay0
+            };
+            for x in label_start..label_start + WORKING_LABEL.len() as u16 {
+                assert_eq!(off[(x, 0)].fg, expected, "{name} off cell x={x}");
+            }
+
+            let (on, app) = render(selected, context_only, true);
+            assert!(
+                (label_start..label_start + WORKING_LABEL.len() as u16)
+                    .any(|x| on[(x, 0)].fg != off[(x, 0)].fg),
+                "{name} must exercise the shimmer"
+            );
+            if selected {
+                for x in label_start..label_start + WORKING_LABEL.len() as u16 {
+                    assert_ne!(
+                        on[(x, 0)].fg,
+                        app.palette.accent,
+                        "vesper selected shimmer cell must remain visible at x={x}"
+                    );
+                }
             }
         }
     }

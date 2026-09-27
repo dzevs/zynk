@@ -4296,6 +4296,7 @@ mod tests {
             viewport_row: 0,
             col: 0,
             local_selection_override: false,
+            source_id: crate::app::LOCAL_INPUT_SOURCE,
             at: std::time::Instant::now(),
         });
 
@@ -6268,6 +6269,7 @@ mod tests {
             viewport_row: 13,
             col: 14,
             local_selection_override: false,
+            source_id: crate::app::LOCAL_INPUT_SOURCE,
             at: pane_click_at,
         });
 

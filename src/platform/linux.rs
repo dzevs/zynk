@@ -450,13 +450,12 @@ pub(crate) fn process_inspection(pid: u32) -> Option<super::ProcessInspection> {
     })
 }
 
-/// Read a process environment only while `pid` still names the peer principal
-/// captured at socket accept time. Invalid UTF-8 entries are ignored; failure
-/// to pin the process returns `None` rather than attributing another process's
-/// environment to the caller.
-pub(crate) fn process_environment(
+/// Read only the two Codex session hints while `pid` still names the peer
+/// principal captured at socket accept time. Other environment entries may
+/// contain credentials and are deliberately neither decoded nor retained.
+pub(crate) fn process_codex_session_hints(
     principal: super::ProcessPrincipal,
-) -> Option<std::collections::HashMap<String, String>> {
+) -> Option<(Option<String>, Option<String>)> {
     let before = process_parent_and_start_time(principal.pid)?;
     if before.1 != principal.start_time {
         return None;
@@ -466,7 +465,8 @@ pub(crate) fn process_environment(
     if before != after {
         return None;
     }
-    let mut environment = std::collections::HashMap::new();
+    let mut thread_id = None;
+    let mut session_id = None;
     for entry in bytes
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
@@ -474,15 +474,16 @@ pub(crate) fn process_environment(
         let Some(separator) = entry.iter().position(|byte| *byte == b'=') else {
             continue;
         };
-        let Ok(key) = std::str::from_utf8(&entry[..separator]) else {
-            continue;
-        };
         let Ok(value) = std::str::from_utf8(&entry[separator + 1..]) else {
             continue;
         };
-        environment.insert(key.to_string(), value.to_string());
+        match &entry[..separator] {
+            b"CODEX_THREAD_ID" => thread_id = Some(value.to_string()),
+            b"CODEX_SESSION_ID" => session_id = Some(value.to_string()),
+            _ => {}
+        }
     }
-    Some(environment)
+    Some((thread_id, session_id))
 }
 
 /// The start time `pid` was stamped with, in clock ticks since boot.
@@ -1264,7 +1265,9 @@ fn process_session_id(pid: u32) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use crate::platform::{interactive_shell_command, is_pane_shell_process_name};
+    use crate::platform::{
+        interactive_shell_command, is_pane_shell_process_name, ProcessPrincipal,
+    };
     #[test]
     fn m839_shell_encoding_is_explicit_for_each_accepted_dialect() {
         let argv: Vec<String> = [
@@ -2196,6 +2199,47 @@ mod tests {
             child_start >= process_start_time(std::process::id()).expect("own start time"),
             "a child cannot have started before its parent"
         );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn codex_process_facts_are_principal_pinned_and_hint_scoped() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .env("CODEX_THREAD_ID", "thread-session")
+            .env("CODEX_SESSION_ID", "thread-session")
+            .env("SHOULD_NOT_BE_RETAINED", "private-value")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn process-facts child");
+        let pid = child.id();
+        let start_time = process_start_time(pid).expect("child start time");
+        let principal = ProcessPrincipal { pid, start_time };
+
+        let inspection = process_inspection(pid).expect("pinned argv inspection");
+        assert_eq!(inspection.principal, principal);
+        assert_eq!(inspection.parent_pid, std::process::id());
+        assert!(inspection
+            .argv
+            .first()
+            .is_some_and(|arg| std::path::Path::new(arg)
+                .file_name()
+                .is_some_and(|name| name == "sleep")));
+        assert_eq!(
+            process_codex_session_hints(principal),
+            Some((Some("thread-session".into()), Some("thread-session".into())))
+        );
+        assert_eq!(
+            process_codex_session_hints(ProcessPrincipal {
+                pid,
+                start_time: start_time.wrapping_add(1),
+            }),
+            None,
+            "a reused principal must not inherit environment hints"
+        );
+
         let _ = child.kill();
         let _ = child.wait();
     }

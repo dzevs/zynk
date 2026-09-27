@@ -765,8 +765,7 @@ impl AppState {
                         self.mode = Mode::Terminal;
                     }
 
-                    let local_selection_override =
-                        mouse.modifiers == crossterm::event::KeyModifiers::ALT;
+                    let local_selection_override = super::local_selection_override(mouse.modifiers);
                     if !local_selection_override
                         && self
                             .forward_pane_mouse_button(
@@ -787,12 +786,17 @@ impl AppState {
                         mouse.row - info.inner_rect.y,
                         mouse.column - info.inner_rect.x,
                     );
-                    self.selection = Some(Selection::anchor(
+                    let selection = Selection::anchor(
                         info.id,
                         row,
                         col,
                         self.pane_scroll_metrics(terminal_runtimes, info.id),
-                    ));
+                    );
+                    self.selection = Some(if local_selection_override {
+                        selection.with_input_source_owner(source_id)
+                    } else {
+                        selection
+                    });
                     return self.mouse_pane_focus_action(info.id);
                 } else if let Some(info) = self.view.pane_infos.iter().find(|p| {
                     mouse.column >= p.rect.x
@@ -810,6 +814,11 @@ impl AppState {
 
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.selection.is_some() && !chrome_gesture {
+                    if self.selection.as_ref().is_some_and(|selection| {
+                        selection.is_owned_by_other_input_source(source_id)
+                    }) {
+                        return None;
+                    }
                     self.update_selection_drag(terminal_runtimes, mouse.column, mouse.row);
                     return None;
                 }
@@ -958,6 +967,9 @@ impl AppState {
                 // Mouse-up either finishes a drag selection or releases after a
                 // double-click word selection; the latter is already finalized.
                 if let Some(selection) = self.selection.as_ref().filter(|_| !chrome_gesture) {
+                    if selection.is_owned_by_other_input_source(source_id) {
+                        return None;
+                    }
                     let was_click = selection.was_just_click();
                     let was_finalized = selection.is_finalized();
 

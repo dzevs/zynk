@@ -751,6 +751,35 @@ fn agent_resolved_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<Resol
     tokens::agent_rows(&app.sidebar_agents, entry, label)
 }
 
+pub(super) fn agent_entry_has_working_shimmer(app: &AppState, entry: &AgentPanelEntry) -> bool {
+    if entry.state != AgentState::Working
+        || entry
+            .state_labels
+            .contains_key(agent_panel_status_key(entry.state, entry.seen))
+    {
+        return false;
+    }
+    let default_style =
+        Style::default().fg(state_label_color(entry.state, entry.seen, &app.palette));
+    app.sidebar_agents
+        .rows_for_agent(entry.agent)
+        .iter()
+        .flatten()
+        .any(|configured| {
+            let (token, patch) = configured.parts();
+            if !matches!(token, crate::config::AgentSidebarToken::StateText) {
+                return false;
+            }
+            let resolved = apply_token_style(default_style, patch);
+            super::status::working_label_shimmer_palette(
+                resolved.fg.unwrap_or(app.palette.yellow),
+                app.palette.text,
+                &app.host_terminal_theme,
+            )
+            .is_some()
+        })
+}
+
 fn agent_row_heights(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<u16> {
     entries
         .iter()
@@ -2174,11 +2203,8 @@ fn render_agent_detail(
                     custom: name_style,
                 };
                 let resolved = agent_resolved_rows(app, detail);
-                let working_shimmer_app = (detail.state == AgentState::Working
-                    && !detail
-                        .state_labels
-                        .contains_key(agent_panel_status_key(detail.state, detail.seen)))
-                .then_some(app);
+                let working_shimmer_app =
+                    agent_entry_has_working_shimmer(app, detail).then_some(app);
                 for line in 0..height {
                     let row_y = y.saturating_add(line);
                     let mut spans = if line == 0 {

@@ -175,3 +175,32 @@ restart this produced two terminals carrying one hook-authoritative session and 
 The incident's message workspace, tab, cwd, and branch fields came from the recipient projection, not from a
 mixed sender environment. Both pane shells retained internally consistent and distinct `ZYNK_*` values; the
 shared daemon's inherited environment was the attribution failure.
+
+### Gate-2 clarification (2026-09-27)
+
+The post-dogfood implementation tightens that amendment without changing its principal boundary:
+
+- The incident paragraph above overstates the recipient projection. Only message workspace and tab are recipient
+  placement. Pane, cwd, and branch follow the resolved sender; they were misattributed because the shared daemon
+  resolved the second session through the first pane, not because either pane shell had a mixed environment.
+- The earlier phrase “fails with a typed launch error” applies to managed `agent start`, whose readiness loop can
+  return typed guidance naming Codex 0.157.1 and `--no-daemon`. Snapshot restore/resume does not probe the binary;
+  an older Codex process emits its own launch error and exits. Both paths remain fail closed with no downgrade.
+- One PID-plus-start-time-pinned walk runs from the Codex report peer to the target pane root. Every observed
+  parent must have started no later than its child. A reused peer or ancestor, an unreadable hop, a cycle, a
+  missing/reused pane root, a foreign UID, the hop limit, or failure to reach the pane root fails before report
+  dispatch. Crossing a managed daemon returns `shared_codex_daemon`.
+- The optional Codex environment values are read as only `CODEX_THREAD_ID` and `CODEX_SESSION_ID`; no complete
+  process environment is retained. On a session-bearing report they are checked against the session ID carried
+  by that report, so a legitimate same-pane clear, resume, or compaction may replace old authority. On
+  `zynk.message_received` they are checked against the pane's current hook-authoritative session. Absence never
+  rejects; contradiction returns `caller_identity_conflict` and never reroutes.
+- Duplicate ownership is checked once, in O(terminals), only when a report proposes a session anchor. It never
+  enters view or render work. Runtime conflicts return `duplicate_agent_session` before identity mutation.
+- A cold snapshot conflict restores both pane locations as plain shells and resumes neither owner. A live
+  handoff preserves both imported PTY runtimes because availability is already established, but removes both
+  conflicting identity/resume anchors. Clearing authority likewise drops the current session anchor, allowing a
+  later terminal to claim it explicitly.
+
+The three names above are additive values in the existing JSON error envelope. Protocol 20, request/response
+field shapes, persistence schema, snapshot shape, and handoff shape remain unchanged.

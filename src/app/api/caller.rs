@@ -38,6 +38,7 @@ enum CodexAncestryError {
     Unreadable { pid: u32 },
     ProcessReplaced { pid: u32 },
     Cycle { pid: u32 },
+    ParentStartedAfterChild { parent_pid: u32, child_pid: u32 },
     HopLimit,
 }
 
@@ -53,6 +54,12 @@ impl CodexAncestryError {
             Self::Cycle { pid } => {
                 format!("could not verify Codex hook ancestry because it cycles at pid {pid}")
             }
+            Self::ParentStartedAfterChild {
+                parent_pid,
+                child_pid,
+            } => format!(
+                "could not verify Codex hook ancestry because parent pid {parent_pid} started after child pid {child_pid}"
+            ),
             Self::HopLimit => format!(
                 "could not verify Codex hook ancestry within {} process hops",
                 crate::platform::MAX_ANCESTRY_HOPS
@@ -72,65 +79,178 @@ fn is_managed_codex_daemon(argv: &[String]) -> bool {
         && argv.iter().any(|arg| arg == "--managed-daemon")
 }
 
-fn inspect_codex_ancestry(
+fn inspect_codex_ancestry_in_pane(
     caller: ProcessPrincipal,
+    pane_root: ProcessPrincipal,
     mut inspect: impl FnMut(u32) -> Option<ProcessInspection>,
-) -> Result<CodexAncestry, CodexAncestryError> {
+) -> Result<CodexAncestry, CodexTreeError> {
     let mut current_pid = caller.pid;
     let mut seen = std::collections::HashMap::new();
+    let mut child: Option<(u32, u64)> = None;
     for hop in 0..crate::platform::MAX_ANCESTRY_HOPS {
         if current_pid <= 1 {
-            return Ok(CodexAncestry::PerPane);
+            return Err(CodexTreeError::Pane(CallerRejection::OutsidePane {
+                peer_pid: caller.pid,
+            }));
         }
-        let process =
-            inspect(current_pid).ok_or(CodexAncestryError::Unreadable { pid: current_pid })?;
+        let Some(process) = inspect(current_pid) else {
+            return Err(if current_pid == pane_root.pid {
+                CodexTreeError::Pane(CallerRejection::PaneRootGone {
+                    peer_pid: caller.pid,
+                    root_pid: pane_root.pid,
+                })
+            } else if hop == 0 {
+                CodexTreeError::Pane(CallerRejection::CallerReplaced {
+                    peer_pid: caller.pid,
+                })
+            } else {
+                CodexTreeError::Ancestry(CodexAncestryError::Unreadable { pid: current_pid })
+            });
+        };
         if hop == 0 && process.principal != caller {
-            return Err(CodexAncestryError::ProcessReplaced { pid: current_pid });
+            return Err(CodexTreeError::Pane(CallerRejection::CallerReplaced {
+                peer_pid: caller.pid,
+            }));
+        }
+        if current_pid == pane_root.pid && process.principal != pane_root {
+            return Err(CodexTreeError::Pane(CallerRejection::PaneRootReplaced {
+                peer_pid: caller.pid,
+                root_pid: pane_root.pid,
+            }));
+        }
+        if let Some((child_pid, child_start)) = child {
+            if process.principal.start_time > child_start {
+                return Err(CodexTreeError::Ancestry(
+                    CodexAncestryError::ParentStartedAfterChild {
+                        parent_pid: process.principal.pid,
+                        child_pid,
+                    },
+                ));
+            }
         }
         if let Some(previous_start) = seen.insert(current_pid, process.principal.start_time) {
             return if previous_start == process.principal.start_time {
-                Err(CodexAncestryError::Cycle { pid: current_pid })
+                Err(CodexTreeError::Ancestry(CodexAncestryError::Cycle {
+                    pid: current_pid,
+                }))
             } else {
-                Err(CodexAncestryError::ProcessReplaced { pid: current_pid })
+                Err(CodexTreeError::Ancestry(
+                    CodexAncestryError::ProcessReplaced { pid: current_pid },
+                ))
             };
+        }
+        if process.principal == pane_root {
+            return Ok(CodexAncestry::PerPane);
         }
         if is_managed_codex_daemon(&process.argv) {
             return Ok(CodexAncestry::SharedManagedDaemon);
         }
+        child = Some((process.principal.pid, process.principal.start_time));
         current_pid = process.parent_pid;
     }
-    Err(CodexAncestryError::HopLimit)
+    Err(CodexTreeError::Ancestry(CodexAncestryError::HopLimit))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexTreeError {
+    Pane(CallerRejection),
+    Ancestry(CodexAncestryError),
+}
+
+pub(crate) trait CallerProcessFacts {
+    fn current_uid(&mut self) -> u32;
+    fn process_parent_and_start_time(&mut self, pid: u32) -> Option<(u32, u64)>;
+    fn process_inspection(&mut self, pid: u32) -> Option<ProcessInspection>;
+    fn codex_session_hints(
+        &mut self,
+        principal: ProcessPrincipal,
+    ) -> Option<(Option<String>, Option<String>)>;
+}
+
+pub(crate) struct SystemCallerProcessFacts;
+
+impl CallerProcessFacts for SystemCallerProcessFacts {
+    fn current_uid(&mut self) -> u32 {
+        crate::platform::current_uid()
+    }
+
+    fn process_parent_and_start_time(&mut self, pid: u32) -> Option<(u32, u64)> {
+        crate::platform::process_parent_and_start_time(pid)
+    }
+
+    fn process_inspection(&mut self, pid: u32) -> Option<ProcessInspection> {
+        crate::platform::process_inspection(pid)
+    }
+
+    fn codex_session_hints(
+        &mut self,
+        principal: ProcessPrincipal,
+    ) -> Option<(Option<String>, Option<String>)> {
+        crate::platform::process_codex_session_hints(principal)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexHintExpectation<'a> {
+    Reported {
+        pane_id: &'a str,
+        session_id: &'a str,
+    },
+    Current {
+        pane_id: &'a str,
+    },
+}
+
+impl<'a> CodexHintExpectation<'a> {
+    pub(crate) fn pane_id(self) -> &'a str {
+        match self {
+            Self::Reported { pane_id, .. } | Self::Current { pane_id } => pane_id,
+        }
+    }
+}
+
+pub(crate) fn codex_hint_expectation(method: &Method) -> Option<CodexHintExpectation<'_>> {
+    fn reported<'a>(
+        pane_id: &'a str,
+        source: &str,
+        agent: &str,
+        session_id: Option<&'a str>,
+    ) -> Option<CodexHintExpectation<'a>> {
+        (source == "zynk:codex"
+            && crate::detect::parse_agent_label(agent) == Some(crate::detect::Agent::Codex))
+        .then_some(session_id)
+        .flatten()
+        .filter(|session_id| !session_id.is_empty())
+        .map(|session_id| CodexHintExpectation::Reported {
+            pane_id,
+            session_id,
+        })
+    }
+    match method {
+        Method::PaneReportAgent(params) => reported(
+            params.pane_id.as_str(),
+            &params.source,
+            &params.agent,
+            params.agent_session_id.as_deref(),
+        ),
+        Method::PaneReportAgentSession(params) => reported(
+            params.pane_id.as_str(),
+            &params.source,
+            &params.agent,
+            params.agent_session_id.as_deref(),
+        ),
+        Method::ZynkMessageReceived(params) => Some(CodexHintExpectation::Current {
+            pane_id: params.pane_id.as_str(),
+        }),
+        _ => None,
+    }
 }
 
 pub(crate) fn is_codex_session_report(method: &Method) -> bool {
-    let (source, agent, session_id, session_path) = match method {
-        Method::PaneReportAgent(params) => (
-            params.source.as_str(),
-            params.agent.as_str(),
-            params.agent_session_id.clone(),
-            params.agent_session_path.clone(),
-        ),
-        Method::PaneReportAgentSession(params) => (
-            params.source.as_str(),
-            params.agent.as_str(),
-            params.agent_session_id.clone(),
-            params.agent_session_path.clone(),
-        ),
-        _ => return false,
-    };
-    source == "zynk:codex"
-        && crate::detect::parse_agent_label(agent) == Some(crate::detect::Agent::Codex)
-        && crate::agent_resume::session_ref_from_report(source, "codex", session_id, session_path)
-            .is_some()
-}
-
-pub(crate) fn codex_hint_sensitive_target(method: &Method) -> Option<&str> {
-    match method {
-        Method::PaneReportAgent(params) => Some(params.pane_id.as_str()),
-        Method::PaneReportAgentSession(params) => Some(params.pane_id.as_str()),
-        Method::ZynkMessageReceived(params) => Some(params.pane_id.as_str()),
-        _ => None,
-    }
+    matches!(
+        codex_hint_expectation(method),
+        Some(CodexHintExpectation::Reported { .. })
+    )
 }
 
 /// Why a caller was refused. Each becomes the same F4 code with a message that
@@ -221,7 +341,7 @@ fn place_caller_in_pane_tree(
     peer: PeerCredentials,
     server_uid: u32,
     pane_root: Option<(u32, Option<u64>)>,
-    ancestry_of: impl Fn(u32) -> Option<(u32, u64)>,
+    ancestry_of: impl FnMut(u32) -> Option<(u32, u64)>,
 ) -> Result<(), CallerRejection> {
     let peer_pid = peer.pid;
     if peer.uid != server_uid {
@@ -303,10 +423,11 @@ impl App {
             .then_some(identity.3)
     }
 
-    pub(crate) fn caller_codex_hints_match_pane(
+    pub(crate) fn caller_codex_hints_match_method(
         &self,
-        pane_id: &str,
+        method: &Method,
         caller: ApiCaller,
+        facts: &mut impl CallerProcessFacts,
     ) -> Result<
         crate::zynk::identity::CodexHintVerification,
         crate::zynk::identity::CallerIdentityConflict,
@@ -316,51 +437,113 @@ impl App {
             return Ok(crate::zynk::identity::CodexHintVerification::NotPresent);
         }
 
+        let Some(expectation) = codex_hint_expectation(method) else {
+            return Ok(crate::zynk::identity::CodexHintVerification::NotPresent);
+        };
+        let authoritative = match expectation {
+            CodexHintExpectation::Reported { session_id, .. } => Some(session_id.to_string()),
+            CodexHintExpectation::Current { pane_id } => {
+                let current = self.authoritative_codex_session_for_pane(pane_id);
+                if current.is_none() {
+                    return Ok(crate::zynk::identity::CodexHintVerification::NotPresent);
+                }
+                current
+            }
+        };
         let hints = match caller.peer.and_then(|peer| {
             peer.start_time.map(|start_time| ProcessPrincipal {
                 pid: peer.pid,
                 start_time,
             })
         }) {
-            Some(principal) => crate::zynk::identity::CodexSessionHints::from_process(principal)?
-                .unwrap_or_default(),
+            Some(principal) => match facts.codex_session_hints(principal) {
+                Some((thread_id, session_id)) => {
+                    crate::zynk::identity::CodexSessionHints::from_values(thread_id, session_id)?
+                }
+                None => {
+                    tracing::warn!(
+                        peer_pid = principal.pid,
+                        "could not read Codex session hints from the pinned API peer"
+                    );
+                    crate::zynk::identity::CodexSessionHints::default()
+                }
+            },
             None => crate::zynk::identity::CodexSessionHints::default(),
         };
-        let authoritative = self.authoritative_codex_session_for_pane(pane_id);
         hints.validate(authoritative.as_deref())
+    }
+
+    fn pane_process_root(&self, pane_id: &str) -> Option<(u32, Option<u64>)> {
+        let (ws_idx, resolved) = self.parse_pane_id(pane_id)?;
+        self.state
+            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, resolved)
+            .and_then(|runtime| {
+                runtime
+                    .child_pid()
+                    .map(|pid| (pid, runtime.child_start_time()))
+            })
     }
 
     pub(crate) fn codex_session_report_has_per_pane_ancestry(
         &self,
+        pane_id: &str,
         caller: ApiCaller,
-    ) -> Result<(), String> {
+        facts: &mut impl CallerProcessFacts,
+    ) -> Result<(), (&'static str, String)> {
         #[cfg(debug_assertions)]
         if caller.trusted_as_pane_child {
             return Ok(());
         }
 
-        let peer = caller
-            .peer
-            .ok_or_else(|| "Codex hook caller has no peer credentials".to_string())?;
-        let start_time = peer.start_time.ok_or_else(|| {
-            format!(
-                "Codex hook caller pid {} exited before its ancestry could be verified",
-                peer.pid
-            )
+        let peer = caller.peer.ok_or_else(|| {
+            let rejection = CallerRejection::UnknownPeer;
+            (CALLER_OUTSIDE_PANE, rejection.message(pane_id))
         })?;
-        match inspect_codex_ancestry(
+        if peer.uid != facts.current_uid() {
+            let rejection = CallerRejection::ForeignUid {
+                peer_pid: peer.pid,
+                uid: peer.uid,
+            };
+            return Err((CALLER_OUTSIDE_PANE, rejection.message(pane_id)));
+        }
+        let Some(start_time) = peer.start_time else {
+            let rejection = CallerRejection::CallerUnidentified { peer_pid: peer.pid };
+            return Err((CALLER_OUTSIDE_PANE, rejection.message(pane_id)));
+        };
+        let Some((root_pid, root_start_time)) = self.pane_process_root(pane_id) else {
+            let rejection = CallerRejection::PaneHasNoProcess { peer_pid: peer.pid };
+            return Err((CALLER_OUTSIDE_PANE, rejection.message(pane_id)));
+        };
+        let Some(root_start_time) = root_start_time else {
+            let rejection = CallerRejection::PaneRootUnidentified {
+                peer_pid: peer.pid,
+                root_pid,
+            };
+            return Err((CALLER_OUTSIDE_PANE, rejection.message(pane_id)));
+        };
+        match inspect_codex_ancestry_in_pane(
             ProcessPrincipal {
                 pid: peer.pid,
                 start_time,
             },
-            crate::platform::process_inspection,
+            ProcessPrincipal {
+                pid: root_pid,
+                start_time: root_start_time,
+            },
+            |pid| facts.process_inspection(pid),
         ) {
             Ok(CodexAncestry::PerPane) => Ok(()),
-            Ok(CodexAncestry::SharedManagedDaemon) => Err(format!(
-                "Codex hook caller pid {} descends from `codex app-server --managed-daemon`; zynk-managed Codex sessions require per-pane `codex --no-daemon` processes",
-                peer.pid
+            Ok(CodexAncestry::SharedManagedDaemon) => Err((
+                SHARED_CODEX_DAEMON,
+                format!(
+                    "Codex hook caller pid {} descends from `codex app-server --managed-daemon` inside pane {pane_id}; zynk-managed Codex sessions require per-pane `codex --no-daemon` processes",
+                    peer.pid
+                ),
             )),
-            Err(error) => Err(error.message()),
+            Err(CodexTreeError::Pane(rejection)) => {
+                Err((CALLER_OUTSIDE_PANE, rejection.message(pane_id)))
+            }
+            Err(CodexTreeError::Ancestry(error)) => Err((SHARED_CODEX_DAEMON, error.message())),
         }
     }
 
@@ -373,10 +556,11 @@ impl App {
         &self,
         pane_id: &str,
         caller: ApiCaller,
+        facts: &mut impl CallerProcessFacts,
     ) -> Result<(), CallerRejection> {
-        let Some((ws_idx, resolved)) = self.parse_pane_id(pane_id) else {
+        if self.parse_pane_id(pane_id).is_none() {
             return Ok(());
-        };
+        }
 
         #[cfg(debug_assertions)]
         if caller.trusted_as_pane_child {
@@ -389,21 +573,11 @@ impl App {
 
         // Load the pid first: the runtime publishes the start time before it, so
         // reading in this order always pairs a pid with its own start time.
-        let pane_root = self
-            .state
-            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, resolved)
-            .and_then(|runtime| {
-                runtime
-                    .child_pid()
-                    .map(|pid| (pid, runtime.child_start_time()))
-            });
+        let pane_root = self.pane_process_root(pane_id);
 
-        place_caller_in_pane_tree(
-            peer,
-            crate::platform::current_uid(),
-            pane_root,
-            crate::platform::process_parent_and_start_time,
-        )
+        place_caller_in_pane_tree(peer, facts.current_uid(), pane_root, |pid| {
+            facts.process_parent_and_start_time(pid)
+        })
     }
 }
 
@@ -501,10 +675,14 @@ mod tests {
             (100, inspected(100, 10, 1, &["zsh"])),
         ]);
         assert_eq!(
-            inspect_codex_ancestry(
+            inspect_codex_ancestry_in_pane(
                 ProcessPrincipal {
                     pid: 400,
                     start_time: 40,
+                },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
                 },
                 |pid| managed.get(&pid).cloned(),
             ),
@@ -520,10 +698,14 @@ mod tests {
             (100, inspected(100, 10, 1, &["zsh"])),
         ]);
         assert_eq!(
-            inspect_codex_ancestry(
+            inspect_codex_ancestry_in_pane(
                 ProcessPrincipal {
                     pid: 400,
                     start_time: 40,
+                },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
                 },
                 |pid| per_pane.get(&pid).cloned(),
             ),
@@ -536,10 +718,14 @@ mod tests {
             (100, inspected(100, 10, 1, &["zsh"])),
         ]);
         assert_eq!(
-            inspect_codex_ancestry(
+            inspect_codex_ancestry_in_pane(
                 ProcessPrincipal {
                     pid: 300,
                     start_time: 30,
+                },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
                 },
                 |pid| ordinary_app_server.get(&pid).cloned(),
             ),
@@ -551,57 +737,82 @@ mod tests {
     fn codex_ancestry_fails_closed_on_pid_reuse_unreadable_cycles_and_hop_bound() {
         let reused_peer = HashMap::from([(400, inspected(400, 41, 1, &["python", "hook.py"]))]);
         assert_eq!(
-            inspect_codex_ancestry(
+            inspect_codex_ancestry_in_pane(
                 ProcessPrincipal {
                     pid: 400,
                     start_time: 40,
                 },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
                 |pid| reused_peer.get(&pid).cloned(),
             ),
-            Err(CodexAncestryError::ProcessReplaced { pid: 400 })
+            Err(CodexTreeError::Pane(CallerRejection::CallerReplaced {
+                peer_pid: 400
+            }))
         );
 
         let unreadable = HashMap::from([(400, inspected(400, 40, 300, &["python", "hook.py"]))]);
         assert_eq!(
-            inspect_codex_ancestry(
+            inspect_codex_ancestry_in_pane(
                 ProcessPrincipal {
                     pid: 400,
                     start_time: 40,
                 },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
                 |pid| unreadable.get(&pid).cloned(),
             ),
-            Err(CodexAncestryError::Unreadable { pid: 300 })
+            Err(CodexTreeError::Ancestry(CodexAncestryError::Unreadable {
+                pid: 300
+            }))
         );
 
         let cycle = HashMap::from([
             (400, inspected(400, 40, 300, &["python"])),
-            (300, inspected(300, 30, 400, &["sh"])),
+            (300, inspected(300, 40, 400, &["sh"])),
         ]);
         assert_eq!(
-            inspect_codex_ancestry(
+            inspect_codex_ancestry_in_pane(
                 ProcessPrincipal {
                     pid: 400,
                     start_time: 40,
                 },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
                 |pid| cycle.get(&pid).cloned(),
             ),
-            Err(CodexAncestryError::Cycle { pid: 400 })
+            Err(CodexTreeError::Ancestry(CodexAncestryError::Cycle {
+                pid: 400
+            }))
         );
 
         let mut deep = HashMap::new();
         for offset in 0..=crate::platform::MAX_ANCESTRY_HOPS {
             let pid = 1000 + offset as u32;
-            deep.insert(pid, inspected(pid, u64::from(pid), pid + 1, &["helper"]));
+            deep.insert(
+                pid,
+                inspected(pid, 10_000 - u64::from(offset as u32), pid + 1, &["helper"]),
+            );
         }
         assert_eq!(
-            inspect_codex_ancestry(
+            inspect_codex_ancestry_in_pane(
                 ProcessPrincipal {
                     pid: 1000,
-                    start_time: 1000,
+                    start_time: 10_000,
+                },
+                ProcessPrincipal {
+                    pid: 9999,
+                    start_time: 1,
                 },
                 |pid| deep.get(&pid).cloned(),
             ),
-            Err(CodexAncestryError::HopLimit)
+            Err(CodexTreeError::Ancestry(CodexAncestryError::HopLimit))
         );
     }
 
@@ -620,14 +831,104 @@ mod tests {
 
         let replaced = HashMap::from([(400, inspected(400, 41, 1, &["unrelated-reused-process"]))]);
         assert_eq!(
-            inspect_codex_ancestry(
+            inspect_codex_ancestry_in_pane(
                 ProcessPrincipal {
                     pid: 400,
                     start_time: 40,
                 },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
                 |pid| replaced.get(&pid).cloned(),
             ),
-            Err(CodexAncestryError::ProcessReplaced { pid: 400 })
+            Err(CodexTreeError::Pane(CallerRejection::CallerReplaced {
+                peer_pid: 400
+            }))
+        );
+    }
+
+    #[test]
+    fn codex_ancestry_stops_at_the_pane_root_and_checks_parent_time_order() {
+        let daemon_above_root = HashMap::from([
+            (400, inspected(400, 40, 200, &["hook"])),
+            (200, inspected(200, 20, 100, &["codex", "--no-daemon"])),
+            (100, inspected(100, 10, 50, &["zsh"])),
+            (
+                50,
+                inspected(50, 5, 1, &["codex", "app-server", "--managed-daemon"]),
+            ),
+        ]);
+        assert_eq!(
+            inspect_codex_ancestry_in_pane(
+                ProcessPrincipal {
+                    pid: 400,
+                    start_time: 40,
+                },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
+                |pid| daemon_above_root.get(&pid).cloned(),
+            ),
+            Ok(CodexAncestry::PerPane),
+            "a daemon outside the pane tree must not reject an in-pane report"
+        );
+
+        let impossible_parent = HashMap::from([
+            (400, inspected(400, 40, 200, &["hook"])),
+            (200, inspected(200, 50, 100, &["codex", "--no-daemon"])),
+            (100, inspected(100, 10, 1, &["zsh"])),
+        ]);
+        assert_eq!(
+            inspect_codex_ancestry_in_pane(
+                ProcessPrincipal {
+                    pid: 400,
+                    start_time: 40,
+                },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
+                |pid| impossible_parent.get(&pid).cloned(),
+            ),
+            Err(CodexTreeError::Ancestry(
+                CodexAncestryError::ParentStartedAfterChild {
+                    parent_pid: 200,
+                    child_pid: 400,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn codex_ancestry_rejects_a_reused_intermediate_ancestor_pid() {
+        let reused_ancestor = HashMap::from([
+            (400, inspected(400, 40, 300, &["hook"])),
+            // A real parent of pid 400 must predate it. Seeing pid 300 with a
+            // later start proves that the original ancestor was reaped and
+            // its numeric pid was reused before this walk reached it.
+            (300, inspected(300, 41, 100, &["unrelated-reused-process"])),
+            (100, inspected(100, 10, 1, &["zsh"])),
+        ]);
+        assert_eq!(
+            inspect_codex_ancestry_in_pane(
+                ProcessPrincipal {
+                    pid: 400,
+                    start_time: 40,
+                },
+                ProcessPrincipal {
+                    pid: 100,
+                    start_time: 10,
+                },
+                |pid| reused_ancestor.get(&pid).cloned(),
+            ),
+            Err(CodexTreeError::Ancestry(
+                CodexAncestryError::ParentStartedAfterChild {
+                    parent_pid: 300,
+                    child_pid: 400,
+                }
+            ))
         );
     }
 

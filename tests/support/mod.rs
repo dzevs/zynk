@@ -20,12 +20,14 @@ const WATCHDOG_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const RUNTIME_OWNER_MARKER: &str = ".zynk-test-owner-pid";
 pub const CURRENT_PROTOCOL: u32 = 20;
 
-const PANE_INJECTED_ENV_VARS: [&str; 5] = [
+const PANE_INJECTED_ENV_VARS: [&str; 7] = [
     "ZYNK_WORKSPACE_ID",
     "ZYNK_TAB_ID",
     "ZYNK_PANE_ID",
     "ZYNK_ENV",
     "ZYNK_BIN_PATH",
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
 ];
 
 /// Remove the environment injected when an integration test itself runs inside zynk.

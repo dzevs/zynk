@@ -521,6 +521,22 @@ pub struct TerminalState {
 }
 
 impl TerminalState {
+    #[cfg(test)]
+    pub(crate) fn test_identity_mutation_fingerprint(&self) -> String {
+        format!(
+            "authority={:?};identity={:?};persisted={:?};sequences={:?};suppressed={:?};stale={:?};state={:?};revision={};argv={:?}",
+            self.hook_authority,
+            self.hook_identity,
+            self.persisted_agent_session,
+            self.hook_report_sequences,
+            self.suppressed_hook_reports,
+            self.stale_hook_sessions,
+            self.state,
+            self.revision,
+            self.launch_argv,
+        )
+    }
+
     pub fn new(id: TerminalId, cwd: PathBuf) -> Self {
         Self {
             id,

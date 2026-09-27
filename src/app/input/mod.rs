@@ -393,7 +393,7 @@ impl App {
             return;
         }
 
-        let handled_pane_double_click = self.handle_pane_double_click(mouse);
+        let handled_pane_double_click = self.handle_pane_double_click(source_id, mouse);
         if !handled_pane_double_click && !self.focus_pane_before_mouse_dispatch(mouse) {
             return;
         }
@@ -666,7 +666,11 @@ impl App {
         true
     }
 
-    fn handle_pane_double_click(&mut self, mouse: MouseEvent) -> bool {
+    fn handle_pane_double_click(
+        &mut self,
+        source_id: crate::app::InputSourceId,
+        mouse: MouseEvent,
+    ) -> bool {
         // A pane press stops being a double-click candidate once it becomes
         // a drag or completes as a real text selection.
         match mouse.kind {
@@ -689,7 +693,7 @@ impl App {
 
         // Only terminal-pane left-clicks can start this gesture; other clicks
         // should keep their existing mouse behavior and clear stale candidates.
-        let Some(click) = self.pane_click_candidate(mouse) else {
+        let Some(click) = self.pane_click_candidate(source_id, mouse) else {
             return false;
         };
 
@@ -699,15 +703,30 @@ impl App {
             return false;
         }
 
+        if click.local_selection_override
+            && self
+                .state
+                .active
+                .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+                .and_then(crate::workspace::Workspace::focused_pane_id)
+                != Some(click.pane_id)
+        {
+            return false;
+        }
+
         self.select_double_clicked_word(click)
     }
 
-    fn pane_click_candidate(&mut self, mouse: MouseEvent) -> Option<PaneClickState> {
+    fn pane_click_candidate(
+        &mut self,
+        source_id: crate::app::InputSourceId,
+        mouse: MouseEvent,
+    ) -> Option<PaneClickState> {
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return None;
         }
 
-        let local_selection_override = mouse.modifiers == KeyModifiers::ALT;
+        let local_selection_override = local_selection_override(mouse.modifiers);
         if !mouse.modifiers.is_empty() && !local_selection_override {
             self.last_pane_click = None;
             return None;
@@ -728,6 +747,7 @@ impl App {
             viewport_row: mouse.row - info.inner_rect.y,
             col: mouse.column - info.inner_rect.x,
             local_selection_override,
+            source_id,
             at: std::time::Instant::now(),
         })
     }
@@ -752,6 +772,7 @@ impl App {
             click.viewport_row,
             click.col,
             click.local_selection_override,
+            click.local_selection_override.then_some(click.source_id),
         );
         if selected {
             self.selection_highlight_clear_deadline = self
@@ -761,6 +782,10 @@ impl App {
         }
         selected
     }
+}
+
+pub(crate) fn local_selection_override(modifiers: KeyModifiers) -> bool {
+    modifiers == KeyModifiers::ALT
 }
 
 pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {

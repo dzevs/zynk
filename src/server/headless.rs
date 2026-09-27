@@ -8806,6 +8806,19 @@ mod tests {
             );
     }
 
+    fn cached_shimmer_cell_count(client: &ClientConnection) -> usize {
+        client
+            .working_animation_cells
+            .iter()
+            .filter(|cell| {
+                matches!(
+                    cell.transition,
+                    crate::server::render_stream::WorkingAnimationTransition::Shimmer { .. }
+                )
+            })
+            .count()
+    }
+
     fn working_animation_allocation_server(
         agent_count: usize,
         visible_pane_count: usize,
@@ -8860,6 +8873,7 @@ mod tests {
         visible_panes: usize,
         clients: usize,
         animated_cells: usize,
+        shimmer_cells: usize,
         scheduler_allocations: usize,
         frame_ownership_allocations: usize,
         frames_sent: usize,
@@ -8922,10 +8936,17 @@ mod tests {
             .values()
             .map(|client| client.working_animation_cells.len())
             .sum();
+        let shimmer_cells = server.clients.values().map(cached_shimmer_cell_count).sum();
         for client in server.clients.values() {
             assert!(
                 !client.working_animation_cells.is_empty(),
                 "every allocation-probe client needs animated cells"
+            );
+            let client_shimmer_cells = cached_shimmer_cell_count(client);
+            assert!(
+                client_shimmer_cells >= crate::ui::WORKING_LABEL_LEN
+                    && client_shimmer_cells.is_multiple_of(crate::ui::WORKING_LABEL_LEN),
+                "every measured allocation client needs complete visible working-label shimmer cells, got {client_shimmer_cells}"
             );
         }
 
@@ -9001,6 +9022,7 @@ mod tests {
             visible_panes: visible_pane_count,
             clients: client_count,
             animated_cells,
+            shimmer_cells,
             scheduler_allocations: expected_scheduler_allocations.expect("scheduler sample"),
             frame_ownership_allocations: expected_frame_ownership_allocations
                 .expect("frame ownership sample"),
@@ -9010,11 +9032,12 @@ mod tests {
             fallbacks: 0,
         };
         eprintln!(
-            "working-animation-allocation geometry=240x80 agents={} panes={} clients={} cells={} scheduler_allocations={} frame_ownership_allocations={} retained_frames={} full_renders={} fallbacks={} serialized_bytes={}",
+            "working-animation-allocation geometry=240x80 agents={} panes={} clients={} cells={} shimmer_cells={} scheduler_allocations={} frame_ownership_allocations={} retained_frames={} full_renders={} fallbacks={} serialized_bytes={}",
             sample.agents,
             sample.visible_panes,
             sample.clients,
             sample.animated_cells,
+            sample.shimmer_cells,
             sample.scheduler_allocations,
             sample.frame_ownership_allocations,
             sample.frames_sent,
@@ -9213,14 +9236,14 @@ mod tests {
     async fn retained_animation_keeps_per_client_layout_for_mixed_sizes_and_encodings() {
         let (mut retained_server, retained_desktop_rx, _) = retained_test_server(b"linked");
         let (mut full_server, full_desktop_rx, _) = retained_test_server(b"linked");
-        let retained_mobile_rx = add_animation_test_client(
+        let retained_ansi_rx = add_animation_test_client(
             &mut retained_server,
             2,
-            (44, 20),
+            (80, 24),
             RenderEncoding::TerminalAnsi,
         );
-        let full_mobile_rx =
-            add_animation_test_client(&mut full_server, 2, (44, 20), RenderEncoding::TerminalAnsi);
+        let full_ansi_rx =
+            add_animation_test_client(&mut full_server, 2, (80, 24), RenderEncoding::TerminalAnsi);
         set_first_test_pane_working(&mut retained_server);
         set_first_test_pane_working(&mut full_server);
 
@@ -9229,75 +9252,77 @@ mod tests {
         let _ = retained_desktop_rx
             .recv_timeout(Duration::from_millis(100))
             .expect("retained desktop baseline");
-        let retained_mobile_baseline = read_server_terminal_frame(
-            retained_mobile_rx
+        let retained_ansi_baseline = read_server_terminal_frame(
+            retained_ansi_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("retained mobile baseline"),
+                .expect("retained TerminalAnsi baseline"),
         );
         let _ = full_desktop_rx
             .recv_timeout(Duration::from_millis(100))
             .expect("full desktop baseline");
-        let full_mobile_baseline = read_server_terminal_frame(
-            full_mobile_rx
+        let full_ansi_baseline = read_server_terminal_frame(
+            full_ansi_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("full mobile baseline"),
+                .expect("full TerminalAnsi baseline"),
         );
-        assert_eq!(retained_mobile_baseline.seq, 1);
-        assert_eq!(full_mobile_baseline.seq, 1);
+        assert_eq!(retained_ansi_baseline.seq, 1);
+        assert_eq!(full_ansi_baseline.seq, 1);
         assert_eq!(
-            (
-                retained_mobile_baseline.width,
-                retained_mobile_baseline.height
-            ),
-            (44, 20)
+            (retained_ansi_baseline.width, retained_ansi_baseline.height),
+            (80, 24)
         );
-        assert_eq!(retained_mobile_baseline, full_mobile_baseline);
-        assert!(retained_mobile_baseline.full);
-        assert!(!retained_mobile_baseline.bytes.is_empty());
+        assert_eq!(retained_ansi_baseline, full_ansi_baseline);
+        assert!(retained_ansi_baseline.full);
+        assert!(!retained_ansi_baseline.bytes.is_empty());
         assert!(!retained_server.clients[&1]
             .working_animation_cells
             .is_empty());
         assert!(!retained_server.clients[&2]
             .working_animation_cells
             .is_empty());
+        assert_eq!(
+            cached_shimmer_cell_count(&retained_server.clients[&2]),
+            crate::ui::WORKING_LABEL_LEN,
+            "the TerminalAnsi client must retain the visible working-label shimmer"
+        );
 
         retained_server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
         full_server.app.state.spinner_tick = crate::app::WORKING_ANIMATION_TICK_STEP;
         assert!(retained_server.render_retained_animation_update_and_stream());
         full_server.render_and_stream();
 
-        let retained_mobile_update = read_server_terminal_frame(
-            retained_mobile_rx
+        let retained_ansi_update = read_server_terminal_frame(
+            retained_ansi_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("retained mobile update"),
+                .expect("retained TerminalAnsi update"),
         );
-        let full_mobile_update = read_server_terminal_frame(
-            full_mobile_rx
+        let full_ansi_update = read_server_terminal_frame(
+            full_ansi_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("full-render mobile update"),
+                .expect("full-render TerminalAnsi update"),
         );
-        assert_eq!(retained_mobile_update.seq, 2);
-        assert_eq!(full_mobile_update.seq, 2);
+        assert_eq!(retained_ansi_update.seq, 2);
+        assert_eq!(full_ansi_update.seq, 2);
         assert_eq!(
             (
-                retained_mobile_update.width,
-                retained_mobile_update.height,
-                retained_mobile_update.full,
+                retained_ansi_update.width,
+                retained_ansi_update.height,
+                retained_ansi_update.full,
             ),
-            (44, 20, false)
+            (80, 24, false)
         );
         assert_eq!(
             (
-                full_mobile_update.width,
-                full_mobile_update.height,
-                full_mobile_update.full,
+                full_ansi_update.width,
+                full_ansi_update.height,
+                full_ansi_update.full,
             ),
-            (44, 20, false)
+            (80, 24, false)
         );
-        assert!(!retained_mobile_update.bytes.is_empty());
-        assert_eq!(retained_mobile_update.bytes, full_mobile_update.bytes);
+        assert!(!retained_ansi_update.bytes.is_empty());
+        assert_eq!(retained_ansi_update.bytes, full_ansi_update.bytes);
         assert_ne!(
-            retained_mobile_update.bytes, retained_mobile_baseline.bytes,
+            retained_ansi_update.bytes, retained_ansi_baseline.bytes,
             "the retained update must not reuse stale baseline bytes"
         );
 
@@ -9314,16 +9339,15 @@ mod tests {
             );
         }
         let decoded_retained =
-            decode_terminal_ansi_frames(&[&retained_mobile_baseline, &retained_mobile_update]);
-        let decoded_full =
-            decode_terminal_ansi_frames(&[&full_mobile_baseline, &full_mobile_update]);
+            decode_terminal_ansi_frames(&[&retained_ansi_baseline, &retained_ansi_update]);
+        let decoded_full = decode_terminal_ansi_frames(&[&full_ansi_baseline, &full_ansi_update]);
         assert_frame_data_eq(&decoded_retained, &decoded_full);
         assert_visible_frame_cells_eq(
             &decoded_retained,
             full_server.clients[&2]
                 .render_state
                 .last_frame()
-                .expect("full mobile semantic frame"),
+                .expect("full TerminalAnsi semantic frame"),
         );
     }
 
@@ -17119,6 +17143,9 @@ next_tab = ""
                 Some(foreground_tx),
             ),
         );
+        server.clients.get_mut(&1).unwrap().mode = ClientConnectionMode::TerminalObserve {
+            terminal_id: "observer-terminal".into(),
+        };
         server.foreground_client_id = Some(2);
         server.sync_foreground_client_state();
 
@@ -17180,7 +17207,13 @@ next_tab = ""
             background_control_rx
                 .recv_timeout(Duration::from_millis(50))
                 .is_err(),
-            "nonforeground App clients must not receive pane clipboard writes"
+            "terminal-observe clients must not receive pane clipboard writes"
+        );
+        assert!(
+            foreground_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "one OSC 52 write must emit exactly one foreground Clipboard message"
         );
 
         drop(runtime);

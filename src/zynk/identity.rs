@@ -52,19 +52,6 @@ impl CodexSessionHints {
         )
     }
 
-    pub(crate) fn from_process(
-        principal: crate::platform::ProcessPrincipal,
-    ) -> Result<Option<Self>, CallerIdentityConflict> {
-        let Some(mut environment) = crate::platform::process_environment(principal) else {
-            return Ok(None);
-        };
-        Self::from_values(
-            environment.remove(CODEX_THREAD_ID_ENV),
-            environment.remove(CODEX_SESSION_ID_ENV),
-        )
-        .map(Some)
-    }
-
     #[cfg(test)]
     pub(crate) fn present(value: impl Into<String>) -> Self {
         Self {

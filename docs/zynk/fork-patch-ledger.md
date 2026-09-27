@@ -8240,3 +8240,45 @@ span, collection, and retained-application helpers. Protocol 20, persistence sch
 animation cadence, and release version are unchanged. This implementation is not closed by author checks; it
 requires one exact-object Claude Gate-2, a fresh swarm Gate-3 using the approved packet-v5 machinery, and a second
 operator-gated dogfood install before any merge or push.
+
+#### Post-dogfood Gate-2 bounded correction (IMPLEMENTED / PENDING VERIFICATION)
+
+The duplicate Codex attribution defect is inherited across the released base through the dogfood candidate
+(`9869b28a..ca13b379`); the 3.2.0 panel/animation work did not create it. The hook could later appear to
+self-correct when another lifecycle event reported from a per-pane process, so recurrence after restart depended
+on shared-daemon timing even though the authority violation itself was deterministic once that daemon emitted a
+hook. The retained incident evidence, not durable docs, owns concrete live session IDs.
+
+Gate-1 amendments A1-A5 are binding here. Cold restore keeps the full layout but resumes neither duplicate
+owner; live handoff keeps both imported runtimes and removes only conflicting anchors. Missing Codex hints never
+reject, report hints constrain the newly reported session, and receipt hints constrain current authority. This
+corrects the earlier row's broad “typed minimum-version failure” wording: managed `agent start` returns typed
+guidance naming `--no-daemon` and the verified 0.157.1 minimum, while snapshot restore/resume shows only Codex's
+own launch error. Neither silently downgrades. Public Alt-drag guidance names only desktops that actually bind
+the gesture (some KDE setups). Message workspace/tab fields are recipient placement, while verified sender
+attribution supplies pane and cwd; no live IDs are embedded in SPEC.
+
+The bounded Gate-2 fixes close five implementation gaps found on `aa7c606a`: same-pane clear/resume/compact
+reports validate against their reported session; duplicate live-handoff PTYs are preserved; animation-off labels
+retain the exact row style; exact-Alt selections are owned by their initiating input source; and an override
+double-click cannot bypass failed focus. The Codex ancestry proof is one start-time-ordered, principal-pinned walk
+to the pane root and reads only the two hint variables. Duplicate-session admission performs one report-bound
+O(terminals) scan. The startup diagnostic is visible rather than log-only, and both Codex hint variables are
+removed from pane launch and neutral test environments before an intentional test rebind.
+
+Accepted evidence boundaries remain explicit rather than being converted into behavior claims: C3's
+TerminalAnsi byte oracle covers its reviewed mixed-client transport case, and C4's deterministic allocation
+scale proof uses fixed geometry and a clean PTY while a separate same-tick oracle covers retained PTY plus
+animation composition. The inherited default-inbox fallback in `src/cli/native.rs` may still use the
+detection-derived `pane.agent` label when no hook-authoritative agent label is available. No receipt-authority
+escalation was demonstrated; changing that fallback requires a separate operator decision.
+
+The required right-click documentation correction is included: wheel and scrollbar actions retain focus-first
+forwarding, whereas an accepted modifier-right-click Down is delivered to its explicit runtime before focus. Exact Alt click,
+double-click, drag, and release are zynk-owned under mouse capture and do not reach the application. The error
+vocabulary adds `shared_codex_daemon`, `duplicate_agent_session`, and `caller_identity_conflict` inside the
+existing JSON error shape; protocol 20, schema, method/field shapes, snapshot/handoff shape, cadence, and release
+version remain unchanged. The retained-animation preflight fingerprint change is a reviewed delegation delta:
+the preflight now asks each tagged transition whether the current cell is eligible, while the glyph-only and
+style-only rules remain fingerprinted separately with blend, color resolution, demand, collection, and apply
+helpers. This row remains pending a fresh exact-object Gate-2 and swarm Gate-3.

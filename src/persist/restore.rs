@@ -170,7 +170,14 @@ fn collect_snapshot_ids_inner(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     }
 }
 
-fn conflicting_snapshot_agent_sessions(snapshot: &SessionSnapshot) -> HashSet<String> {
+struct SnapshotAgentSessionConflicts {
+    keys: HashSet<String>,
+    descriptions: Vec<String>,
+}
+
+fn conflicting_snapshot_agent_sessions(
+    snapshot: &SessionSnapshot,
+) -> SnapshotAgentSessionConflicts {
     let mut owners: HashMap<String, (String, Vec<String>)> = HashMap::new();
     for (workspace_index, workspace) in snapshot.workspaces.iter().enumerate() {
         let workspace_label = workspace
@@ -225,16 +232,26 @@ fn conflicting_snapshot_agent_sessions(snapshot: &SessionSnapshot) -> HashSet<St
         .collect();
     conflicts.sort_by(|left, right| left.0.cmp(&right.0));
     let mut keys = HashSet::new();
+    let mut descriptions = Vec::new();
     for (key, (session, mut panes)) in conflicts {
         panes.sort();
-        warn!(
-            session,
-            panes = %panes.join(", "),
-            "snapshot contains a duplicate agent session; restoring every conflicting pane as a plain shell"
-        );
+        let panes = panes.join(", ");
+        descriptions.push(format!("{session} on {panes}"));
         keys.insert(key);
     }
-    keys
+    SnapshotAgentSessionConflicts { keys, descriptions }
+}
+
+pub(crate) fn snapshot_agent_session_conflict_diagnostic(
+    snapshot: &SessionSnapshot,
+) -> Option<String> {
+    let conflicts = conflicting_snapshot_agent_sessions(snapshot);
+    (!conflicts.descriptions.is_empty()).then(|| {
+        format!(
+            "Duplicate agent session detected: {}. The complete layout was preserved: cold restore uses plain shells, live handoff keeps imported processes, and every conflicting identity anchor was removed.",
+            conflicts.descriptions.join("; ")
+        )
+    })
 }
 
 fn migrated_public_pane_numbers_by_old_raw(
@@ -358,7 +375,14 @@ fn restore_with_imports_and_failures(
     let mut terminals = HashMap::new();
     let mut terminal_runtimes = HashMap::new();
     let mut resumed_agent_sessions = HashSet::new();
-    let conflicting_agent_sessions = conflicting_snapshot_agent_sessions(snapshot);
+    let conflicts = conflicting_snapshot_agent_sessions(snapshot);
+    for conflict in &conflicts.descriptions {
+        warn!(
+            conflict,
+            "snapshot contains a duplicate agent session; preserving the panes and dropping every conflicting identity anchor"
+        );
+    }
+    let conflicting_agent_sessions = conflicts.keys;
     let mut failed_imports = 0;
     for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
         let runtime_context = RestoreRuntimeContext {
@@ -657,10 +681,11 @@ fn restore_tab(
                 )
             })
             .unwrap_or_default();
-        let imported_runtime = suppress_conflicting_imported_runtime(
-            old_pane_id.and_then(|old_id| imported_panes.remove(&old_id)),
-            startup.duplicate_agent_session,
-        );
+        // A duplicate snapshot identity invalidates both anchors, not either
+        // running process. Handoff keeps the imported PTY alive while
+        // `restored_terminal_agent_session` and `pane_restore_startup` drop the
+        // conflicting identity/resume state.
+        let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
         let pending_native_agent_restore = if was_imported {
             None
@@ -941,23 +966,6 @@ fn restored_terminal_agent_session(
         return None;
     }
     session.and_then(persisted_agent_session_from_snapshot)
-}
-
-fn suppress_conflicting_imported_runtime(
-    imported: Option<crate::handoff_runtime::ImportedHandoffRuntime>,
-    duplicate_agent_session: bool,
-) -> Option<crate::handoff_runtime::ImportedHandoffRuntime> {
-    if !duplicate_agent_session {
-        return imported;
-    }
-    if let Some(imported) = imported {
-        use std::os::fd::{FromRawFd, OwnedFd};
-
-        // The conflicting process cannot retain either identity owner. Consume
-        // the transferred master so the normal restore path starts a plain shell.
-        drop(unsafe { OwnedFd::from_raw_fd(imported.master_fd) });
-    }
-    None
 }
 
 #[cfg(test)]
@@ -1312,6 +1320,8 @@ mod tests {
             )
             .unwrap();
             source.pause_handoff_reader(Duration::from_secs(1)).unwrap();
+            // SAFETY: duplicate_handoff_fd returns a new owned descriptor; this
+            // test transfers that sole ownership into ImportedHandoffRuntime.
             let fd = unsafe { OwnedFd::from_raw_fd(source.duplicate_handoff_fd().unwrap()) };
             let state = source.handoff_runtime_state(0);
             let mut imports = PendingImports(HashMap::from([(
@@ -1951,38 +1961,132 @@ mod tests {
         assert!(restored_terminal_agent_session(Some(&session), true).is_none());
     }
 
-    #[test]
-    fn duplicate_restore_discards_the_imported_runtime_before_starting_a_shell() {
-        use std::os::fd::{AsRawFd, IntoRawFd};
-        use std::os::unix::net::UnixStream;
+    #[tokio::test]
+    async fn duplicate_restore_keeps_both_imported_runtimes_but_drops_identity_anchors() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use std::time::Duration;
 
-        let (imported, peer) = UnixStream::pair().expect("handoff fixture socket pair");
-        let raw_fd = imported.as_raw_fd();
-        let imported = crate::handoff_runtime::ImportedHandoffRuntime {
-            master_fd: imported.into_raw_fd(),
-            state: crate::handoff_runtime::HandoffRuntimeState {
-                pane_id: 7,
-                child_pid: 123,
-                child_start_time: 456,
-                rows: 24,
-                cols: 80,
-                cell_width_px: 9,
-                cell_height_px: 18,
-                keyboard_protocol_flags: 0,
-                keyboard_protocol_ansi: None,
-                input_state: None,
-                terminal_title: None,
-                initial_history_ansi: None,
-            },
+        let cwd = std::env::current_dir().unwrap();
+        let session = super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "zynk:codex".into(),
+            agent: "codex".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "shared-codex-session".into(),
         };
+        let pane = |cwd: &std::path::Path| super::super::snapshot::PaneSnapshot {
+            cwd: cwd.to_path_buf(),
+            label: None,
+            agent_name: Some("codex".into()),
+            managed_agent_kind: Some("codex".into()),
+            agent_session: Some(session.clone()),
+            launch_argv: Some(vec!["codex".into(), "resume".into(), session.value.clone()]),
+            hook_retirement: None,
+        };
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("w1".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::from([(10, 1), (20, 2)]),
+                next_public_pane_number: 3,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Split {
+                        direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(LayoutSnapshot::Pane(10)),
+                        second: Box::new(LayoutSnapshot::Pane(20)),
+                    },
+                    panes: HashMap::from([(10, pane(&cwd)), (20, pane(&cwd))]),
+                    zoomed: false,
+                    focused: Some(10),
+                    root_pane: Some(10),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        let (events, _event_rx) = mpsc::channel(32);
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(RenderSignal::new());
+        let launch = PaneLaunchEnv::from_extra(vec![("ZYNK_AGENT".into(), String::new())])
+            .without_pane_identity();
+        let mut sources = Vec::new();
+        let mut imports = HashMap::new();
+        let mut child_pids = Vec::new();
+        for old_pane_id in [10, 20] {
+            let source = TerminalRuntime::spawn_argv_command(
+                PaneId::from_raw(old_pane_id),
+                24,
+                80,
+                cwd.clone(),
+                &["/bin/cat".into()],
+                &launch,
+                crate::pane::AgentDetection::Disabled,
+                0,
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                events.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
+            )
+            .unwrap();
+            source.pause_handoff_reader(Duration::from_secs(1)).unwrap();
+            child_pids.push(source.child_pid().expect("source child pid"));
+            let fd = unsafe { OwnedFd::from_raw_fd(source.duplicate_handoff_fd().unwrap()) };
+            imports.insert(
+                old_pane_id,
+                crate::handoff_runtime::ImportedHandoffRuntime {
+                    master_fd: fd.into_raw_fd(),
+                    state: source.handoff_runtime_state(old_pane_id),
+                },
+            );
+            sources.push(source);
+        }
 
-        assert!(suppress_conflicting_imported_runtime(Some(imported), true).is_none());
-        assert_eq!(unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::EBADF)
-        );
-        drop(peer);
+        let (workspaces, terminals, mut runtimes) = restore_handoff(
+            &snapshot,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            events,
+            render_notify,
+            render_dirty,
+        )
+        .expect("duplicate identity must not terminate imported runtimes");
+        for source in sources {
+            source.preserve_for_handoff();
+        }
+        for runtime in runtimes.values_mut() {
+            runtime.assume_handoff_ownership();
+        }
+
+        assert!(imports.is_empty());
+        assert_eq!(workspaces[0].tabs[0].panes.len(), 2);
+        assert_eq!(runtimes.len(), 2);
+        let mut restored_pids = runtimes
+            .values()
+            .filter_map(TerminalRuntime::child_pid)
+            .collect::<Vec<_>>();
+        child_pids.sort_unstable();
+        restored_pids.sort_unstable();
+        assert_eq!(restored_pids, child_pids);
+        for terminal in terminals.values() {
+            assert!(terminal.persisted_agent_session.is_none());
+            assert!(terminal.pending_agent_resume_plan.is_none());
+        }
+        for (_, runtime) in runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     #[tokio::test]
@@ -2114,7 +2218,14 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
-        let snapshot_before = serde_json::to_vec(&snapshot).unwrap();
+        let diagnostic = snapshot_agent_session_conflict_diagnostic(&snapshot)
+            .expect("duplicate sessions must surface a startup diagnostic");
+        assert!(diagnostic.contains("shared-codex-session"));
+        assert!(diagnostic.contains("w1:p1"));
+        assert!(diagnostic.contains("w1:p2"));
+        assert!(diagnostic.contains("complete layout was preserved"));
+        assert!(diagnostic.contains("cold restore uses plain shells"));
+        assert!(diagnostic.contains("live handoff keeps imported processes"));
 
         let (workspaces, terminals, mut runtimes) = restore(
             &snapshot,
@@ -2134,7 +2245,6 @@ mod tests {
         assert_eq!(workspaces[0].tabs[0].panes.len(), 2);
         assert_eq!(terminals.len(), 2);
         assert_eq!(runtimes.len(), 2, "both conflicting owners become shells");
-        assert_eq!(serde_json::to_vec(&snapshot).unwrap(), snapshot_before);
         for terminal in terminals.values() {
             assert!(terminal.pending_agent_resume_plan.is_none());
             assert!(terminal.persisted_agent_session.is_none());
@@ -2143,6 +2253,127 @@ mod tests {
         for (_, runtime) in runtimes.drain() {
             runtime.shutdown();
         }
+    }
+
+    #[tokio::test]
+    async fn distinct_codex_snapshot_sessions_restore_as_distinct_no_daemon_resumes() {
+        let cwd = std::env::current_dir().unwrap();
+        let pane = |session: &str| super::super::snapshot::PaneSnapshot {
+            cwd: cwd.clone(),
+            label: None,
+            agent_name: Some("codex".into()),
+            managed_agent_kind: Some("codex".into()),
+            agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
+                source: "zynk:codex".into(),
+                agent: "codex".into(),
+                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                value: session.into(),
+            }),
+            launch_argv: Some(vec!["codex".into(), "resume".into(), session.into()]),
+            hook_retirement: None,
+        };
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("w1".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::from([(10, 1), (20, 2)]),
+                next_public_pane_number: 3,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Split {
+                        direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(LayoutSnapshot::Pane(10)),
+                        second: Box::new(LayoutSnapshot::Pane(20)),
+                    },
+                    panes: HashMap::from([
+                        (10, pane("codex-session-a")),
+                        (20, pane("codex-session-b")),
+                    ]),
+                    zoomed: false,
+                    focused: Some(10),
+                    root_pane: Some(10),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        assert!(snapshot_agent_session_conflict_diagnostic(&snapshot).is_none());
+
+        let (workspaces, terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            mpsc::channel(4).0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        assert_eq!(workspaces[0].tabs[0].panes.len(), 2);
+        assert!(
+            runtimes.is_empty(),
+            "native resumes stay pending until startup"
+        );
+        let mut restored = terminals
+            .values()
+            .map(|terminal| {
+                let session = terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .expect("distinct session anchor");
+                let plan = terminal
+                    .pending_agent_resume_plan
+                    .as_ref()
+                    .expect("distinct pending Codex resume");
+                assert_eq!(
+                    plan.argv
+                        .iter()
+                        .filter(|arg| arg.as_str() == "--no-daemon")
+                        .count(),
+                    1
+                );
+                assert!(!plan.argv.iter().any(|arg| arg == "--managed-daemon"));
+                (session.session_ref.value.clone(), plan.argv.clone())
+            })
+            .collect::<Vec<_>>();
+        restored.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            restored,
+            vec![
+                (
+                    "codex-session-a".into(),
+                    vec![
+                        "codex".into(),
+                        "--no-daemon".into(),
+                        "resume".into(),
+                        "codex-session-a".into(),
+                    ]
+                ),
+                (
+                    "codex-session-b".into(),
+                    vec![
+                        "codex".into(),
+                        "--no-daemon".into(),
+                        "resume".into(),
+                        "codex-session-b".into(),
+                    ]
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
