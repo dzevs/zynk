@@ -1140,7 +1140,7 @@ impl App {
                         frame,
                     );
                 })?;
-                self.rendered_animation_demand = rendered_animation_demand;
+                self.commit_rendered_animation_demand(rendered_animation_demand);
                 self.sync_animation_timer(now);
                 self.state.host_cell_size = observed_cell_size;
                 if kitty_graphics_enabled {
@@ -6840,7 +6840,7 @@ mod tests {
                     );
                 })
                 .unwrap();
-            app.rendered_animation_demand = demand;
+            app.commit_rendered_animation_demand(demand);
             demand
         };
         let set_state = |app: &mut App, ws_idx: usize, agent_state: AgentState| {

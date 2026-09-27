@@ -427,6 +427,13 @@ impl App {
         self.agent_metadata_deadline = self.state.next_agent_metadata_expiry();
     }
 
+    pub(crate) fn commit_rendered_animation_demand(
+        &mut self,
+        demand: super::state::WorkingAnimationDemand,
+    ) {
+        self.rendered_animation_demand = demand;
+    }
+
     pub(crate) fn sync_animation_timer(&mut self, now: Instant) {
         if self.state.working_animation && !self.rendered_animation_demand.is_empty() {
             self.next_animation_tick

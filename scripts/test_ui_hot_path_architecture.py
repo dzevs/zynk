@@ -20,6 +20,7 @@ APP_SERVER_SOURCES = (
 )
 HEADLESS_SOURCE = PROJECT_ROOT / "src" / "server" / "headless.rs"
 RENDER_STREAM_SOURCE = PROJECT_ROOT / "src" / "server" / "render_stream.rs"
+APP_SOURCE = PROJECT_ROOT / "src" / "app" / "mod.rs"
 APP_RUNTIME_SOURCE = PROJECT_ROOT / "src" / "app" / "runtime.rs"
 UI_SOURCE = PROJECT_ROOT / "src" / "ui.rs"
 STATUS_SOURCE = PROJECT_ROOT / "src" / "ui" / "status.rs"
@@ -150,6 +151,9 @@ WORKING_ANIMATION_RENDER_STREAM_FINGERPRINTS = {
     ),
 }
 WORKING_ANIMATION_APP_RUNTIME_FINGERPRINTS = {
+    "commit_rendered_animation_demand": (
+        "4f906b43ebff691ffc9eebe46246059146364ae0c858db444652cff456a13439"
+    ),
     "tick_working_animation": (
         "d534d6ad22e146eb582b37beac6cc2cfa5f00e2813d66bf519de23e3efd70628"
     ),
@@ -358,6 +362,55 @@ def render_state_purity_violations(source: str) -> list[str]:
     return violations
 
 
+def local_rendered_animation_demand_commit_violations(
+    app_source: str, app_runtime_source: str
+) -> list[str]:
+    violations: list[str] = []
+    app_code = production_code(app_source)
+    runtime_code = production_code(app_runtime_source)
+    run_body = rust_function_body(app_source, "run")
+    helper_body = rust_function_body(
+        app_runtime_source, "commit_rendered_animation_demand"
+    )
+    expected_call = re.compile(
+        r"\bself\s*\.\s*commit_rendered_animation_demand\s*\(\s*"
+        r"rendered_animation_demand\s*\)\s*;"
+    )
+    call_count = len(expected_call.findall(run_body))
+    if call_count != 1:
+        violations.append(
+            "local run must commit the render-returned animation demand exactly once; "
+            f"found {call_count} calls"
+        )
+
+    writer = re.compile(r"\bself\s*\.\s*rendered_animation_demand\s*=")
+    writer_count = len(writer.findall(app_code)) + len(writer.findall(runtime_code))
+    if writer_count != 1:
+        violations.append(
+            "commit_rendered_animation_demand must be the only local production writer; "
+            f"found {writer_count} assignments"
+        )
+    if len(writer.findall(helper_body)) != 1:
+        violations.append(
+            "commit_rendered_animation_demand must contain its sole field assignment"
+        )
+    if re.search(
+        r"\bself\s*\.\s*state\s*\.\s*view\s*\.\s*working_animation_demand\b",
+        helper_body,
+    ):
+        violations.append(
+            "commit_rendered_animation_demand must use the render-returned demand, "
+            "not ViewState model demand"
+        )
+    if not re.search(
+        r"\bself\s*\.\s*rendered_animation_demand\s*=\s*demand\s*;", helper_body
+    ):
+        violations.append(
+            "commit_rendered_animation_demand must assign its demand argument unchanged"
+        )
+    return violations
+
+
 def normalized_body_fingerprint(body: str) -> str:
     normalized = re.sub(r"\s+", "", body)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -562,6 +615,52 @@ class UiHotPathArchitectureTests(unittest.TestCase):
         violations = render_state_purity_violations(source)
         self.assertIn(
             "render_with_runtime_registry must not borrow AppState mutably",
+            violations,
+        )
+
+    def test_local_animation_demand_commit_uses_render_return_only(self) -> None:
+        violations = local_rendered_animation_demand_commit_violations(
+            APP_SOURCE.read_text(encoding="utf-8"),
+            APP_RUNTIME_SOURCE.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(violations, [], "\n".join(violations))
+
+    def test_local_animation_demand_commit_guard_rejects_model_demand(self) -> None:
+        runtime = APP_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        assignment = "self.rendered_animation_demand = demand;"
+        self.assertEqual(runtime.count(assignment), 1)
+        runtime = runtime.replace(
+            assignment,
+            "self.rendered_animation_demand = self.state.view.working_animation_demand;",
+            1,
+        )
+        violations = local_rendered_animation_demand_commit_violations(
+            APP_SOURCE.read_text(encoding="utf-8"), runtime
+        )
+        self.assertIn(
+            "commit_rendered_animation_demand must use the render-returned demand, "
+            "not ViewState model demand",
+            violations,
+        )
+
+    def test_local_animation_demand_commit_guard_rejects_run_bypass(self) -> None:
+        source = APP_SOURCE.read_text(encoding="utf-8")
+        call = "self.commit_rendered_animation_demand(rendered_animation_demand);"
+        self.assertEqual(source.count(call), 1)
+        source = source.replace(
+            call,
+            "self.rendered_animation_demand = rendered_animation_demand;",
+            1,
+        )
+        violations = local_rendered_animation_demand_commit_violations(
+            source, APP_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        )
+        self.assertTrue(
+            any("local run must commit" in violation for violation in violations),
+            violations,
+        )
+        self.assertTrue(
+            any("only local production writer" in violation for violation in violations),
             violations,
         )
 

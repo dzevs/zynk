@@ -383,6 +383,9 @@ header braille demand likewise comes from its rendered status. Dots-mode pulse d
 points keep `&AppState`, return this metadata without mutating `AppState` or `ViewState`, and accumulate it during
 the existing placement pass without a second list traversal or per-tick allocation. Committed metadata may only
 narrow a preflight bit; it never re-enables animation in a mode where preflight suppressed that surface.
+`App::commit_rendered_animation_demand` is the attached loop's sole production writer: each completed draw
+passes its returned demand through that helper exactly once. The helper, its call edge, and the absence of a
+second local writer are architecture-guarded so model-level `ViewState` demand cannot replace rendered demand.
 
 Multi-pane border rendering represents every junction arm as none, light, or heavy and maps every mixed-weight
 corner, tee, and cross combination; light and heavy straight arms collapse to their single Unicode straight

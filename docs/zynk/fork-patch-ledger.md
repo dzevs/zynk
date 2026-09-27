@@ -8323,3 +8323,12 @@ one `delta_inventory_cycle_paths` value naming `MANIFEST.sha256`, `manifest-chec
 controls fail closed. These implementation and machinery changes remain unapproved until one exact successor
 passes Claude Gate-2 and a fresh standing-swarm Gate-3. No dogfood, merge, push, version, tag, publish, or release
 authority follows this ledger entry.
+
+The first final-byte `F-A47-A1` mutation exposed a vacuous author oracle: it restored the local run loop's broad
+model-demand assignment, but the scheduler test independently assigned the render result and therefore stayed
+green. That attempt is excluded. `App::commit_rendered_animation_demand` now owns the sole production assignment
+on the attached path; both the run loop and the scheduler control use it. The architecture check fingerprints
+the helper, requires one run-loop delegation with the render-returned value, and rejects any second local writer
+or a helper body that reads `ViewState` demand. The replacement fault mutates this shared helper, so offscreen and
+truncated Symbols cases must fail while the visible positive remains valid. This is an oracle correction only;
+render behavior, server commit ownership, protocol, schema, cadence, and configuration are unchanged.
