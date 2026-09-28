@@ -117,6 +117,9 @@ global `swarm` skill: an arbiter fans out specialist reviewers (e.g. correctness
 does-it-reproduce), collects and cross-verifies their findings, and reports one verdict through the audited
 zynk conversation (`zynk thread` / `zynk trace <id>`).
 
+For 3.2.0 evidence packets, Gate-3 uses the frozen numbered acceptance specification
+sealed at source-docs/GATE3-ACCEPTANCE-SPEC-3.2.0-V1.md; blockers cite a requirement.
+
 Manual fallback (no swarm skill available): Codex `zynk send`s the change to three or more reviewer panes with
 distinct lenses, collects their `zynk reply` verdicts, and treats a majority-confirm as the Gate-3 verdict.
 

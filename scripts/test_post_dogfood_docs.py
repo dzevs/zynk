@@ -39,6 +39,18 @@ PROMPT_TRANSPORT_CONTRACT_DOCUMENTS = (
     "docs/zynk/SPEC.md",
     "docs/zynk/fork-patch-ledger.md",
 )
+PINNED_PROMPT_COMMAND = "zynk agent prompt"
+PINNED_PROMPT_METHOD = "agent.prompt"
+PINNED_PROMPT_DELAY_MS = 300
+PINNED_DIRECT_COMMANDS = (
+    "zynk agent send",
+    "zynk pane run",
+    "zynk send",
+    "zynk reply",
+)
+PINNED_DIRECT_METHOD = "pane.send_input"
+PINNED_DRAFT_COMMAND = "zynk pane send-text"
+PINNED_DRAFT_METHOD = "pane.send_text"
 
 
 def normalized(path: str) -> str:
@@ -316,6 +328,8 @@ def parse_cli_prompt_method(text: str) -> str:
     methods = re.findall(r"method:\s*Method::([A-Za-z_][A-Za-z0-9_]*)\s*\(", body)
     if len(methods) != 1:
         raise ValueError("agent_prompt must dispatch exactly one Method variant")
+    if methods[0] != "AgentPrompt":
+        raise ValueError("agent_prompt must dispatch Method::AgentPrompt")
     return rust_method_to_wire(methods[0])
 
 
@@ -354,7 +368,33 @@ def parse_prompt_api_transport(text: str) -> tuple[int, str, str]:
     )
     if len(delay_definitions) != 1:
         raise ValueError("prompt submit delay must have one literal millisecond definition")
-    return int(delay_definitions[0]), immediate, delayed
+    delay_ms = int(delay_definitions[0])
+    if delay_ms != PINNED_PROMPT_DELAY_MS:
+        raise ValueError("prompt submit delay must equal 300 ms")
+    return delay_ms, immediate, delayed
+
+
+def validate_pinned_prompt_transport(transport: dict[str, object]) -> None:
+    actual = (
+        transport["prompt_command"],
+        transport["prompt_method"],
+        transport["delay_ms"],
+        tuple(transport["direct_commands"]),
+        transport["direct_method"],
+        transport["draft_command"],
+        transport["draft_method"],
+    )
+    expected = (
+        PINNED_PROMPT_COMMAND,
+        PINNED_PROMPT_METHOD,
+        PINNED_PROMPT_DELAY_MS,
+        PINNED_DIRECT_COMMANDS,
+        PINNED_DIRECT_METHOD,
+        PINNED_DRAFT_COMMAND,
+        PINNED_DRAFT_METHOD,
+    )
+    if actual != expected:
+        raise ValueError("F4 transport contract does not match the pinned method map")
 
 
 def validate_actor_delayed_suffix_order(text: str) -> None:
@@ -426,7 +466,7 @@ def derive_prompt_transport_contract(
     if len({prompt_method, direct_method, draft_method}) != 3:
         raise ValueError("prompt, direct-submit, and draft methods must be distinct")
 
-    return {
+    transport = {
         "prompt_command": prompt_command,
         "prompt_method": prompt_method,
         "delay_ms": delay_ms,
@@ -435,6 +475,8 @@ def derive_prompt_transport_contract(
         "draft_command": draft_command,
         "draft_method": draft_method,
     }
+    validate_pinned_prompt_transport(transport)
+    return transport
 
 
 def markdown_list(values: list[str]) -> str:
@@ -897,6 +939,47 @@ pub fn delivery_status_for(cmd: SendCommand) -> DeliveryStatus {
 
 
 class PromptTransportParserTest(unittest.TestCase):
+    def test_rejects_wrong_literal_cli_prompt_method(self) -> None:
+        source = """
+fn agent_prompt(args: &[String]) {
+    send(Request { method: Method::PaneSendInput(one()) });
+}
+"""
+        with self.assertRaisesRegex(
+            ValueError, "agent_prompt must dispatch Method::AgentPrompt"
+        ):
+            parse_cli_prompt_method(source)
+
+    def test_rejects_wrong_literal_prompt_delay(self) -> None:
+        source = """
+const DELAY: Duration = Duration::from_millis(17);
+fn handle_agent_prompt() {
+    let (mut text, enter) = crate::app::api_helpers::encode_api_submission_parts();
+    runtime.try_send_bytes_with_delayed_suffix(
+        Bytes::from(text),
+        Bytes::from(enter),
+        DELAY,
+    );
+}
+"""
+        with self.assertRaisesRegex(ValueError, "prompt submit delay must equal 300 ms"):
+            parse_prompt_api_transport(source)
+
+    def test_rejects_coordinated_transport_method_swap(self) -> None:
+        transport = {
+            "prompt_command": PINNED_PROMPT_COMMAND,
+            "prompt_method": PINNED_PROMPT_METHOD,
+            "delay_ms": PINNED_PROMPT_DELAY_MS,
+            "direct_commands": list(PINNED_DIRECT_COMMANDS),
+            "direct_method": PINNED_DRAFT_METHOD,
+            "draft_command": PINNED_DRAFT_COMMAND,
+            "draft_method": PINNED_DIRECT_METHOD,
+        }
+        with self.assertRaisesRegex(
+            ValueError, "F4 transport contract does not match the pinned method map"
+        ):
+            validate_pinned_prompt_transport(transport)
+
     def test_rejects_multiple_cli_prompt_methods(self) -> None:
         source = """
 fn agent_prompt(args: &[String]) {
