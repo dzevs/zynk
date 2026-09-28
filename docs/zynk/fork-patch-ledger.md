@@ -8395,3 +8395,29 @@ oracle covers the status mapping, the current header call sites, and the explici
 clause. Production Rust, protocol 20, routing, receipts, persistence, configuration, rendering, and runtime
 behavior are unchanged. This successor remains pending exact-object Claude Gate-2 and fresh standing-swarm
 Gate-3; no dogfood, merge, push, version, tag, publish, or release authority follows this row.
+
+#### 4d95d071 Gate-3 prompt-transport correction (IMPLEMENTED / PENDING VERIFICATION)
+
+Fresh standing-swarm Gate-3 `msg_847ee0adf039233d` found that two public statements still grouped readiness-
+gated `agent prompt` with the one-vector `pane.send_input` path. Production already dispatches the distinct
+`agent.prompt` method, splits encoded prompt text from Enter, and gives the PTY actor one ordered command that
+queues Enter after the source-defined delay. The source-derived agent-prompt transport contract is: `zynk agent
+prompt` dispatches `agent.prompt`, which queues prompt text immediately and Enter 300 ms later through one
+ordered PTY actor command; `zynk agent send`, `zynk pane run`, `zynk send`, and `zynk reply` dispatch
+`pane.send_input` as one validated encoded byte vector; `zynk pane send-text` dispatches `pane.send_text`
+without Enter.
+
+The released 3.1.0 CHANGELOG bullet is corrected minimally in place so it no longer attributes one-vector
+transport to `agent prompt`; the Unreleased section names that historical correction explicitly. SPEC now states
+the same six-command map. A fail-closed maintenance oracle derives the CLI method, F4 integration roster, API
+delayed-suffix call, millisecond constant, and PTY actor ordering from source, then checks SPEC, both CHANGELOG
+locations, this ledger row, and the already-correct README and ADR 0015 boundaries. Parser ambiguity, a direct
+one-vector prompt send, or reversed actor queue order fails the control.
+
+This bounded source successor records Claude's verification and pre-Gate-1 expectations
+`msg_0a0e42956e543f54`, Gate-1 approval `msg_45068ef593a87222`, and the standing red-capture dispositions through
+`msg_72e64102b1067590`. It changes documentation and its maintenance test only; production Rust, protocol 20,
+routing, persistence, receipt authority, configuration, and runtime behavior remain unchanged. The two packet-
+machinery findings from the same Gate-3 verdict remain assigned to packet v12 and are not closed by this row.
+This successor remains pending exact-object Claude Gate-2 and a fresh standing-swarm Gate-3; no dogfood, merge,
+push, install, version, tag, publish, or release authority follows this entry.

@@ -58,6 +58,11 @@ dispatch, not receipt; the server-validated receipt event remains the only path 
 
 **Fixed**
 
+- Documentation correction for the released 3.1.0 input-queue bullet: The source-derived agent-prompt transport
+  contract is: `zynk agent prompt` dispatches `agent.prompt`, which queues prompt text immediately and Enter
+  300 ms later through one ordered PTY actor command; `zynk agent send`, `zynk pane run`, `zynk send`, and
+  `zynk reply` dispatch `pane.send_input` as one validated encoded byte vector; `zynk pane send-text` dispatches
+  `pane.send_text` without Enter.
 - Protocol-version refusals from native `send`, `reply`, and caller-bound `inbox` now retain the typed F4
   `protocol_mismatch` with both versions instead of becoming a generic transport failure. Explicit
   `inbox --agent` remains database-only.
@@ -224,8 +229,9 @@ removed (see **Changed** and **Removed**), and zynk now builds for Linux x86_64 
 
 - `agent prompt` now queues text and a 300 ms delayed Enter as one ordered PTY actor command, so later input
   cannot overtake submission. GitHub Copilot receives focus before the prompt text on the same command.
-- `pane.send_input`, `agent send`, `agent prompt`, and `pane run` now enqueue one encoded byte vector
-  after validating all keys. Empty text with no keys is one empty queue item rather than no item.
+- `pane.send_input`, `agent send`, and `pane run` now enqueue one encoded byte vector after validating all keys.
+  Empty text with no keys is one empty queue item rather than no item. `agent prompt` instead queues prompt text
+  immediately and Enter 300 ms later through one ordered PTY actor command, so later input cannot overtake Enter.
 - Migration 0005 adds `agent.prompt` to delivery-event proof provenance by rebuilding the constrained
   table and copying all existing row columns verbatim. Older binaries typed-refuse the newer database
   lineage; rollback requires a compatible binary or operator-owned recovery.

@@ -219,11 +219,14 @@ launch readiness is required. Prompt `--wait` is stricter: completion must be la
 baseline sequence. Timeouts are checked between requests and do not bound a blocked in-flight IPC
 read. A changed terminal or name fails instead of retargeting.
 
-`pane.send_input`, and therefore `agent send`, `agent prompt`, and `pane run`, validates all keys
-before mutation and enqueues one byte vector containing optional bracketed text plus encoded keys.
-The empty-text/empty-keys request now enqueues one empty item; this is a behavior change from the
-previous zero-item path. One queue item is not a promise of one kernel write or external consumption.
-Legacy and Kitty disambiguation-only Enter encode CR; Kitty report-all Enter encodes `ESC[13u`.
+The source-derived agent-prompt transport contract is: `zynk agent prompt` dispatches `agent.prompt`, which
+queues prompt text immediately and Enter 300 ms later through one ordered PTY actor command; `zynk agent send`,
+`zynk pane run`, `zynk send`, and `zynk reply` dispatch `pane.send_input` as one validated encoded byte vector;
+`zynk pane send-text` dispatches `pane.send_text` without Enter. For `pane.send_input`, all keys are validated
+before mutation and the vector contains optional bracketed text plus encoded keys. The empty-text/empty-keys
+request enqueues one empty item rather than no item. One queue item is not a promise of one kernel write or
+external consumption. Legacy and Kitty disambiguation-only Enter encode CR; Kitty report-all Enter encodes
+`ESC[13u`.
 
 Protocol remains 19 in this intermediate range. It therefore spans two incompatible `agent.start`
 request shapes: the equality-only guard cannot detect that difference, and an old-shape request is
