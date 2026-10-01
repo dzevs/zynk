@@ -3,6 +3,8 @@
 
 from pathlib import Path
 import re
+from collections.abc import Callable
+from typing import NoReturn
 import unittest
 
 
@@ -12,6 +14,11 @@ F4_COMMAND_CASE_SOURCE = "tests/cli_wrapper.rs"
 CLI_AGENT_SOURCE = "src/cli/agent.rs"
 AGENT_API_SOURCE = "src/app/api/agents.rs"
 PTY_ACTOR_SOURCE = "src/pty/actor/unix.rs"
+DETECT_SOURCE = "src/detect/mod.rs"
+GIT_STATUS_SOURCE = "src/workspace/git/status.rs"
+GIT_REFRESH_SOURCE = "src/app/git_refresh.rs"
+APP_API_SOURCE = "src/app/api.rs"
+PLATFORM_LINUX_SOURCE = "src/platform/linux.rs"
 F4_ROSTER_MARKER = "The complete F4 SendOutcome command roster is:"
 F4_CONTRACT_DOCUMENTS = (
     "CHANGELOG.md",
@@ -39,6 +46,28 @@ PROMPT_TRANSPORT_CONTRACT_DOCUMENTS = (
     "docs/zynk/SPEC.md",
     "docs/zynk/fork-patch-ledger.md",
 )
+MANUAL_RESUME_CONTRACT_MARKERS = {
+    "CHANGELOG.md": "Safe flags from a manually launched official Claude or Codex process",
+    "README.md": "For manually launched official agents",
+    "docs/zynk/SPEC.md": "Snapshot preservation for manually launched official agents",
+    "docs/zynk/fork-patch-ledger.md": (
+        "Gate-3 v14 selected-process and pipe-deadline corrections bind"
+    ),
+}
+WORKING_SHIMMER_CONTRACT_MARKERS = {
+    "CHANGELOG.md": "Working-label shimmer now keeps",
+    "README.md": "With `working_animation = true`",
+    "docs/zynk/SPEC.md": "The literal `working` label on expanded sidebar rows",
+    "docs/zynk/fork-patch-ledger.md": "Working labels preserve each surface's resting foreground",
+}
+DIRTY_STATUS_CONTRACT_MARKERS = {
+    "CHANGELOG.md": "The existing sidebar `git_status` token now prefixes",
+    "README.md": "The `git_status` token renders a green `+N`",
+    "docs/zynk/SPEC.md": "The plain configured `git_status` token also demands",
+    "docs/zynk/fork-patch-ledger.md": (
+        "Post-read dirty-status validation now runs while"
+    ),
+}
 PINNED_PROMPT_COMMAND = "zynk agent prompt"
 PINNED_PROMPT_METHOD = "agent.prompt"
 PINNED_PROMPT_DELAY_MS = 300
@@ -333,12 +362,17 @@ def parse_cli_prompt_method(text: str) -> str:
     return rust_method_to_wire(methods[0])
 
 
-def parse_prompt_api_transport(text: str) -> tuple[int, str, str]:
+def parse_prompt_api_transport(
+    text: str, fail: Callable[[str], NoReturn] | None = None
+) -> tuple[int, str, str]:
     body = without_rust_comments(
         declaration_body(text, r"fn\s+handle_agent_prompt\s*\([^)]*\)[^{]*\{")
     )
     if re.search(r"\.try_send_bytes\s*\(", body):
-        raise ValueError("handle_agent_prompt must not use the one-vector send path")
+        message = "handle_agent_prompt must not use the one-vector send path"
+        if fail is not None:
+            fail(message)
+        raise ValueError(message)
 
     encoded_parts = re.findall(
         r"let\s*\(\s*mut\s+([A-Za-z_][A-Za-z0-9_]*)\s*,\s*"
@@ -426,6 +460,7 @@ def derive_prompt_transport_contract(
     cli_source: str,
     api_source: str,
     actor_source: str,
+    fail: Callable[[str], NoReturn] | None = None,
 ) -> dict[str, object]:
     envelopes, public, statuses = parse_send_command_source(send_source)
     case_envelopes, _argvs, submit_methods = parse_f4_command_cases(f4_source)
@@ -433,7 +468,7 @@ def derive_prompt_transport_contract(
         raise ValueError("F4 command cases must match SendCommand order and cardinality")
 
     prompt_method = parse_cli_prompt_method(cli_source)
-    delay_ms, immediate, delayed = parse_prompt_api_transport(api_source)
+    delay_ms, immediate, delayed = parse_prompt_api_transport(api_source, fail)
     validate_actor_delayed_suffix_order(actor_source)
     if (immediate, delayed) != ("text", "enter"):
         raise ValueError("agent prompt must encode immediate text and delayed Enter")
@@ -717,6 +752,7 @@ class PostDogfoodDocsTest(unittest.TestCase):
             (ROOT / CLI_AGENT_SOURCE).read_text(encoding="utf-8"),
             (ROOT / AGENT_API_SOURCE).read_text(encoding="utf-8"),
             (ROOT / PTY_ACTOR_SOURCE).read_text(encoding="utf-8"),
+            self.fail,
         )
         expected = prompt_transport_contract(transport)
         for path in PROMPT_TRANSPORT_CONTRACT_DOCUMENTS:
@@ -757,6 +793,225 @@ class PostDogfoodDocsTest(unittest.TestCase):
                 text = normalized(path)
                 for clause in clauses:
                     self.assertNotIn(clause, text)
+
+    def test_manual_resume_contract_is_documented_exactly(self) -> None:
+        required = {
+            "CHANGELOG.md": (
+                "exact foreground process selected by leader-first or priority detection",
+                "same-name sibling cannot add or remove them",
+                "most recent live launch wins over an older recorded command",
+                "Tier-B captures resume by the official command name",
+                "Pi retains safe Tier-A flags",
+            ),
+            "README.md": (
+                "most recent live launch decides which flags survive",
+                "later canonical or rejected live command suppresses older privileged flags",
+                "resume through the official command name",
+                "Pi's rewritten process title is not a faithful flag view",
+                "exactly one `--no-daemon`",
+            ),
+            "docs/zynk/SPEC.md": (
+                "present live foreground as authoritative",
+                "canonical-only or rejected launch records a tombstone",
+                "normalizes argv0 to the official agent command name",
+                "Pi's rewritten process title is not a faithful flag view",
+                "exactly one `--no-daemon`",
+            ),
+            "docs/zynk/fork-patch-ledger.md": (
+                "exact process index chosen by leader-first or priority detection",
+                "no longer performs a second normalized-name search",
+                "neither add an allowlisted flag",
+                "nor drop a flag",
+            ),
+        }
+        stale = (
+            "no normalization of Tier-B argv0",
+            "vendor-internal executable path is equivalent",
+            "older privileged flags remain authoritative",
+        )
+        for path, marker in MANUAL_RESUME_CONTRACT_MARKERS.items():
+            with self.subTest(path=path):
+                contract = canonical_marked_contract(path, marker)
+                for clause in required[path]:
+                    self.assertIn(clause, contract)
+                for clause in stale:
+                    self.assertNotIn(clause, contract)
+
+        source = (ROOT / DETECT_SOURCE).read_text(encoding="utf-8")
+        capture = declaration_body(
+            source,
+            r"fn\s+foreground_agent_argv_from_job\s*\([^)]*\)[^{]*\{",
+        )
+        compact_capture = re.sub(r"\s+", "", capture)
+        self.assertIn("job.processes.get(selection.process_index)", compact_capture)
+        self.assertNotIn(".find(", capture)
+        selection = declaration_body(
+            source,
+            r"fn\s+select_agent_in_job\s*\([^)]*\)[^{]*\{",
+        )
+        self.assertIn("process_index", selection)
+
+    def test_working_shimmer_contract_is_documented_exactly(self) -> None:
+        required = {
+            "CHANGELOG.md": (
+                "each surface's existing resting foreground",
+                "two leading letters at full red",
+                "one trailing letter at a half blend",
+                "128 ms cadence",
+            ),
+            "README.md": (
+                "each surface's resting foreground color",
+                "two leading letters use full `palette.red`",
+                "trailing letter is a half blend",
+                "ordinary working text remains yellow",
+                "muted mobile/context labels remain muted",
+            ),
+            "docs/zynk/SPEC.md": (
+                "per-surface resting foreground never change",
+                "target is `palette.red`",
+                "two leading cells at full red",
+                "trailing cell at a half blend",
+                "muted mobile/context labels remain `palette.overlay0`",
+            ),
+            "docs/zynk/fork-patch-ledger.md": (
+                "each surface's resting foreground",
+                "two leading letters are full red",
+                "trailing letter is a half blend",
+                "muted mobile/context labels stay overlay0",
+            ),
+        }
+        stale = (
+            "target is `palette.text`",
+            "sweep toward white",
+            "every surface's base is yellow",
+            "universal yellow base",
+        )
+        for path, marker in WORKING_SHIMMER_CONTRACT_MARKERS.items():
+            with self.subTest(path=path):
+                contract = canonical_marked_contract(path, marker)
+                for clause in required[path]:
+                    self.assertIn(clause, contract)
+                for clause in stale:
+                    self.assertNotIn(clause, contract)
+
+    def test_dirty_status_contract_is_documented_exactly(self) -> None:
+        required = {
+            "CHANGELOG.md": (
+                "green `+N`",
+                "individual untracked files count",
+                "ignored paths do not",
+                "configured-token background refresh only",
+                "at most one bounded query per 5 seconds",
+                "both output pipes to reach EOF inside 250 ms",
+                "signals the original process group before reaping the direct child",
+                "descendant retaining a pipe can no longer stall later Git refreshes",
+                "back off for 30 seconds",
+            ),
+            "README.md": (
+                "green `+N`",
+                "every individual untracked file count",
+                "plain configured `git_status` token demands them",
+                "outside rendering",
+                "at most once per checkout per 5 seconds",
+                "last successful value (or hides `+N` before the first success)",
+                "suppresses another dirty query for 30 seconds",
+                "both output pipes to reach EOF inside the 250 ms query deadline",
+                "signals the original process group before reaping the direct child",
+                "unreaped child reserves its PID/PGID",
+                "separate 250 ms cleanup grace",
+                "cannot stall the global worker or later refreshes",
+                "custom global `core.excludesFile` is intentionally not honored",
+            ),
+            "docs/zynk/SPEC.md": (
+                "green `+N`",
+                "every individual untracked file count",
+                "plain `git_status`",
+                "at most one bounded query per 5,000 ms",
+                "optional locks and fsmonitor disabled",
+                "both output pipes to reach EOF inside one 250 ms wall-clock deadline",
+                "signals the original process group before reaping the direct child",
+                "unreaped child reserves its PID/PGID",
+                "separate 250 ms cleanup grace",
+                "cannot stall the global refresh worker or later refreshes",
+                "custom global `core.excludesFile` is not honored",
+                "retains the last successful count (or hides it before first success)",
+                "delays the next attempt for 30,000 ms",
+                "No Git or filesystem work occurs on the render path",
+            ),
+            "docs/zynk/fork-patch-ledger.md": (
+                "direct Git child to exit and both output pipes to reach EOF",
+                "250 ms wall-clock deadline",
+                "waitid",
+                "WNOHANG | WNOWAIT",
+                "signals the original process group before reaping the direct child",
+                "unreaped zombie reserves its PID/PGID",
+                "separate 250 ms cleanup grace",
+                "escaped-descendant fixture records the direct PID",
+                "Post-read dirty-status validation",
+                "validated status-zero result commits success and reaps exactly once",
+                "any other validator failure",
+                "status-zero fixture emits malformed porcelain",
+                "observes `State: Z` at the parser boundary",
+            ),
+        }
+        for path, marker in DIRTY_STATUS_CONTRACT_MARKERS.items():
+            with self.subTest(path=path):
+                text = normalized(path)
+                self.assertEqual(text.count(marker), 1)
+                for clause in required[path]:
+                    self.assertIn(clause, text)
+
+        for path in DIRTY_STATUS_CONTRACT_MARKERS:
+            with self.subTest(path=path, stale=True):
+                text = normalized(path)
+                self.assertNotIn("untracked directories count once", text)
+                self.assertNotIn("query on every 1.5-second refresh", text)
+                self.assertNotIn("failure clears the dirty count", text)
+
+        status_source = (ROOT / GIT_STATUS_SOURCE).read_text(encoding="utf-8")
+        for constant in ("GIT_DIRTY_STATUS_TIMEOUT", "GIT_DIRTY_STATUS_CLEANUP_GRACE"):
+            definitions = re.findall(
+                rf"const\s+{constant}\s*:\s*Duration\s*=\s*"
+                r"Duration::from_millis\(\s*([0-9]+)\s*\)\s*;",
+                without_rust_comments(status_source),
+            )
+            self.assertEqual(definitions, ["250"], constant)
+        dirty_body = declaration_body(
+            status_source,
+            r"fn\s+run_dirty_status_command\s*\([^)]*\)[^{]*\{",
+        )
+        self.assertIn("wait_for_bounded_child_output", dirty_body)
+        self.assertIn("validate_dirty_status_output", dirty_body)
+        self.assertIn("BoundedChildOutputError::Validation", status_source)
+        self.assertIn(
+            "dirty_status_malformed_output_signals_group_before_reaping",
+            status_source,
+        )
+        self.assertIn("GIT_CONFIG_GLOBAL", status_source)
+        self.assertIn("GIT_CONFIG_SYSTEM", status_source)
+
+        platform_source = (ROOT / PLATFORM_LINUX_SOURCE).read_text(encoding="utf-8")
+        platform_body = declaration_body(
+            platform_source,
+            r"fn\s+wait_for_bounded_child_output(?:<[^>]+>)?\s*\([^{}]*\)[^{]*\{",
+        )
+        self.assertIn("libc::poll", platform_body)
+        self.assertIn("observe_child_exit_without_reaping", platform_body)
+        validation = platform_body.index("validate(BoundedChildOutput")
+        success_reap = platform_body.index("child.try_wait()", validation)
+        self.assertLess(validation, success_reap)
+        self.assertIn("libc::WNOWAIT", platform_source)
+        self.assertNotIn("thread::spawn", platform_body)
+        self.assertNotIn(".join(", platform_body)
+
+        refresh_source = (ROOT / GIT_REFRESH_SOURCE).read_text(encoding="utf-8")
+        worker = declaration_body(
+            refresh_source,
+            r"fn\s+start_git_status_refresh_if_due\s*\([^)]*\)[^{]*\{",
+        )
+        self.assertIn("AppEvent::GitStatusRefreshed", worker)
+        app_api_source = (ROOT / APP_API_SOURCE).read_text(encoding="utf-8")
+        self.assertIn("self.git_refresh_in_flight = false;", app_api_source)
 
     def test_f4_identity_verification_shape_is_documented_exactly(self) -> None:
         required = {

@@ -2,7 +2,7 @@
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::io::Read;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::manifest::{effective_platforms, ensure_platform_supported};
 use super::plugin_manifest_available;
@@ -154,12 +154,15 @@ impl App {
                             read_capped_plugin_output(stderr, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
                         })
                     });
-                    match wait_for_plugin_child(
+                    match crate::platform::wait_for_bounded_child(
                         &mut child,
-                        is_startup.then_some(PLUGIN_STARTUP_TIMEOUT),
-                        is_startup,
+                        crate::platform::BoundedChildWaitOptions {
+                            timeout: is_startup.then_some(PLUGIN_STARTUP_TIMEOUT),
+                            terminate_process_group: is_startup,
+                            cancel: None,
+                        },
                     ) {
-                        Ok(PluginChildWait::Exited(status)) => {
+                        Ok(crate::platform::BoundedChildWait::Exited(status)) => {
                             crate::events::AppEvent::PluginCommandFinished {
                                 log_id,
                                 finished_unix_ms: current_unix_ms(),
@@ -173,7 +176,7 @@ impl App {
                                 error: None,
                             }
                         }
-                        Ok(PluginChildWait::TimedOut(status)) => {
+                        Ok(crate::platform::BoundedChildWait::TimedOut(status)) => {
                             crate::events::AppEvent::PluginCommandFinished {
                                 log_id,
                                 finished_unix_ms: current_unix_ms(),
@@ -188,6 +191,20 @@ impl App {
                                     "plugin startup command timed out after {} ms",
                                     PLUGIN_STARTUP_TIMEOUT.as_millis()
                                 )),
+                            }
+                        }
+                        Ok(crate::platform::BoundedChildWait::Cancelled(status)) => {
+                            crate::events::AppEvent::PluginCommandFinished {
+                                log_id,
+                                finished_unix_ms: current_unix_ms(),
+                                exit_code: status.code(),
+                                stdout: stdout_reader
+                                    .and_then(|reader| reader.join().ok())
+                                    .unwrap_or_default(),
+                                stderr: stderr_reader
+                                    .and_then(|reader| reader.join().ok())
+                                    .unwrap_or_default(),
+                                error: Some("plugin command was cancelled".to_string()),
                             }
                         }
                         Err(err) => crate::events::AppEvent::PluginCommandFinished {
@@ -321,50 +338,6 @@ impl App {
     }
 }
 
-enum PluginChildWait {
-    Exited(std::process::ExitStatus),
-    TimedOut(std::process::ExitStatus),
-}
-
-fn wait_for_plugin_child(
-    child: &mut std::process::Child,
-    timeout: Option<Duration>,
-    terminate_process_group: bool,
-) -> std::io::Result<PluginChildWait> {
-    let Some(timeout) = timeout else {
-        return child.wait().map(PluginChildWait::Exited);
-    };
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(PluginChildWait::Exited(status));
-        }
-        if Instant::now() >= deadline {
-            if terminate_process_group {
-                let process_group = i32::try_from(child.id()).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "plugin process id exceeds Linux pid range",
-                    )
-                })?;
-                let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
-                if result != 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(err);
-                    }
-                }
-            } else if let Err(err) = child.kill() {
-                if err.kind() != std::io::ErrorKind::InvalidInput {
-                    return Err(err);
-                }
-            }
-            return child.wait().map(PluginChildWait::TimedOut);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 fn current_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -406,6 +379,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_wait_preserves_normal_plugin_exit_and_output_behavior() {
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "printf stdout; printf stderr >&2; exit 7"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let outcome = crate::platform::wait_for_bounded_child(
+            &mut child,
+            crate::platform::BoundedChildWaitOptions {
+                timeout: None,
+                terminate_process_group: false,
+                cancel: None,
+            },
+        )
+        .unwrap();
+        let crate::platform::BoundedChildWait::Exited(status) = outcome else {
+            panic!("ordinary plugin command did not exit normally");
+        };
+        assert_eq!(status.code(), Some(7));
+        assert_eq!(read_capped_plugin_output(stdout, 64), "stdout");
+        assert_eq!(read_capped_plugin_output(stderr, 64), "stderr");
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn plugin_output_cap_remains_lossy_and_marked() {
+        assert_eq!(
+            read_capped_plugin_output(std::io::Cursor::new(b"abcdef"), 4),
+            "abcd\n[zynk truncated plugin output after 4 bytes]"
+        );
+    }
+
+    #[test]
     fn m844_startup_wait_kills_a_command_at_the_runtime_bound() {
         use std::os::unix::process::CommandExt as _;
 
@@ -416,10 +425,20 @@ mod tests {
             .stdout(Stdio::piped());
         let mut child = command.spawn().unwrap();
         let mut stdout = child.stdout.take().unwrap();
-        let started = Instant::now();
-        let outcome =
-            wait_for_plugin_child(&mut child, Some(Duration::from_millis(30)), true).unwrap();
-        assert!(matches!(outcome, PluginChildWait::TimedOut(_)));
+        let started = std::time::Instant::now();
+        let outcome = crate::platform::wait_for_bounded_child(
+            &mut child,
+            crate::platform::BoundedChildWaitOptions {
+                timeout: Some(Duration::from_millis(30)),
+                terminate_process_group: true,
+                cancel: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::platform::BoundedChildWait::TimedOut(_)
+        ));
         let mut bytes = Vec::new();
         stdout.read_to_end(&mut bytes).unwrap();
         assert!(started.elapsed() < Duration::from_secs(2));

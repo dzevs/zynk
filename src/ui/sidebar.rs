@@ -408,6 +408,7 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
             branch: ws.branch().as_deref(),
             state_text: state_label(state, seen),
             ahead_behind: ws.git_ahead_behind(),
+            dirty_paths: ws.git_dirty_paths(),
             tokens: &values,
             suppress_git_details: indented,
         },
@@ -773,7 +774,7 @@ pub(super) fn agent_entry_has_working_shimmer(app: &AppState, entry: &AgentPanel
             let resolved = apply_token_style(default_style, patch);
             super::status::working_label_shimmer_palette(
                 resolved.fg.unwrap_or(app.palette.yellow),
-                app.palette.text,
+                app.palette.red,
                 &app.host_terminal_theme,
             )
             .is_some()
@@ -1589,10 +1590,17 @@ fn resolved_token_spans(
         .map(|token| match token.parts().0 {
             ResolvedToken::StateIcon => display_width(state_icon.0),
             ResolvedToken::Branch(_) => display_width("\u{2387} "),
-            ResolvedToken::GitStatus { ahead, behind } => {
-                usize::from(*ahead > 0) * display_width(&format!("\u{2191}{ahead}"))
+            ResolvedToken::GitStatus {
+                dirty,
+                ahead,
+                behind,
+            } => {
+                let segments =
+                    usize::from(*dirty > 0) + usize::from(*ahead > 0) + usize::from(*behind > 0);
+                usize::from(*dirty > 0) * display_width(&format!("+{dirty}"))
+                    + usize::from(*ahead > 0) * display_width(&format!("\u{2191}{ahead}"))
                     + usize::from(*behind > 0) * display_width(&format!("\u{2193}{behind}"))
-                    + usize::from(*ahead > 0 && *behind > 0)
+                    + segments.saturating_sub(1)
             }
             _ => 0,
         })
@@ -1732,7 +1740,23 @@ fn resolved_token_spans(
                     apply_token_style(styles.secondary, token_style),
                 ));
             }
-            ResolvedToken::GitStatus { ahead, behind } => {
+            ResolvedToken::GitStatus {
+                dirty,
+                ahead,
+                behind,
+            } => {
+                if *dirty > 0 {
+                    spans.push(Span::styled(
+                        format!("+{dirty}"),
+                        apply_token_style(Style::default().fg(p.green), token_style),
+                    ));
+                }
+                if *dirty > 0 && (*ahead > 0 || *behind > 0) {
+                    spans.push(Span::styled(
+                        " ",
+                        apply_token_style(Style::default(), token_style),
+                    ));
+                }
                 if *ahead > 0 {
                     spans.push(Span::styled(
                         format!("\u{2191}{ahead}"),
@@ -1922,6 +1946,7 @@ fn render_workspace_list(
                 branch: ws.branch().as_deref(),
                 state_text: state_label(display_state, display_seen),
                 ahead_behind: ws.git_ahead_behind(),
+                dirty_paths: ws.git_dirty_paths(),
                 tokens: &values,
                 suppress_git_details: card.indented,
             },
@@ -2710,7 +2735,7 @@ mod tests {
                     app.workspaces = vec![Workspace::test_new("WSPACE")];
                     app.workspaces[0].tabs[0].set_custom_name("GROUP".into());
                     app.workspaces[0].cached_git_branch = Some("topic".into());
-                    app.workspaces[0].cached_git_ahead_behind = Some((2, 1));
+                    app.workspaces[0].set_cached_git_ahead_behind(Some((2, 1)));
                     assert!(app.workspaces[0].metadata_tokens.patch(
                         std::collections::HashMap::from([(
                             "tag".into(),
@@ -3707,6 +3732,7 @@ mod tests {
                     R::Workspace("W".into()),
                     R::Custom("C".into()),
                     R::GitStatus {
+                        dirty: 2,
                         ahead: 2,
                         behind: 1
                     }
@@ -3715,8 +3741,32 @@ mod tests {
                 false
             )
             .trim_end(),
-            "\u{25cf} W \u{b7} C \u{2191}2 \u{2193}1"
+            "\u{25cf} W \u{b7} C +2 \u{2191}2 \u{2193}1"
         );
+        let git_spans = resolved_token_spans(
+            &[R::GitStatus {
+                dirty: 2,
+                ahead: 3,
+                behind: 1,
+            }],
+            ("\u{25cf}", Style::default()),
+            styles,
+            &app.palette,
+            40,
+            false,
+            None,
+        )
+        .spans;
+        assert_eq!(
+            git_spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>(),
+            ["+2", " ", "\u{2191}3", " ", "\u{2193}1"]
+        );
+        assert_eq!(git_spans[0].style.fg, Some(app.palette.green));
+        assert_eq!(git_spans[2].style.fg, Some(app.palette.green));
+        assert_eq!(git_spans[4].style.fg, Some(app.palette.red));
         let config = crate::config::SpacesSidebarConfig {
             rows: vec![vec![
                 S::Custom("a".into()),
@@ -3743,6 +3793,7 @@ mod tests {
                         state_text: "idle",
                         branch: None,
                         ahead_behind: None,
+                        dirty_paths: None,
                         tokens: values,
                         suppress_git_details: false,
                     },
@@ -3904,11 +3955,12 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         let git = [
             R::Branch("branch".into()),
             R::GitStatus {
+                dirty: 2,
                 ahead: 12,
                 behind: 3,
             },
         ];
-        assert_eq!(draw(&git, 40).0, "\u{2387} branch \u{2191}12 \u{2193}3");
+        assert_eq!(draw(&git, 40).0, "\u{2387} branch +2 \u{2191}12 \u{2193}3");
         let (fixed, cells) = draw(&git, 5);
         assert!(
             display_width(&fixed) > 5,
@@ -3916,7 +3968,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
         );
         assert_eq!(
             (2..7).map(|x| cells[(x, 1)].symbol()).collect::<String>(),
-            "\u{2191}12 \u{2193}"
+            "+2 \u{2191}1"
         );
         let (_, cells) = draw(&git, 0);
         assert!(cells.content.iter().all(|cell| cell.symbol() == "#"));
@@ -3966,6 +4018,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
                         state_text: "unknown",
                         branch: None,
                         ahead_behind: None,
+                        dirty_paths: None,
                         tokens: &values,
                         suppress_git_details: false,
                     },
@@ -4118,7 +4171,7 @@ rows = [[{ token = "workspace", fg = "#123456", bold = false, dim = true }]]
             {
                 let workspace = &mut app.workspaces[index];
                 workspace.cached_git_branch = Some(format!("branch-{index}"));
-                workspace.cached_git_ahead_behind = Some((2, 1));
+                workspace.set_cached_git_ahead_behind(Some((2, 1)));
                 let expected: std::collections::HashMap<String, String> = values
                     .iter()
                     .map(|(key, value)| ((*key).into(), (*value).into()))

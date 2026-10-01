@@ -18,6 +18,7 @@ pub(super) enum ResolvedToken {
     TerminalTitle(String),
     Branch(String),
     GitStatus {
+        dirty: usize,
         ahead: usize,
         behind: usize,
     },
@@ -104,6 +105,7 @@ pub(super) struct SpaceTokenContext<'a> {
     pub branch: Option<&'a str>,
     pub state_text: &'a str,
     pub ahead_behind: Option<(usize, usize)>,
+    pub dirty_paths: Option<usize>,
     pub tokens: &'a std::collections::HashMap<String, String>,
     pub suppress_git_details: bool,
 }
@@ -132,10 +134,17 @@ pub(super) fn space_rows(
                             .branch
                             .map(|branch| ResolvedToken::Branch(branch.to_string())),
                         SpaceSidebarToken::Branch => None,
-                        SpaceSidebarToken::GitStatus if !context.suppress_git_details => context
-                            .ahead_behind
-                            .filter(|(ahead, behind)| *ahead > 0 || *behind > 0)
-                            .map(|(ahead, behind)| ResolvedToken::GitStatus { ahead, behind }),
+                        SpaceSidebarToken::GitStatus if !context.suppress_git_details => {
+                            let (ahead, behind) = context.ahead_behind.unwrap_or_default();
+                            let dirty = context.dirty_paths.unwrap_or_default();
+                            (dirty > 0 || ahead > 0 || behind > 0).then_some(
+                                ResolvedToken::GitStatus {
+                                    dirty,
+                                    ahead,
+                                    behind,
+                                },
+                            )
+                        }
                         SpaceSidebarToken::GitStatus => None,
                         SpaceSidebarToken::Custom(name) => {
                             context.tokens.get(name).cloned().map(ResolvedToken::Custom)
@@ -364,6 +373,7 @@ rows = [[{ token = "$wanted", dim = true }]]
                 branch: None,
                 state_text: "working",
                 ahead_behind: None,
+                dirty_paths: None,
                 tokens: &values,
                 suppress_git_details: false,
             },
@@ -466,6 +476,7 @@ rows = [[{ token = "$wanted", dim = true }]]
                     branch,
                     state_text: "state-label",
                     ahead_behind,
+                    dirty_paths: None,
                     tokens: &tokens,
                     suppress_git_details,
                 },
@@ -477,6 +488,7 @@ rows = [[{ token = "$wanted", dim = true }]]
             R::Workspace("workspace-label".into()),
             R::Branch("feature-branch".into()),
             R::GitStatus {
+                dirty: 0,
                 ahead: 2,
                 behind: 3,
             },
@@ -520,7 +532,11 @@ rows = [[{ token = "$wanted", dim = true }]]
         }
         for (ahead, behind) in [(0, 3), (2, 0)] {
             let mut expected = visible.clone();
-            expected[4] = R::GitStatus { ahead, behind };
+            expected[4] = R::GitStatus {
+                dirty: 0,
+                ahead,
+                behind,
+            };
             assert_eq!(
                 resolve(Some("feature-branch"), Some((ahead, behind)), false),
                 vec![expected]
@@ -541,17 +557,55 @@ rows = [[{ token = "$wanted", dim = true }]]
         };
         assert_eq!(
             space_rows(
+                &config,
+                SpaceTokenContext {
+                    workspace: "workspace-label",
+                    branch: None,
+                    state_text: "state-label",
+                    ahead_behind: None,
+                    dirty_paths: Some(2),
+                    tokens: &tokens,
+                    suppress_git_details: false,
+                }
+            )[0][3],
+            R::GitStatus {
+                dirty: 2,
+                ahead: 0,
+                behind: 0,
+            }
+        );
+        assert_eq!(
+            space_rows(
                 &custom_only,
                 SpaceTokenContext {
                     workspace: "workspace-label",
                     branch: None,
                     state_text: "state-label",
                     ahead_behind: None,
+                    dirty_paths: None,
                     tokens: &tokens,
                     suppress_git_details: true,
                 }
             ),
             vec![vec![R::Custom("custom-space".into())]]
         );
+
+        let git_only = SpacesSidebarConfig {
+            rows: vec![vec![S::GitStatus]],
+            ..Default::default()
+        };
+        assert!(space_rows(
+            &git_only,
+            SpaceTokenContext {
+                workspace: "workspace-label",
+                branch: None,
+                state_text: "state-label",
+                ahead_behind: Some((0, 0)),
+                dirty_paths: Some(0),
+                tokens: &tokens,
+                suppress_git_details: false,
+            }
+        )
+        .is_empty());
     }
 }

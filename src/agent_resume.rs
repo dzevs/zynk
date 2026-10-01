@@ -31,6 +31,25 @@ pub struct AgentResumePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResumeArgvObservation {
+    Flagged {
+        dedupe_key: String,
+        argv: Vec<String>,
+    },
+    ObservedCanonical {
+        dedupe_key: String,
+    },
+}
+
+impl ResumeArgvObservation {
+    fn dedupe_key(&self) -> &str {
+        match self {
+            Self::Flagged { dedupe_key, .. } | Self::ObservedCanonical { dedupe_key } => dedupe_key,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedAgentSession {
     pub source: String,
     pub agent: String,
@@ -161,12 +180,112 @@ pub fn persisted_resume_argv(
     foreground_argv: Option<&[String]>,
     existing_launch_argv: Option<&[String]>,
 ) -> Option<Vec<String>> {
-    let canonical = canonical_resume_argv(source, agent, session_ref)?;
-    let sanitized = |argv: Option<&[String]>| -> Option<Vec<String>> {
-        argv.and_then(|a| plan(source, agent, session_ref, Some(a)).map(|p| p.argv))
-            .filter(|out| out.len() > canonical.len())
+    let mut observation = None;
+    persisted_resume_argv_with_observation(
+        source,
+        agent,
+        session_ref,
+        foreground_argv,
+        existing_launch_argv,
+        &mut observation,
+    )
+}
+
+pub(crate) fn persisted_resume_argv_with_observation(
+    source: &str,
+    agent: &str,
+    session_ref: &AgentSessionRef,
+    foreground_argv: Option<&[String]>,
+    existing_launch_argv: Option<&[String]>,
+    observation: &mut Option<ResumeArgvObservation>,
+) -> Option<Vec<String>> {
+    let faithful_foreground = match agent {
+        "claude" | "codex" => true,
+        "pi" => false,
+        _ => {
+            *observation = None;
+            return None;
+        }
     };
-    sanitized(foreground_argv).or_else(|| sanitized(existing_launch_argv))
+    let canonical = canonical_resume_argv(source, agent, session_ref)?;
+    let key = dedupe_key(source, agent, session_ref);
+    if observation
+        .as_ref()
+        .is_some_and(|cached| cached.dedupe_key() != key)
+    {
+        *observation = None;
+    }
+
+    let sanitized = |argv: Option<&[String]>, normalize_argv0: bool| -> Option<Vec<String>> {
+        let mut argv = argv
+            .and_then(|candidate| plan(source, agent, session_ref, Some(candidate)))?
+            .argv;
+        if argv.len() <= canonical.len() {
+            return None;
+        }
+        if normalize_argv0 {
+            argv[0] = agent.to_string();
+        }
+        Some(argv)
+    };
+    let foreground_flagged = sanitized(foreground_argv, true);
+    let tier_a_flagged = sanitized(existing_launch_argv, false);
+
+    if let Some(argv) = foreground_flagged {
+        *observation = Some(ResumeArgvObservation::Flagged {
+            dedupe_key: key,
+            argv: argv.clone(),
+        });
+        return Some(argv);
+    }
+
+    if faithful_foreground && foreground_argv.is_some() {
+        *observation = Some(ResumeArgvObservation::ObservedCanonical { dedupe_key: key });
+        return None;
+    }
+
+    if faithful_foreground {
+        match observation.as_ref() {
+            Some(ResumeArgvObservation::Flagged { argv, .. }) => return Some(argv.clone()),
+            Some(ResumeArgvObservation::ObservedCanonical { .. }) => return None,
+            None => {}
+        }
+    }
+
+    if let Some(argv) = tier_a_flagged {
+        *observation = Some(ResumeArgvObservation::Flagged {
+            dedupe_key: key,
+            argv: argv.clone(),
+        });
+        return Some(argv);
+    }
+
+    if !faithful_foreground {
+        match observation.take() {
+            Some(ResumeArgvObservation::Flagged { argv, .. }) => {
+                *observation = Some(ResumeArgvObservation::Flagged {
+                    dedupe_key: key,
+                    argv: argv.clone(),
+                });
+                return Some(argv);
+            }
+            Some(ResumeArgvObservation::ObservedCanonical { .. }) | None => {}
+        }
+    }
+
+    None
+}
+
+pub(crate) fn managed_resume_observation(plan: &AgentResumePlan) -> Option<ResumeArgvObservation> {
+    let canonical_len = match plan.agent.as_str() {
+        "claude" | "pi" => 3,
+        "codex" => 4,
+        _ => return None,
+    };
+    (plan.argv.len() > canonical_len).then(|| ResumeArgvObservation::Flagged {
+        dedupe_key: plan.dedupe_key.clone(),
+        argv: plan.argv.clone(),
+    })
 }
 
 /// Today's fixed-minimal resume argv, built from agent identity + session ref only.
@@ -1044,6 +1163,45 @@ mod tests {
     }
 
     #[test]
+    fn manual_foreground_codex_normalizes_vendor_argv0_to_command_name() {
+        let id = AgentSessionRef::id("X").unwrap();
+        let foreground = vec![
+            "/opt/codex/vendor/aarch64-unknown-linux-musl/codex".to_string(),
+            "--yolo".to_string(),
+        ];
+
+        assert_eq!(
+            persisted_resume_argv("zynk:codex", "codex", &id, Some(&foreground), None,),
+            Some(vec![
+                "codex".to_string(),
+                "--no-daemon".to_string(),
+                "resume".to_string(),
+                "X".to_string(),
+                "--yolo".to_string(),
+            ]),
+            "safe Tier-B captures must resume through the official command name",
+        );
+    }
+
+    #[test]
+    fn tier_a_codex_preserves_its_explicit_argv0() {
+        let id = AgentSessionRef::id("X").unwrap();
+        let tier_a = vec!["/opt/operator/bin/codex".to_string(), "--yolo".to_string()];
+
+        assert_eq!(
+            persisted_resume_argv("zynk:codex", "codex", &id, None, Some(&tier_a)),
+            Some(vec![
+                "/opt/operator/bin/codex".to_string(),
+                "--no-daemon".to_string(),
+                "resume".to_string(),
+                "X".to_string(),
+                "--yolo".to_string(),
+            ]),
+            "only Tier-B process captures normalize argv0",
+        );
+    }
+
+    #[test]
     fn manual_foreground_pi_preserves_model_and_thinking() {
         let target = pi_target_ref();
         let fg = vec![
@@ -1125,6 +1283,529 @@ mod tests {
         )
         .is_none());
         assert!(persisted_resume_argv("zynk:claude", "claude", &id, None, None).is_none());
+    }
+
+    #[test]
+    fn faithful_canonical_foreground_suppresses_stale_tier_a_flags() {
+        let id = AgentSessionRef::id("X").unwrap();
+        let foreground = vec!["claude".to_string()];
+        let stale_tier_a = vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+
+        assert_eq!(
+            persisted_resume_argv(
+                "zynk:claude",
+                "claude",
+                &id,
+                Some(&foreground),
+                Some(&stale_tier_a),
+            ),
+            None,
+            "the newest faithful launch must decide whether privileged flags persist",
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum TableForeground {
+        Flagged,
+        Canonical,
+        Absent,
+    }
+
+    #[derive(Clone, Copy)]
+    enum TableCache {
+        Flagged,
+        Canonical,
+        Empty,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TableResult {
+        Foreground,
+        TierA,
+        Cache,
+        None,
+    }
+
+    fn table_observation(
+        key: &str,
+        cache: TableCache,
+        cached: &[String],
+    ) -> Option<ResumeArgvObservation> {
+        match cache {
+            TableCache::Flagged => Some(ResumeArgvObservation::Flagged {
+                dedupe_key: key.to_string(),
+                argv: cached.to_vec(),
+            }),
+            TableCache::Canonical => Some(ResumeArgvObservation::ObservedCanonical {
+                dedupe_key: key.to_string(),
+            }),
+            TableCache::Empty => None,
+        }
+    }
+
+    #[test]
+    fn faithful_resume_observation_decision_table_covers_all_eighteen_cells() {
+        let id = AgentSessionRef::id("X").unwrap();
+        let key = dedupe_key("zynk:claude", "claude", &id);
+        let foreground = vec![
+            "/vendor/claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+        let canonical = vec!["claude".to_string()];
+        let tier_a = vec!["claude".to_string(), "--safe-mode".to_string()];
+        let expected_foreground = vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            "--resume".to_string(),
+            "X".to_string(),
+        ];
+        let expected_tier_a = vec![
+            "claude".to_string(),
+            "--safe-mode".to_string(),
+            "--resume".to_string(),
+            "X".to_string(),
+        ];
+        let cached = vec![
+            "claude".to_string(),
+            "--resume".to_string(),
+            "X".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+        let cases = [
+            (
+                "F-T-K",
+                TableForeground::Flagged,
+                true,
+                TableCache::Flagged,
+                TableResult::Foreground,
+            ),
+            (
+                "F-T-O",
+                TableForeground::Flagged,
+                true,
+                TableCache::Canonical,
+                TableResult::Foreground,
+            ),
+            (
+                "F-T-E",
+                TableForeground::Flagged,
+                true,
+                TableCache::Empty,
+                TableResult::Foreground,
+            ),
+            (
+                "F---K",
+                TableForeground::Flagged,
+                false,
+                TableCache::Flagged,
+                TableResult::Foreground,
+            ),
+            (
+                "F---O",
+                TableForeground::Flagged,
+                false,
+                TableCache::Canonical,
+                TableResult::Foreground,
+            ),
+            (
+                "F---E",
+                TableForeground::Flagged,
+                false,
+                TableCache::Empty,
+                TableResult::Foreground,
+            ),
+            (
+                "C-T-K",
+                TableForeground::Canonical,
+                true,
+                TableCache::Flagged,
+                TableResult::None,
+            ),
+            (
+                "C-T-O",
+                TableForeground::Canonical,
+                true,
+                TableCache::Canonical,
+                TableResult::None,
+            ),
+            (
+                "C-T-E",
+                TableForeground::Canonical,
+                true,
+                TableCache::Empty,
+                TableResult::None,
+            ),
+            (
+                "C---K",
+                TableForeground::Canonical,
+                false,
+                TableCache::Flagged,
+                TableResult::None,
+            ),
+            (
+                "C---O",
+                TableForeground::Canonical,
+                false,
+                TableCache::Canonical,
+                TableResult::None,
+            ),
+            (
+                "C---E",
+                TableForeground::Canonical,
+                false,
+                TableCache::Empty,
+                TableResult::None,
+            ),
+            (
+                "--T-K",
+                TableForeground::Absent,
+                true,
+                TableCache::Flagged,
+                TableResult::Cache,
+            ),
+            (
+                "--T-O",
+                TableForeground::Absent,
+                true,
+                TableCache::Canonical,
+                TableResult::None,
+            ),
+            (
+                "--T-E",
+                TableForeground::Absent,
+                true,
+                TableCache::Empty,
+                TableResult::TierA,
+            ),
+            (
+                "----K",
+                TableForeground::Absent,
+                false,
+                TableCache::Flagged,
+                TableResult::Cache,
+            ),
+            (
+                "----O",
+                TableForeground::Absent,
+                false,
+                TableCache::Canonical,
+                TableResult::None,
+            ),
+            (
+                "----E",
+                TableForeground::Absent,
+                false,
+                TableCache::Empty,
+                TableResult::None,
+            ),
+        ];
+
+        for (cell, foreground_state, has_tier_a, cache_state, expected) in cases {
+            let foreground_argv = match foreground_state {
+                TableForeground::Flagged => Some(foreground.as_slice()),
+                TableForeground::Canonical => Some(canonical.as_slice()),
+                TableForeground::Absent => None,
+            };
+            let mut observation = table_observation(&key, cache_state, &cached);
+            let actual = persisted_resume_argv_with_observation(
+                "zynk:claude",
+                "claude",
+                &id,
+                foreground_argv,
+                has_tier_a.then_some(tier_a.as_slice()),
+                &mut observation,
+            );
+            let expected_argv = match expected {
+                TableResult::Foreground => Some(expected_foreground.clone()),
+                TableResult::TierA => Some(expected_tier_a.clone()),
+                TableResult::Cache => Some(cached.clone()),
+                TableResult::None => None,
+            };
+            assert_eq!(actual, expected_argv, "faithful cell {cell}");
+            match expected {
+                TableResult::Foreground => assert!(
+                    matches!(
+                        observation,
+                        Some(ResumeArgvObservation::Flagged { ref argv, .. }) if argv == &expected_foreground
+                    ),
+                    "faithful cell {cell} cache"
+                ),
+                TableResult::TierA => assert!(
+                    matches!(
+                        observation,
+                        Some(ResumeArgvObservation::Flagged { ref argv, .. }) if argv == &expected_tier_a
+                    ),
+                    "faithful cell {cell} cache"
+                ),
+                TableResult::Cache => assert!(
+                    matches!(
+                        observation,
+                        Some(ResumeArgvObservation::Flagged { ref argv, .. }) if argv == &cached
+                    ),
+                    "faithful cell {cell} cache"
+                ),
+                TableResult::None if matches!(foreground_state, TableForeground::Canonical) => {
+                    assert!(
+                        matches!(
+                            observation,
+                            Some(ResumeArgvObservation::ObservedCanonical { .. })
+                        ),
+                        "faithful cell {cell} tombstone"
+                    )
+                }
+                TableResult::None if matches!(cache_state, TableCache::Canonical) => assert!(
+                    matches!(
+                        observation,
+                        Some(ResumeArgvObservation::ObservedCanonical { .. })
+                    ),
+                    "faithful cell {cell} retained tombstone"
+                ),
+                TableResult::None => assert!(observation.is_none(), "faithful cell {cell} empty"),
+            }
+        }
+    }
+
+    #[test]
+    fn pi_resume_observation_decision_table_covers_all_eighteen_cells() {
+        let session = pi_target_ref();
+        let key = dedupe_key("zynk:pi", "pi", &session);
+        let foreground = vec![
+            "/vendor/pi".to_string(),
+            "--model".to_string(),
+            "foreground".to_string(),
+        ];
+        let canonical = vec!["pi".to_string()];
+        let tier_a = vec!["pi".to_string(), "--model=tier-a".to_string()];
+        let expected_foreground = vec![
+            "pi".to_string(),
+            "--model".to_string(),
+            "foreground".to_string(),
+            "--session".to_string(),
+            session.value.clone(),
+        ];
+        let expected_tier_a = vec![
+            "pi".to_string(),
+            "--model=tier-a".to_string(),
+            "--session".to_string(),
+            session.value.clone(),
+        ];
+        let cached = vec![
+            "pi".to_string(),
+            "--session".to_string(),
+            session.value.clone(),
+            "--thinking".to_string(),
+            "high".to_string(),
+        ];
+        let cases = [
+            (
+                "F-T-K",
+                TableForeground::Flagged,
+                true,
+                TableCache::Flagged,
+                TableResult::Foreground,
+            ),
+            (
+                "F-T-O",
+                TableForeground::Flagged,
+                true,
+                TableCache::Canonical,
+                TableResult::Foreground,
+            ),
+            (
+                "F-T-E",
+                TableForeground::Flagged,
+                true,
+                TableCache::Empty,
+                TableResult::Foreground,
+            ),
+            (
+                "F---K",
+                TableForeground::Flagged,
+                false,
+                TableCache::Flagged,
+                TableResult::Foreground,
+            ),
+            (
+                "F---O",
+                TableForeground::Flagged,
+                false,
+                TableCache::Canonical,
+                TableResult::Foreground,
+            ),
+            (
+                "F---E",
+                TableForeground::Flagged,
+                false,
+                TableCache::Empty,
+                TableResult::Foreground,
+            ),
+            (
+                "C-T-K",
+                TableForeground::Canonical,
+                true,
+                TableCache::Flagged,
+                TableResult::TierA,
+            ),
+            (
+                "C-T-O",
+                TableForeground::Canonical,
+                true,
+                TableCache::Canonical,
+                TableResult::TierA,
+            ),
+            (
+                "C-T-E",
+                TableForeground::Canonical,
+                true,
+                TableCache::Empty,
+                TableResult::TierA,
+            ),
+            (
+                "C---K",
+                TableForeground::Canonical,
+                false,
+                TableCache::Flagged,
+                TableResult::Cache,
+            ),
+            (
+                "C---O",
+                TableForeground::Canonical,
+                false,
+                TableCache::Canonical,
+                TableResult::None,
+            ),
+            (
+                "C---E",
+                TableForeground::Canonical,
+                false,
+                TableCache::Empty,
+                TableResult::None,
+            ),
+            (
+                "--T-K",
+                TableForeground::Absent,
+                true,
+                TableCache::Flagged,
+                TableResult::TierA,
+            ),
+            (
+                "--T-O",
+                TableForeground::Absent,
+                true,
+                TableCache::Canonical,
+                TableResult::TierA,
+            ),
+            (
+                "--T-E",
+                TableForeground::Absent,
+                true,
+                TableCache::Empty,
+                TableResult::TierA,
+            ),
+            (
+                "----K",
+                TableForeground::Absent,
+                false,
+                TableCache::Flagged,
+                TableResult::Cache,
+            ),
+            (
+                "----O",
+                TableForeground::Absent,
+                false,
+                TableCache::Canonical,
+                TableResult::None,
+            ),
+            (
+                "----E",
+                TableForeground::Absent,
+                false,
+                TableCache::Empty,
+                TableResult::None,
+            ),
+        ];
+
+        for (cell, foreground_state, has_tier_a, cache_state, expected) in cases {
+            let foreground_argv = match foreground_state {
+                TableForeground::Flagged => Some(foreground.as_slice()),
+                TableForeground::Canonical => Some(canonical.as_slice()),
+                TableForeground::Absent => None,
+            };
+            let mut observation = table_observation(&key, cache_state, &cached);
+            let actual = persisted_resume_argv_with_observation(
+                "zynk:pi",
+                "pi",
+                &session,
+                foreground_argv,
+                has_tier_a.then_some(tier_a.as_slice()),
+                &mut observation,
+            );
+            let expected_argv = match expected {
+                TableResult::Foreground => Some(expected_foreground.clone()),
+                TableResult::TierA => Some(expected_tier_a.clone()),
+                TableResult::Cache => Some(cached.clone()),
+                TableResult::None => None,
+            };
+            assert_eq!(actual, expected_argv, "pi cell {cell}");
+            assert!(
+                !matches!(
+                    observation,
+                    Some(ResumeArgvObservation::ObservedCanonical { .. })
+                ),
+                "pi cell {cell} must never retain a canonical tombstone",
+            );
+        }
+    }
+
+    #[test]
+    fn resume_observation_is_exact_session_scoped() {
+        let first = AgentSessionRef::id("first").unwrap();
+        let second = AgentSessionRef::id("second").unwrap();
+        let flagged = vec!["codex".to_string(), "--yolo".to_string()];
+        let mut observation = None;
+        assert!(persisted_resume_argv_with_observation(
+            "zynk:codex",
+            "codex",
+            &first,
+            Some(&flagged),
+            None,
+            &mut observation,
+        )
+        .is_some());
+        assert_eq!(
+            persisted_resume_argv_with_observation(
+                "zynk:codex",
+                "codex",
+                &second,
+                None,
+                None,
+                &mut observation,
+            ),
+            None,
+        );
+        assert!(observation.is_none());
+    }
+
+    #[test]
+    fn managed_resume_observation_tracks_only_flagged_adapter_plans() {
+        let session = AgentSessionRef::id("X").unwrap();
+        let flagged = plan(
+            "zynk:codex",
+            "codex",
+            &session,
+            Some(&["codex".to_string(), "--yolo".to_string()]),
+        )
+        .unwrap();
+        assert!(matches!(
+            managed_resume_observation(&flagged),
+            Some(ResumeArgvObservation::Flagged { argv, .. }) if argv.contains(&"--yolo".to_string())
+        ));
+
+        let canonical = plan("zynk:codex", "codex", &session, None).unwrap();
+        assert_eq!(managed_resume_observation(&canonical), None);
     }
 
     // --- Adversarial: anything unrecognized falls back to canonical (returns None) ---

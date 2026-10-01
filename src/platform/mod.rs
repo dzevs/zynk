@@ -284,6 +284,142 @@ pub(crate) fn read_limited_reader(
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum BoundedChildWait {
+    Exited(std::process::ExitStatus),
+    TimedOut(std::process::ExitStatus),
+    Cancelled(std::process::ExitStatus),
+}
+
+#[derive(Debug)]
+pub(crate) struct BoundedChildOutput {
+    pub(crate) stdout: LimitedRead,
+    pub(crate) stderr: LimitedRead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoundedChildOutputError {
+    Wait,
+    Timeout,
+    Output,
+    Exit,
+    Validation,
+}
+
+pub(crate) struct BoundedChildOutputOptions {
+    pub deadline: std::time::Instant,
+    pub cleanup_grace: std::time::Duration,
+    pub stdout_max_bytes: usize,
+    pub stderr_max_bytes: usize,
+}
+
+pub(crate) struct BoundedChildWaitOptions<'a> {
+    pub timeout: Option<std::time::Duration>,
+    pub terminate_process_group: bool,
+    pub cancel: Option<&'a std::sync::atomic::AtomicBool>,
+}
+
+pub(crate) fn wait_for_bounded_child(
+    child: &mut std::process::Child,
+    options: BoundedChildWaitOptions<'_>,
+) -> std::io::Result<BoundedChildWait> {
+    if options.timeout.is_none() && options.cancel.is_none() {
+        return child.wait().map(BoundedChildWait::Exited);
+    }
+
+    let deadline = options
+        .timeout
+        .map(|timeout| std::time::Instant::now() + timeout);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(BoundedChildWait::Exited(status)),
+            Ok(None) => {}
+            Err(wait_error) => {
+                let _ = terminate_and_reap_child(child, options.terminate_process_group);
+                return Err(wait_error);
+            }
+        }
+
+        let cancelled = options
+            .cancel
+            .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Acquire));
+        let timed_out = deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
+        if cancelled || timed_out {
+            let status = terminate_and_reap_child(child, options.terminate_process_group)?;
+            return Ok(if timed_out {
+                BoundedChildWait::TimedOut(status)
+            } else {
+                BoundedChildWait::Cancelled(status)
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn terminate_and_reap_child(
+    child: &mut std::process::Child,
+    terminate_process_group: bool,
+) -> std::io::Result<std::process::ExitStatus> {
+    terminate_and_reap_child_until(child, terminate_process_group, None)
+}
+
+fn terminate_and_reap_child_until(
+    child: &mut std::process::Child,
+    terminate_process_group: bool,
+    deadline: Option<std::time::Instant>,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut termination_error = terminate_process_group
+        .then(|| kill_process_group(child.id()).err())
+        .flatten();
+    if let Err(err) = child.kill() {
+        if err.kind() != std::io::ErrorKind::InvalidInput {
+            termination_error.get_or_insert(err);
+        }
+    }
+    let status = if let Some(deadline) = deadline {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "child did not exit within cleanup grace",
+                        ));
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "child did not exit within cleanup grace",
+                ));
+            }
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(now)
+                    .min(std::time::Duration::from_millis(2)),
+            );
+        }
+    } else {
+        loop {
+            match child.wait() {
+                Ok(status) => break status,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            }
+        }
+    };
+    if let Some(err) = termination_error {
+        return Err(err);
+    }
+    Ok(status)
+}
+
 mod linux;
 pub use linux::*;
 
@@ -365,5 +501,37 @@ mod tests {
             read_limited_reader(input, 16).expect("limited read"),
             LimitedRead::Complete(b"image".to_vec())
         );
+    }
+
+    #[test]
+    fn bounded_child_cancellation_kills_and_reaps_the_process_group() {
+        use std::os::unix::process::CommandExt as _;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 5 & wait"]).process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_group_id = child.id();
+        let cancel = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        let outcome = wait_for_bounded_child(
+            &mut child,
+            BoundedChildWaitOptions {
+                timeout: Some(std::time::Duration::from_secs(5)),
+                terminate_process_group: true,
+                cancel: Some(&cancel),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, BoundedChildWait::Cancelled(_)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(child.try_wait().unwrap().is_some());
+        assert_eq!(unsafe { libc::kill(-(process_group_id as i32), 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert!(cancel.load(Ordering::Acquire));
     }
 }

@@ -2709,8 +2709,14 @@ impl AppState {
                 ws.cached_git_branch = result.branch;
                 changed = true;
             }
-            if result.demand.ahead_behind && ws.cached_git_ahead_behind != result.ahead_behind {
-                ws.cached_git_ahead_behind = result.ahead_behind;
+            if result.demand.ahead_behind && ws.git_ahead_behind() != result.ahead_behind {
+                ws.set_cached_git_ahead_behind(result.ahead_behind);
+                changed = true;
+            }
+            if result.demand.dirty_paths
+                && ws.git_dirty_paths() != result.demand.dirty_paths_result()
+            {
+                ws.set_cached_git_dirty_paths(result.demand.dirty_paths_result());
                 changed = true;
             }
             if ws.cached_git_space != result.space {
@@ -4960,7 +4966,8 @@ mod tests {
                 workspace_id: first_id,
                 resolved_identity_cwd: first_cwd.clone(),
                 status_cache_key: first_cwd,
-                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL
+                    .with_dirty_paths_result(Some(3)),
                 auto_label: "one".into(),
                 branch: Some("main".into()),
                 ahead_behind: Some((2, 1)),
@@ -4971,6 +4978,7 @@ mod tests {
         assert!(changed);
         assert_eq!(state.workspaces[0].branch().as_deref(), Some("main"));
         assert_eq!(state.workspaces[0].git_ahead_behind(), Some((2, 1)));
+        assert_eq!(state.workspaces[0].git_dirty_paths(), Some(3));
         assert_eq!(state.workspaces[1].id, second_id);
         assert_eq!(state.workspaces[1].git_ahead_behind(), None);
     }
@@ -4980,7 +4988,7 @@ mod tests {
         let mut state = app_with_workspaces(&["one"]);
         let workspace_id = state.workspaces[0].id.clone();
         state.workspaces[0].cached_git_branch = Some("old".into());
-        state.workspaces[0].cached_git_ahead_behind = Some((1, 0));
+        state.workspaces[0].set_cached_git_ahead_behind(Some((1, 0)));
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let changed = state.apply_workspace_git_statuses(
@@ -5009,6 +5017,7 @@ mod tests {
         let cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
         state.workspaces[0].cached_auto_label = "one".into();
         state.workspaces[0].cached_git_branch = Some("old".into());
+        state.workspaces[0].set_cached_git_dirty_paths(Some(2));
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let changed = state.apply_workspace_git_statuses(
@@ -5020,6 +5029,8 @@ mod tests {
                 demand: crate::workspace::GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    dirty_paths: false,
+                    ..Default::default()
                 },
                 auto_label: "one".into(),
                 branch: Some("new".into()),
@@ -5030,6 +5041,7 @@ mod tests {
 
         assert!(!changed);
         assert_eq!(state.workspaces[0].branch().as_deref(), Some("old"));
+        assert_eq!(state.workspaces[0].git_dirty_paths(), Some(2));
     }
 
     #[test]
@@ -5038,7 +5050,8 @@ mod tests {
         let workspace_id = state.workspaces[0].id.clone();
         let cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
         state.workspaces[0].cached_git_branch = Some("main".into());
-        state.workspaces[0].cached_git_ahead_behind = Some((1, 2));
+        state.workspaces[0].set_cached_git_ahead_behind(Some((1, 2)));
+        state.workspaces[0].set_cached_git_dirty_paths(Some(3));
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let changed = state.apply_workspace_git_statuses(
@@ -5058,6 +5071,7 @@ mod tests {
         assert!(changed);
         assert_eq!(state.workspaces[0].branch(), None);
         assert_eq!(state.workspaces[0].git_ahead_behind(), None);
+        assert_eq!(state.workspaces[0].git_dirty_paths(), None);
     }
 
     #[test]

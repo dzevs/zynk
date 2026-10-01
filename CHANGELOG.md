@@ -29,8 +29,8 @@ dispatch, not receipt; the server-validated receipt event remains the only path 
 - `[ui.sidebar.agents].group_gap` is independent of `row_gap` and defaults to 1. With the default agent
   `row_gap = 0`, this restores no gap within groups and one blank row before every later emitted group header.
 - `ui.working_animation` defaults to true and restores the yellow sidebar pulse plus navigator/mobile braille
-  spinner. Expanded agent rows, mobile switcher rows, and navigator rows also sweep a theme-derived brightness
-  shimmer across the literal `working` label without changing its glyphs or width. The server advances one
+  spinner. Expanded agent rows, mobile switcher rows, and navigator rows also sweep a three-letter red band
+  across the literal `working` label without changing its resting color, glyphs, or width. The server advances one
   visible frame per 128 ms only while App clients demand animation and uses a retained chrome path; detached
   and terminal-attach-only servers schedule none. Animation is active render work and can raise idle CPU, so
   set the key to false to use the static 3.1.0 marks and labels.
@@ -39,6 +39,8 @@ dispatch, not receipt; the server-validated receipt event remains the only path 
   keep the application's existing mouse-reporting behavior.
 - `zynk agent wait --status S` is an alias of `--until S`. Either form can repeat with the same any-of status
   semantics; `agent prompt` does not gain the alias.
+- The existing sidebar `git_status` token now prefixes ahead/behind counters with a green `+N` when `N` paths
+  differ from `HEAD`. Staged, modified, deleted, and individual untracked files count; ignored paths do not.
 
 **Changed**
 
@@ -55,6 +57,15 @@ dispatch, not receipt; the server-validated receipt event remains the only path 
   before acting. Accepted modifier-right-click passthrough instead delivers its Down bytes to the explicit pane
   first, then focuses it; rejected delivery leaves focus unchanged and opens the ordinary pane menu.
   Navigate-mode Tab and Shift-Tab cycle panes without leaving Navigate.
+- Working-label shimmer now keeps each surface's existing resting foreground (including yellow working text and
+  muted mobile/context labels) and uses a moving red band: two leading letters at full red and one trailing letter
+  at a half blend. Its 128 ms cadence and `ui.working_animation` gate are unchanged.
+- Dirty-path status uses the existing configured-token background refresh only. Each checkout runs at most one
+  bounded query per 5 seconds. Success requires Git to exit and both output pipes to reach EOF inside 250 ms;
+  failure cleanup signals the original process group before reaping the direct child, whose unreaped state keeps
+  its PID/PGID reserved during that signal. Failures use a separate bounded cleanup grace, retain the last value
+  (or hide it before the first success), and back off for 30 seconds. A process descendant retaining a pipe can
+  no longer stall later Git refreshes.
 
 **Fixed**
 
@@ -63,6 +74,11 @@ dispatch, not receipt; the server-validated receipt event remains the only path 
   300 ms later through one ordered PTY actor command; `zynk agent send`, `zynk pane run`, `zynk send`, and
   `zynk reply` dispatch `pane.send_input` as one validated encoded byte vector; `zynk pane send-text` dispatches
   `pane.send_text` without Enter.
+- Safe flags from a manually launched official Claude or Codex process now survive normal shutdown and restart.
+  Flags come only from the exact foreground process selected by leader-first or priority detection, so a
+  same-name sibling cannot add or remove them. The most recent live launch wins over an older recorded command,
+  Tier-B captures resume by the official command name rather than a vendor-internal path, and Pi retains safe
+  Tier-A flags when its rewritten process title is not a faithful view of its launch.
 - Protocol-version refusals from native `send`, `reply`, and caller-bound `inbox` now retain the typed F4
   `protocol_mismatch` with both versions instead of becoming a generic transport failure. Explicit
   `inbox --agent` remains database-only.

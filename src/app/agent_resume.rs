@@ -280,6 +280,9 @@ impl App {
             return false;
         }
 
+        runtime.replace_agent_resume_observation(crate::agent_resume::managed_resume_observation(
+            &plan,
+        ));
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             // Record the effective resumed command so a future snapshot preserves the flags we just
@@ -520,7 +523,8 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.ensure_test_terminals();
-        let plan_argv = long_running_test_argv();
+        let mut plan_argv = long_running_test_argv();
+        plan_argv.extend(["managed-resume".into(), "safe-flag".into()]);
         app.state
             .terminals
             .get_mut(&terminal_id)
@@ -539,6 +543,17 @@ mod tests {
             .expect("terminal should survive launch");
         assert_eq!(terminal.launch_argv.as_deref(), Some(plan_argv.as_slice()));
         assert!(terminal.pending_agent_resume_plan.is_none());
+        let observation = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .with_agent_resume_observation(|observation| observation.clone())
+            .flatten();
+        assert!(matches!(
+            observation,
+            Some(crate::agent_resume::ResumeArgvObservation::Flagged { argv, .. })
+                if argv == plan_argv
+        ));
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();

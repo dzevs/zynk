@@ -158,7 +158,7 @@ fn collect_working_shimmer_cells(
             };
             let Some(palette) = crate::ui::working_label_shimmer_palette(
                 base_color,
-                app_state.palette.text,
+                app_state.palette.red,
                 &app_state.host_terminal_theme,
             ) else {
                 column += 1;
@@ -737,11 +737,11 @@ mod working_animation_tests {
         let mut app = AppState::test_new();
         app.spinner_tick = 0;
         app.palette.yellow = Color::Rgb(20, 40, 60);
-        app.palette.text = Color::Rgb(100, 120, 140);
+        app.palette.red = Color::Rgb(100, 120, 140);
         let rendered_base = Color::Rgb(5, 15, 25);
         let palette = crate::ui::working_label_shimmer_palette(
             rendered_base,
-            app.palette.text,
+            app.palette.red,
             &app.host_terminal_theme,
         )
         .expect("RGB endpoints resolve without a host palette");

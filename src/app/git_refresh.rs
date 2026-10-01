@@ -106,7 +106,10 @@ impl App {
         for token in self.state.sidebar_spaces.rows.iter().flatten() {
             match token {
                 crate::config::SpaceSidebarToken::Branch => demand.branch = true,
-                crate::config::SpaceSidebarToken::GitStatus => demand.ahead_behind = true,
+                crate::config::SpaceSidebarToken::GitStatus => {
+                    demand.ahead_behind = true;
+                    demand.dirty_paths = true;
+                }
                 _ => {}
             }
         }
@@ -254,6 +257,8 @@ mod tests {
             GitStatusRefreshDemand {
                 branch: true,
                 ahead_behind: false,
+                dirty_paths: false,
+                ..Default::default()
             }
         );
         let worker_state = (
@@ -264,13 +269,13 @@ mod tests {
             app.last_git_repo_discovery_refresh,
             app.git_status_cache.len(),
         );
-        for (rows, branch, ahead_behind) in [
-            ("[[\"branch\"]]", true, false),
-            ("[[\"git_status\"]]", false, true),
-            ("[[\"workspace\"]]", false, false),
-            ("[[\"branch\"], [\"git_status\"]]", true, true),
-            ("[]", false, false),
-            ("[[\"$branch\", \"$git_status\"]]", false, false),
+        for (rows, branch, ahead_behind, dirty_paths) in [
+            ("[[\"branch\"]]", true, false, false),
+            ("[[\"git_status\"]]", false, true, true),
+            ("[[\"workspace\"]]", false, false, false),
+            ("[[\"branch\"], [\"git_status\"]]", true, true, true),
+            ("[]", false, false, false),
+            ("[[\"$branch\", \"$git_status\"]]", false, false, false),
         ] {
             let text = format!("onboarding = false\n[keys]\nnew_workspace = \"prefix+n\"\n[ui.sidebar.spaces]\nrows = {rows}\n");
             assert!(text.parse::<toml::Value>().is_ok());
@@ -282,6 +287,8 @@ mod tests {
             let expected = GitStatusRefreshDemand {
                 branch,
                 ahead_behind,
+                dirty_paths,
+                ..Default::default()
             };
             assert_eq!(app.git_refresh_demand(), expected, "{rows}");
             assert!(app.state.keybinds.new_workspace.matches_prefix(
@@ -375,13 +382,13 @@ mod tests {
 
     #[test]
     fn m828d2_git_demand_follows_plain_configured_tokens() {
-        for (rows, branch, ahead_behind) in [
-            ("[[\"workspace\"]]", false, false),
-            ("[[\"branch\"]]", true, false),
-            ("[[\"git_status\"]]", false, true),
-            ("[[\"branch\", \"git_status\"]]", true, true),
-            ("[[\"$branch\", \"$git_status\"]]", false, false),
-            ("[]", false, false),
+        for (rows, branch, ahead_behind, dirty_paths) in [
+            ("[[\"workspace\"]]", false, false, false),
+            ("[[\"branch\"]]", true, false, false),
+            ("[[\"git_status\"]]", false, true, true),
+            ("[[\"branch\", \"git_status\"]]", true, true, true),
+            ("[[\"$branch\", \"$git_status\"]]", false, false, false),
+            ("[]", false, false, false),
         ] {
             let input = format!("[ui.sidebar.spaces]\nrow_gap = 2\nrows = {rows}\n");
             assert!(input.parse::<toml::Value>().is_ok());
@@ -395,11 +402,13 @@ mod tests {
             let expected = GitStatusRefreshDemand {
                 branch,
                 ahead_behind,
+                dirty_paths,
+                ..Default::default()
             };
             assert_eq!(app.git_refresh_demand(), expected, "rows {rows}");
             assert_eq!(
                 app.git_refresh_deadline(),
-                (branch || ahead_behind).then_some(now)
+                (branch || ahead_behind || dirty_paths).then_some(now)
             );
         }
     }
@@ -674,10 +683,12 @@ mod tests {
         let cached = GitStatusCacheEntry {
             fingerprint: None,
             retry_after: Some(Instant::now() + std::time::Duration::from_secs(30)),
+            dirty_refresh_after: None,
             snapshot: crate::workspace::WorkspaceGitStatusSnapshot {
                 auto_label: "/".into(),
                 branch: Some("main".into()),
                 ahead_behind: None,
+                dirty_paths: None,
                 space: Some(crate::workspace::GitSpaceMetadata {
                     key: "/.git".into(),
                     checkout_key: "/".into(),
@@ -763,10 +774,12 @@ mod tests {
         let cached = GitStatusCacheEntry {
             fingerprint: None,
             retry_after: None,
+            dirty_refresh_after: None,
             snapshot: crate::workspace::WorkspaceGitStatusSnapshot {
                 auto_label: "stale".into(),
                 branch: None,
                 ahead_behind: None,
+                dirty_paths: None,
                 space: None,
             },
         };
@@ -881,6 +894,50 @@ mod tests {
             .git_refresh_deadline()
             .expect("refresh should be due once a workspace exists");
         assert!(deadline <= Instant::now());
+    }
+
+    #[test]
+    fn dirty_pipe_timeout_emits_completion_and_clears_global_in_flight() {
+        let fixture = crate::workspace::DirtyPipeFixture::new("escaped");
+        let mut app = test_app(&crate::config::Config::default());
+        let mut workspace = Workspace::test_new("dirty-pipe-worker");
+        workspace.tabs.clear();
+        workspace.identity_cwd = fixture.repo.clone();
+        app.state.workspaces.push(workspace);
+        let now = Instant::now();
+        app.mark_git_status_refresh_due(now);
+
+        let started = Instant::now();
+        app.start_git_status_refresh_if_due(now);
+        assert!(app.git_refresh_in_flight);
+        let outer_deadline = started + std::time::Duration::from_secs(3);
+        let event = loop {
+            if let Ok(event) = app.event_rx.try_recv() {
+                break event;
+            }
+            assert!(
+                Instant::now() < outer_deadline,
+                "dirty pipe worker never emitted completion"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        let elapsed = started.elapsed();
+        let escaped_descendant_alive = fixture.descendant_alive();
+        app.handle_internal_event(event);
+
+        assert!(
+            elapsed <= std::time::Duration::from_millis(1_000),
+            "global Git worker exceeded dirty deadline plus cleanup grace: {elapsed:?}"
+        );
+        assert!(
+            escaped_descendant_alive,
+            "worker waited for the escaped descendant instead of closing its pipe"
+        );
+        assert!(
+            !app.git_refresh_in_flight,
+            "GitStatusRefreshed handling must clear the global in-flight flag"
+        );
+        assert_eq!(app.state.workspaces[0].git_dirty_paths(), None);
     }
 
     #[test]

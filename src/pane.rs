@@ -1136,6 +1136,7 @@ pub struct PaneRuntime {
     process_observation: ProcessObservationSlot,
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
+    agent_resume_observation: Arc<Mutex<Option<crate::agent_resume::ResumeArgvObservation>>>,
     preserve_processes_on_drop: bool,
     // Task handles for deterministic shutdown
     detect_handle: Option<tokio::task::AbortHandle>,
@@ -2041,6 +2042,7 @@ impl PaneRuntime {
             process_observation,
             detect_reset_notify,
             pending_release,
+            agent_resume_observation: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             detect_handle: Some(detect_handle),
         })
@@ -2639,6 +2641,7 @@ impl PaneRuntime {
             process_observation,
             detect_reset_notify,
             pending_release,
+            agent_resume_observation: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: false,
             detect_handle,
         })
@@ -3141,6 +3144,34 @@ impl PaneRuntime {
         (pid > 0).then_some(pid)
     }
 
+    pub(crate) fn with_agent_resume_observation<T>(
+        &self,
+        update: impl FnOnce(&mut Option<crate::agent_resume::ResumeArgvObservation>) -> T,
+    ) -> Option<T> {
+        self.agent_resume_observation
+            .lock()
+            .ok()
+            .map(|mut observation| update(&mut observation))
+    }
+
+    pub(crate) fn replace_agent_resume_observation(
+        &self,
+        observation: Option<crate::agent_resume::ResumeArgvObservation>,
+    ) -> bool {
+        self.with_agent_resume_observation(|current| *current = observation)
+            .is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_agent_resume_observation_for_test(&self) {
+        let observation = Arc::clone(&self.agent_resume_observation);
+        let _ = std::thread::spawn(move || {
+            let _guard = observation.lock().unwrap();
+            panic!("poison agent resume observation for fail-closed coverage");
+        })
+        .join();
+    }
+
     /// The start time captured for `child_pid()`, which together with the pid is
     /// ADR 0014's pane-root principal.
     ///
@@ -3305,6 +3336,7 @@ impl PaneRuntime {
                 process_observation: Arc::new(Mutex::new(None)),
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
+                agent_resume_observation: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
                 detect_handle: Some(tokio::spawn(async {}).abort_handle()),
             },
@@ -4643,6 +4675,7 @@ mod tests {
             process_observation: Arc::new(Mutex::new(None)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
+            agent_resume_observation: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
@@ -4680,6 +4713,7 @@ mod tests {
             process_observation: Arc::new(Mutex::new(None)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
+            agent_resume_observation: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };

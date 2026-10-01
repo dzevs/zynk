@@ -345,10 +345,12 @@ Working-agent animation is a fork-owned presentation feature controlled by reloa
 `◌ ◎ ◉ ● ◉ ◎` pulse for working agent rows, group aggregates, workspace dots, and the collapsed rail.
 Navigator rows/chips and mobile header/switcher surfaces use `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`.
 The literal `working` label on expanded sidebar rows, mobile switcher rows, and navigator rows also receives a
-style-only brightness sweep. Its symbols, width, alignment, background, and modifiers never change. The base is
-the label's rendered working foreground; the peak blends three quarters toward the theme text color, followed
-by one-half and one-quarter tail cells. The deterministic ten-step period is the seven-character label plus the
-three-cell tail. Symbols-mode sidebar marks remain static while the label shimmer and braille surfaces animate.
+style-only hue sweep. Its symbols, width, alignment, background, modifiers, and per-surface resting foreground
+never change. The target is `palette.red`; the moving three-letter band has two leading cells at full red and a
+trailing cell at a half blend with that surface's resting color. Passed cells return to their resting color, so
+ordinary working text remains `palette.yellow` while muted mobile/context labels remain `palette.overlay0`.
+The deterministic ten-step period is the seven-character label plus the three-cell tail. Symbols-mode sidebar
+marks remain static while the label shimmer and braille surfaces animate.
 If either palette endpoint cannot resolve, the label stays static. Turning the key off restores the static
 3.1.0 marks and labels everywhere. Both execution loops advance by eight tick units every 128 ms, producing the
 same one-frame-per-128-ms visual cadence without intermediate wakeups; the shimmer is intentionally stepped,
@@ -447,6 +449,17 @@ one diagnostic names the conflict. Live handoff instead keeps both already-runni
 only their conflicting identity and resume anchors. Clearing current authority releases its session anchor for a
 later terminal.
 
+Snapshot preservation for manually launched official agents stores only default-deny, adapter-sanitized resume
+argv. Claude and Codex read argv from the exact process selected by leader-first or priority detection; no second
+same-name search can let a sibling add or remove another process's flags. They treat that present live foreground
+as authoritative: a safely flagged launch replaces the same-session runtime cache, while a canonical-only or
+rejected launch records a tombstone that suppresses stale Tier-A or cached privileged flags after the process
+exits. A safe Tier-B capture normalizes argv0 to the official agent command name, so restore resolves `claude` or
+`codex` rather than replaying a vendor-internal binary path; explicit Tier-A argv0 remains unchanged. Pi's
+rewritten process title is not a faithful flag view, so a canonical-only Pi foreground does not erase safe Tier-A
+flags. The cache is runtime-only, exact-session keyed, never stores raw argv, and changes no snapshot schema. A
+zynk-managed canonical resume clears an older cache; Codex's restore plan still injects exactly one `--no-daemon`.
+
 For Codex-origin CLI operations, `CODEX_THREAD_ID` and `CODEX_SESSION_ID` are optional consistency hints, never
 routing authority. When both are present they must agree. When the source pane already has an authoritative Codex
 session, a receipt hint must match that current session. For a session-bearing report, a present hint instead
@@ -527,6 +540,23 @@ adjacent, one gap follows the group's last member before another top-level space
 reserved. Pane-resize and move-tab actions have typed keybinding fields and contextual admission. Sidebar
 token occurrences accept optional `fg`, `bold`, and `dim` styling while preserving plain-token demand,
 occurrence, selection, metadata, and B1 view semantics.
+
+The plain configured `git_status` token also demands a cached dirty-path count. It renders a green `+N` before
+the existing ahead/behind segments when `N > 0`; zero and unavailable values are hidden. `N` counts unique
+porcelain-v1 paths that differ from `HEAD`: staged, modified, deleted, and every individual untracked file count,
+ignored paths do not, a path dirty in both columns counts once, and disabled rename detection makes a rename a
+deletion plus an addition. The existing demand-gated background scheduler runs no dirty query for custom tokens
+or spaces without plain `git_status`. For each configured Git checkout it runs at most one bounded query per
+5,000 ms, with optional locks and fsmonitor disabled. Success requires the Git child to exit and both output
+pipes to reach EOF inside one 250 ms wall-clock deadline; stdout has a 4 MiB cap. On failure, descriptors close
+and cleanup signals the original process group before reaping the direct child. The unreaped child reserves its
+PID/PGID through that signal; both steps have a separate 250 ms cleanup grace. A same-group or escaped descendant
+retaining a pipe cannot stall the global refresh worker or later refreshes. Any timeout, overflow,
+process/read/wait error, nonzero exit, or malformed NUL record retains the last successful count (or hides it
+before first success) and delays the next attempt for 30,000 ms. The query sets
+`GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null`, so a custom global `core.excludesFile` is not
+honored; repository `.gitignore` and repository-local excludes still apply. No Git or filesystem work occurs on
+the render path; non-Git and pure `jj` spaces remain unaffected.
 
 `ui.tab_bar_right` is an ordered list of at most 16 typed `zoom`, `hostname`, `datetime`, `text`, and `command`
 entries. Commands execute outside render through `/bin/sh -lc`, with bounded output, interval, timeout, and

@@ -26,6 +26,11 @@ UI_SOURCE = PROJECT_ROOT / "src" / "ui.rs"
 MOBILE_SOURCE = PROJECT_ROOT / "src" / "ui" / "mobile.rs"
 STATUS_SOURCE = PROJECT_ROOT / "src" / "ui" / "status.rs"
 SIDEBAR_SOURCE = PROJECT_ROOT / "src" / "ui" / "sidebar.rs"
+GIT_REFRESH_SOURCE = PROJECT_ROOT / "src" / "app" / "git_refresh.rs"
+GIT_STATUS_SOURCE = PROJECT_ROOT / "src" / "workspace" / "git" / "status.rs"
+PLATFORM_SOURCE = PROJECT_ROOT / "src" / "platform" / "mod.rs"
+PLATFORM_LINUX_SOURCE = PROJECT_ROOT / "src" / "platform" / "linux.rs"
+PLUGIN_RUNTIME_SOURCE = PROJECT_ROOT / "src" / "app" / "api" / "plugins" / "runtime.rs"
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
@@ -142,7 +147,7 @@ WORKING_ANIMATION_RENDER_STREAM_FINGERPRINTS = {
         "f0aa6bcc6fb0b455e00e827c1a1b81afe65a9b9e2aabd26079ba7b8266a0a01c"
     ),
     "collect_working_shimmer_cells": (
-        "732d67067976509087db6a255b624de74c86e54a4330b835519af1b8eee8d2dd"
+        "56555282fc87c927a8cb75ae34ecc7fad75a87759f257ff4ab1cb45ee8e8e474"
     ),
     "can_apply": (
         "ec5240ffed4c97a5b232bd7cd9542061d02d497443bc8e81a8b856afe979d42e"
@@ -180,10 +185,10 @@ WORKING_ANIMATION_STATUS_FINGERPRINTS = {
         "51f0e483b3855a768d2642f62d04e5820135cf5e27f89ac5ff6ef584def33ce4"
     ),
     "working_label_shimmer_weight": (
-        "8ebb87ba9847249d91daecf7b0d185f904b22c5a42b161d2ef2bfb178e82a543"
+        "d74a1b37ede561c724ca0e09b8af7c8e27d73d6472e32194c9e76bf58440fc7a"
     ),
     "working_label_spans": (
-        "7a503692d452877171ba2f9fb58a7f3feb4fc3f11101a48c02eca2a589d919b7"
+        "d9156e0ce654675e38802e94b8c31f202c2c5b6679c09832f639d3b9c988e91f"
     ),
     "blend_quarters": (
         "fb06b28d9003480653577686b27ceda1317096f4cc9590ae28bbf5d2375e0b84"
@@ -194,7 +199,7 @@ WORKING_ANIMATION_STATUS_FINGERPRINTS = {
 }
 WORKING_ANIMATION_SIDEBAR_FINGERPRINTS = {
     "agent_entry_has_working_shimmer": (
-        "5e027cd77df2083c61308dfb5b1ab2a61fc0d3a25552d2c32315cd463e2b388e"
+        "f029e20718286f064bba10357ec94b22e72be796ad4985cecd1c397359a311a7"
     ),
 }
 WORKING_ANIMATION_RETAINED_FORBIDDEN = (
@@ -330,7 +335,8 @@ def find_violations(paths, rules) -> list[str]:
 def rust_function_body(source: str, name: str) -> str:
     code = production_code(source)
     signature = re.compile(
-        rf"\b(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+{re.escape(name)}\s*\("
+        rf"\b(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+{re.escape(name)}"
+        r"(?:\s*<[^>{}]*>)?\s*\("
     )
     matches = list(signature.finditer(code))
     if len(matches) != 1:
@@ -624,6 +630,75 @@ def headless_working_animation_violations(
 
 
 class UiHotPathArchitectureTests(unittest.TestCase):
+    def test_dirty_git_status_is_demand_gated_bounded_and_off_render_paths(self) -> None:
+        refresh = production_code(GIT_REFRESH_SOURCE.read_text(encoding="utf-8"))
+        status_source = GIT_STATUS_SOURCE.read_text(encoding="utf-8")
+        status = production_code(status_source)
+        status_literals = status_source.split("\n#[cfg(test)]\nmod tests {", 1)[0]
+        platform = production_code(PLATFORM_SOURCE.read_text(encoding="utf-8"))
+        platform_linux = production_code(
+            PLATFORM_LINUX_SOURCE.read_text(encoding="utf-8")
+        )
+        plugin = production_code(PLUGIN_RUNTIME_SOURCE.read_text(encoding="utf-8"))
+
+        self.assertIn(
+            "dirty_paths",
+            refresh,
+            "plain configured git_status demand must request dirty paths",
+        )
+        self.assertIn(
+            "GIT_DIRTY_STATUS_REFRESH_INTERVAL",
+            status,
+            "dirty queries need a literal five-second eligibility interval",
+        )
+        self.assertIn(
+            "GIT_DIRTY_STATUS_FAILURE_BACKOFF",
+            status,
+            "dirty-query failures need a literal thirty-second backoff",
+        )
+        for needle in (
+            "--no-optional-locks",
+            "GIT_OPTIONAL_LOCKS",
+            "core.fsmonitor=false",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--no-renames",
+        ):
+            self.assertIn(
+                needle,
+                status_literals,
+                f"dirty status command missing {needle}",
+            )
+        self.assertIn(
+            "wait_for_bounded_child",
+            platform,
+            "Git and plugins must share one bounded child lifecycle helper",
+        )
+        self.assertIn(
+            "wait_for_bounded_child",
+            plugin,
+            "plugin command behavior must delegate to the shared child helper",
+        )
+        self.assertIn(
+            "wait_for_bounded_child_output",
+            status,
+            "dirty Git status must use the pipe-aware bounded child helper",
+        )
+        pipe_wait = rust_function_body(platform_linux, "wait_for_bounded_child_output")
+        self.assertIn("libc::poll", pipe_wait)
+        self.assertNotIn("thread::spawn", pipe_wait)
+        self.assertNotIn(".join(", pipe_wait)
+
+        hot_path = "\n".join(
+            production_code(path.read_text(encoding="utf-8"))
+            for path in HOT_PATH_SOURCES
+        )
+        self.assertNotIn(
+            "--porcelain=v1",
+            hot_path,
+            "render paths must never launch or parse Git dirty status",
+        )
+
     def test_render_entries_keep_app_state_immutable(self) -> None:
         violations = render_state_purity_violations(
             UI_SOURCE.read_text(encoding="utf-8")

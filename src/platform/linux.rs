@@ -2,17 +2,18 @@
 // See NOTICE ("Modified files (Apache-2.0 provenance)") for the provenance and the license terms.
 use std::{
     collections::HashMap,
-    io::{self, Write},
-    os::fd::RawFd,
+    io::{self, Read, Write},
+    os::fd::{AsRawFd, RawFd},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::{Child, ChildStderr, ChildStdout, Command, Stdio},
     sync::{Mutex, Once, OnceLock},
     time::{Duration, Instant},
 };
 
 use super::{
-    read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
-    LimitedRead, RemoteSshConfigPaths, Signal,
+    read_limited_reader, terminate_and_reap_child_until, BoundedChildOutput,
+    BoundedChildOutputError, BoundedChildOutputOptions, ClipboardCommand, ClipboardImage,
+    ForegroundJob, ForegroundProcess, LimitedRead, RemoteSshConfigPaths, Signal,
 };
 
 pub(crate) fn remote_ssh_config_paths() -> RemoteSshConfigPaths {
@@ -297,6 +298,447 @@ pub(crate) const fn status_commands_supported() -> bool {
     true
 }
 
+pub(crate) fn kill_process_group(process_group_id: u32) -> std::io::Result<()> {
+    let process_group_id = i32::try_from(process_group_id)
+        .map_err(|_| std::io::Error::other("process id exceeds Linux pid range"))?;
+    let result = unsafe { libc::kill(-process_group_id, libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(err)
+    }
+}
+
+fn process_group_exists(process_group_id: u32) -> io::Result<bool> {
+    let process_group_id = i32::try_from(process_group_id)
+        .map_err(|_| io::Error::other("process id exceeds Linux pid range"))?;
+    if unsafe { libc::kill(-process_group_id, 0) } == 0 {
+        return Ok(true);
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(err)
+    }
+}
+
+struct NonblockingPipe<R> {
+    reader: R,
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    eof: bool,
+}
+
+impl<R: AsRawFd + Read> NonblockingPipe<R> {
+    fn new(reader: R, max_bytes: usize) -> io::Result<Self> {
+        let fd = reader.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            reader,
+            bytes: Vec::new(),
+            max_bytes,
+            eof: false,
+        })
+    }
+
+    fn drain(&mut self, deadline: Instant) -> Result<(), BoundedChildOutputError> {
+        let mut buffer = [0_u8; 8192];
+        while !self.eof {
+            if Instant::now() >= deadline {
+                return Err(BoundedChildOutputError::Timeout);
+            }
+            let remaining = self
+                .max_bytes
+                .saturating_add(1)
+                .saturating_sub(self.bytes.len());
+            if remaining == 0 {
+                return Err(BoundedChildOutputError::Output);
+            }
+            let read_len = remaining.min(buffer.len());
+            match self.reader.read(&mut buffer[..read_len]) {
+                Ok(0) => self.eof = true,
+                Ok(bytes_read) => {
+                    self.bytes.extend_from_slice(&buffer[..bytes_read]);
+                    if self.bytes.len() > self.max_bytes {
+                        return Err(BoundedChildOutputError::Output);
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+                    if Instant::now() >= deadline {
+                        return Err(BoundedChildOutputError::Timeout);
+                    }
+                    continue;
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => return Err(BoundedChildOutputError::Output),
+            }
+        }
+        Ok(())
+    }
+
+    fn complete(self) -> LimitedRead {
+        debug_assert!(self.eof);
+        if self.bytes.is_empty() {
+            LimitedRead::Empty
+        } else {
+            LimitedRead::Complete(self.bytes)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChildExitObservation {
+    Success,
+    Failure,
+}
+
+fn observe_child_exit_without_reaping(child: &Child) -> io::Result<Option<ChildExitObservation>> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: waitid writes into valid siginfo storage and P_PID scopes the
+    // observation to this owned direct child without consuming its status.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let info = unsafe { info.assume_init() };
+    // SAFETY: these accessors read the SIGCHLD fields populated by waitid.
+    let observed_pid = unsafe { info.si_pid() };
+    if observed_pid == 0 {
+        return Ok(None);
+    }
+    if u32::try_from(observed_pid).ok() != Some(child.id()) {
+        return Err(io::Error::other(
+            "waitid returned status for an unexpected child",
+        ));
+    }
+
+    let status = unsafe { info.si_status() };
+    match info.si_code {
+        libc::CLD_EXITED if status == 0 => Ok(Some(ChildExitObservation::Success)),
+        libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED => {
+            Ok(Some(ChildExitObservation::Failure))
+        }
+        _ => Err(io::Error::other(
+            "waitid returned an unexpected child state",
+        )),
+    }
+}
+
+fn cleanup_bounded_child<T>(
+    child: &mut Child,
+    cleanup_grace: Duration,
+    error: BoundedChildOutputError,
+) -> Result<T, BoundedChildOutputError> {
+    let cleanup_deadline = Instant::now() + cleanup_grace;
+    let process_group_id = child.id();
+    if terminate_and_reap_child_until(child, true, Some(cleanup_deadline)).is_err() {
+        return Err(BoundedChildOutputError::Wait);
+    }
+    loop {
+        match process_group_exists(process_group_id) {
+            Ok(false) => return Err(error),
+            Ok(true) => {}
+            Err(_) => return Err(BoundedChildOutputError::Wait),
+        }
+        let now = Instant::now();
+        if now >= cleanup_deadline {
+            return Err(error);
+        }
+        std::thread::sleep(
+            cleanup_deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(2)),
+        );
+    }
+}
+
+fn poll_timeout(remaining: Duration) -> libc::c_int {
+    remaining.as_millis().clamp(1, 10) as libc::c_int
+}
+
+pub(crate) fn wait_for_bounded_child_output<T>(
+    child: &mut Child,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    options: BoundedChildOutputOptions,
+    validate: impl FnOnce(BoundedChildOutput) -> Result<T, BoundedChildOutputError>,
+) -> Result<T, BoundedChildOutputError> {
+    let stdout = match stdout {
+        Some(stdout) => stdout,
+        None => {
+            drop(stderr);
+            return cleanup_bounded_child(
+                child,
+                options.cleanup_grace,
+                BoundedChildOutputError::Output,
+            );
+        }
+    };
+    let stderr = match stderr {
+        Some(stderr) => stderr,
+        None => {
+            drop(stdout);
+            return cleanup_bounded_child(
+                child,
+                options.cleanup_grace,
+                BoundedChildOutputError::Output,
+            );
+        }
+    };
+
+    if Instant::now() >= options.deadline {
+        drop(stdout);
+        drop(stderr);
+        return cleanup_bounded_child(
+            child,
+            options.cleanup_grace,
+            BoundedChildOutputError::Timeout,
+        );
+    }
+
+    let mut stdout = match NonblockingPipe::new(stdout, options.stdout_max_bytes) {
+        Ok(stdout) => stdout,
+        Err(_) => {
+            drop(stderr);
+            return cleanup_bounded_child(
+                child,
+                options.cleanup_grace,
+                BoundedChildOutputError::Output,
+            );
+        }
+    };
+    let mut stderr = match NonblockingPipe::new(stderr, options.stderr_max_bytes) {
+        Ok(stderr) => stderr,
+        Err(_) => {
+            drop(stdout);
+            return cleanup_bounded_child(
+                child,
+                options.cleanup_grace,
+                BoundedChildOutputError::Output,
+            );
+        }
+    };
+    let mut exit_observation = None;
+
+    loop {
+        if Instant::now() >= options.deadline {
+            drop(stdout);
+            drop(stderr);
+            return cleanup_bounded_child(
+                child,
+                options.cleanup_grace,
+                BoundedChildOutputError::Timeout,
+            );
+        }
+
+        if let Err(error) = stdout
+            .drain(options.deadline)
+            .and_then(|()| stderr.drain(options.deadline))
+        {
+            drop(stdout);
+            drop(stderr);
+            return cleanup_bounded_child(child, options.cleanup_grace, error);
+        }
+
+        if exit_observation.is_none() {
+            match observe_child_exit_without_reaping(child) {
+                Ok(observation) => exit_observation = observation,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+                    if Instant::now() >= options.deadline {
+                        drop(stdout);
+                        drop(stderr);
+                        return cleanup_bounded_child(
+                            child,
+                            options.cleanup_grace,
+                            BoundedChildOutputError::Timeout,
+                        );
+                    }
+                    continue;
+                }
+                Err(err) if err.raw_os_error() == Some(libc::ECHILD) => {
+                    drop(stdout);
+                    drop(stderr);
+                    return Err(BoundedChildOutputError::Wait);
+                }
+                Err(_) => {
+                    drop(stdout);
+                    drop(stderr);
+                    return cleanup_bounded_child(
+                        child,
+                        options.cleanup_grace,
+                        BoundedChildOutputError::Wait,
+                    );
+                }
+            }
+        }
+
+        if exit_observation == Some(ChildExitObservation::Failure) {
+            drop(stdout);
+            drop(stderr);
+            return cleanup_bounded_child(
+                child,
+                options.cleanup_grace,
+                BoundedChildOutputError::Exit,
+            );
+        }
+
+        let now = Instant::now();
+        if stdout.eof
+            && stderr.eof
+            && now <= options.deadline
+            && exit_observation == Some(ChildExitObservation::Success)
+        {
+            let validated = match validate(BoundedChildOutput {
+                stdout: stdout.complete(),
+                stderr: stderr.complete(),
+            }) {
+                Ok(validated) => validated,
+                Err(error) => {
+                    return cleanup_bounded_child(child, options.cleanup_grace, error);
+                }
+            };
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) if status.success() => return Ok(validated),
+                    Ok(Some(_)) => {
+                        return cleanup_bounded_child(
+                            child,
+                            options.cleanup_grace,
+                            BoundedChildOutputError::Exit,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+                        if Instant::now() >= options.deadline {
+                            return cleanup_bounded_child(
+                                child,
+                                options.cleanup_grace,
+                                BoundedChildOutputError::Timeout,
+                            );
+                        }
+                        continue;
+                    }
+                    Err(err) if err.raw_os_error() == Some(libc::ECHILD) => {
+                        return Err(BoundedChildOutputError::Wait);
+                    }
+                    Err(_) => {
+                        return cleanup_bounded_child(
+                            child,
+                            options.cleanup_grace,
+                            BoundedChildOutputError::Wait,
+                        );
+                    }
+                }
+                let now = Instant::now();
+                if now >= options.deadline {
+                    return cleanup_bounded_child(
+                        child,
+                        options.cleanup_grace,
+                        BoundedChildOutputError::Timeout,
+                    );
+                }
+                std::thread::sleep(
+                    options
+                        .deadline
+                        .saturating_duration_since(now)
+                        .min(Duration::from_millis(2)),
+                );
+            }
+        }
+        if now >= options.deadline {
+            drop(stdout);
+            drop(stderr);
+            return cleanup_bounded_child(
+                child,
+                options.cleanup_grace,
+                BoundedChildOutputError::Timeout,
+            );
+        }
+
+        let mut poll_fds = [
+            libc::pollfd {
+                fd: if stdout.eof {
+                    -1
+                } else {
+                    stdout.reader.as_raw_fd()
+                },
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: if stderr.eof {
+                    -1
+                } else {
+                    stderr.reader.as_raw_fd()
+                },
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
+            },
+        ];
+        let timeout = poll_timeout(options.deadline.saturating_duration_since(now));
+        let result = unsafe {
+            libc::poll(
+                poll_fds.as_mut_ptr(),
+                poll_fds.len() as libc::nfds_t,
+                timeout,
+            )
+        };
+        if result < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                if Instant::now() >= options.deadline {
+                    drop(stdout);
+                    drop(stderr);
+                    return cleanup_bounded_child(
+                        child,
+                        options.cleanup_grace,
+                        BoundedChildOutputError::Timeout,
+                    );
+                }
+                continue;
+            }
+            drop(stdout);
+            drop(stderr);
+            return cleanup_bounded_child(
+                child,
+                options.cleanup_grace,
+                BoundedChildOutputError::Output,
+            );
+        }
+        if poll_fds
+            .iter()
+            .any(|descriptor| descriptor.revents & libc::POLLNVAL != 0)
+        {
+            drop(stdout);
+            drop(stderr);
+            return cleanup_bounded_child(
+                child,
+                options.cleanup_grace,
+                BoundedChildOutputError::Output,
+            );
+        }
+    }
+}
+
 pub(crate) struct StatusCommandGuard {
     process_group_id: Option<i32>,
 }
@@ -317,9 +759,7 @@ impl StatusCommandGuard {
         if let Some(process_group_id) = self.process_group_id.take() {
             // The command is the process-group leader, so this also terminates
             // descendants before the Tokio task can observe cancellation.
-            unsafe {
-                libc::kill(-process_group_id, libc::SIGKILL);
-            }
+            let _ = kill_process_group(process_group_id as u32);
         }
     }
 }
@@ -1265,9 +1705,23 @@ fn process_session_id(pid: u32) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+    use super::NonblockingPipe;
     use crate::platform::{
-        interactive_shell_command, is_pane_shell_process_name, ProcessPrincipal,
+        interactive_shell_command, is_pane_shell_process_name, BoundedChildOutputError,
+        ProcessPrincipal,
     };
+
+    #[test]
+    fn nonblocking_pipe_checks_deadline_before_reading() {
+        let (reader, _writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut pipe = NonblockingPipe::new(reader, 16).unwrap();
+
+        assert_eq!(
+            pipe.drain(std::time::Instant::now()),
+            Err(BoundedChildOutputError::Timeout)
+        );
+    }
+
     #[test]
     fn m839_shell_encoding_is_explicit_for_each_accepted_dialect() {
         let argv: Vec<String> = [

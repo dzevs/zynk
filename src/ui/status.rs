@@ -311,9 +311,8 @@ pub(crate) fn working_label_shimmer_color(
 pub(crate) fn working_label_shimmer_weight(tick: u32, character_index: usize) -> u16 {
     let step = ((tick / crate::app::WORKING_ANIMATION_TICK_STEP) % 10) as usize;
     match step.checked_sub(character_index) {
-        Some(0) => 3,
-        Some(1) => 2,
-        Some(2) => 1,
+        Some(0 | 1) => 4,
+        Some(2) => 2,
         _ => 0,
     }
 }
@@ -337,7 +336,7 @@ pub(super) fn working_label_spans(
     }
     let Some(palette) = working_label_shimmer_palette(
         style.fg.unwrap_or(app.palette.yellow),
-        app.palette.text,
+        app.palette.red,
         &app.host_terminal_theme,
     ) else {
         return WorkingLabelRender {
@@ -547,72 +546,17 @@ mod tests {
     fn working_label_shimmer_uses_the_exact_quarter_blend_sequence() {
         let base = Color::Rgb(20, 40, 60);
         let target = Color::Rgb(100, 120, 140);
+        let half = Color::Rgb(60, 80, 100);
         let expected = [
-            [Color::Rgb(80, 100, 120), base, base, base, base, base, base],
-            [
-                Color::Rgb(60, 80, 100),
-                Color::Rgb(80, 100, 120),
-                base,
-                base,
-                base,
-                base,
-                base,
-            ],
-            [
-                Color::Rgb(40, 60, 80),
-                Color::Rgb(60, 80, 100),
-                Color::Rgb(80, 100, 120),
-                base,
-                base,
-                base,
-                base,
-            ],
-            [
-                base,
-                Color::Rgb(40, 60, 80),
-                Color::Rgb(60, 80, 100),
-                Color::Rgb(80, 100, 120),
-                base,
-                base,
-                base,
-            ],
-            [
-                base,
-                base,
-                Color::Rgb(40, 60, 80),
-                Color::Rgb(60, 80, 100),
-                Color::Rgb(80, 100, 120),
-                base,
-                base,
-            ],
-            [
-                base,
-                base,
-                base,
-                Color::Rgb(40, 60, 80),
-                Color::Rgb(60, 80, 100),
-                Color::Rgb(80, 100, 120),
-                base,
-            ],
-            [
-                base,
-                base,
-                base,
-                base,
-                Color::Rgb(40, 60, 80),
-                Color::Rgb(60, 80, 100),
-                Color::Rgb(80, 100, 120),
-            ],
-            [
-                base,
-                base,
-                base,
-                base,
-                base,
-                Color::Rgb(40, 60, 80),
-                Color::Rgb(60, 80, 100),
-            ],
-            [base, base, base, base, base, base, Color::Rgb(40, 60, 80)],
+            [target, base, base, base, base, base, base],
+            [target, target, base, base, base, base, base],
+            [half, target, target, base, base, base, base],
+            [base, half, target, target, base, base, base],
+            [base, base, half, target, target, base, base],
+            [base, base, base, half, target, target, base],
+            [base, base, base, base, half, target, target],
+            [base, base, base, base, base, half, target],
+            [base, base, base, base, base, base, half],
             [base; 7],
         ];
 
@@ -631,10 +575,50 @@ mod tests {
         let rounding_base = Color::Rgb(0, 0, 0);
         let rounding_target = Color::Rgb(1, 2, 3);
         assert_eq!(
-            working_label_shimmer_colors(rounding_base, rounding_target, 0, &Default::default())
+            working_label_shimmer_colors(rounding_base, rounding_target, 16, &Default::default())
                 .unwrap()[0],
-            Color::Rgb(1, 2, 2),
+            Color::Rgb(1, 1, 2),
             "quarter blending must exercise the +2 nearest-integer rounding"
+        );
+    }
+
+    #[test]
+    fn working_label_shimmer_uses_two_full_target_cells_and_one_half_trailer() {
+        let expected = [2, 4, 4, 0, 0, 0, 0];
+        assert_eq!(
+            std::array::from_fn::<_, WORKING_LABEL_LEN, _>(|index| {
+                working_label_shimmer_weight(16, index)
+            }),
+            expected,
+            "the moving band must be half target followed by two full target cells",
+        );
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.palette.red = Color::Rgb(200, 20, 30);
+        app.palette.text = Color::Rgb(240, 241, 242);
+        app.spinner_tick = 16;
+        let base = Color::Rgb(80, 90, 100);
+        let spans = working_label_spans(
+            WORKING_LABEL.to_string(),
+            Style::default().fg(base),
+            true,
+            &app,
+        );
+        let expected = working_label_shimmer_colors(
+            base,
+            app.palette.red,
+            app.spinner_tick,
+            &app.host_terminal_theme,
+        )
+        .unwrap();
+        assert_eq!(
+            spans
+                .spans
+                .iter()
+                .map(|span| span.style.fg.unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+            "working shimmer must target palette.red instead of palette.text",
         );
     }
 
@@ -704,32 +688,74 @@ mod tests {
     fn working_label_shimmer_uses_the_rendered_label_color_as_its_base() {
         let mut app = crate::app::state::AppState::test_new();
         app.palette.yellow = Color::Rgb(200, 180, 20);
+        app.palette.overlay0 = Color::Rgb(50, 60, 70);
+        app.palette.red = Color::Rgb(220, 40, 50);
         app.palette.text = Color::Rgb(100, 120, 140);
         app.spinner_tick = 0;
-        let rendered_base = Color::Rgb(12, 24, 36);
-        let spans = working_label_spans(
+        for rendered_base in [app.palette.yellow, app.palette.overlay0] {
+            let spans = working_label_spans(
+                WORKING_LABEL.to_string(),
+                Style::default().fg(rendered_base),
+                true,
+                &app,
+            );
+            let expected = working_label_shimmer_colors(
+                rendered_base,
+                app.palette.red,
+                0,
+                &app.host_terminal_theme,
+            )
+            .unwrap();
+            assert!(spans.animated);
+            assert_eq!(spans.spans.len(), WORKING_LABEL_LEN);
+            assert_eq!(
+                spans
+                    .spans
+                    .iter()
+                    .map(|span| span.style.fg.unwrap())
+                    .collect::<Vec<_>>(),
+                expected,
+                "surface resting color must remain the shimmer base",
+            );
+        }
+    }
+
+    fn assert_tokyo_night_shimmer_returns_to_surface_base(rendered_base: Color) {
+        let mut app = crate::app::state::AppState::test_new();
+        app.palette = crate::app::state::Palette::tokyo_night();
+        app.spinner_tick = 16;
+        let active = working_label_spans(
             WORKING_LABEL.to_string(),
             Style::default().fg(rendered_base),
             true,
             &app,
         );
-        let expected = working_label_shimmer_colors(
-            rendered_base,
-            app.palette.text,
-            0,
-            &app.host_terminal_theme,
-        )
-        .unwrap();
-        assert!(spans.animated);
-        assert_eq!(spans.spans.len(), WORKING_LABEL_LEN);
-        assert_eq!(
-            spans
-                .spans
-                .iter()
-                .map(|span| span.style.fg.unwrap())
-                .collect::<Vec<_>>(),
-            expected
+        assert_ne!(active.spans[0].style.fg, Some(rendered_base));
+
+        app.spinner_tick = 24;
+        let passed = working_label_spans(
+            WORKING_LABEL.to_string(),
+            Style::default().fg(rendered_base),
+            true,
+            &app,
         );
+        assert_eq!(
+            passed.spans[0].style.fg,
+            Some(rendered_base),
+            "a cell must return to its surface's resting color after the red band passes",
+        );
+    }
+
+    #[test]
+    fn tokyo_night_sidebar_working_label_returns_to_yellow_after_the_band() {
+        let palette = crate::app::state::Palette::tokyo_night();
+        assert_tokyo_night_shimmer_returns_to_surface_base(palette.yellow);
+    }
+
+    #[test]
+    fn tokyo_night_muted_working_label_returns_to_overlay0_after_the_band() {
+        let palette = crate::app::state::Palette::tokyo_night();
+        assert_tokyo_night_shimmer_returns_to_surface_base(palette.overlay0);
     }
 
     #[test]

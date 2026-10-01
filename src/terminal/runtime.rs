@@ -594,6 +594,25 @@ impl TerminalRuntime {
         self.0.child_pid()
     }
 
+    pub(crate) fn with_agent_resume_observation<T>(
+        &self,
+        update: impl FnOnce(&mut Option<crate::agent_resume::ResumeArgvObservation>) -> T,
+    ) -> Option<T> {
+        self.0.with_agent_resume_observation(update)
+    }
+
+    pub(crate) fn replace_agent_resume_observation(
+        &self,
+        observation: Option<crate::agent_resume::ResumeArgvObservation>,
+    ) -> bool {
+        self.0.replace_agent_resume_observation(observation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_agent_resume_observation_for_test(&self) {
+        self.0.poison_agent_resume_observation_for_test();
+    }
+
     pub fn child_start_time(&self) -> Option<u64> {
         self.0.child_start_time()
     }

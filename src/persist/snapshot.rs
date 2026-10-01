@@ -331,6 +331,7 @@ fn persisted_agent_launch_argv(
     agent_session: Option<&PaneAgentSessionSnapshot>,
     child_pid: Option<u32>,
     existing_launch_argv: Option<Vec<String>>,
+    runtime: Option<&crate::terminal::TerminalRuntime>,
 ) -> Option<Vec<String>> {
     let Some(sess) = agent_session else {
         return existing_launch_argv;
@@ -346,6 +347,21 @@ fn persisted_agent_launch_argv(
     let foreground_argv =
         child_pid.and_then(|pid| crate::detect::foreground_agent_argv(pid, &sess.agent));
     // Official native agent session: sanitized-or-None ONLY. No raw `existing_launch_argv` fallback.
+    if let Some(runtime) = runtime {
+        return runtime
+            .with_agent_resume_observation(|observation| {
+                crate::agent_resume::persisted_resume_argv_with_observation(
+                    &sess.source,
+                    &sess.agent,
+                    &persisted.session_ref,
+                    foreground_argv.as_deref(),
+                    existing_launch_argv.as_deref(),
+                    observation,
+                )
+            })
+            .flatten();
+    }
+
     crate::agent_resume::persisted_resume_argv(
         &sess.source,
         &sess.agent,
@@ -420,12 +436,16 @@ fn capture_tab(
             .and_then(|terminal| terminal.launch_argv.clone());
         // Tier B: for an official agent pane, prefer a resume argv sanitized from the live foreground
         // command so manual shell launches (which never populate launch_argv) preserve their flags.
-        let child_pid = attached_terminal_id
+        let runtime = attached_terminal_id
             .as_ref()
-            .and_then(|tid| terminal_runtimes.get(tid))
-            .and_then(|runtime| runtime.child_pid());
-        let launch_argv =
-            persisted_agent_launch_argv(agent_session.as_ref(), child_pid, existing_launch_argv);
+            .and_then(|tid| terminal_runtimes.get(tid));
+        let child_pid = runtime.and_then(|runtime| runtime.child_pid());
+        let launch_argv = persisted_agent_launch_argv(
+            agent_session.as_ref(),
+            child_pid,
+            existing_launch_argv,
+            runtime,
+        );
         // Ages are relative to ONE capture instant per pane, so every boundary keeps its
         // gaps when the restoring server re-bases them against its own clock.
         let hook_retirement = attached_terminal_id
@@ -1725,7 +1745,7 @@ mod tests {
         // Non-agent pane (no agent_session): existing launch_argv passes through unchanged.
         let plain = Some(vec!["sh".to_string(), "-c".to_string(), "x".to_string()]);
         assert_eq!(
-            persisted_agent_launch_argv(None, None, plain.clone()),
+            persisted_agent_launch_argv(None, None, plain.clone(), None),
             plain
         );
 
@@ -1742,7 +1762,7 @@ mod tests {
             "--dangerously-skip-permissions".to_string(),
         ]);
         assert_eq!(
-            persisted_agent_launch_argv(Some(&sess), None, tier_a),
+            persisted_agent_launch_argv(Some(&sess), None, tier_a, None),
             Some(vec![
                 "claude".to_string(),
                 "--dangerously-skip-permissions".to_string(),
@@ -1758,7 +1778,7 @@ mod tests {
             "X".to_string(),
         ]);
         assert_eq!(
-            persisted_agent_launch_argv(Some(&sess), None, canonical),
+            persisted_agent_launch_argv(Some(&sess), None, canonical, None),
             None
         );
     }
@@ -1784,7 +1804,125 @@ mod tests {
             "--model".to_string(),
             "x".to_string(),
         ]);
-        assert_eq!(persisted_agent_launch_argv(Some(&pi), None, secret), None);
+        assert_eq!(
+            persisted_agent_launch_argv(Some(&pi), None, secret, None),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn final_snapshot_uses_cached_manual_flags_after_foreground_exit() {
+        let mut state = state_with_workspaces(&["manual-codex"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_with_session_ref(
+                "zynk:codex".into(),
+                "codex".into(),
+                crate::detect::AgentState::Idle,
+                None,
+                crate::agent_resume::AgentSessionRef::id("manual-session"),
+                Some(1),
+            );
+        let session = crate::agent_resume::AgentSessionRef::id("manual-session").unwrap();
+        let plan = crate::agent_resume::plan(
+            "zynk:codex",
+            "codex",
+            &session,
+            Some(&["codex".to_string(), "--yolo".to_string()]),
+        )
+        .unwrap();
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        assert!(runtime.replace_agent_resume_observation(
+            crate::agent_resume::managed_resume_observation(&plan),
+        ));
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        runtimes.insert(terminal_id, runtime);
+
+        let snapshot = capture_from_state_with_runtimes(&state, &runtimes);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].panes[&pane.raw()]
+                .launch_argv
+                .as_deref(),
+            Some(plan.argv.as_slice()),
+            "a final save after process exit must retain the newest safe manual flags",
+        );
+    }
+
+    #[tokio::test]
+    async fn final_snapshot_tombstone_suppresses_stale_tier_a_flags() {
+        let mut state = state_with_workspaces(&["manual-codex-canonical"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:codex".into(),
+            "codex".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            crate::agent_resume::AgentSessionRef::id("manual-session"),
+            Some(1),
+        );
+        terminal.launch_argv = Some(vec!["codex".into(), "--yolo".into()]);
+
+        let session = crate::agent_resume::AgentSessionRef::id("manual-session").unwrap();
+        let canonical = crate::agent_resume::plan("zynk:codex", "codex", &session, None).unwrap();
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        assert!(runtime.replace_agent_resume_observation(Some(
+            crate::agent_resume::ResumeArgvObservation::ObservedCanonical {
+                dedupe_key: canonical.dedupe_key,
+            },
+        )));
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        runtimes.insert(terminal_id, runtime);
+
+        let snapshot = capture_from_state_with_runtimes(&state, &runtimes);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].panes[&pane.raw()].launch_argv,
+            None,
+            "a final save must not resurrect stale Tier-A flags after a canonical launch",
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_resume_observation_fails_closed_without_tier_a_replay() {
+        let mut state = state_with_workspaces(&["manual-codex-poisoned"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_hook_authority_with_session_ref(
+            "zynk:codex".into(),
+            "codex".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            crate::agent_resume::AgentSessionRef::id("manual-session"),
+            Some(1),
+        );
+        terminal.launch_argv = Some(vec!["codex".into(), "--yolo".into()]);
+
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.poison_agent_resume_observation_for_test();
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        runtimes.insert(terminal_id, runtime);
+
+        let snapshot = capture_from_state_with_runtimes(&state, &runtimes);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].panes[&pane.raw()].launch_argv,
+            None,
+            "an unavailable cache must fail canonical instead of replaying Tier A",
+        );
     }
 
     #[test]

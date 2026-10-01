@@ -61,7 +61,249 @@ pub struct WorkspaceGitStatusSnapshot {
     pub auto_label: String,
     pub branch: Option<String>,
     pub ahead_behind: Option<(usize, usize)>,
+    pub dirty_paths: Option<usize>,
     pub space: Option<GitSpaceMetadata>,
+}
+
+#[cfg(test)]
+pub(crate) struct DirtyPipeFixture {
+    pub(crate) repo: PathBuf,
+    sentinel: PathBuf,
+    direct_sentinel: PathBuf,
+    validation_sentinel: PathBuf,
+    release_sentinel: PathBuf,
+    root: PathBuf,
+    previous_path: Option<std::ffi::OsString>,
+    previous_mode: Option<std::ffi::OsString>,
+    previous_sentinel: Option<std::ffi::OsString>,
+    previous_direct_sentinel: Option<std::ffi::OsString>,
+    previous_validation_sentinel: Option<std::ffi::OsString>,
+    previous_release_sentinel: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl DirtyPipeFixture {
+    pub(crate) fn new(mode: &str) -> Self {
+        assert!(matches!(
+            mode,
+            "stdout" | "stderr" | "escaped" | "escaped-custody" | "malformed-custody"
+        ));
+        let lock = crate::config::test_config_env_lock().lock().unwrap();
+        let root = std::env::var_os("ZYNK_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "zynk-dirty-pipe-{mode}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let repo = root.join("repo");
+        let bin = root.join("bin");
+        let sentinel = root.join("descendant.pid");
+        let direct_sentinel = root.join("direct.pid");
+        let validation_sentinel = root.join("validation-state");
+        let release_sentinel = root.join("release-direct-child");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let run_git = |args: &[&str]| {
+            let output = std::process::Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "fixture git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_git(&["init", "--quiet", "-b", "main"]);
+        run_git(&[
+            "-c",
+            "user.name=Zynk Test",
+            "-c",
+            "user.email=zynk@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ]);
+
+        let wrapper = bin.join("git");
+        std::fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+is_status=no
+is_porcelain=no
+for argument in "$@"; do
+    case "$argument" in
+        status) is_status=yes ;;
+        --porcelain=v1) is_porcelain=yes ;;
+    esac
+done
+if [ "$is_status" = yes ] && [ "$is_porcelain" = yes ]; then
+    printf '%s\n' "$$" > "$ZYNK_DIRTY_PIPE_DIRECT_SENTINEL"
+    printf '?? held\0'
+    case "$ZYNK_DIRTY_PIPE_MODE" in
+        stdout)
+            /usr/bin/sh -c 'printf "%s\n" "$$" > "$ZYNK_DIRTY_PIPE_SENTINEL"; exec /usr/bin/sleep 2' 2>/dev/null &
+            ;;
+        stderr)
+            /usr/bin/sh -c 'printf "%s\n" "$$" > "$ZYNK_DIRTY_PIPE_SENTINEL"; exec /usr/bin/sleep 2' >/dev/null &
+            ;;
+        escaped)
+            /usr/bin/setsid /usr/bin/sh -c 'printf "%s\n" "$$" > "$ZYNK_DIRTY_PIPE_SENTINEL"; exec /usr/bin/sleep 2' 2>/dev/null &
+            ;;
+        escaped-custody)
+            while [ ! -e "$ZYNK_DIRTY_PIPE_RELEASE_SENTINEL" ]; do
+                /usr/bin/sleep 0.001
+            done
+            /usr/bin/setsid /usr/bin/sh -c 'printf "%s\n" "$$" > "$ZYNK_DIRTY_PIPE_SENTINEL"; exec /usr/bin/sleep 2' 2>/dev/null &
+            ;;
+        malformed-custody)
+            /usr/bin/sh -c 'printf "%s\n" "$$" > "$ZYNK_DIRTY_PIPE_SENTINEL"; exec /usr/bin/sleep 2' </dev/null >/dev/null 2>&1 &
+            while [ ! -s "$ZYNK_DIRTY_PIPE_SENTINEL" ]; do
+                /usr/bin/sleep 0.001
+            done
+            printf 'malformed'
+            ;;
+        *) exit 97 ;;
+    esac
+    exit 0
+fi
+exec /usr/bin/git "$@"
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let previous_path = std::env::var_os("PATH");
+        let previous_mode = std::env::var_os("ZYNK_DIRTY_PIPE_MODE");
+        let previous_sentinel = std::env::var_os("ZYNK_DIRTY_PIPE_SENTINEL");
+        let previous_direct_sentinel = std::env::var_os("ZYNK_DIRTY_PIPE_DIRECT_SENTINEL");
+        let previous_validation_sentinel = std::env::var_os("ZYNK_DIRTY_PIPE_VALIDATION_SENTINEL");
+        let previous_release_sentinel = std::env::var_os("ZYNK_DIRTY_PIPE_RELEASE_SENTINEL");
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("ZYNK_DIRTY_PIPE_MODE", mode);
+        std::env::set_var("ZYNK_DIRTY_PIPE_SENTINEL", &sentinel);
+        std::env::set_var("ZYNK_DIRTY_PIPE_DIRECT_SENTINEL", &direct_sentinel);
+        std::env::set_var("ZYNK_DIRTY_PIPE_VALIDATION_SENTINEL", &validation_sentinel);
+        std::env::set_var("ZYNK_DIRTY_PIPE_RELEASE_SENTINEL", &release_sentinel);
+
+        Self {
+            repo,
+            sentinel,
+            direct_sentinel,
+            validation_sentinel,
+            release_sentinel,
+            root,
+            previous_path,
+            previous_mode,
+            previous_sentinel,
+            previous_direct_sentinel,
+            previous_validation_sentinel,
+            previous_release_sentinel,
+            _lock: lock,
+        }
+    }
+
+    pub(crate) fn direct_pid(&self) -> Option<u32> {
+        std::fs::read_to_string(&self.direct_sentinel)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    pub(crate) fn release_direct_child(&self) {
+        std::fs::write(&self.release_sentinel, b"release\n").unwrap();
+    }
+
+    pub(crate) fn direct_child_state(&self) -> Option<char> {
+        let status =
+            std::fs::read_to_string(format!("/proc/{}/status", self.direct_pid()?)).ok()?;
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("State:"))?
+            .split_whitespace()
+            .next()?
+            .chars()
+            .next()
+    }
+
+    pub(crate) fn direct_child_exists(&self) -> bool {
+        self.direct_pid()
+            .is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+    }
+
+    pub(crate) fn validation_direct_child_state(&self) -> Option<char> {
+        std::fs::read_to_string(&self.validation_sentinel)
+            .ok()?
+            .trim()
+            .chars()
+            .next()
+    }
+
+    pub(crate) fn descendant_pid(&self) -> Option<u32> {
+        std::fs::read_to_string(&self.sentinel)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    pub(crate) fn descendant_alive(&self) -> bool {
+        self.descendant_pid()
+            .is_some_and(|pid| unsafe { libc::kill(pid as i32, 0) } == 0)
+    }
+}
+
+#[cfg(test)]
+impl Drop for DirtyPipeFixture {
+    fn drop(&mut self) {
+        fn restore(name: &str, value: Option<&std::ffi::OsString>) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        restore("PATH", self.previous_path.as_ref());
+        restore("ZYNK_DIRTY_PIPE_MODE", self.previous_mode.as_ref());
+        restore("ZYNK_DIRTY_PIPE_SENTINEL", self.previous_sentinel.as_ref());
+        restore(
+            "ZYNK_DIRTY_PIPE_DIRECT_SENTINEL",
+            self.previous_direct_sentinel.as_ref(),
+        );
+        restore(
+            "ZYNK_DIRTY_PIPE_VALIDATION_SENTINEL",
+            self.previous_validation_sentinel.as_ref(),
+        );
+        restore(
+            "ZYNK_DIRTY_PIPE_RELEASE_SENTINEL",
+            self.previous_release_sentinel.as_ref(),
+        );
+
+        if let Some(pid) = self.descendant_pid() {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+            for _ in 0..50 {
+                if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
 }
 
 pub(crate) fn discover_workspace_git_identity(
@@ -98,7 +340,11 @@ impl WorkspaceGitStatusSnapshot {
             workspace_id,
             resolved_identity_cwd,
             status_cache_key,
-            demand,
+            demand: demand.with_dirty_paths_result(if demand.dirty_paths {
+                self.dirty_paths
+            } else {
+                None
+            }),
             auto_label,
             branch: self.branch,
             ahead_behind: self.ahead_behind,
@@ -179,6 +425,21 @@ pub(crate) fn reserve_workspace_ids(workspaces: &[Workspace]) {
 }
 
 /// A named workspace containing tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CachedGitStatus {
+    ahead_behind: Option<(usize, usize)>,
+    dirty_paths: Option<usize>,
+}
+
+impl CachedGitStatus {
+    fn new(ahead_behind: Option<(usize, usize)>, dirty_paths: Option<usize>) -> Option<Self> {
+        (ahead_behind.is_some() || dirty_paths.is_some()).then_some(Self {
+            ahead_behind,
+            dirty_paths,
+        })
+    }
+}
+
 pub struct Workspace {
     /// Stable public workspace identity, independent of display order.
     pub id: String,
@@ -194,8 +455,8 @@ pub struct Workspace {
     pub(crate) cached_git_status_key: PathBuf,
     /// Cached current git branch for the workspace repo.
     pub(crate) cached_git_branch: Option<String>,
-    /// Cached ahead/behind counts for the workspace repo's current branch upstream.
-    pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
+    /// Cached ahead/behind and dirty-path presentation for the workspace repo.
+    pub(crate) cached_git_ahead_behind: Option<CachedGitStatus>,
     /// Cached derived Git repo metadata for worktree actions and status display.
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
     /// Explicit Zynk-managed worktree grouping provenance.
@@ -1170,6 +1431,24 @@ impl Workspace {
 
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
         self.cached_git_ahead_behind
+            .as_ref()
+            .and_then(|status| status.ahead_behind)
+    }
+
+    pub fn git_dirty_paths(&self) -> Option<usize> {
+        self.cached_git_ahead_behind
+            .as_ref()
+            .and_then(|status| status.dirty_paths)
+    }
+
+    pub(crate) fn set_cached_git_ahead_behind(&mut self, value: Option<(usize, usize)>) {
+        let dirty_paths = self.git_dirty_paths();
+        self.cached_git_ahead_behind = CachedGitStatus::new(value, dirty_paths);
+    }
+
+    pub(crate) fn set_cached_git_dirty_paths(&mut self, value: Option<usize>) {
+        let ahead_behind = self.git_ahead_behind();
+        self.cached_git_ahead_behind = CachedGitStatus::new(ahead_behind, value);
     }
 
     pub fn git_space(&self) -> Option<&GitSpaceMetadata> {
@@ -1184,7 +1463,7 @@ impl Workspace {
     pub fn refresh_git_ahead_behind(&mut self) {
         let cwd = self.resolved_identity_cwd();
         self.cached_git_branch = cwd.as_deref().and_then(git_branch);
-        self.cached_git_ahead_behind = cwd.as_deref().and_then(git_ahead_behind);
+        self.set_cached_git_ahead_behind(cwd.as_deref().and_then(git_ahead_behind));
         self.cached_git_space = cwd.as_deref().and_then(git_space_metadata);
     }
 

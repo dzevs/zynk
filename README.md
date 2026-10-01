@@ -532,6 +532,15 @@ the member is omitted without a Codex hint. It reports hint consistency only and
 authority. The separate reader surfaces expose top-level `identity_verification` on `zynk whoami --json` and
 implicit `zynk inbox --json`.
 
+For manually launched official agents, snapshot flag preservation remains default-deny and stores only argv that
+the agent adapter has sanitized. For Claude and Codex, argv is read only from the exact process selected by
+leader-first or priority detection; a same-name job member cannot supply another process's flags. The most recent
+live launch decides which flags survive: a later canonical or rejected live command suppresses older privileged
+flags, including in the final save after the process exits. Safe Tier-B captures resume through the official
+command name (`claude` or `codex`), not a vendor-internal executable path. Pi's rewritten process title is not a
+faithful flag view, so its safe recorded Tier-A command remains authoritative unless a safely flagged live Pi
+command is observed. Codex still receives exactly one `--no-daemon`.
+
 ## Keybindings
 
 Press `ctrl+b` to enter prefix mode; default actions are prefix-first and tmux-like.
@@ -662,6 +671,12 @@ tokens read pane metadata, while space custom tokens read workspace metadata.
 style. Unknown themes and malformed styles are diagnosed while the previous live palette/UI section remains
 active on reload.
 
+The `git_status` token renders a green `+N` before its existing ahead/behind arrows when `N` is nonzero. `N` is
+the number of unique paths that differ from `HEAD`: staged, modified, deleted, and every individual untracked
+file count, while ignored paths do not. A path changed in both the index and worktree counts once; rename
+detection is disabled, so a rename counts as one deletion plus one addition. Non-Git spaces render no token,
+and a colocated Git/`jj` checkout continues to use Git status without invoking `jj`.
+
 Override agent rows by canonical detected agent, independently of a renamed
 display label. For example, replace `rows_by_agent = {}` above with this table
 after the agents configuration; do not define both:
@@ -708,7 +723,16 @@ divider, leaving the content cell available.
 Title capture continues regardless of configuration. Configured title builtins in
 global or override rows request redraw in both desktop execution loops; a custom
 key with the same spelling does not. Periodic Git detail demand follows builtin
-space `branch` and `git_status` tokens; one-shot identity refresh remains independent.
+space `branch` and `git_status` tokens; one-shot identity refresh remains independent. Dirty-path queries run
+only when a plain configured `git_status` token demands them, outside rendering, at most once per checkout per
+5 seconds. Success requires Git to exit and both output pipes to reach EOF inside the 250 ms query deadline. On
+failure, descriptors close and cleanup signals the original process group before reaping the direct child. The
+unreaped child reserves its PID/PGID through that signal; both steps have a separate 250 ms cleanup grace. An
+inherited pipe cannot stall the global worker or later refreshes. A timeout, oversized or malformed output,
+process failure, or nonzero exit keeps the last successful value (or hides `+N` before the first success) and
+suppresses another dirty query for 30 seconds. The background query sets `GIT_CONFIG_GLOBAL=/dev/null` and
+`GIT_CONFIG_SYSTEM=/dev/null`, so a custom global `core.excludesFile` is intentionally not honored; repository
+`.gitignore` and repository-local excludes still apply, and every remaining untracked file counts.
 
 Rows, overrides and gaps reload together. Previously ignored keys are now typed:
 invalid row/token shapes, invalid override keys and negative, oversized or
@@ -741,9 +765,12 @@ topology projections, and global mobile status counts remain complete and unchan
 
 With `working_animation = true`, dots-mode sidebar working marks use the yellow `◌ ◎ ◉ ● ◉ ◎` pulse and
 navigator/mobile working marks use the braille spinner. The literal `working` label on expanded agent rows,
-mobile switcher rows, and navigator rows keeps the same glyphs and width while a three-character brightness
-tail sweeps across it using only theme colors. Symbols-mode sidebar marks remain static while the label shimmer
-and braille surfaces still animate. Setting the key to false makes every affected mark and label static.
+mobile switcher rows, and navigator rows keeps each surface's resting foreground color, glyphs, and width while
+a three-letter red band sweeps across it: two leading letters use full `palette.red`, and the trailing letter is
+a half blend back toward the resting color. Passed letters return to that surface's base color; ordinary working
+text remains yellow while muted mobile/context labels remain muted. Symbols-mode sidebar marks remain static
+while the label shimmer and braille surfaces still animate. Setting the key to false makes every affected mark
+and label static.
 Animation advances once per 128 ms only while an App client renders eligible working UI; the shimmer is
 deliberately stepped rather than 60 fps. A detached or terminal-attach-only server schedules no animation.
 

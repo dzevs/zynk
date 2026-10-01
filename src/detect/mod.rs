@@ -240,21 +240,33 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
     parse_agent_label(process_name)
 }
 
-pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
-    if let Some(process) = job
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentSelection {
+    agent: Agent,
+    name: String,
+    process_index: usize,
+}
+
+fn select_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<AgentSelection> {
+    if let Some((process_index, process)) = job
         .processes
         .iter()
-        .find(|process| process.pid == job.process_group_id)
+        .enumerate()
+        .find(|(_, process)| process.pid == job.process_group_id)
     {
         let candidate = normalized_process_name(process);
         if let Some(agent) = identify_agent(&candidate) {
-            return Some((agent, candidate));
+            return Some(AgentSelection {
+                agent,
+                name: candidate,
+                process_index,
+            });
         }
     }
 
-    let mut best: Option<(u8, Agent, String)> = None;
+    let mut best: Option<(u8, AgentSelection)> = None;
 
-    for process in &job.processes {
+    for (process_index, process) in job.processes.iter().enumerate() {
         let candidate = normalized_process_name(process);
         let Some(agent) = identify_agent(&candidate) else {
             continue;
@@ -262,12 +274,40 @@ pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Ag
         let score = process_priority(process, &candidate);
 
         match &best {
-            Some((best_score, _, _)) if *best_score >= score => {}
-            _ => best = Some((score, agent, candidate)),
+            Some((best_score, _)) if *best_score >= score => {}
+            _ => {
+                best = Some((
+                    score,
+                    AgentSelection {
+                        agent,
+                        name: candidate,
+                        process_index,
+                    },
+                ))
+            }
         }
     }
 
-    best.map(|(_, agent, name)| (agent, name))
+    best.map(|(_, selection)| selection)
+}
+
+pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
+    let selection = select_agent_in_job(job)?;
+    Some((selection.agent, selection.name))
+}
+
+fn foreground_agent_argv_from_job(
+    job: &crate::platform::ForegroundJob,
+    expected_agent: &str,
+) -> Option<Vec<String>> {
+    let expected = parse_agent_label(expected_agent)?;
+    let selection = select_agent_in_job(job)?;
+    if selection.agent != expected {
+        return None;
+    }
+    job.processes
+        .get(selection.process_index)
+        .and_then(|process| process.argv.clone())
 }
 
 /// Capture the argv of the foreground agent process behind a pane shell `child_pid`, but ONLY when the
@@ -278,16 +318,8 @@ pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Ag
 /// Conservative by construction: a wrapped or mismatched launcher (e.g. `node …/claude.js`) will not
 /// match the bare agent and yields `None`, so the caller keeps the canonical resume.
 pub fn foreground_agent_argv(child_pid: u32, expected_agent: &str) -> Option<Vec<String>> {
-    let expected = parse_agent_label(expected_agent)?;
     let job = foreground_job(child_pid)?;
-    let (agent, name) = identify_agent_in_job(&job)?;
-    if agent != expected {
-        return None;
-    }
-    job.processes
-        .iter()
-        .find(|process| normalized_process_name(process) == name)
-        .and_then(|process| process.argv.clone())
+    foreground_agent_argv_from_job(&job, expected_agent)
 }
 
 /// Detect the state of an agent from the live terminal tail snapshot.
@@ -951,6 +983,132 @@ mod tests {
         assert_eq!(
             identify_agent_in_job(&job),
             Some((Agent::Claude, "claude".to_string()))
+        );
+    }
+
+    fn assert_codex_capture_follows_selection(
+        job: crate::platform::ForegroundJob,
+        expected_index: usize,
+        expected_pid: u32,
+        expected_raw: &[&str],
+        expected_yolo: bool,
+    ) {
+        let selection = select_agent_in_job(&job).expect("selected Codex process");
+        assert_eq!(selection.agent, Agent::Codex);
+        assert_eq!(selection.process_index, expected_index);
+        assert_eq!(job.processes[selection.process_index].pid, expected_pid);
+
+        let captured = foreground_agent_argv_from_job(&job, "codex");
+        let expected_raw = expected_raw
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            captured.as_deref(),
+            Some(expected_raw.as_slice()),
+            "argv capture must use the process selected by leader/priority detection"
+        );
+
+        let session_ref = crate::agent_resume::AgentSessionRef::id("selected").unwrap();
+        let mut observation = None;
+        let persisted = crate::agent_resume::persisted_resume_argv_with_observation(
+            "zynk:codex",
+            "codex",
+            &session_ref,
+            captured.as_deref(),
+            None,
+            &mut observation,
+        );
+        if expected_yolo {
+            let expected = vec![
+                "codex".to_string(),
+                "--no-daemon".to_string(),
+                "resume".to_string(),
+                "selected".to_string(),
+                "--yolo".to_string(),
+            ];
+            assert_eq!(persisted, Some(expected.clone()));
+            assert!(matches!(
+                observation,
+                Some(crate::agent_resume::ResumeArgvObservation::Flagged { argv, .. })
+                    if argv == expected
+            ));
+        } else {
+            assert_eq!(persisted, None);
+            assert!(matches!(
+                observation,
+                Some(crate::agent_resume::ResumeArgvObservation::ObservedCanonical { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn leader_capture_ignores_earlier_flagged_same_name_sibling() {
+        assert_codex_capture_follows_selection(
+            crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![
+                    foreground_process(43, "codex", &["codex", "--yolo"]),
+                    foreground_process(42, "codex", &["codex"]),
+                ],
+            },
+            1,
+            42,
+            &["codex"],
+            false,
+        );
+    }
+
+    #[test]
+    fn leader_capture_keeps_selected_flag_when_earlier_sibling_is_canonical() {
+        assert_codex_capture_follows_selection(
+            crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![
+                    foreground_process(43, "codex", &["codex"]),
+                    foreground_process(42, "codex", &["codex", "--yolo"]),
+                ],
+            },
+            1,
+            42,
+            &["codex", "--yolo"],
+            true,
+        );
+    }
+
+    #[test]
+    fn priority_capture_ignores_earlier_flagged_lower_priority_sibling() {
+        assert_codex_capture_follows_selection(
+            crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![
+                    foreground_process(42, "bash", &["bash"]),
+                    foreground_process(43, "codex", &["codex", "--yolo"]),
+                    foreground_process(44, ".codex-wrapped", &["/opt/vendor/codex"]),
+                ],
+            },
+            2,
+            44,
+            &["/opt/vendor/codex"],
+            false,
+        );
+    }
+
+    #[test]
+    fn priority_capture_keeps_selected_flag_when_earlier_sibling_is_canonical() {
+        assert_codex_capture_follows_selection(
+            crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![
+                    foreground_process(42, "bash", &["bash"]),
+                    foreground_process(43, "codex", &["codex"]),
+                    foreground_process(44, ".codex-wrapped", &["/opt/vendor/codex", "--yolo"]),
+                ],
+            },
+            2,
+            44,
+            &["/opt/vendor/codex", "--yolo"],
+            true,
         );
     }
 

@@ -954,8 +954,8 @@ mod tests {
         );
         app.palette = crate::app::state::Palette::catppuccin_latte();
 
-        let ratatui::style::Color::Rgb(r, g, b) = app.palette.text else {
-            panic!("test palette text must be RGB");
+        let ratatui::style::Color::Rgb(r, g, b) = app.palette.red else {
+            panic!("test palette red must be RGB");
         };
         app.sidebar_agents.rows = vec![vec![serde_json::from_value(serde_json::json!({
             "token": "state_text",
@@ -966,7 +966,7 @@ mod tests {
         assert_eq!(
             app.view.working_animation_demand,
             WorkingAnimationDemand::NONE,
-            "a token-styled label whose resolved base equals text has no visible shimmer"
+            "a token-styled label whose resolved base equals the shimmer target has no visible shimmer"
         );
         app.sidebar_agents = crate::config::AgentsSidebarConfig::default();
 

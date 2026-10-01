@@ -8421,3 +8421,94 @@ routing, persistence, receipt authority, configuration, and runtime behavior rem
 machinery findings from the same Gate-3 verdict remain assigned to packet v12 and are not closed by this row.
 This successor remains pending exact-object Claude Gate-2 and a fresh standing-swarm Gate-3; no dogfood, merge,
 push, install, version, tag, publish, or release authority follows this entry.
+
+#### 86f61611 3.2.0 runtime follow-up batch (IMPLEMENTED / PENDING VERIFICATION)
+
+The post-merge follow-up batch closes three operator-observed gaps without a version bump. Manual official-agent
+flag persistence now keeps one runtime-only, exact-session observation of already-sanitized argv. For faithful
+Claude/Codex foregrounds the current launch wins: a flagged launch replaces the observation, while a canonical
+or rejected launch records a tombstone so an older privileged Tier-A command cannot return during the final save.
+Safe Tier-B argv0 is normalized to the official command name; explicit Tier A stays unchanged. Pi keeps safe
+Tier-A flags when its rewritten process title is not a faithful argv view. Raw argv remains forbidden, the
+default-deny adapters are unchanged, and Codex still receives exactly one `--no-daemon`.
+
+Working labels preserve each surface's resting foreground and move a three-letter `palette.red` band over the
+literal text: two leading letters are full red and the trailing letter is a half blend. Ordinary working text
+therefore stays yellow at rest, muted mobile/context labels stay overlay0, passed letters return to their base,
+the shared 128 ms cadence is unchanged, and disabled animation remains static.
+
+The existing configured `git_status` token now renders a green `+N` before ahead/behind, where `N` is the number
+of unique staged, modified, deleted, or individual untracked paths and ignored paths are excluded. Dirty work
+reuses the demand-gated 1.5-second scheduler but is eligible at most once per checkout per 5,000 ms. It runs
+outside rendering with optional locks and fsmonitor disabled, a 250 ms deadline, a 4 MiB cap, shared
+process-group kill/reap custody, and a 30,000 ms failure backoff that retains the last good value or hides the
+segment before first success. This adds no config key, wire/API field, database member, persisted snapshot field,
+or `jj` query.
+
+The bounded candidate records Gate-1 proposal V2 `12d9795c67d23599686d6a6fbb69705ad5aab6ee06b8aebcfdb4e4dab2e6ba30`,
+erratum `ae3effeeb1037b65d9b3633de2876728c5ebfb4fb84a72ec5487a8dadc8b1946`, and approval
+`msg_77716265443ba59f`. It remains IMPLEMENTED / PENDING VERIFICATION until the exact candidate passes Claude
+Gate-2 and a fresh standing-swarm Gate-3. Frozen v13-launchfix objects and all residue remain untouched; no
+install, restart, merge, push, bump, tag, publish, release, or cleanup authority follows this entry.
+
+#### d8fd3e1f Gate-3 selected-process and pipe-deadline correction (IMPLEMENTED / PENDING VERIFICATION)
+
+Gate-3 v14 selected-process and pipe-deadline corrections bind argv capture to the exact process index chosen by
+leader-first or priority detection. The capture path no longer performs a second normalized-name search, so an
+earlier same-name sibling can neither add an allowlisted flag to a canonical selected process nor drop a flag from
+a flagged selected process. Four deterministic hostile-order tests cover both leader and priority selection while
+the accepted Item-A observation tables, command-name normalization, default-deny adapters, and exactly-one
+`--no-daemon` rule remain unchanged.
+
+Dirty-status success now requires the direct Git child to exit and both output pipes to reach EOF inside the same
+250 ms wall-clock deadline. A Linux nonblocking-pipe poll state machine replaces unbounded reader joins. Failure
+closes the descriptors, kills the process group, reaps the direct child, and has a separate 250 ms cleanup grace;
+same-group stdout and stderr holders and an escaped-group pipe holder are covered by deterministic fixtures. The
+escaped case also proves the global worker emits completion and clears its in-flight state before the fixture
+reaps its own descendant. Existing 5,000 ms eligibility, 30,000 ms backoff, last-good-or-hidden behavior,
+optional-lock suppression, Item-B shimmer semantics, and Item-C rendering remain unchanged. The background query
+sets `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null`; custom global `core.excludesFile` therefore
+does not apply, while repository ignore rules continue to apply and each remaining untracked file counts.
+
+This replacement records Gate-3 verdict `msg_2fe482ca145b0d29`, blockers
+`G3-V14-FOREGROUND-ARGV-IDENTITY-001` and `G3-V14-DIRTY-QUERY-DEADLINE-001`, Gate-1 proposal V3
+`e51adda1575aab7f76a2871d864aad08c0c5518b1f3017b8f8b832f2f5739edf`, and approval
+`msg_d5efd1ef40063ae4`. The docs oracle closes the carried SRC1 parser follow-up with ordinary `self.fail` output.
+The final object must carry 79 source faults, fresh exact and CPU evidence, and packet-v15 custody before review.
+It remains IMPLEMENTED / PENDING VERIFICATION until exact-object Claude Gate-2 and fresh standing-swarm Gate-3;
+no install, restart, merge, push, bump, tag, publish, release, or cleanup authority follows this entry.
+
+#### *(this commit)* Gate-3 process-group custody correction (IMPLEMENTED / PENDING VERIFICATION)
+
+Dirty-status child exit is now observed without reaping through Linux `waitid` with `WNOHANG | WNOWAIT`. On
+every failure, cleanup signals the original process group before reaping the direct child. Keeping that child as
+an unreaped zombie reserves its PID/PGID through the group signal, so a recycled numeric group cannot receive the
+signal. Success still requires an exit status of zero and EOF on both pipes inside the 250 ms query deadline;
+only then is the successful child reaped. Interrupted read, poll, observation, success-reap, and cleanup-wait
+retries all re-check their active deadline before retrying. The 5,000 ms cadence, 30,000 ms backoff, output caps,
+last-good-or-hidden behavior, and separate 250 ms cleanup grace are unchanged.
+
+A deterministic escaped-descendant fixture records the direct PID, holds the query open through an inherited
+pipe, and proves `/proc/<pid>/status` remains `State: Z` until timeout cleanup signals the original group. It then
+proves the direct child is gone after cleanup while the escaped descendant remains outside that group. This
+replacement records Gate-3 verdict `msg_e860ed2750b0cc79`, erratum `msg_1d45d9edec996078`, and Gate-1 authority
+`msg_4448c1038645e3f3`. It remains IMPLEMENTED / PENDING VERIFICATION until exact-object Claude Gate-2 and fresh
+standing-swarm Gate-3; no install, restart, merge, push, bump, tag, publish, release, or cleanup authority follows
+this entry.
+
+#### *(this commit)* Gate-3 post-validation custody correction (IMPLEMENTED / PENDING VERIFICATION)
+
+Post-read dirty-status validation now runs while the successful direct child remains waitable and its unreaped
+zombie still reserves the original PID/PGID. A validated status-zero result commits success and reaps exactly once
+without signaling the group. Malformed output, or any other validator failure, instead closes the completed pipe
+readers, signals the original process group while that custody still holds, and only then reaps the direct child
+inside the existing 250 ms cleanup grace. The 250 ms query deadline, output caps, nonzero-exit classification,
+5,000 ms cadence, 30,000 ms backoff, last-good-or-hidden behavior, and successful-query semantics are unchanged.
+
+A deterministic status-zero fixture emits malformed porcelain, closes both pipes, and leaves a same-group
+descendant with closed stdio. Its regression observes `State: Z` at the parser boundary, then proves malformed
+cleanup removes the descendant, reaps the direct child exactly once, and completes inside the query deadline plus
+cleanup grace. This replacement records Gate-3 verdict `msg_eb67b29afabc0f50`, completeness statement
+`msg_14ff032fb736e1e7`, and Gate-1 authority `msg_6d30db178d88f713`. It remains IMPLEMENTED / PENDING
+VERIFICATION until exact-object Claude Gate-2 and fresh standing-swarm Gate-3; no install, restart, merge, push,
+bump, tag, publish, release, or cleanup authority follows this entry.
