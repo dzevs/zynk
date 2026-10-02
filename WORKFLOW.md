@@ -17,9 +17,8 @@ unverified agent output never reaches `main`. Project conventions live in `CLAUD
 - **Pi** — coordinator / relay; READ-ONLY verification. Doesn't write code, commit, or push.
 - **zynk** — the audited transport; the conversation is the verdict record.
 
-The operator reassigned these roles on 2026-09-09 for the remaining B1 corrections and Linux-only v0.8.2
-port. Prior approvals remain valid only for their recorded ranges under the original reviewers.
-Transferring implementation ownership does not approve inherited commits.
+Role changes are operator-ordered and recorded. Prior approvals stay valid only for their recorded ranges under
+the original reviewers; transferring implementation ownership never approves inherited commits.
 
 ## Binding rules
 
