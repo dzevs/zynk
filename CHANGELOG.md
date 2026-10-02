@@ -1,6 +1,6 @@
 # Changelog
 
-## [3.2.0] — Unreleased
+## [3.2.0] — 2026-10-02
 
 This release restores operator-selected 3.0.x presentation and interaction behavior on top of 3.1.0. Binary
 protocol 20 and the socket API method and field shapes remain unchanged, as do persistence, session snapshots,

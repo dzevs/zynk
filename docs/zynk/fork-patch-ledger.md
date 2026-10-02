@@ -8512,3 +8512,11 @@ cleanup grace. This replacement records Gate-3 verdict `msg_eb67b29afabc0f50`, c
 `msg_14ff032fb736e1e7`, and Gate-1 authority `msg_6d30db178d88f713`. It remains IMPLEMENTED / PENDING
 VERIFICATION until exact-object Claude Gate-2 and fresh standing-swarm Gate-3; no install, restart, merge, push,
 bump, tag, publish, release, or cleanup authority follows this entry.
+
+---
+
+# RELEASE 3.2.0 (2026-10-02) — release metadata
+
+| area | files | what / why |
+|---|---|---|
+| release metadata | `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `docs/zynk/fork-patch-ledger.md` | Version 3.1.0 → 3.2.0 (root package only; no dependency refresh); date the completed 3.2.0 changelog for the release; hosted main CI run `36961878580` attempt 2 is green on `7d690c27e02464b1c80e5d22a646b5043a859155`. |
