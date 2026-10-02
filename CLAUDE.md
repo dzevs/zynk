@@ -18,6 +18,7 @@ in the chat; a chat reply never reaches them.
 
 ## Commands (`just`)
 
+- **Change tiers:** Light, Standard, and Major gates are defined in `WORKFLOW.md`.
 - **Test:** `just test` (nextest + the maintenance unittests). One: `just test-one <filter>`. TS: `just test-ts` (Bun).
 - **Lint:** `just lint` = `cargo fmt --check` + `cargo clippy --all-targets --locked -- -D warnings` (dead code fails the lint gate).
 - **Check:** `just check` (= `ci` + maintenance unittests) — run before committing; never bypass a failing check.

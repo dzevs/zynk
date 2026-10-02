@@ -53,10 +53,18 @@ or hardcoding pane ids — they're session-local; re-read `zynk pane list` befor
 When another agent sends you a message via zynk, **reply through zynk** (`zynk reply` / `zynk send`) — never
 in the chat; a chat reply never reaches them.
 
-For substantive tasks follow `WORKFLOW.md`: **Gate-1 Claude spec review → Gate-2 Claude implementation review →
-Gate-3 swarm independent verification**, then the operator's merge/push gate. The authoritative verdict is the
-**audited zynk conversation** (`zynk thread` / `zynk trace <id>` / inbox), not `delivery_status` (which proves
-submission only). Read and verify every cited `file:line` before accepting a verdict.
+The host is shared. Agents coordinate only inside their own project workspace; never pause, schedule around, or
+request pauses from another project's agents. A Major-tier CPU measurement step enforces its own quiet-host check
+by observing load and retrying later; it never asks other agents to stop.
+
+For substantive tasks follow the tiers in `WORKFLOW.md`:
+- **Light** — local `just check` + `just gate`, Claude Gate-2 diff read, operator gate, hosted CI; no Gate-3.
+- **Standard** — short Gate-1 proposal, Gate-2, one bounded read-only Gate-3 swarm, operator gate.
+- **Major** — full proposal + frozen acceptance specification, Gate-2, specification-bound Gate-3, operator gate.
+
+Tooling/hygiene stops never return to Gate-1; evidentiary failures get one Claude disposition and at most one
+fresh run. The authoritative verdict is the **audited zynk conversation** (`zynk thread` / `zynk trace <id>` /
+inbox), not `delivery_status` (submission only). Read and verify every cited `file:line` before accepting it.
 
 ## Upstream port policy
 

@@ -10,9 +10,10 @@ unverified agent output never reaches `main`. Project conventions live in `CLAUD
 - **Operator** — starts tasks; gives the final explicit merge / push / release approval.
 - **Codex** — the single implementer/executor. Only Codex edits files, commits, and runs approved
   merge/push/tag/release operations, and waits for an explicit operator gate per action.
-- **Claude** — collaborative reviewer (Gate-1 spec + Gate-2 implementation) and context owner, read-only
-  on implementation. A co-author, not independent.
-- **Swarm** — Gate-3 independent verification: a fan-out of specialist reviewers, decorrelated from the author.
+- **Claude** — collaborative reviewer (tier confirmation / Gate-1 + Gate-2 implementation) and context owner,
+  read-only on implementation. A co-author, not independent.
+- **Swarm** — Standard/Major Gate-3 independent verification: a bounded fan-out of specialist reviewers,
+  decorrelated from the author.
 - **Pi** — coordinator / relay; READ-ONLY verification. Doesn't write code, commit, or push.
 - **zynk** — the audited transport; the conversation is the verdict record.
 
@@ -23,19 +24,22 @@ Transferring implementation ownership does not approve inherited commits.
 ## Binding rules
 
 1. No merge / push / tag / release / publish until the operator explicitly approves — each is a separate gate.
-2. No "ready to merge" claim until Gate-1, Gate-2, and Gate-3 all approve.
+2. No "ready to merge" claim until every gate required by the confirmed tier approves.
 3. Pi must not edit source files or write code; Pi coordinates and verifies read-only.
-4. On any gate/check failure: STOP, fix the root cause, re-run until clean. Never bypass (`--no-verify` is
+4. On any gate/check failure: STOP and follow **Stops and cost ceiling** below. Never bypass (`--no-verify` is
    forbidden). Every check is required — zynk builds for one target (ADR 0013), so there is no informational tier.
 5. Local builds/tests use an isolated `CARGO_TARGET_DIR`, never the live runtime.
-6. Precise `git add <path>` — never `git add -A`. Lowercase conventional commits; never force-push `main`.
-7. Freeze the candidate branch and worktree from review submission until the consolidated verdict.
+6. The host is shared. Agents coordinate only inside their own project workspace; never pause, schedule around,
+   or request pauses from another project's agents. A Major-tier CPU measurement step enforces its own quiet-host
+   check by observing load and retrying later; it never asks other agents to stop.
+7. Precise `git add <path>` — never `git add -A`. Lowercase conventional commits; never force-push `main`.
+8. Freeze the candidate branch and worktree from Gate-2 submission until the tier's required review verdicts.
    No candidate edits, new commits, or teammate fixes while that review is open; reviewer probes belong in
    isolated copies. After the verdict, address the collected required findings in one bounded batch.
-8. Review the successor delta and affected invariants. Nonblocking notes do not reopen accepted,
+9. Review the successor delta and affected invariants. Nonblocking notes do not reopen accepted,
    unchanged areas; reopening requires concrete regression evidence. No fresh broad review fan-out
    while corrections to its parent are in progress. Separate approved milestones require separate worktrees.
-9. Unreviewed fixes are **IMPLEMENTED / PENDING VERIFICATION**, never closed merely because a
+10. Unreviewed fixes are **IMPLEMENTED / PENDING VERIFICATION**, never closed merely because a
    commit landed or the author's tests passed. Record approval only for the exact reviewed range.
 
 ## Upstream port policy
@@ -46,97 +50,59 @@ Transferring implementation ownership does not approve inherited commits.
   an explicit operator decision at Gate-1.
 - A ledger entry alone is never sufficient evidence or approval for a user-visible change.
 
-## Gate overview
+## Tiers
 
-```text
-Gate-1: Claude reviews the spec for soundness.
-Gate-2: Claude reviews the implementation.
-Gate-3: a swarm independently verifies the change.
-Operator: merge/push approval only after Gate-1 + Gate-2 + Gate-3 approve.
-```
+| tier | scope |
+|---|---|
+| **Light** | Docs, test hardening, version bump/tag/publish, and bounded bug fixes (about 200 changed production lines or fewer) with no contract change. |
+| **Standard** | Product features and fixes that affect UI, config effect, integrations, or bounded runtime behavior. |
+| **Major** | Upstream ports; wire/API/DB/snapshot schema changes; identity/security changes; or a new release line. |
 
-## Linux v0.8.2 end-state port batch protocol
+Codex states the tier and reason in the kickoff/proposal, including paths touched and contracts changed. Claude
+confirms or raises the tier in the first reply; for Light, that reply is the Gate-1 equivalent. When in doubt,
+use the heavier tier. The operator may override the classification. Upgrade automatically mid-task if the change
+touches wire/API/DB/snapshot schema, identity/security, or exceeds the Light bound; never downgrade mid-task.
 
-For the operator-approved M8-40 through M9-31 end-state port, the combined specification and source map replace
-per-upstream-commit implementation gates. Work is divided into B1 (agent/plugins), B2
-(input/protocol/render/server/graphics), and B3 (Linux platform/remote/update/config). The combined spec and
-plan receive one Claude Gate-1 followed by one explicit operator sign-off before B1. Before B2 and B3, Claude
-reviews a concise batch-start binding against the unchanged combined design; this does not require renewed
-operator sign-off unless a material spec amendment is needed. Each batch has one implementation, one sealed
-packet, and one exact-tip Claude Gate-2. Gate-3 runs once at M-FINAL after all three exact-tip Gate-2 approvals.
+## Gates per tier
 
-Changed behavior is developed red then green. `just lint` runs at the first compile-green before any full-suite
-run; final candidate bytes must pass targeted tests, `just check`, and `just gate`. Mutation faults are limited
-to at most five predeclared critical fork-owned production units per batch. Frozen controls and RAW-red are
-required only when they prove a behavior change; controls are never deleted, ignored, excluded, or weakened to
-obtain green.
+| tier | required gates |
+|---|---|
+| **Light** | Local `just check` + `just gate` in the isolated target; Claude Gate-2 diff read; operator merge/push gate; hosted CI after push. No Gate-1 document and no Gate-3. |
+| **Standard** | Short Gate-1 proposal (at most one page: goal, paths, risks, evidence to be produced); Gate-2; one read-only Gate-3 swarm with an arbiter plus at most three lanes, one pass, and one consolidated verdict; operator gate. No sealed packet. |
+| **Major** | Full proposal plus a frozen numbered acceptance specification per program; Gate-2; Gate-3 swarm against that specification; operator gate. |
 
-The batch protocol removes routine 35-second gaps, dual inspection chains, per-step boundary receipts, and
-per-source gates. It does not relax source accounting, isolated runtime/build requirements, candidate freeze,
-failure handling, reviewer independence, exact-SHA review, or operator gates. Every covered upstream source
-is listed in the batch ledger; every parent/final hunk against v0.8.2 has one documented residue disposition;
-fork-owned deviations are itemized; incomplete evidence is NOT_OBSERVED; and a failure still stops for
-interpretation before any rerun or correction.
+Gate-2 is Claude's collaborative diff review of the exact implementation. Gate-3 is independent and
+decorrelated from the author; its authoritative consolidated verdict is the audited zynk conversation
+(`zynk thread` / `zynk trace <id>`), not transport submission status.
 
-This override ends at M-FINAL. No merge, push, install, tag, publish, release, or live-runtime action is implied
-by a batch gate.
+## Evidence per tier
 
-## Full workflow
+| tier | required evidence |
+|---|---|
+| **Light** | `just check`, `just gate`, hosted CI, and a plain-text record of commands, exits, and counts. |
+| **Standard** | Light evidence plus red-first TDD logs. Run `just release-audit` only when update/release code is touched. Produce a fault matrix or CPU evidence only when the proposal names that performance/regression risk. |
+| **Major** | Frozen acceptance specification; layer A exact records bound to the SHA (full test run, check, lint, gate, release audit, fault matrix, CPU rows); layer B strict manifest, canonical tree hash, and signed external seal. Layer C (reviewer bootstrap, rehearsal twin, STOPS/boundary/lifecycle indexes, machinery classifier) runs only when the operator opts in explicitly in the specification; it is off by default. |
 
-```mermaid
-flowchart TD
-  A[Operator starts task] --> B[Codex drafts spec]
-  B --> C[Gate-1: Claude reviews spec]
-  C -->|request-changes| B
-  C -->|approve| D[Codex implements + tests]
-  D --> E[Gate-2: Claude reviews implementation]
-  E -->|request-changes| D
-  E -->|approve| F[Gate-3: swarm independent verification]
-  F -->|request-changes| D
-  F -->|approve| G[Codex reports all gates approved]
-  G --> H[Operator approves merge/push]
-  H --> I[Codex merges to main / pushes]
-```
+Any Gate-3 blocker, in any tier where Gate-3 runs, must name a concrete product or public-contract defect with
+`file:line`. Evidence packaging is never a blocker.
 
-## `Gate-1` — spec soundness
+## Stops and cost ceiling
 
-Codex writes a spec, then asks Claude to review it (`zynk send <claude-pane> --type request-review --trace <id>
--- "<text>"`). Claude may iterate with Codex until the spec is sound. Gate-1 passes only when Claude explicitly
-approves the final spec.
-
-## `Gate-2` — collaborative implementation review
-
-Codex implements the approved spec with tests, then asks Claude to review the diff. Claude may request changes;
-Codex waits for the consolidated verdict before editing again. Gate-2 passes only when Claude explicitly
-approves the implementation; an author never issues their own review approval.
-
-## `Gate-3` — swarm independent verification
-
-After Gate-2, Codex requests an independent **swarm** verification, decorrelated from the author. Use the
-global `swarm` skill: an arbiter fans out specialist reviewers (e.g. correctness, security, regression,
-does-it-reproduce), collects and cross-verifies their findings, and reports one verdict through the audited
-zynk conversation (`zynk thread` / `zynk trace <id>`).
-
-For 3.2.0 evidence packets, Gate-3 uses the frozen numbered acceptance specification
-sealed at source-docs/GATE3-ACCEPTANCE-SPEC-3.2.0-V1.md; blockers cite a requirement.
-
-Manual fallback (no swarm skill available): Codex `zynk send`s the change to three or more reviewer panes with
-distinct lenses, collects their `zynk reply` verdicts, and treats a majority-confirm as the Gate-3 verdict.
-
-Allowed Gate-3 verdicts: `approve`, `request-changes`, `blocked-insufficient-evidence`, `blocked-harness-failure`.
-
-## Failure handling
-
-- **request-changes** — a real issue was found. After the consolidated verdict, Codex fixes the collected required findings; a new Gate-2 and scoped Gate-3 are required.
-- **blocked-insufficient-evidence** — the change couldn't be verified (incomplete proof/diff). Codex corrects the evidence; no code change is implied; re-verify.
-- **blocked-harness-failure** — the verifier environment/tooling failed. Fix the harness; re-verify the same candidate.
+- **Author-tooling or hygiene stops** (wrappers, caches, quoting, parser assumptions) never return to Gate-1.
+  Retain the failed run, fix the tool, record it, and report it in the next status.
+- **Evidentiary failures** (full run, CI, fault, CPU) get one disposition from Claude and at most one fresh run.
+  A second failure goes to the operator.
+- **Documented intermittent tests** allow one rerun and must be hardened in the next Light change.
+- **Cost ceiling:** when one review loop exceeds three stops or about four hours of implementer time on
+  non-product work, Claude stops and gives the operator a cost/benefit table with a scope-cut option instead of
+  continuing.
 
 ## Merge rule
 
-Codex may report "ready to merge" only when ALL are true: Gate-1 (Claude spec) approved, Gate-2 (Claude impl)
-approved, Gate-3 (swarm) `approve` recorded in the audited conversation, Codex has checked every cited
+Codex may report "ready to merge" only when all tier-required gates approve, Codex has checked every cited
 `file:line`, and the operator explicitly approves. Merge to `main` is a fast-forward; pushes are operator-gated;
-never force-push.
+never force-push. Claude never executes mutating repository or system actions (merge, push, cleanup, deletes,
+installs); Codex executes them only on an operator gate, and Claude verifies.
 
 ## Private content gate
 
@@ -150,13 +116,17 @@ Run whole-tree with `just gate`. On any failure: STOP, fix the root cause, never
 
 ## Release gates (each a separate operator gate)
 
-A `vX.Y.Z` tag and a crates.io publish (`cargo publish`) each need a separate explicit operator approval.
-Never tag / release / publish / yank / bump-version / force-push without one. Released tags are immutable
-provenance anchors. zynk builds for Linux x86_64 only (ADR 0013): one target, no release artifacts to verify.
+A version bump commit, signed `vX.Y.Z` tag, crates.io publish (`cargo publish`), and GitHub release each need a
+separate explicit operator approval. Never tag / release / publish / yank / bump-version / force-push without
+one. Released tags are immutable provenance anchors. zynk builds for Linux x86_64 only (ADR 0013): one target,
+no release artifacts to verify.
+
+The proven order is bump commit → hosted CI green → signed tag → crates.io publish → GitHub release
+(source-only). Each step is an operator gate. No reviewer machinery runs between these release gates.
 
 **Release gates** (a failure stops the release, never bypassed): `just check` — the same path as CI
 `check-required` (`just check` on Ubuntu); `just gate` (the private-content gates, `gates.yml`); conventional
-commits; Gate-1 / Gate-2 / Gate-3 on exact SHAs; and the operator merge/push gate. Fedora validation is the
+commits; tier-required review on exact SHAs; and the operator merge/push gate. Fedora validation is the
 operator's dogfood of a binary built locally from the exact reviewed SHA, recorded in the gate with that SHA,
 the binary's sha256, the version and the exercised session/send/receipt/recovery flows; the installed live
 binary isn't evidence for an uninstalled candidate.
