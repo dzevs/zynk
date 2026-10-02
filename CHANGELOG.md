@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+**Removed**
+
+- `zynk update` no longer special-cases Homebrew-managed installs. A binary under a Homebrew-style prefix now
+  follows the same fail-closed update path as any other direct install; the Homebrew tap is retired under ADR
+  0013.
+
 ## [3.2.0] — 2026-10-02
 
 This release restores operator-selected 3.0.x presentation and interaction behavior on top of 3.1.0. Binary

@@ -20,17 +20,15 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
-// ADR 0007: releases ship on GitHub/Homebrew/crates.io/Nix, but there is no update-MANIFEST hosting
-// yet, so the updater fails closed instead of consulting the placeholder zynk.dev manifests. Flip to
-// true + repoint STABLE/PREVIEW_UPDATE_MANIFEST_URL once manifest hosting exists.
+// ADR 0013: zynk is distributed from source only, and there is no update-MANIFEST hosting yet, so
+// the updater fails closed instead of consulting the placeholder zynk.dev manifests. Flip to true
+// + repoint STABLE/PREVIEW_UPDATE_MANIFEST_URL once manifest hosting exists.
 pub(crate) const ZYNK_RELEASE_INFRA_AVAILABLE: bool = false;
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://zynk.dev/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://zynk.dev/preview.json";
-const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/zynk.json";
 // ADR 0007 §3: the direct-install self-update command is Zynk-branded. The const
 // name stays `ZYNK_*` (internal symbol, category-2 — no broad internal rename).
 const ZYNK_UPDATE_COMMAND: &str = "zynk update";
-const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade zynk";
 const MISE_UPDATE_COMMAND: &str = "mise upgrade zynk";
 const NIX_UPDATE_COMMAND: &str = "update through Nix";
 const MISE_INSTALLS_DIR_ENV: &str = "MISE_INSTALLS_DIR";
@@ -222,16 +220,6 @@ struct PreviewBuildMetadata {
     built_at: String,
     protocol: u32,
     assets: BTreeMap<String, AssetRef>,
-}
-
-#[derive(Deserialize)]
-struct HomebrewFormula {
-    versions: HomebrewFormulaVersions,
-}
-
-#[derive(Deserialize)]
-struct HomebrewFormulaVersions {
-    stable: String,
 }
 
 impl UpdateManifest {
@@ -485,53 +473,6 @@ fn check_latest() -> Result<Option<ReleaseInfo>, String> {
         }
     }
     Ok(release)
-}
-
-fn parse_homebrew_formula_stable_version(input: &[u8]) -> Result<Version, String> {
-    let formula: HomebrewFormula = serde_json::from_slice(input)
-        .map_err(|e| format!("failed to parse Homebrew formula JSON: {e}"))?;
-    Version::parse(&formula.versions.stable).ok_or_else(|| {
-        format!(
-            "invalid stable version in Homebrew formula JSON: {}",
-            formula.versions.stable
-        )
-    })
-}
-
-fn homebrew_update_from_formula_json(
-    input: &[u8],
-    current: &Version,
-) -> Result<Option<Version>, String> {
-    let latest = parse_homebrew_formula_stable_version(input)?;
-    if &latest <= current {
-        return Ok(None);
-    }
-
-    Ok(Some(latest))
-}
-
-fn check_homebrew_latest() -> Result<Option<Version>, String> {
-    let current = Version::current();
-
-    let output = Command::new("curl")
-        .args([
-            "-sfL",
-            "--retry",
-            "2",
-            "--connect-timeout",
-            "5",
-            "--max-time",
-            "10",
-            HOMEBREW_FORMULA_API_URL,
-        ])
-        .output()
-        .map_err(|e| format!("curl failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err("failed to fetch Homebrew formula JSON".into());
-    }
-
-    homebrew_update_from_formula_json(&output.stdout, &current)
 }
 
 // ---------------------------------------------------------------------------
@@ -1649,9 +1590,7 @@ fn print_running_session_update_outcomes(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn update_install_command() -> &'static str {
-    if is_homebrew_managed_install() {
-        HOMEBREW_UPDATE_COMMAND
-    } else if is_mise_managed_install() {
+    if is_mise_managed_install() {
         MISE_UPDATE_COMMAND
     } else if is_nix_managed_install() {
         NIX_UPDATE_COMMAND
@@ -1665,26 +1604,14 @@ pub(crate) fn update_install_instruction(install_command: &str) -> String {
         ZYNK_UPDATE_COMMAND => {
             "detach, run `zynk update`, then follow its restart guidance".to_string()
         }
-        HOMEBREW_UPDATE_COMMAND => {
-            "detach, run `brew update && brew upgrade zynk`, then restart this Zynk session when ready".to_string()
-        }
         MISE_UPDATE_COMMAND => {
-            "detach, run `mise upgrade zynk`, then restart this Zynk session when ready"
-                .to_string()
+            "detach, run `mise upgrade zynk`, then restart this Zynk session when ready".to_string()
         }
         NIX_UPDATE_COMMAND => {
             "detach, update through Nix, then restart this Zynk session when ready".to_string()
         }
         command => format!("detach, run `{command}`, then restart this Zynk session when ready"),
     }
-}
-
-fn is_homebrew_managed_install() -> bool {
-    let Ok(current_exe) = env::current_exe() else {
-        return false;
-    };
-
-    is_homebrew_managed_exe_path_following_links(&current_exe)
 }
 
 fn is_nix_managed_install() -> bool {
@@ -1713,9 +1640,7 @@ pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static
 
 pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> Option<&'static str>
 {
-    if is_homebrew_managed_install() {
-        Some("Use `brew update && brew upgrade zynk` to update Homebrew installs.")
-    } else if is_mise_managed_install() {
+    if is_mise_managed_install() {
         Some("Use `mise upgrade zynk` to update mise installs.")
     } else if is_nix_managed_install() {
         Some("Update through Nix to update Nix-managed Zynk installs.")
@@ -1725,11 +1650,7 @@ pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> O
 }
 
 fn preview_channel_rejection_for_exe_path(path: &Path) -> Option<&'static str> {
-    if is_homebrew_managed_exe_path_following_links(path) {
-        Some(
-            "preview channel is only available for direct Zynk installs; Homebrew installs update through `brew update && brew upgrade zynk`",
-        )
-    } else if is_mise_managed_exe_path_following_links(path) {
+    if is_mise_managed_exe_path_following_links(path) {
         Some(
             "preview channel is only available for direct Zynk installs; mise installs update through `mise upgrade zynk`",
         )
@@ -1741,18 +1662,7 @@ fn preview_channel_rejection_for_exe_path(path: &Path) -> Option<&'static str> {
 }
 
 pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
-    is_homebrew_managed_exe_path_following_links(path)
-        || is_mise_managed_exe_path_following_links(path)
-        || is_nix_store_exe_path_following_links(path)
-}
-
-fn is_homebrew_managed_exe_path_following_links(path: &Path) -> bool {
-    if is_homebrew_managed_exe_path(path) {
-        return true;
-    }
-
-    path.canonicalize()
-        .is_ok_and(|path| is_homebrew_managed_exe_path(&path))
+    is_mise_managed_exe_path_following_links(path) || is_nix_store_exe_path_following_links(path)
 }
 
 fn is_nix_store_exe_path_following_links(path: &Path) -> bool {
@@ -1838,30 +1748,6 @@ fn paths_match(left: &Path, right: &Path) -> bool {
     left == right
 }
 
-fn is_homebrew_managed_exe_path(path: &Path) -> bool {
-    homebrew_cellar_keg_root(path).is_some()
-}
-
-fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
-    if path.file_name()? != "zynk" {
-        return None;
-    }
-    let bin_dir = path.parent()?;
-    if bin_dir.file_name()? != "bin" {
-        return None;
-    }
-    let version_dir = bin_dir.parent()?;
-    let formula_dir = version_dir.parent()?;
-    if formula_dir.file_name()? != "zynk" {
-        return None;
-    }
-    let cellar_dir = formula_dir.parent()?;
-    if cellar_dir.file_name()? != "Cellar" {
-        return None;
-    }
-    Some(version_dir.to_path_buf())
-}
-
 // ---------------------------------------------------------------------------
 // M6/ADR 0007: release-infra gate
 // ---------------------------------------------------------------------------
@@ -1908,17 +1794,6 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
     }
 
     let channel = UpdateChannel::configured();
-    if is_homebrew_managed_install() {
-        if channel == UpdateChannel::Preview {
-            return Err(
-                "self-update is disabled for Homebrew installs; preview is only available for direct Zynk installs".into(),
-            );
-        }
-        return Err(format!(
-            "self-update is disabled for Homebrew installs; run `{HOMEBREW_UPDATE_COMMAND}`"
-        ));
-    }
-
     if is_mise_managed_install() {
         if channel == UpdateChannel::Preview {
             return Err(
@@ -2039,17 +1914,6 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
     }
 
     let configured_channel = UpdateChannel::configured();
-    if is_homebrew_managed_install() {
-        if configured_channel == UpdateChannel::Preview {
-            crate::logging::update_check_failed(
-                "preview channel is not available for Homebrew installs",
-            );
-            return;
-        }
-        auto_update_homebrew(events);
-        return;
-    }
-
     if is_mise_managed_install() && configured_channel == UpdateChannel::Preview {
         crate::logging::update_check_failed("preview channel is not available for mise installs");
         return;
@@ -2091,53 +1955,6 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
         version: release.label().to_string(),
         install_command: update_install_command().to_string(),
     });
-}
-
-fn auto_update_homebrew(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
-    let version = match check_homebrew_latest() {
-        Ok(Some(version)) => version,
-        Ok(None) => return,
-        Err(err) => {
-            crate::logging::update_check_failed(&err);
-            return;
-        }
-    };
-
-    crate::logging::update_available(&version.to_string());
-    let notes_body = homebrew_release_notes_body(&version);
-    if let Err(e) = crate::release_notes::save_pending(&version.to_string(), &notes_body) {
-        tracing::warn!("failed to save pending release notes: {e}");
-    }
-
-    tracing::info!(
-        "auto-update check: v{} available through Homebrew, waiting for explicit install",
-        version
-    );
-
-    let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
-        version: version.to_string(),
-        install_command: HOMEBREW_UPDATE_COMMAND.to_string(),
-    });
-}
-
-fn homebrew_release_notes_body(version: &Version) -> String {
-    let manifest = fetch_update_manifest().ok();
-    homebrew_release_notes_body_from_manifest(version, manifest.as_ref())
-}
-
-fn homebrew_release_notes_body_from_manifest(
-    version: &Version,
-    manifest: Option<&UpdateManifest>,
-) -> String {
-    if let Some(metadata) = manifest.and_then(|manifest| manifest.metadata_for_version(version)) {
-        let notes_body = metadata.notes_body();
-        if !notes_body.is_empty() {
-            handle_manifest_announcement(&version.to_string(), metadata.announcement.as_ref());
-            return notes_body;
-        }
-    }
-
-    format!("### Changed\n- v{version} is available through Homebrew.")
 }
 
 // ---------------------------------------------------------------------------
@@ -2296,38 +2113,6 @@ mod tests {
     }
 
     #[test]
-    fn homebrew_cellar_path_is_detected() {
-        let path = Path::new("/opt/homebrew/Cellar/zynk/0.5.9/bin/zynk");
-
-        assert!(is_homebrew_managed_exe_path(path));
-        assert_eq!(
-            homebrew_cellar_keg_root(path).unwrap(),
-            PathBuf::from("/opt/homebrew/Cellar/zynk/0.5.9")
-        );
-    }
-
-    #[test]
-    fn homebrew_linux_cellar_path_is_detected() {
-        let path = Path::new("/home/linuxbrew/.linuxbrew/Cellar/zynk/0.5.9/bin/zynk");
-
-        assert!(is_homebrew_managed_exe_path(path));
-    }
-
-    #[test]
-    fn homebrew_opt_path_requires_canonicalized_cellar_target() {
-        let path = Path::new("/opt/homebrew/opt/zynk/bin/zynk");
-
-        assert!(!is_homebrew_managed_exe_path(path));
-    }
-
-    #[test]
-    fn non_homebrew_path_is_not_detected() {
-        let path = Path::new("/usr/local/bin/zynk");
-
-        assert!(!is_homebrew_managed_exe_path(path));
-    }
-
-    #[test]
     fn mise_install_path_is_detected() {
         let path = Path::new("/home/user/.local/share/mise/installs/zynk/0.6.6/bin/zynk");
 
@@ -2380,26 +2165,6 @@ mod tests {
     }
 
     #[test]
-    fn package_manager_path_detection_follows_homebrew_symlink() {
-        {
-            let root = std::env::temp_dir()
-                .join(format!("zynk-homebrew-symlink-test-{}", std::process::id()));
-            let cellar_bin = root.join("Cellar/zynk/0.6.2/bin");
-            let opt_bin = root.join("opt/zynk/bin");
-            fs::create_dir_all(&cellar_bin).unwrap();
-            fs::create_dir_all(&opt_bin).unwrap();
-            let cellar_binary = cellar_bin.join("zynk");
-            let opt_binary = opt_bin.join("zynk");
-            fs::write(&cellar_binary, b"").unwrap();
-            std::os::unix::fs::symlink(&cellar_binary, &opt_binary).unwrap();
-
-            assert!(is_package_manager_managed_exe_path(&opt_binary));
-
-            let _ = fs::remove_dir_all(root);
-        }
-    }
-
-    #[test]
     fn package_manager_path_detection_follows_mise_symlink() {
         {
             let root =
@@ -2429,13 +2194,10 @@ mod tests {
 
     #[test]
     fn preview_channel_is_rejected_for_package_manager_paths() {
-        let homebrew = Path::new("/opt/homebrew/Cellar/zynk/0.6.6/bin/zynk");
         let mise = Path::new("/home/user/.local/share/mise/installs/zynk/0.6.6/bin/zynk");
         let nix = Path::new("/nix/store/abc123-zynk-0.6.6/bin/zynk");
         let direct = Path::new("/home/user/.local/bin/zynk");
 
-        assert!(preview_channel_rejection_for_exe_path(homebrew)
-            .is_some_and(|message| message.contains("Homebrew")));
         assert!(preview_channel_rejection_for_exe_path(mise)
             .is_some_and(|message| message.contains("mise")));
         assert!(preview_channel_rejection_for_exe_path(nix)
@@ -2451,77 +2213,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_homebrew_formula_stable_version_reads_versions_stable() {
-        let version = parse_homebrew_formula_stable_version(
-            br#"{"versions":{"stable":"0.5.10","head":"HEAD","bottle":true}}"#,
-        )
-        .unwrap();
-
-        assert_eq!(version, Version::parse("0.5.10").unwrap());
-    }
-
-    #[test]
-    fn homebrew_formula_update_uses_formula_stable_not_manifest_latest() {
-        let current = Version::parse("0.6.1").unwrap();
-        let update = homebrew_update_from_formula_json(
-            br#"{"versions":{"stable":"0.6.2","head":"HEAD","bottle":true}}"#,
-            &current,
-        )
-        .unwrap();
-
-        assert_eq!(update, Some(Version::parse("0.6.2").unwrap()));
-    }
-
-    #[test]
-    fn homebrew_formula_update_ignores_versions_that_are_not_newer() {
-        let current = Version::parse("0.6.2").unwrap();
-        let update = homebrew_update_from_formula_json(
-            br#"{"versions":{"stable":"0.6.2","head":"HEAD","bottle":true}}"#,
-            &current,
-        )
-        .unwrap();
-
-        assert_eq!(update, None);
-    }
-
-    #[test]
-    fn homebrew_release_notes_use_package_manager_guidance() {
-        let body =
-            homebrew_release_notes_body_from_manifest(&Version::parse("0.6.3").unwrap(), None);
-
-        assert_eq!(body, "### Changed\n- v0.6.3 is available through Homebrew.");
-    }
-
-    #[test]
-    fn homebrew_release_notes_can_use_manifest_metadata() {
-        let manifest: UpdateManifest = serde_json::from_str(
-            r####"{
-                "version": "0.6.3",
-                "protocol": 10,
-                "notes": "### Fixed\n- Brew notes",
-                "assets": {
-                    "linux-x86_64": "https://example.com/zynk-linux-x86_64"
-                }
-            }"####,
-        )
-        .unwrap();
-        let body = homebrew_release_notes_body_from_manifest(
-            &Version::parse("0.6.3").unwrap(),
-            Some(&manifest),
-        );
-
-        assert_eq!(body, "### Fixed\n- Brew notes");
-    }
-
-    #[test]
     fn update_install_instruction_distinguishes_install_from_restart() {
         assert_eq!(
             update_install_instruction(ZYNK_UPDATE_COMMAND),
             "detach, run `zynk update`, then follow its restart guidance"
-        );
-        assert_eq!(
-            update_install_instruction(HOMEBREW_UPDATE_COMMAND),
-            "detach, run `brew update && brew upgrade zynk`, then restart this Zynk session when ready"
         );
         assert_eq!(
             update_install_instruction(MISE_UPDATE_COMMAND),
@@ -3381,7 +3076,7 @@ mod tests {
             err.contains("cargo install --path . --locked") && err.contains("Zig 0.15.2"),
             "message points to an exact-source rebuild: {err}"
         );
-        for retired in ["brew ", "github.com/dzevs/zynk/releases", "nix run"] {
+        for retired in ["github.com/dzevs/zynk/releases", "nix run"] {
             assert!(
                 !err.contains(retired),
                 "ADR 0013 leaves no {retired:?} install channel to point at: {err}"

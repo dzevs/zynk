@@ -6962,17 +6962,14 @@ mod tests {
 
         state.handle_app_event(AppEvent::UpdateReady {
             version: "0.5.0".into(),
-            install_command: "brew update && brew upgrade zynk".into(),
+            install_command: "mise upgrade zynk".into(),
         });
 
-        assert_eq!(
-            state.update_install_command,
-            "brew update && brew upgrade zynk"
-        );
+        assert_eq!(state.update_install_command, "mise upgrade zynk");
         let toast = state.toast.as_ref().expect("update toast");
         assert_eq!(
             toast.context,
-            "detach, run `brew update && brew upgrade zynk`, then restart this Zynk session when ready"
+            "detach, run `mise upgrade zynk`, then restart this Zynk session when ready"
         );
     }
 
