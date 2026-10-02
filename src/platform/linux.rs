@@ -2659,7 +2659,10 @@ mod tests {
 
     #[test]
     fn codex_process_facts_are_principal_pinned_and_hint_scoped() {
+        use std::os::unix::process::CommandExt as _;
+
         let mut child = Command::new("sleep")
+            .arg0("sleep")
             .arg("30")
             .env("CODEX_THREAD_ID", "thread-session")
             .env("CODEX_SESSION_ID", "thread-session")
@@ -2675,12 +2678,12 @@ mod tests {
         let inspection = process_inspection(pid).expect("pinned argv inspection");
         assert_eq!(inspection.principal, principal);
         assert_eq!(inspection.parent_pid, std::process::id());
-        assert!(inspection
-            .argv
-            .first()
-            .is_some_and(|arg| std::path::Path::new(arg)
-                .file_name()
-                .is_some_and(|name| name == "sleep")));
+        assert_eq!(
+            inspection.argv.first().map(String::as_str),
+            Some("sleep"),
+            "explicit child argv[0] must survive /proc inspection; observed argv={:?}",
+            inspection.argv
+        );
         assert_eq!(
             process_codex_session_hints(principal),
             Some((Some("thread-session".into()), Some("thread-session".into())))

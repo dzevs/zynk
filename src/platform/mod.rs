@@ -527,11 +527,23 @@ mod tests {
         assert!(matches!(outcome, BoundedChildWait::Cancelled(_)));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(child.try_wait().unwrap().is_some());
-        assert_eq!(unsafe { libc::kill(-(process_group_id as i32), 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
+        let group_reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let (final_probe, final_error) = loop {
+            let probe = unsafe { libc::kill(-(process_group_id as i32), 0) };
+            let error = (probe == -1)
+                .then(|| std::io::Error::last_os_error().raw_os_error())
+                .flatten();
+            if probe == -1 && error == Some(libc::ESRCH) {
+                break (probe, error);
+            }
+            assert!(
+                std::time::Instant::now() < group_reap_deadline,
+                "cancelled process group remained visible after the reap grace: pgid={process_group_id}, probe={probe}, error={error:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(final_probe, -1);
+        assert_eq!(final_error, Some(libc::ESRCH));
         assert!(cancel.load(Ordering::Acquire));
     }
 }

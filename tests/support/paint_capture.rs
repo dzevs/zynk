@@ -88,6 +88,51 @@ pub(super) fn paint_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+pub(super) fn visible_paint_text(bytes: &[u8]) -> String {
+    let mut visible = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        if bytes[cursor..].starts_with(b"\x1b]") {
+            cursor += 2;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    0x07 => {
+                        cursor += 1;
+                        break;
+                    }
+                    0x1b if bytes.get(cursor + 1) == Some(&b'\\') => {
+                        cursor += 2;
+                        break;
+                    }
+                    0x1b => break,
+                    _ => cursor += 1,
+                }
+            }
+            continue;
+        }
+
+        if bytes[cursor..].starts_with(b"\x1b[") {
+            let sequence_start = cursor;
+            cursor += 2;
+            while cursor < bytes.len() && !(0x40..=0x7e).contains(&bytes[cursor]) {
+                cursor += 1;
+            }
+            if cursor < bytes.len() {
+                cursor += 1;
+                continue;
+            }
+            visible.extend_from_slice(&bytes[sequence_start..]);
+            break;
+        }
+
+        visible.push(bytes[cursor]);
+        cursor += 1;
+    }
+
+    String::from_utf8_lossy(&visible).into_owned()
+}
+
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -195,6 +240,17 @@ fn diagnostic_line(label: &str, value: serde_json::Value) {
     let _ = writeln!(stderr, "{label} {value}");
 }
 
+fn default_retention_root() -> io::Result<PathBuf> {
+    let root =
+        crate::support::test_root().join(format!("zynk-paint-evidence-{}", std::process::id()));
+    match fs::DirBuilder::new().mode(0o700).create(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    Ok(root)
+}
+
 pub(super) fn report_paint_failure(
     capture: &PaintCapture,
     evaluated_sha256: &str,
@@ -212,13 +268,13 @@ pub(super) fn report_paint_failure(
             "watermark": failure.watermark,
         }),
     );
-    let root = std::env::var_os("ZYNK_TEST_PAINT_EVIDENCE_ROOT");
-    let outcome = retain_paint_capture(
-        root.as_deref().map(Path::new),
-        capture,
-        evaluated_sha256,
-        failure,
-    );
+    let root = std::env::var_os("ZYNK_TEST_PAINT_EVIDENCE_ROOT")
+        .map(PathBuf::from)
+        .map_or_else(default_retention_root, Ok);
+    let outcome = match root {
+        Ok(root) => retain_paint_capture(Some(&root), capture, evaluated_sha256, failure),
+        Err(error) => Err(error),
+    };
     let report = match outcome {
         Ok(Some(receipt)) => json!({
             "status": "RETAINED", "directory": receipt.directory,
@@ -269,6 +325,23 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn paint_text_strips_complete_controls_and_preserves_visible_text() {
+        assert_eq!(
+            visible_paint_text(b"\x1b]2;PAINTFIRST\x07\x1b[1;1Hvisible\x1b]2;unfinished"),
+            "visible"
+        );
+        assert_eq!(visible_paint_text(b"\x1b[2;3HPAINTFIRST"), "PAINTFIRST");
+    }
+
+    #[test]
+    fn paint_text_keeps_paint_after_an_unterminated_osc() {
+        assert_eq!(
+            visible_paint_text(b"\x1b]2;unfinished\x1b[2;3Hpainted text"),
+            "painted text"
+        );
     }
 
     #[test]
@@ -485,23 +558,27 @@ mod tests {
                 text.len()
             );
         }
-        for mode in ["retained", "retention-error"] {
+        for mode in ["retained", "retention-error", "default"] {
             let evidence = MpdDirectory::new();
             let root = if mode == "retained" {
                 evidence.0.clone()
             } else {
                 evidence.0.join("absent")
             };
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
                 .args([
                     "--exact",
                     "paint_capture::tests::mpd_failure_retention_survives_cleanup_and_keeps_panic",
                     "--nocapture",
                 ])
-                .env(CHILD, mode)
-                .env("ZYNK_TEST_PAINT_EVIDENCE_ROOT", &root)
-                .output()
-                .unwrap();
+                .env(CHILD, mode);
+            if mode == "default" {
+                command.env_remove("ZYNK_TEST_PAINT_EVIDENCE_ROOT");
+            } else {
+                command.env("ZYNK_TEST_PAINT_EVIDENCE_ROOT", &root);
+            }
+            let output = command.output().unwrap();
             assert!(!output.status.success());
             let output = format!(
                 "{}{}",
@@ -545,13 +622,25 @@ mod tests {
                 continue;
             }
             assert_eq!(retention["status"], "RETAINED");
-            assert_eq!(children.len(), 1);
-            let raw = std::fs::read(children[0].join("raw.bin")).unwrap();
+            let retained = if mode == "default" {
+                let directory: std::path::PathBuf =
+                    serde_json::from_value(retention["directory"].clone()).unwrap();
+                assert!(directory.starts_with(crate::support::test_root()));
+                assert!(children.is_empty());
+                directory
+            } else {
+                assert_eq!(children.len(), 1);
+                children[0].clone()
+            };
+            let raw = std::fs::read(retained.join("raw.bin")).unwrap();
             assert_eq!(raw, b"\x1b]2;PAINTFIRST\x07");
             assert_eq!(evaluated["evaluated_sha256"], paint_sha256(&raw));
             assert_eq!(evaluated["raw_length"], raw.len());
             assert_eq!(evaluated["clean_length"], 0);
-            assert!(children[0].join("complete.json").is_file());
+            assert!(retained.join("complete.json").is_file());
+            if mode == "default" {
+                std::fs::remove_dir_all(retained.parent().unwrap()).unwrap();
+            }
         }
     }
 }

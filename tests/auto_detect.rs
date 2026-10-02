@@ -5,7 +5,9 @@ mod support;
 #[path = "support/paint_capture.rs"]
 mod paint_capture;
 
-use paint_capture::{paint_sha256, report_paint_failure, PaintCapture, PaintFailure, ReaderStop};
+use paint_capture::{
+    paint_sha256, report_paint_failure, visible_paint_text, PaintCapture, PaintFailure, ReaderStop,
+};
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -214,22 +216,17 @@ fn m828d2_monolithic_title_rows_reach_owned_pty_paint_output() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    let osc = regex::Regex::new(r"(?s)\x1b\].*?(?:\x07|\x1b\\)").unwrap();
-    let trailing_osc = regex::Regex::new(r"(?s)\x1b\].*$").unwrap();
-    let csi = regex::Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap();
-    let paint = |bytes: &[u8]| {
-        let text = String::from_utf8_lossy(bytes);
-        let without_osc = osc.replace_all(&text, "");
-        let complete = trailing_osc.replace_all(&without_osc, "");
-        csi.replace_all(&complete, "").into_owned()
-    };
     assert_eq!(
-        paint(b"\x1b]2;PAINTFIRST\x07\x1b[1;1Hvisible\x1b]2;unfinished"),
+        visible_paint_text(b"\x1b]2;PAINTFIRST\x07\x1b[1;1Hvisible\x1b]2;unfinished"),
         "visible"
     );
-    assert_eq!(paint(b"\x1b[2;3HPAINTFIRST"), "PAINTFIRST");
+    assert_eq!(
+        visible_paint_text(b"\x1b]2;unfinished\x1b[2;3Hpainted text"),
+        "painted text"
+    );
+    assert_eq!(visible_paint_text(b"\x1b[2;3HPAINTFIRST"), "PAINTFIRST");
     let wait_for_paint = |needle: &str, watermark: usize| {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let evaluated = captured.lock().unwrap().clone();
             let bytes = &evaluated.bytes;
@@ -249,7 +246,7 @@ fn m828d2_monolithic_title_rows_reach_owned_pty_paint_output() {
                 );
             }
             assert!(bytes.len() <= 2 * 1024 * 1024, "bounded PTY capture");
-            let text = paint(bytes);
+            let text = visible_paint_text(bytes);
             if text
                 .get(watermark..)
                 .is_some_and(|tail| tail.contains(needle))

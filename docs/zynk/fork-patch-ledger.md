@@ -8520,3 +8520,9 @@ bump, tag, publish, release, or cleanup authority follows this entry.
 | area | files | what / why |
 |---|---|---|
 | release metadata | `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `docs/zynk/fork-patch-ledger.md` | Version 3.1.0 → 3.2.0 (root package only; no dependency refresh); date the completed 3.2.0 changelog for the release; hosted main CI run `36961878580` attempt 2 is green on `7d690c27e02464b1c80e5d22a646b5043a859155`. |
+
+# POST-RELEASE LIGHT CHANGES
+
+| area | files | what / why |
+|---|---|---|
+| intermittent-test hardening | `tests/multi_client.rs`, `tests/auto_detect.rs`, `tests/support/paint_capture.rs`, `src/platform/mod.rs` (tests only), `src/platform/linux.rs` (tests only), `docs/zynk/fork-patch-ledger.md` | Replace timing-sensitive instantaneous assertions with condition-based bounded waits and actionable diagnostics: multi-client resize tests require both a frame and a larger effective PTY size within 8 seconds; PTY paint waits allow 10 seconds under parallel full-suite load, retain raw failure evidence by default, and preserve visible paint after an unterminated OSC reaches the next escape; process-group cancellation allows up to 2 seconds for init to reap a killed orphan; `/proc` argv inspection pins and reports explicit argv0. Operator light-change authority `msg_bac7ebf88a8e3f3a`; no production behavior changes. |

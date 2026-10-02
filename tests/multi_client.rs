@@ -708,6 +708,60 @@ fn wait_for_frame(stream: &mut UnixStream, timeout: Duration) -> bool {
     false
 }
 
+struct ResizeFrameObservation {
+    matched: bool,
+    frames_seen: usize,
+    last_size: Option<(u16, u16)>,
+}
+
+fn wait_for_frame_after_size_increase(
+    stream: &mut UnixStream,
+    socket_path: &Path,
+    pane_id: &str,
+    previous_size: (u16, u16),
+    timeout: Duration,
+) -> io::Result<ResizeFrameObservation> {
+    let deadline = Instant::now() + timeout;
+    let mut frames_seen = 0;
+    let mut last_size = None;
+
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let slice = remaining.min(Duration::from_millis(75));
+        match read_server_variant(stream, slice) {
+            Ok(1) => frames_seen += 1,
+            Ok(_) => {}
+            Err(err) if is_timeout(&err) => {}
+            Err(err) => return Err(err),
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        if let Some(size) = try_read_pane_tty_size(
+            socket_path,
+            pane_id,
+            remaining.min(Duration::from_millis(400)),
+        ) {
+            last_size = Some(size);
+            if frames_seen > 0 && size.0 > previous_size.0 && size.1 > previous_size.1 {
+                return Ok(ResizeFrameObservation {
+                    matched: true,
+                    frames_seen,
+                    last_size,
+                });
+            }
+        }
+    }
+
+    Ok(ResizeFrameObservation {
+        matched: false,
+        frames_seen,
+        last_size,
+    })
+}
+
 fn wait_for_frame_matching_with_snapshots(
     stream: &mut UnixStream,
     timeout: Duration,
@@ -936,29 +990,20 @@ fn multi_client_disconnect_recalculates_to_next_smallest() {
     send_client_detach(&mut c80);
     drop(c80);
 
-    assert!(
-        wait_for_frame(&mut c100, Duration::from_secs(2)),
-        "next-smallest client should receive resized-up frame"
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(8);
-    let mut size_after_smallest_disconnect = None;
-    while Instant::now() < deadline {
-        let maybe_size = try_read_pane_tty_size(&api_socket, &pane_id, Duration::from_millis(400));
-        if let Some(size) = maybe_size {
-            if size.0 > size_with_three.0 && size.1 > size_with_three.1 {
-                size_after_smallest_disconnect = Some(size);
-                break;
-            }
-        }
-        thread::sleep(Duration::from_millis(60));
-    }
-
-    assert!(
-        size_after_smallest_disconnect.is_some(),
-        "effective pane size should increase after smallest disconnects: before={:?}, last_seen={:?}",
+    let observation = wait_for_frame_after_size_increase(
+        &mut c100,
+        &api_socket,
+        &pane_id,
         size_with_three,
-        try_read_pane_tty_size(&api_socket, &pane_id, Duration::from_millis(300))
+        Duration::from_secs(8),
+    )
+    .expect("next-smallest frame decoding should succeed");
+
+    assert!(
+        observation.matched,
+        "next-smallest client should receive a frame after the effective pane size increases: before={size_with_three:?}, frames_seen={}, last_size={:?}",
+        observation.frames_seen,
+        observation.last_size
     );
 
     cleanup_spawned_zynk(server, base);
@@ -992,20 +1037,20 @@ fn multi_client_smallest_leaving_resizes_up_for_remaining_clients() {
     send_client_detach(&mut small);
     drop(small);
 
-    // Remaining client should receive a new (larger) frame.
-    assert!(
-        wait_for_frame(&mut large, Duration::from_secs(2)),
-        "remaining client should receive resized-up frame"
-    );
-
-    let size_after_small_leaves = read_pane_tty_size(&api_socket, &pane_id, Duration::from_secs(5));
-
-    assert!(
-        size_after_small_leaves.0 > size_with_small_client.0
-            && size_after_small_leaves.1 > size_with_small_client.1,
-        "remaining clients should get larger effective pane size after smallest leaves: before={:?}, after={:?}",
+    let observation = wait_for_frame_after_size_increase(
+        &mut large,
+        &api_socket,
+        &pane_id,
         size_with_small_client,
-        size_after_small_leaves
+        Duration::from_secs(8),
+    )
+    .expect("remaining-client frame decoding should succeed");
+
+    assert!(
+        observation.matched,
+        "remaining client should receive a frame after the effective pane size increases: before={size_with_small_client:?}, frames_seen={}, last_size={:?}",
+        observation.frames_seen,
+        observation.last_size
     );
 
     cleanup_spawned_zynk(server, base);
